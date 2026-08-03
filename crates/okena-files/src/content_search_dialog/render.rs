@@ -26,20 +26,19 @@ impl Render for ContentSearchDialog {
             && !self.glob_editing
             && self.preview_search.is_none()
         {
-            self.search_input.update(cx, |input, cx| input.focus(window, cx));
+            self.search_input
+                .update(cx, |input, cx| input.focus(window, cx));
         }
 
         // Shared key handler for both modes
         let key_handler = cx.listener(|this, event: &KeyDownEvent, window, cx| {
             match event.keystroke.key.as_str() {
-                "up"
-                    if this.select_prev() => {
-                        cx.notify();
-                    }
-                "down"
-                    if this.select_next() => {
-                        cx.notify();
-                    }
+                "up" if this.select_prev() => {
+                    cx.notify();
+                }
+                "down" if this.select_next() => {
+                    cx.notify();
+                }
                 "enter" => this.open_selected(cx),
                 // In-page search over the preview (only visible when expanded)
                 "f" if (event.keystroke.modifiers.platform
@@ -64,14 +63,14 @@ impl Render for ContentSearchDialog {
                 }
                 "c" if event.keystroke.modifiers.platform => {
                     if let Some(file_path) = &this.preview_file
-                        && let Some(lines) = this.highlight_cache.get(file_path) {
-                            let text = extract_selected_text(
-                                &this.preview_selection,
-                                lines.len(),
-                                |i| &lines[i].plain_text,
-                            );
-                            copy_to_clipboard(cx, text);
-                        }
+                        && let Some(lines) = this.highlight_cache.get(file_path)
+                    {
+                        let text =
+                            extract_selected_text(&this.preview_selection, lines.len(), |i| {
+                                &lines[i].plain_text
+                            });
+                        copy_to_clipboard(cx, text);
+                    }
                 }
                 _ => {}
             }
@@ -110,7 +109,12 @@ impl Render for ContentSearchDialog {
         };
 
         // Results list
-        let results_area: AnyElement = if self.rows.is_empty() {
+        let results_area: AnyElement = if let Some(error) = &self.error_message {
+            div()
+                .flex_1()
+                .child(empty_state(error, &t, cx))
+                .into_any_element()
+        } else if self.rows.is_empty() {
             div()
                 .flex_1()
                 .child(empty_state(
@@ -130,33 +134,42 @@ impl Render for ContentSearchDialog {
             let _has_context = self.expanded;
             let view = cx.entity().clone();
 
-            uniform_list("content-search-list", rows.len(), move |range, _window, cx| {
-                view.update(cx, |this, cx| {
-                    range
-                        .map(|i| {
-                            let row = &rows[i];
-                            match row {
-                                ResultRow::FileHeader {
-                                    relative_path,
-                                    match_count,
-                                    ..
-                                } => this
-                                    .render_file_header(i, relative_path, *match_count, cx)
-                                    .into_any_element(),
-                                ResultRow::Match {
-                                    file_path,
-                                    line_number,
-                                    line_content,
-                                    match_ranges,
-                                    ..
-                                } => this.render_match_row(
-                                    i, file_path, *line_number, line_content, match_ranges, cx,
-                                ),
-                            }
-                        })
-                        .collect()
-                })
-            })
+            uniform_list(
+                "content-search-list",
+                rows.len(),
+                move |range, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        range
+                            .map(|i| {
+                                let row = &rows[i];
+                                match row {
+                                    ResultRow::FileHeader {
+                                        relative_path,
+                                        match_count,
+                                        ..
+                                    } => this
+                                        .render_file_header(i, relative_path, *match_count, cx)
+                                        .into_any_element(),
+                                    ResultRow::Match {
+                                        file_path,
+                                        line_number,
+                                        line_content,
+                                        match_ranges,
+                                        ..
+                                    } => this.render_match_row(
+                                        i,
+                                        file_path,
+                                        *line_number,
+                                        line_content,
+                                        match_ranges,
+                                        cx,
+                                    ),
+                                }
+                            })
+                            .collect()
+                    })
+                },
+            )
             .flex_1()
             .track_scroll(&self.scroll_handle)
             .into_any_element()
@@ -247,10 +260,13 @@ impl Render for ContentSearchDialog {
                             .id("cs-filter-popover-backdrop")
                             .absolute()
                             .inset_0()
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.filter_popover_open = false;
-                                cx.notify();
-                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.filter_popover_open = false;
+                                    cx.notify();
+                                }),
+                            ),
                     )
                 })
                 .when_some(
@@ -260,7 +276,10 @@ impl Render for ContentSearchDialog {
                     |d, bounds| {
                         let entity = cx.entity().downgrade();
                         d.child(crate::list_overlay::file_filter_popover(
-                            bounds, self.show_ignored, &t, cx,
+                            bounds,
+                            self.show_ignored,
+                            &t,
+                            cx,
                             move |filter, _, cx| {
                                 if let Some(e) = entity.upgrade() {
                                     e.update(cx, |this, cx| {
@@ -312,10 +331,13 @@ impl Render for ContentSearchDialog {
                                     .id("cs-filter-popover-backdrop-compact")
                                     .absolute()
                                     .inset_0()
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.filter_popover_open = false;
-                                        cx.notify();
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.filter_popover_open = false;
+                                            cx.notify();
+                                        }),
+                                    ),
                             )
                         })
                         .when_some(
@@ -323,22 +345,26 @@ impl Render for ContentSearchDialog {
                                 .then_some(self.filter_button_bounds)
                                 .flatten(),
                             |modal, bounds| {
-                            let entity = cx.entity().downgrade();
-                            modal.child(crate::list_overlay::file_filter_popover(
-                                bounds, self.show_ignored, &t, cx,
-                                move |filter, _, cx| {
-                                    if let Some(e) = entity.upgrade() {
-                                        e.update(cx, |this, cx| {
-                                            if filter == "ignored" {
-                                                this.show_ignored = !this.show_ignored;
-                                            }
-                                            this.trigger_search(cx);
-                                            cx.notify();
-                                        });
-                                    }
-                                },
-                            ))
-                        }),
+                                let entity = cx.entity().downgrade();
+                                modal.child(crate::list_overlay::file_filter_popover(
+                                    bounds,
+                                    self.show_ignored,
+                                    &t,
+                                    cx,
+                                    move |filter, _, cx| {
+                                        if let Some(e) = entity.upgrade() {
+                                            e.update(cx, |this, cx| {
+                                                if filter == "ignored" {
+                                                    this.show_ignored = !this.show_ignored;
+                                                }
+                                                this.trigger_search(cx);
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                ))
+                            },
+                        ),
                 )
                 .into_any_element()
         }

@@ -1,11 +1,11 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
-mod status;
 mod settings;
-mod usage;
+mod status;
 mod ui_helpers;
+mod usage;
 
-use gpui::{AppContext as _, AnyView};
+use gpui::{AnyView, AppContext as _};
 use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};
 use std::sync::Arc;
 

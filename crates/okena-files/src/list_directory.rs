@@ -9,6 +9,8 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub(crate) const DIRECTORY_NOT_FOUND_ERROR: &str = "Directory no longer exists";
+
 /// One direct child of a directory.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirEntry {
@@ -32,8 +34,8 @@ pub fn list_directory(
     // root — `relative_path` may carry `..` segments or even be absolute
     // (Path::join with an absolute argument replaces). Without this guard
     // a caller passing `../../etc` would list arbitrary directories. The
-    // read_file / read_file_bytes path enforces the same invariant via
-    // LocalProjectFs::resolve; this is the listing-side mirror.
+    // read_file / read_file_bytes path enforces the same invariant via the
+    // server-side `resolve_project_file`; this is the listing-side mirror.
     let canonical_root = project_root
         .canonicalize()
         .map_err(|e| format!("Cannot resolve project path: {}", e))?;
@@ -41,17 +43,14 @@ pub fn list_directory(
         canonical_root.clone()
     } else {
         let joined = canonical_root.join(relative_path);
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| format!("Cannot read directory: {}", e))?;
+        let canonical = joined.canonicalize().map_err(directory_read_error)?;
         if !canonical.starts_with(&canonical_root) {
             return Err("path traversal not allowed".to_string());
         }
         canonical
     };
 
-    let metadata = std::fs::metadata(&target)
-        .map_err(|e| format!("Cannot read directory: {}", e))?;
+    let metadata = std::fs::metadata(&target).map_err(directory_read_error)?;
     if !metadata.is_dir() {
         return Err(format!("Not a directory: {}", target.display()));
     }
@@ -110,6 +109,14 @@ pub fn list_directory(
     Ok(entries)
 }
 
+fn directory_read_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        DIRECTORY_NOT_FOUND_ERROR.to_string()
+    } else {
+        format!("Cannot read directory: {error}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +145,10 @@ mod tests {
         fs::create_dir(root.join("a_dir")).unwrap();
 
         let entries = list_directory(root, "", false).unwrap();
-        assert_eq!(names(&entries), vec!["a_dir", "z_dir", "a_file.txt", "z_file.txt"]);
+        assert_eq!(
+            names(&entries),
+            vec!["a_dir", "z_dir", "a_file.txt", "z_file.txt"]
+        );
         assert!(entries[0].is_dir && entries[1].is_dir);
         assert!(!entries[2].is_dir && !entries[3].is_dir);
     }
@@ -240,7 +250,7 @@ mod tests {
     fn errors_on_missing_path() {
         let tmp = TempDir::new().unwrap();
         let err = list_directory(tmp.path(), "nope/nada", false).unwrap_err();
-        assert!(err.contains("Cannot read directory"), "err = {}", err);
+        assert_eq!(err, DIRECTORY_NOT_FOUND_ERROR);
     }
 
     #[test]

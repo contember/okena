@@ -1,10 +1,10 @@
 //! Context menu for remote connections in the sidebar.
 
 use crate::Cancel;
-use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
-use okena_ui::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
+use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
+use okena_ui::theme::theme;
 
 /// Event emitted by RemoteContextMenu
 pub enum RemoteContextMenuEvent {
@@ -16,7 +16,9 @@ pub enum RemoteContextMenuEvent {
 }
 
 impl okena_ui::overlay::CloseEvent for RemoteContextMenuEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 /// Context menu for remote connections
@@ -100,55 +102,74 @@ impl Render for RemoteContextMenu {
             .absolute()
             .inset_0()
             .id("remote-context-menu-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(
-                        context_menu_panel("remote-context-menu", &t)
-                            .when(self.is_pairing, |el| {
-                                el.child(
-                                    menu_item("remote-ctx-pair", "icons/keyboard.svg", "Pair", &t)
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.pair(cx);
-                                        })),
-                                )
-                            })
-                            .child(
-                                menu_item("remote-ctx-reconnect", "icons/terminal.svg", "Reconnect", &t)
+                anchored().position(position).snap_to_window().child(
+                    context_menu_panel("remote-context-menu", &t)
+                        .when(self.is_pairing, |el| {
+                            el.child(
+                                menu_item("remote-ctx-pair", "icons/keyboard.svg", "Pair", &t)
                                     .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.reconnect(cx);
+                                        this.pair(cx);
                                     })),
                             )
-                            .when(!self.tls, |el| {
-                                el.child(
-                                    menu_item("remote-ctx-upgrade", "icons/keyboard.svg", "Upgrade to TLS", &t)
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.upgrade_to_tls(cx);
-                                        })),
-                                )
-                            })
-                            .child(menu_separator(&t))
-                            .child(
-                                menu_item_with_color(
-                                    "remote-ctx-remove",
-                                    "icons/trash.svg",
-                                    format!("Remove \"{}\"", self.connection_name),
-                                    t.error,
-                                    t.error,
+                        })
+                        .child(
+                            menu_item(
+                                "remote-ctx-reconnect",
+                                "icons/terminal.svg",
+                                "Reconnect",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.reconnect(cx);
+                                },
+                            )),
+                        )
+                        .when(!self.tls, |el| {
+                            el.child(
+                                menu_item(
+                                    "remote-ctx-upgrade",
+                                    "icons/keyboard.svg",
+                                    "Upgrade to TLS",
                                     &t,
                                 )
-                                .on_click(cx.listener(|this, _, _window, cx| {
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.upgrade_to_tls(cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .child(menu_separator(&t))
+                        .child(
+                            menu_item_with_color(
+                                "remote-ctx-remove",
+                                "icons/trash.svg",
+                                format!("Remove \"{}\"", self.connection_name),
+                                t.error,
+                                t.error,
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
                                     this.remove(cx);
-                                })),
-                            ),
-                    ),
+                                },
+                            )),
+                        ),
+                ),
             ))
     }
 }

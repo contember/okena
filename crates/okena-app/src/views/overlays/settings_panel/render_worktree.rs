@@ -2,8 +2,8 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use gpui::*;
 
-use super::components::*;
 use super::SettingsPanel;
+use super::components::*;
 
 impl SettingsPanel {
     pub(super) fn render_worktree(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -13,21 +13,16 @@ impl SettingsPanel {
 
         div()
             .child(section_header("Path", &t, cx))
-            .child(
-                section_container(&t)
-                    .child(
-                        hook_input_row(
-                            "worktree-path-template",
-                            "Path Template",
-                            "relative to project dir. {repo} = repo name, {branch} = branch",
-                            &self.worktree_dir_suffix_input,
-                            "",
-                            &t,
-                            false,
-                            cx,
-                        ),
-                    ),
-            )
+            .child(section_container(&t).child(hook_input_row(
+                "worktree-path-template",
+                "Path Template",
+                "relative to project dir. {repo} = repo name, {branch} = branch",
+                &self.worktree_dir_suffix_input,
+                "",
+                &t,
+                false,
+                cx,
+            )))
             .child(section_header("Close Defaults", &t, cx))
             .child(
                 section_container(&t)

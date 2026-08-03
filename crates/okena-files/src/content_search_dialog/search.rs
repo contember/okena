@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 impl ContentSearchDialog {
     /// Trigger a debounced search.
     pub(super) fn trigger_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let search_generation = self.search_generation;
+
         // Cancel any running search
         if let Some(handle) = self.search_handle.take() {
             handle.cancel();
@@ -20,22 +23,30 @@ impl ContentSearchDialog {
             self.rows.clear();
             self.total_matches = 0;
             self.searching = false;
+            self.error_message = None;
             self.selected_index = 0;
             cx.notify();
             return;
         }
 
         // Debounce: wait 200ms before starting search
-        self.debounce_task = Some(cx.spawn(async move |this: WeakEntity<ContentSearchDialog>, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
-            this.update(cx, |this, cx| {
-                this.run_search(cx);
-            }).ok();
-        }));
+        self.debounce_task = Some(cx.spawn(
+            async move |this: WeakEntity<ContentSearchDialog>, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.search_generation == search_generation {
+                        this.run_search(search_generation, cx);
+                    }
+                })
+                .ok();
+            },
+        ));
     }
 
     /// Actually run the search on a background thread.
-    fn run_search(&mut self, cx: &mut Context<Self>) {
+    fn run_search(&mut self, search_generation: u64, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).value().to_string();
         if query.is_empty() {
             return;
@@ -44,6 +55,7 @@ impl ContentSearchDialog {
         let handle = SearchHandle::new();
         self.search_handle = Some(handle.clone());
         self.searching = true;
+        self.error_message = None;
         self.highlight_cache.clear();
         cx.notify();
 
@@ -72,14 +84,9 @@ impl ContentSearchDialog {
                 .background_executor()
                 .spawn(async move {
                     let mut results: Vec<FileSearchResult> = Vec::new();
-                    project_fs.search_content(
-                        &query,
-                        &config,
-                        &cancelled,
-                        &mut |result| {
-                            results.push(result);
-                        },
-                    );
+                    project_fs.search_content(&query, &config, &cancelled, &mut |result| {
+                        results.push(result);
+                    })?;
                     // Sort files by best match score (highest first) for fuzzy mode,
                     // breaking ties by relative_path for stable order across runs
                     // (parallel walker emits in non-deterministic order).
@@ -88,21 +95,29 @@ impl ContentSearchDialog {
                             .cmp(&a.best_score)
                             .then_with(|| a.relative_path.cmp(&b.relative_path))
                     });
-                    results
+                    Ok::<_, String>(results)
                 })
                 .await;
 
             entity
                 .update(cx, |this, cx| {
-                    if this
-                        .search_handle
-                        .as_ref()
-                        .is_some_and(|h| !h.is_cancelled())
-                    {
-                        this.apply_results(results);
+                    if owns_search_completion(
+                        this.search_generation,
+                        search_generation,
+                        this.search_handle.as_ref(),
+                    ) {
                         this.searching = false;
-                        // Preload highlighting for files in search results
-                        this.preload_result_files(cx);
+                        match results {
+                            Ok(results) => {
+                                this.apply_results(results);
+                                this.preload_result_files(cx);
+                            }
+                            Err(error) => {
+                                this.rows.clear();
+                                this.total_matches = 0;
+                                this.error_message = Some(error);
+                            }
+                        }
                         cx.notify();
                     }
                 })
@@ -137,7 +152,11 @@ impl ContentSearchDialog {
             }
         }
 
-        self.selected_index = if self.rows.is_empty() { 0 } else { 1.min(self.rows.len() - 1) };
+        self.selected_index = if self.rows.is_empty() {
+            0
+        } else {
+            1.min(self.rows.len() - 1)
+        };
     }
 
     /// Get syntax-highlighted line for a file. Returns None if not yet cached
@@ -189,18 +208,38 @@ impl ContentSearchDialog {
             let _ = entity.update(cx, |this, cx| {
                 this.loading_files.remove(&fp);
                 if let Ok(content) = result {
-                    let lines = highlight_content(
-                        &content,
-                        &fp,
-                        &this.syntax_set,
-                        5000,
-                        this.is_dark,
-                    );
+                    let lines =
+                        highlight_content(&content, &fp, &this.syntax_set, 5000, this.is_dark);
                     this.highlight_cache.insert(fp, lines);
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+}
+
+fn owns_search_completion(
+    current_generation: u64,
+    completion_generation: u64,
+    current_handle: Option<&SearchHandle>,
+) -> bool {
+    current_generation == completion_generation
+        && current_handle.is_some_and(|handle| !handle.is_cancelled())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn cancelled_older_completion_cannot_claim_newer_search_handle() {
+        let older = SearchHandle::new();
+        older.cancel();
+        let newer = SearchHandle::new();
+
+        assert!(!owns_search_completion(2, 1, Some(&newer)));
+        assert!(owns_search_completion(2, 2, Some(&newer)));
+        assert!(!owns_search_completion(1, 1, Some(&older)));
     }
 }

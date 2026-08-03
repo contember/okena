@@ -486,7 +486,8 @@ mod tests {
         // `run --wait` flags precede the trailing command (trailing_var_arg).
         assert!(Cli::try_parse_from(["okena", "run", "--wait", "t1", "make"]).is_ok());
         assert!(
-            Cli::try_parse_from(["okena", "run", "--wait", "--timeout", "60", "t1", "make"]).is_ok()
+            Cli::try_parse_from(["okena", "run", "--wait", "--timeout", "60", "t1", "make"])
+                .is_ok()
         );
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
@@ -498,13 +499,18 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "theme", "save", "mine", "--no-activate"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "command", "list"]).is_ok());
         assert!(
-            Cli::try_parse_from(["okena", "command", "run", "ToggleSidebar", "--window", "main"])
-                .is_ok()
+            Cli::try_parse_from([
+                "okena",
+                "command",
+                "run",
+                "ToggleSidebar",
+                "--window",
+                "main"
+            ])
+            .is_ok()
         );
         // --user and --project are mutually exclusive.
-        assert!(
-            Cli::try_parse_from(["okena", "skill", "install", "--user", "--project"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["okena", "skill", "install", "--user", "--project"]).is_err());
         // Missing required positional → error.
         assert!(Cli::try_parse_from(["okena", "term", "split", "p/sh"]).is_err());
     }

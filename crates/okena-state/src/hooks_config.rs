@@ -50,7 +50,7 @@ pub struct WorktreeHooks {
 
 /// Grouped hook configuration (project, terminal, worktree).
 /// Backward-compatible: deserializes both the old flat format and the new grouped format.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct HooksConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub project: ProjectHooks,
@@ -64,12 +64,69 @@ fn is_default<T: Default + PartialEq>(val: &T) -> bool {
     *val == T::default()
 }
 
+impl HooksConfig {
+    /// Project onto the wire mirror in `okena-core` (see [`okena_core::api::ApiHooksConfig`]).
+    pub fn to_api(&self) -> okena_core::api::ApiHooksConfig {
+        okena_core::api::ApiHooksConfig {
+            project: okena_core::api::ApiProjectHooks {
+                on_open: self.project.on_open.clone(),
+                on_close: self.project.on_close.clone(),
+            },
+            terminal: okena_core::api::ApiTerminalHooks {
+                on_create: self.terminal.on_create.clone(),
+                on_close: self.terminal.on_close.clone(),
+                shell_wrapper: self.terminal.shell_wrapper.clone(),
+            },
+            worktree: okena_core::api::ApiWorktreeHooks {
+                on_create: self.worktree.on_create.clone(),
+                on_close: self.worktree.on_close.clone(),
+                pre_merge: self.worktree.pre_merge.clone(),
+                post_merge: self.worktree.post_merge.clone(),
+                before_remove: self.worktree.before_remove.clone(),
+                after_remove: self.worktree.after_remove.clone(),
+                on_rebase_conflict: self.worktree.on_rebase_conflict.clone(),
+                on_dirty_close: self.worktree.on_dirty_close.clone(),
+            },
+        }
+    }
+
+    /// Rebuild from the wire mirror.
+    pub fn from_api(api: &okena_core::api::ApiHooksConfig) -> Self {
+        HooksConfig {
+            project: ProjectHooks {
+                on_open: api.project.on_open.clone(),
+                on_close: api.project.on_close.clone(),
+            },
+            terminal: TerminalHooks {
+                on_create: api.terminal.on_create.clone(),
+                on_close: api.terminal.on_close.clone(),
+                shell_wrapper: api.terminal.shell_wrapper.clone(),
+            },
+            worktree: WorktreeHooks {
+                on_create: api.worktree.on_create.clone(),
+                on_close: api.worktree.on_close.clone(),
+                pre_merge: api.worktree.pre_merge.clone(),
+                post_merge: api.worktree.post_merge.clone(),
+                before_remove: api.worktree.before_remove.clone(),
+                after_remove: api.worktree.after_remove.clone(),
+                on_rebase_conflict: api.worktree.on_rebase_conflict.clone(),
+                on_dirty_close: api.worktree.on_dirty_close.clone(),
+            },
+        }
+    }
+}
+
 const FLAT_HOOK_KEYS: &[&str] = &[
-    "on_project_open", "on_project_close",
-    "on_worktree_create", "on_worktree_close",
-    "pre_merge", "post_merge",
-    "before_worktree_remove", "worktree_removed",
-    "on_rebase_conflict", "on_dirty_worktree_close",
+    "on_project_open",
+    "on_project_close",
+    "on_worktree_create",
+    "on_worktree_close",
+    "pre_merge",
+    "post_merge",
+    "before_worktree_remove",
+    "worktree_removed",
+    "on_rebase_conflict",
+    "on_dirty_worktree_close",
 ];
 
 impl<'de> Deserialize<'de> for HooksConfig {
@@ -80,7 +137,9 @@ impl<'de> Deserialize<'de> for HooksConfig {
             None => return Ok(HooksConfig::default()),
         };
 
-        let is_new_format = obj.contains_key("project") || obj.contains_key("terminal") || obj.contains_key("worktree");
+        let is_new_format = obj.contains_key("project")
+            || obj.contains_key("terminal")
+            || obj.contains_key("worktree");
         let has_flat_keys = !is_new_format && FLAT_HOOK_KEYS.iter().any(|k| obj.contains_key(*k));
 
         if has_flat_keys {
@@ -106,15 +165,21 @@ impl<'de> Deserialize<'de> for HooksConfig {
             })
         } else {
             let deser = |key: &str| -> serde_json::Value {
-                obj.get(key).cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                obj.get(key)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
             };
-            let project: ProjectHooks = serde_json::from_value(deser("project"))
-                .unwrap_or_default();
-            let terminal: TerminalHooks = serde_json::from_value(deser("terminal"))
-                .unwrap_or_default();
-            let worktree: WorktreeHooks = serde_json::from_value(deser("worktree"))
-                .unwrap_or_default();
-            Ok(HooksConfig { project, terminal, worktree })
+            let project: ProjectHooks =
+                serde_json::from_value(deser("project")).unwrap_or_default();
+            let terminal: TerminalHooks =
+                serde_json::from_value(deser("terminal")).unwrap_or_default();
+            let worktree: WorktreeHooks =
+                serde_json::from_value(deser("worktree")).unwrap_or_default();
+            Ok(HooksConfig {
+                project,
+                terminal,
+                worktree,
+            })
         }
     }
 }
@@ -147,10 +212,22 @@ mod tests {
         assert_eq!(config.worktree.on_close.as_deref(), Some("echo wt-close"));
         assert_eq!(config.worktree.pre_merge.as_deref(), Some("echo pre"));
         assert_eq!(config.worktree.post_merge.as_deref(), Some("echo post"));
-        assert_eq!(config.worktree.before_remove.as_deref(), Some("echo before-rm"));
-        assert_eq!(config.worktree.after_remove.as_deref(), Some("echo after-rm"));
-        assert_eq!(config.worktree.on_rebase_conflict.as_deref(), Some("echo rebase"));
-        assert_eq!(config.worktree.on_dirty_close.as_deref(), Some("echo dirty"));
+        assert_eq!(
+            config.worktree.before_remove.as_deref(),
+            Some("echo before-rm")
+        );
+        assert_eq!(
+            config.worktree.after_remove.as_deref(),
+            Some("echo after-rm")
+        );
+        assert_eq!(
+            config.worktree.on_rebase_conflict.as_deref(),
+            Some("echo rebase")
+        );
+        assert_eq!(
+            config.worktree.on_dirty_close.as_deref(),
+            Some("echo dirty")
+        );
         // Terminal section never existed in the legacy format.
         assert_eq!(config.terminal, TerminalHooks::default());
     }
@@ -179,7 +256,10 @@ mod tests {
         assert_eq!(config.project.on_open.as_deref(), Some("echo open"));
         assert_eq!(config.project.on_close.as_deref(), Some("echo close"));
         assert_eq!(config.terminal.on_create.as_deref(), Some("echo tc"));
-        assert_eq!(config.terminal.shell_wrapper.as_deref(), Some("wrap {shell}"));
+        assert_eq!(
+            config.terminal.shell_wrapper.as_deref(),
+            Some("wrap {shell}")
+        );
         assert_eq!(config.worktree.on_create.as_deref(), Some("echo wtc"));
         assert_eq!(config.worktree.pre_merge.as_deref(), Some("echo pm"));
     }
@@ -216,11 +296,23 @@ mod tests {
 
         let json = serde_json::to_value(&config).unwrap();
         // is_default subgroups are skipped on serialization.
-        assert!(json.get("terminal").is_none(), "default terminal should be omitted");
-        assert!(json.get("worktree").is_none(), "default worktree should be omitted");
+        assert!(
+            json.get("terminal").is_none(),
+            "default terminal should be omitted"
+        );
+        assert!(
+            json.get("worktree").is_none(),
+            "default worktree should be omitted"
+        );
         let project = json.get("project").expect("project group present");
-        assert_eq!(project.get("on_open").and_then(|v| v.as_str()), Some("setup"));
-        assert!(project.get("on_close").is_none(), "None on_close should be omitted");
+        assert_eq!(
+            project.get("on_open").and_then(|v| v.as_str()),
+            Some("setup")
+        );
+        assert!(
+            project.get("on_close").is_none(),
+            "None on_close should be omitted"
+        );
     }
 
     #[test]
@@ -236,9 +328,18 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
 
         // The serialized output must be in the new grouped format.
-        assert!(serialized.contains("\"project\""), "expected grouped 'project' key");
-        assert!(serialized.contains("\"worktree\""), "expected grouped 'worktree' key");
-        assert!(!serialized.contains("\"on_project_open\""), "legacy keys must not survive");
+        assert!(
+            serialized.contains("\"project\""),
+            "expected grouped 'project' key"
+        );
+        assert!(
+            serialized.contains("\"worktree\""),
+            "expected grouped 'worktree' key"
+        );
+        assert!(
+            !serialized.contains("\"on_project_open\""),
+            "legacy keys must not survive"
+        );
 
         // And re-parsing must yield the same content.
         let reparsed: HooksConfig = serde_json::from_str(&serialized).unwrap();
@@ -267,5 +368,41 @@ mod tests {
         assert_eq!(config.project, ProjectHooks::default());
         assert_eq!(config.terminal, TerminalHooks::default());
         assert_eq!(config.worktree, WorktreeHooks::default());
+    }
+
+    #[test]
+    fn api_round_trip_preserves_every_field() {
+        // Every field set to a distinct value so a mis-wired converter (a copy
+        // paste swap between project/terminal/worktree) is caught.
+        let original = HooksConfig {
+            project: ProjectHooks {
+                on_open: Some("p-open".into()),
+                on_close: Some("p-close".into()),
+            },
+            terminal: TerminalHooks {
+                on_create: Some("t-create".into()),
+                on_close: Some("t-close".into()),
+                shell_wrapper: Some("wrap {shell}".into()),
+            },
+            worktree: WorktreeHooks {
+                on_create: Some("w-create".into()),
+                on_close: Some("w-close".into()),
+                pre_merge: Some("pre".into()),
+                post_merge: Some("post".into()),
+                before_remove: Some("before".into()),
+                after_remove: Some("after".into()),
+                on_rebase_conflict: Some("rebase".into()),
+                on_dirty_close: Some("dirty".into()),
+            },
+        };
+        let back = HooksConfig::from_api(&original.to_api());
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn api_round_trip_default_is_empty() {
+        let api = HooksConfig::default().to_api();
+        assert!(api.is_empty());
+        assert_eq!(HooksConfig::from_api(&api), HooksConfig::default());
     }
 }

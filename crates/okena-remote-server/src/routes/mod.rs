@@ -4,23 +4,28 @@ pub mod health;
 pub mod pair;
 pub mod paste_image;
 pub mod refresh;
+pub mod restart;
+pub mod shutdown;
 pub mod state;
 pub mod stream;
 pub mod tokens;
+pub mod update;
 
 use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
-use axum::extract::DefaultBodyLimit;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -39,10 +44,67 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Broadcast of daemon-originated toasts. Each WS connection subscribes a
+    /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
+    /// receivers are simply dropped (fire-and-forget, like git status).
+    pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    /// One-shot exact-terminal focus requests produced by successful external
+    /// actions and consumed by connected desktop clients.
+    pub terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    /// Optional wake-up path for the host git poller when a WS client starts
+    /// viewing terminals.
+    pub git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     pub next_connection_id: Arc<AtomicU64>,
+    /// Count of currently-live authenticated WS connections. The stream route
+    /// increments it on accept and decrements it on close; `/v1/shutdown` uses
+    /// it for UI-owned lifecycle handoff. (`remote_subscribed_terminals`
+    /// only tracks connections that have subscribed to a terminal, so it can't
+    /// stand in for a live-connection registry.)
+    pub active_connections: Arc<AtomicU64>,
+    /// UI-owned daemons shut down once the last connected client leaves after
+    /// any desktop has requested lifecycle handoff. Standalone daemons ignore
+    /// desktop quit requests.
+    pub ui_owned: bool,
+    pub shutdown_when_idle: Arc<AtomicBool>,
+    /// Set true once at least one authenticated client has connected. Gates the
+    /// idle-exit monitor (see [`shutdown::run_idle_exit_monitor`]) so a freshly
+    /// spawned UI-owned daemon isn't reaped before its GUI makes first contact.
+    pub had_client: Arc<AtomicBool>,
+    /// Graceful process-shutdown trigger for `/v1/shutdown`. The shared daemon
+    /// run loop awaits it and tears down the socket, discovery file, and
+    /// instance lock through normal drops.
+    pub process_shutdown: Arc<tokio::sync::Notify>,
+    pub update_info: okena_ext_updater::UpdateInfo,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PeerInfo {
+    Tcp(SocketAddr),
+    Local,
+}
+
+impl PeerInfo {
+    pub fn is_local_trusted(self) -> bool {
+        match self {
+            Self::Local => true,
+            Self::Tcp(addr) => match addr.ip() {
+                IpAddr::V4(v4) => v4.is_loopback(),
+                // Dual-stack binds can surface an IPv4 loopback peer as the
+                // mapped form `::ffff:127.0.0.1`.
+                IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                    Some(v4) => v4.is_loopback(),
+                    None => v6.is_loopback(),
+                },
+            },
+        }
+    }
+}
+
+fn request_is_unix_socket(req: &Request) -> bool {
+    matches!(req.extensions().get::<PeerInfo>(), Some(PeerInfo::Local))
 }
 
 /// Build the complete axum router.
@@ -55,8 +117,16 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+    terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
     next_connection_id: Arc<AtomicU64>,
+    active_connections: Arc<AtomicU64>,
+    process_shutdown: Arc<tokio::sync::Notify>,
+    ui_owned: bool,
+    had_client: Arc<AtomicBool>,
+    update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -65,8 +135,17 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
+        toast_tx,
+        terminal_focus_tx,
         remote_subscribed_terminals,
+        git_poll_trigger_tx,
         next_connection_id,
+        active_connections,
+        process_shutdown,
+        ui_owned,
+        shutdown_when_idle: Arc::new(AtomicBool::new(false)),
+        had_client,
+        update_info,
     };
 
     // Routes that require auth
@@ -78,10 +157,22 @@ pub fn build_router(
             axum::routing::post(paste_image::post_paste_image)
                 .layer(DefaultBodyLimit::max(paste_image::IMAGE_UPLOAD_LIMIT)),
         )
+        .route(
+            "/v1/terminals/{terminal_id}/paste-file",
+            axum::routing::post(paste_image::post_paste_file)
+                .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
+        )
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
-        .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
+        .route(
+            "/v1/tokens/{id}",
+            axum::routing::delete(tokens::revoke_token),
+        )
+        .route(
+            "/v1/pair-code",
+            axum::routing::post(pair::post_pair_code).delete(pair::delete_pair_code),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -91,12 +182,29 @@ pub fn build_router(
     // `/v1/auth/reload` is loopback-gated in its handler: the CLI register
     // flow calls it before the new token is visible in-memory, so bearer auth
     // would deadlock, but exposed listeners must not accept network callers.
+    // `/v1/restart` is loopback-gated in the same way: a same-host UI restarts
+    // the daemon; it is bearer-free so the restart works even if the caller's
+    // token is in an awkward state, and off-host callers are refused.
+    // `/v1/shutdown` is loopback-gated identically: a same-host UI asks the
+    // daemon to stop on quit, but the daemon refuses while other clients remain.
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair))
         .route(
             "/v1/auth/reload",
             axum::routing::post(auth_reload::post_reload),
+        )
+        .route("/v1/restart", axum::routing::post(restart::post_restart))
+        .route("/v1/shutdown", axum::routing::post(shutdown::post_shutdown))
+        .route("/v1/update/status", axum::routing::get(update::get_status))
+        .route("/v1/update/check", axum::routing::post(update::post_check))
+        .route(
+            "/v1/update/install",
+            axum::routing::post(update::post_install),
+        )
+        .route(
+            "/v1/update/dismiss",
+            axum::routing::post(update::post_dismiss),
         );
 
     public
@@ -146,12 +254,17 @@ fn serve_embedded_file(path: &str, file: rust_embed::EmbeddedFile) -> axum::resp
 }
 
 /// Auth middleware: validates Bearer token on protected routes.
+/// Unix socket traffic is already same-user scoped by the local transport.
 /// Skips validation for WebSocket upgrade requests (WS has its own auth flow).
 async fn auth_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if request_is_unix_socket(&req) {
+        return Ok(next.run(req).await);
+    }
+
     // Allow WebSocket upgrades through — they handle auth via query param or first message
     let is_websocket = req
         .headers()
@@ -178,4 +291,26 @@ async fn auth_middleware(
     }
 
     Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_socket_requests_skip_bearer_auth() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut().insert(PeerInfo::Local);
+
+        assert!(request_is_unix_socket(&req));
+    }
+
+    #[test]
+    fn tcp_loopback_requests_still_require_bearer_auth() {
+        let mut req = Request::new(axum::body::Body::empty());
+        req.extensions_mut()
+            .insert(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))));
+
+        assert!(!request_is_unix_socket(&req));
+    }
 }

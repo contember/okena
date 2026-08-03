@@ -1,22 +1,231 @@
 //! Start / stop / restart individual services, plus PTY-exit handling.
 
-use super::{MAX_RESTART_COUNT, ServiceKind, ServiceManager, ServiceStatus, is_process_alive};
+use super::{
+    DockerMutation, DockerMutationKind, MAX_RESTART_COUNT, OkenaLaunchToken, ServiceAsyncCx,
+    ServiceCx, ServiceHandle, ServiceKind, ServiceManager, ServiceStatus,
+};
 use crate::port_detect;
-use gpui::{Context, WeakEntity};
+use okena_core::process::is_process_alive;
+use okena_terminal::backend::TerminalLaunchPlan;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Compose mutations may legitimately pull or build images, but must not own
+/// the mutation queue forever when Docker or a credential helper wedges.
+const DOCKER_MUTATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Copy)]
+pub(super) enum OkenaLaunchFailure {
+    Crashed,
+    Reconnect { auto_start: bool },
+}
+
+pub(super) trait DockerMutationRunner: Send + Sync {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()>;
+}
+
+pub(super) struct CommandDockerMutationRunner;
+
+impl DockerMutationRunner for CommandDockerMutationRunner {
+    fn run(&self, mutation: &DockerMutation) -> crate::ServiceResult<()> {
+        run_docker_mutation(mutation)
+    }
+}
+
 impl ServiceManager {
+    fn schedule_docker_mutation(
+        &mut self,
+        key: (String, String),
+        project_path: String,
+        compose_file: String,
+        kind: DockerMutationKind,
+        cx: &mut impl ServiceCx,
+    ) {
+        let project_incarnation = self.project_incarnation(&key.0, &project_path);
+        let Some(first) = self.docker_mutations.enqueue(
+            key.clone(),
+            project_incarnation,
+            project_path,
+            compose_file,
+            kind,
+        ) else {
+            return;
+        };
+        let scope = first.scope();
+        let runner = self.docker_mutation_runner.clone();
+
+        cx.spawn_main(async move |this, cx| {
+            let mut current = Some(first);
+            while let Some(mutation) = current {
+                let key = (mutation.project_id.clone(), mutation.service_name.clone());
+                let is_current = this
+                    .update(cx, |this, _| {
+                        mutation
+                            .project_incarnation
+                            .as_ref()
+                            .is_some_and(|incarnation| {
+                                this.is_project_incarnation_current(
+                                    &mutation.project_id,
+                                    incarnation,
+                                )
+                            })
+                    })
+                    .unwrap_or(false);
+                if !is_current {
+                    current = this
+                        .update(cx, |this, _| {
+                            this.docker_mutations.finish(&scope, mutation.generation)
+                        })
+                        .flatten();
+                    continue;
+                }
+
+                let run = mutation.clone();
+                let runner = runner.clone();
+                let result = cx.spawn_blocking(move || runner.run(&run)).await;
+                crate::docker_compose::invalidate_status_snapshot();
+                let failed = result.is_err();
+                if let Err(error) = result {
+                    log::error!(
+                        "docker compose {} failed for '{}': {}",
+                        mutation.kind.compose_argument(),
+                        mutation.service_name,
+                        error
+                    );
+                }
+
+                current = this
+                    .update(cx, |this, cx| {
+                        let is_current =
+                            mutation
+                                .project_incarnation
+                                .as_ref()
+                                .is_some_and(|incarnation| {
+                                    this.is_project_incarnation_current(
+                                        &mutation.project_id,
+                                        incarnation,
+                                    )
+                                });
+                        let next = this.docker_mutations.finish(&scope, mutation.generation);
+                        if is_current {
+                            if failed
+                                && !this.docker_mutations.has_service_mutation(&key.0, &key.1)
+                                && let Some(instance) = this.instances.get_mut(&key)
+                                && matches!(
+                                    instance.status,
+                                    ServiceStatus::Starting | ServiceStatus::Restarting
+                                )
+                            {
+                                instance.status = ServiceStatus::Stopped;
+                            }
+                            cx.notify();
+                        }
+                        next
+                    })
+                    .flatten();
+            }
+        });
+    }
+
+    pub(super) fn complete_okena_terminal_launch(
+        &mut self,
+        key: &(String, String),
+        launch_token: &OkenaLaunchToken,
+        terminal_id: &str,
+        cwd: &str,
+        cx: &mut impl ServiceCx,
+    ) -> bool {
+        if !self.is_okena_launch_current(key, launch_token) {
+            return false;
+        }
+
+        let running = self.instances.get(key).is_some_and(|instance| {
+            instance.status == ServiceStatus::Starting
+                && instance.terminal_id.as_deref() == Some(terminal_id)
+        }) && self.terminal_to_service.get(terminal_id) == Some(key);
+        let exited_without_restart = self.instances.get(key).is_some_and(|instance| {
+            matches!(&instance.status, ServiceStatus::Crashed { .. })
+                && instance.terminal_id.as_deref() == Some(terminal_id)
+        }) && !self.terminal_to_service.contains_key(terminal_id);
+        if !running && !exited_without_restart {
+            return false;
+        }
+
+        let terminal = Arc::new(Terminal::new(
+            terminal_id.to_string(),
+            TerminalSize::default(),
+            self.backend.transport(),
+            cwd.to_string(),
+        ));
+        self.terminals
+            .lock()
+            .insert(terminal_id.to_string(), terminal);
+        if running {
+            if let Some(instance) = self.instances.get_mut(key) {
+                instance.status = ServiceStatus::Running;
+            }
+            self.start_port_detection(&key.0, &key.1, cx);
+        }
+        self.finish_okena_launch(key, launch_token);
+        cx.notify();
+        true
+    }
+
+    pub(super) fn scheduled_okena_restart_is_current(
+        &self,
+        key: &(String, String),
+        restart_count: u32,
+    ) -> bool {
+        self.instances.get(key).is_some_and(|instance| {
+            instance.status == ServiceStatus::Restarting && instance.restart_count == restart_count
+        })
+    }
+
+    pub(super) fn schedule_okena_restart(
+        &self,
+        project_id: &str,
+        service_name: &str,
+        project_path: &str,
+        restart_delay_ms: u64,
+        cx: &mut impl ServiceCx,
+    ) {
+        let Some(project_incarnation) = self.project_incarnation(project_id, project_path) else {
+            return;
+        };
+        let key = (project_id.to_string(), service_name.to_string());
+        let Some(restart_count) = self.instances.get(&key).and_then(|instance| {
+            (instance.status == ServiceStatus::Restarting).then_some(instance.restart_count)
+        }) else {
+            return;
+        };
+        let project_id = project_id.to_string();
+        let service_name = service_name.to_string();
+        let project_path = project_path.to_string();
+        let delay = Duration::from_millis(restart_delay_ms);
+
+        cx.spawn_main(async move |this, cx| {
+            cx.timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                let key = (project_id.clone(), service_name.clone());
+                if this.is_project_incarnation_current(&project_id, &project_incarnation)
+                    && this.scheduled_okena_restart_is_current(&key, restart_count)
+                {
+                    this.start_service(&project_id, &service_name, &project_path, cx);
+                }
+            });
+        });
+    }
+
     /// Start a service by spawning a PTY (Okena) or running `docker compose start` (Docker).
     pub fn start_service(
         &mut self,
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
         let instance = match self.instances.get_mut(&key) {
@@ -40,29 +249,15 @@ impl ServiceManager {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
                 let path = project_path.to_string();
-                let name = service_name.to_string();
                 instance.status = ServiceStatus::Starting;
                 cx.notify();
-
-                // Fire-and-forget: status poller will pick up the change
-                let log_name = name.clone();
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "start", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    if let Ok(output) = result
-                        && !output.status.success() {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose start failed for '{}': {}", log_name, stderr.trim());
-                        }
-                    // Trigger an immediate status poll
-                    let _ = this.update(cx, |_this, cx| cx.notify());
-                }).detach();
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Start,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 self.start_okena_service(project_id, service_name, project_path, cx);
@@ -76,9 +271,38 @@ impl ServiceManager {
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
         let key = (project_id.to_string(), service_name.to_string());
+        self.invalidate_okena_restart(&key, true);
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+        self.begin_okena_terminal_launch(
+            project_id,
+            service_name,
+            project_path,
+            terminal_id,
+            OkenaLaunchFailure::Crashed,
+            cx,
+        );
+    }
+
+    pub(super) fn begin_okena_terminal_launch(
+        &mut self,
+        project_id: &str,
+        service_name: &str,
+        project_path: &str,
+        terminal_id: String,
+        failure: OkenaLaunchFailure,
+        cx: &mut impl ServiceCx,
+    ) {
+        if self.project_incarnation(project_id, project_path).is_none() {
+            return;
+        }
+        let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        let launch_token = self.begin_okena_launch(&key, project_path);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -97,64 +321,112 @@ impl ServiceManager {
             .to_string_lossy()
             .to_string();
 
-        let shell = ShellType::for_command(command);
+        let launch_plan = TerminalLaunchPlan::for_shell(ShellType::for_command(command))
+            .with_environment(instance.definition.env.clone().into_iter().collect());
 
         instance.status = ServiceStatus::Starting;
-
-        match self.backend.create_terminal(&cwd, Some(&shell)) {
-            Ok(terminal_id) => {
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    self.backend.transport(),
-                    cwd,
-                ));
-                self.terminals.lock().insert(terminal_id.clone(), terminal);
-
-                #[allow(
-                    clippy::expect_used,
-                    reason = "instance set to Starting a few lines above, absence is a bug"
-                )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
-                instance.status = ServiceStatus::Running;
-                instance.terminal_id = Some(terminal_id.clone());
-                self.terminal_to_service.insert(
-                    terminal_id,
-                    (project_id.to_string(), service_name.to_string()),
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "Failed to start service '{}' for project {}: {}",
-                    service_name,
-                    project_id,
-                    e
-                );
-                #[allow(
-                    clippy::expect_used,
-                    reason = "instance set to Starting a few lines above, absence is a bug"
-                )]
-                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
-                instance.status = ServiceStatus::Crashed { exit_code: None };
-            }
-        }
-
+        instance.terminal_id = Some(terminal_id.clone());
+        self.terminal_to_service
+            .insert(terminal_id.clone(), key.clone());
         cx.notify();
 
-        // Start port detection if service is now running
-        if self.instances.get(&key).is_some_and(|i| i.status == ServiceStatus::Running) {
-            self.start_port_detection(project_id, service_name, cx);
-        }
+        let backend = self.backend.clone();
+        let project_id = project_id.to_string();
+        let service_name = service_name.to_string();
+        let project_path = project_path.to_string();
+        cx.spawn_main(async move |this, cx| {
+            let launch_backend = backend.clone();
+            let launch_id = terminal_id.clone();
+            let launch_cwd = cwd.clone();
+            let result = cx
+                .spawn_blocking(move || {
+                    launch_backend.reconnect_terminal_with_plan(
+                        &launch_id,
+                        &launch_cwd,
+                        &launch_plan,
+                    )
+                })
+                .await;
+
+            let actual_id = result.as_ref().ok().cloned();
+            let (accepted, cleanup_requested) = this
+                .update(cx, |this, cx| {
+                    let key = (project_id.clone(), service_name.clone());
+                    if result
+                        .as_ref()
+                        .is_ok_and(|returned_id| returned_id == &terminal_id)
+                        && this.complete_okena_terminal_launch(
+                            &key,
+                            &launch_token,
+                            &terminal_id,
+                            &cwd,
+                            cx,
+                        )
+                    {
+                        return (true, false);
+                    }
+                    let current_launch = this.is_okena_launch_current(&key, &launch_token)
+                        && this.instances.get(&key).is_some_and(|instance| {
+                            instance.status == ServiceStatus::Starting
+                                && instance.terminal_id.as_deref() == Some(&terminal_id)
+                        })
+                        && this.terminal_to_service.get(&terminal_id) == Some(&key);
+                    if !current_launch {
+                        let cleanup_requested =
+                            this.terminal_to_service.get(&terminal_id) != Some(&key);
+                        return (false, cleanup_requested);
+                    }
+
+                    match &result {
+                        Ok(returned_id) if returned_id == &terminal_id => unreachable!(),
+                        _ => {
+                            this.terminal_to_service.remove(&terminal_id);
+                            if let Some(instance) = this.instances.get_mut(&key) {
+                                instance.terminal_id = None;
+                                instance.status = match failure {
+                                    OkenaLaunchFailure::Crashed => {
+                                        ServiceStatus::Crashed { exit_code: None }
+                                    }
+                                    OkenaLaunchFailure::Reconnect { .. } => ServiceStatus::Stopped,
+                                };
+                            }
+                            this.finish_okena_launch(&key, &launch_token);
+                            cx.notify();
+                            if matches!(failure, OkenaLaunchFailure::Reconnect { auto_start: true })
+                            {
+                                this.start_service(&project_id, &service_name, &project_path, cx);
+                            }
+                            (false, true)
+                        }
+                    }
+                })
+                .unwrap_or((false, true));
+
+            if !accepted {
+                let mut cleanup_ids: std::collections::HashSet<String> = actual_id
+                    .into_iter()
+                    .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)
+                    .collect();
+                if cleanup_requested {
+                    cleanup_ids.insert(terminal_id);
+                }
+                for cleanup_id in cleanup_ids {
+                    let cleanup_backend = backend.clone();
+                    cx.spawn_blocking(move || cleanup_backend.kill(&cleanup_id))
+                        .await;
+                }
+            }
+        });
     }
 
     /// Stop a running service.
-    pub fn stop_service(
-        &mut self,
-        project_id: &str,
-        service_name: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn stop_service(&mut self, project_id: &str, service_name: &str, cx: &mut impl ServiceCx) {
         let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        self.invalidate_okena_launch(&key);
+        self.invalidate_okena_restart(&key, true);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -170,31 +442,21 @@ impl ServiceManager {
         match &instance.kind {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
-                let path = self.project_paths.get(project_id).cloned().unwrap_or_default();
-                let name = service_name.to_string();
+                let path = self
+                    .project_paths
+                    .get(project_id)
+                    .cloned()
+                    .unwrap_or_default();
                 instance.status = ServiceStatus::Stopped;
                 instance.detected_ports.clear();
                 cx.notify();
-
-                let log_name = name.clone();
-                cx.spawn(async move |_this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "stop", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    match result {
-                        Ok(output) if !output.status.success() => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose stop failed for '{}': {}", log_name, stderr.trim());
-                        }
-                        Err(e) => log::error!("docker compose stop failed to run for '{}': {}", log_name, e),
-                        _ => {}
-                    }
-                }).detach();
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Stop,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 instance.status = ServiceStatus::Stopped;
@@ -211,9 +473,14 @@ impl ServiceManager {
         project_id: &str,
         service_name: &str,
         project_path: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) {
+        let project_incarnation = self.project_incarnation(project_id, project_path);
         let key = (project_id.to_string(), service_name.to_string());
+        if !self.instances.contains_key(&key) {
+            return;
+        }
+        self.invalidate_okena_launch(&key);
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -223,7 +490,6 @@ impl ServiceManager {
             ServiceKind::DockerCompose { compose_file } => {
                 let compose_file = compose_file.clone();
                 let path = project_path.to_string();
-                let name = service_name.to_string();
 
                 // Kill log viewer PTY if any
                 if let Some(terminal_id) = instance.terminal_id.take() {
@@ -236,26 +502,13 @@ impl ServiceManager {
                 instance.detected_ports.clear();
                 cx.notify();
 
-                let log_name = name.clone();
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                    let result = cx.background_executor()
-                        .spawn(async move {
-                            let mut cmd = okena_core::process::command("docker");
-                            cmd.args(["compose", "-f", &compose_file, "restart", &name])
-                                .current_dir(&path);
-                            okena_core::process::safe_output(&mut cmd)
-                        })
-                        .await;
-                    match result {
-                        Ok(output) if !output.status.success() => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            log::error!("docker compose restart failed for '{}': {}", log_name, stderr.trim());
-                        }
-                        Err(e) => log::error!("docker compose restart failed to run for '{}': {}", log_name, e),
-                        _ => {}
-                    }
-                    let _ = this.update(cx, |_this, cx| cx.notify());
-                }).detach();
+                self.schedule_docker_mutation(
+                    key,
+                    path,
+                    compose_file,
+                    DockerMutationKind::Restart,
+                    cx,
+                );
             }
             ServiceKind::Okena => {
                 // Take terminal_id now to prevent concurrent access.
@@ -267,39 +520,44 @@ impl ServiceManager {
                 instance.detected_ports.clear();
                 cx.notify();
 
+                let restart_token =
+                    self.begin_okena_restart(&key, project_path, terminal_id.clone());
+
                 let pid = project_id.to_string();
                 let name = service_name.to_string();
                 let path = project_path.to_string();
                 let backend = self.backend.clone();
-                let terminals = self.terminals.clone();
 
-                cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+                cx.spawn_main(async move |this, cx| {
                     // Collect descendant PIDs on background executor.
                     // get_service_pids() may spawn subprocesses (lsof/tmux)
                     // and get_descendant_pids() may call pgrep/wmic.
                     let old_pids: Vec<u32> = if let Some(ref tid) = terminal_id {
                         let tid = tid.clone();
                         let backend_ref = backend.clone();
-                        cx.background_executor()
-                            .spawn(async move {
-                                backend_ref.get_service_pids(&tid)
-                                    .into_iter()
-                                    .flat_map(port_detect::get_descendant_pids)
-                                    .collect()
-                            })
-                            .await
+                        cx.spawn_blocking(move || {
+                            backend_ref
+                                .get_service_pids(&tid)
+                                .into_iter()
+                                .flat_map(port_detect::get_descendant_pids)
+                                .collect()
+                        })
+                        .await
                     } else {
                         Vec::new()
                     };
 
-                    // Kill old terminal (backend.kill spawns a bg thread internally)
-                    if let Some(ref tid) = terminal_id {
-                        backend.kill(tid);
-                        terminals.lock().remove(tid);
-                        let tid = tid.clone();
-                        let _ = this.update(cx, |this, _cx| {
-                            this.terminal_to_service.remove(&tid);
-                        });
+                    let is_current = this
+                        .update(cx, |this, _| {
+                            let key = (pid.clone(), name.clone());
+                            this.finalize_okena_restart_terminal(&key, &restart_token)
+                                && project_incarnation.as_ref().is_some_and(|incarnation| {
+                                    this.is_project_incarnation_current(&pid, incarnation)
+                                })
+                        })
+                        .unwrap_or(false);
+                    if !is_current {
+                        return;
                     }
 
                     // Wait for old processes to die
@@ -308,30 +566,34 @@ impl ServiceManager {
                             if old_pids.iter().all(|&p| !is_process_alive(p)) {
                                 break;
                             }
-                            cx.background_executor().timer(Duration::from_millis(50)).await;
+                            cx.timer(Duration::from_millis(50)).await;
                         }
                     }
 
                     let _ = this.update(cx, |this, cx| {
+                        if !project_incarnation.as_ref().is_some_and(|incarnation| {
+                            this.is_project_incarnation_current(&pid, incarnation)
+                        }) {
+                            return;
+                        }
                         let key = (pid.clone(), name.clone());
+                        if !this.is_okena_restart_current(&key, &restart_token) {
+                            return;
+                        }
+                        this.finish_okena_restart(&key, &restart_token);
                         if let Some(instance) = this.instances.get(&key)
-                            && instance.status == ServiceStatus::Restarting {
-                                this.start_service(&pid, &name, &path, cx);
-                            }
+                            && instance.status == ServiceStatus::Restarting
+                        {
+                            this.start_service(&pid, &name, &path, cx);
+                        }
                     });
-                })
-                .detach();
+                });
             }
         }
     }
 
     /// Start all services for a project.
-    pub fn start_all(
-        &mut self,
-        project_id: &str,
-        project_path: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn start_all(&mut self, project_id: &str, project_path: &str, cx: &mut impl ServiceCx) {
         let names: Vec<String> = self
             .instances
             .keys()
@@ -345,7 +607,7 @@ impl ServiceManager {
     }
 
     /// Stop all services for a project.
-    pub fn stop_all(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn stop_all(&mut self, project_id: &str, cx: &mut impl ServiceCx) {
         let names: Vec<String> = self
             .instances
             .keys()
@@ -364,7 +626,7 @@ impl ServiceManager {
         &mut self,
         terminal_id: &str,
         exit_code: Option<u32>,
-        cx: &mut Context<Self>,
+        cx: &mut impl ServiceCx,
     ) -> bool {
         let key = match self.terminal_to_service.remove(terminal_id) {
             Some(key) => key,
@@ -372,6 +634,7 @@ impl ServiceManager {
         };
 
         let (project_id, service_name) = key.clone();
+        let project_path = self.project_paths.get(&project_id).cloned();
 
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
@@ -390,24 +653,35 @@ impl ServiceManager {
         // Okena service exit handling
         instance.detected_ports.clear();
 
-        if instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT {
+        if exit_code == Some(0) {
+            instance.terminal_id = None;
+            instance.status = ServiceStatus::Stopped;
+            instance.restart_count = 0;
+            self.terminals.lock().remove(terminal_id);
+            self.invalidate_okena_launch(&key);
+            cx.notify();
+            return true;
+        }
+
+        let should_restart =
+            instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT;
+        if should_restart {
             // Auto-restart: clean up old terminal, will create new one
             instance.terminal_id = None;
             self.terminals.lock().remove(terminal_id);
             instance.status = ServiceStatus::Restarting;
             instance.restart_count += 1;
-
-            let delay = Duration::from_millis(instance.definition.restart_delay_ms);
-
-            cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-                cx.background_executor().timer(delay).await;
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(project_path) = this.project_paths.get(&project_id).cloned() {
-                        this.start_service(&project_id, &service_name, &project_path, cx);
-                    }
-                });
-            })
-            .detach();
+            let restart_delay_ms = instance.definition.restart_delay_ms;
+            self.invalidate_okena_launch(&key);
+            if let Some(project_path) = project_path {
+                self.schedule_okena_restart(
+                    &project_id,
+                    &service_name,
+                    &project_path,
+                    restart_delay_ms,
+                    cx,
+                );
+            }
         } else {
             // Crash without restart: keep terminal_id and Terminal in registry
             // so the user can see the crash output until they manually restart.
@@ -416,5 +690,42 @@ impl ServiceManager {
 
         cx.notify();
         true
+    }
+}
+
+fn run_docker_mutation(mutation: &DockerMutation) -> crate::ServiceResult<()> {
+    let mut command = okena_core::process::command("docker");
+    match mutation.kind {
+        DockerMutationKind::Start => {
+            // `up -d` creates the service and its dependency graph; `start` does not.
+            command.args([
+                "compose",
+                "-f",
+                &mutation.compose_file,
+                "up",
+                "-d",
+                &mutation.service_name,
+            ]);
+        }
+        DockerMutationKind::Stop | DockerMutationKind::Restart => {
+            command.args([
+                "compose",
+                "-f",
+                &mutation.compose_file,
+                mutation.kind.compose_argument(),
+                &mutation.service_name,
+            ]);
+        }
+    }
+    command.current_dir(&mutation.project_path);
+    let output =
+        okena_core::process::safe_output_with_timeout(&mut command, DOCKER_MUTATION_TIMEOUT)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(crate::ServiceError::CommandExitError {
+            context: format!("docker compose {}", mutation.kind.compose_argument()),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
     }
 }

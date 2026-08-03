@@ -2,9 +2,7 @@ use super::super::Terminal;
 use super::super::TerminalNotification;
 use super::super::app_version::set_app_version;
 use super::super::osc_sidecar::parse_osc7_file_uri;
-use super::super::types::{
-    PromptMarkKind, TerminalProgress, TerminalProgressState, TerminalSize,
-};
+use super::super::types::{PromptMarkKind, TerminalProgress, TerminalProgressState, TerminalSize};
 use super::{CapturingTransport, NullTransport};
 use std::sync::Arc;
 
@@ -272,12 +270,19 @@ fn test_osc_title_reset() {
     terminal.process_output(b"\x1b]0;\x07");
     // After reset, title should be cleared or set to empty
     let title = terminal.title();
-    assert!(title.is_none() || title.as_deref() == Some(""), "title should be empty or None, got: {:?}", title);
+    assert!(
+        title.is_none() || title.as_deref() == Some(""),
+        "title should be empty or None, got: {:?}",
+        title
+    );
 }
 
 /// A title-less notification, the shape `OSC 9` produces.
 fn body(text: &str) -> TerminalNotification {
-    TerminalNotification { title: None, body: text.to_string() }
+    TerminalNotification {
+        title: None,
+        body: text.to_string(),
+    }
 }
 
 #[test]
@@ -366,16 +371,18 @@ fn test_osc9_st_terminator() {
     // ST-terminated form (ESC \) is equally valid.
     terminal.process_output(b"\x1b]9;hello\x1b\\");
 
-    assert_eq!(
-        terminal.take_pending_notifications(),
-        vec![body("hello")],
-    );
+    assert_eq!(terminal.take_pending_notifications(), vec![body("hello")],);
 }
 
 #[test]
 fn test_osc9_4_st1_sets_normal_progress() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     assert_eq!(terminal.progress(), None);
 
@@ -384,19 +391,30 @@ fn test_osc9_4_st1_sets_normal_progress() {
 
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            value: 42
+        }),
     );
     // Progress is sticky (not drained on read).
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            value: 42
+        }),
     );
 }
 
 #[test]
 fn test_osc9_4_st0_clears_progress() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     terminal.process_output(b"\x1b]9;4;1;50\x07");
     assert!(terminal.progress().is_some());
@@ -409,35 +427,56 @@ fn test_osc9_4_st0_clears_progress() {
 #[test]
 fn test_osc9_4_st3_indeterminate_ignores_value() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // st=3 is a spinner — pr is meaningless and normalised to 0.
     terminal.process_output(b"\x1b]9;4;3;77\x07");
 
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Indeterminate, value: 0 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Indeterminate,
+            value: 0
+        }),
     );
 }
 
 #[test]
 fn test_osc9_4_clamps_value_over_100() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // pr above 100 is clamped to 100.
     terminal.process_output(b"\x1b]9;4;1;255\x07");
 
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 100 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            value: 100
+        }),
     );
 }
 
 #[test]
 fn test_osc9_4_st2_error_keeps_previous_value() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // Set a baseline, then signal an error without an explicit percent.
     terminal.process_output(b"\x1b]9;4;1;30\x07");
@@ -445,21 +484,32 @@ fn test_osc9_4_st2_error_keeps_previous_value() {
 
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Error, value: 30 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Error,
+            value: 30
+        }),
     );
 
     // An explicit pr on the error state overrides the kept value.
     terminal.process_output(b"\x1b]9;4;2;80\x07");
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Error, value: 80 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Error,
+            value: 80
+        }),
     );
 }
 
 #[test]
 fn test_osc9_4_garbage_st_ignored() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     terminal.process_output(b"\x1b]9;4;1;25\x07");
     // A non-numeric / out-of-range st must leave the current bar untouched and
@@ -469,7 +519,10 @@ fn test_osc9_4_garbage_st_ignored() {
 
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 25 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            value: 25
+        }),
     );
     assert!(terminal.take_pending_notifications().is_empty());
 }
@@ -477,7 +530,12 @@ fn test_osc9_4_garbage_st_ignored() {
 #[test]
 fn test_osc9_4_does_not_produce_notification() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // The progress subtype must NOT be treated as notification text...
     terminal.process_output(b"\x1b]9;4;1;42\x07");
@@ -487,17 +545,28 @@ fn test_osc9_4_does_not_produce_notification() {
     // ...while a plain OSC 9 message still produces a notification and leaves
     // progress untouched (no regression).
     terminal.process_output(b"\x1b]9;Build complete\x07");
-    assert_eq!(terminal.take_pending_notifications(), vec![body("Build complete")]);
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Build complete")]
+    );
     assert_eq!(
         terminal.progress(),
-        Some(TerminalProgress { state: TerminalProgressState::Normal, value: 42 }),
+        Some(TerminalProgress {
+            state: TerminalProgressState::Normal,
+            value: 42
+        }),
     );
 }
 
 #[test]
 fn test_osc777_notify_title_and_body() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // urxvt-style: OSC 777 ; notify ; <title> ; <body>
     terminal.process_output(b"\x1b]777;notify;Claude;Waiting for your input\x07");
@@ -514,7 +583,12 @@ fn test_osc777_notify_title_and_body() {
 #[test]
 fn test_osc777_body_keeps_semicolons() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // A body containing semicolons must be rejoined, not truncated.
     terminal.process_output(b"\x1b]777;notify;Build;done: a; b; c\x07");
@@ -531,7 +605,12 @@ fn test_osc777_body_keeps_semicolons() {
 #[test]
 fn test_osc777_non_notify_subcommand_ignored() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // 777 carries unrelated subcommands (e.g. precmd) — those must not queue.
     terminal.process_output(b"\x1b]777;precmd;something\x07");
@@ -544,7 +623,12 @@ fn test_osc777_non_notify_subcommand_ignored() {
 #[test]
 fn test_osc99_simple_single_chunk() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // Minimal kitty form: empty metadata, payload is the (title) text. With no
     // body it maps to a title-less notification, like OSC 9.
@@ -552,18 +636,29 @@ fn test_osc99_simple_single_chunk() {
 
     assert_eq!(
         terminal.take_pending_notifications(),
-        vec![TerminalNotification { title: None, body: "Hello world".to_string() }],
+        vec![TerminalNotification {
+            title: None,
+            body: "Hello world".to_string()
+        }],
     );
 }
 
 #[test]
 fn test_osc99_title_and_body_chunks() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // First chunk: title, d=0 (not complete) → nothing displayed yet.
     terminal.process_output(b"\x1b]99;i=x:d=0;My Title\x07");
-    assert!(terminal.take_pending_notifications().is_empty(), "d=0 must not emit");
+    assert!(
+        terminal.take_pending_notifications().is_empty(),
+        "d=0 must not emit"
+    );
 
     // Second chunk: body, d defaults to 1 (complete) → emit assembled pair.
     terminal.process_output(b"\x1b]99;i=x:p=body;Body text\x07");
@@ -580,21 +675,34 @@ fn test_osc99_title_and_body_chunks() {
 fn test_osc99_base64_payload() {
     use base64::Engine as _;
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     let encoded = base64::engine::general_purpose::STANDARD.encode("Encoded msg");
     terminal.process_output(format!("\x1b]99;e=1;{encoded}\x07").as_bytes());
 
     assert_eq!(
         terminal.take_pending_notifications(),
-        vec![TerminalNotification { title: None, body: "Encoded msg".to_string() }],
+        vec![TerminalNotification {
+            title: None,
+            body: "Encoded msg".to_string()
+        }],
     );
 }
 
 #[test]
 fn test_osc99_close_drops_pending() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // Start a chunked notification, then close it before completion.
     terminal.process_output(b"\x1b]99;i=x:d=0;Partial\x07");
@@ -609,7 +717,12 @@ fn test_osc99_close_drops_pending() {
 #[test]
 fn test_osc99_query_payload_ignored() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     // A capability query (p=?) carries no displayable text.
     terminal.process_output(b"\x1b]99;p=?;\x07");
@@ -619,7 +732,12 @@ fn test_osc99_query_payload_ignored() {
 #[test]
 fn test_bell_edge_is_one_shot() {
     let transport = Arc::new(NullTransport);
-    let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, "/tmp".into());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
 
     assert!(!terminal.take_pending_bell(), "no bell yet");
 
@@ -629,7 +747,10 @@ fn test_bell_edge_is_one_shot() {
     assert!(!terminal.take_pending_bell(), "edge is consumed (one-shot)");
 
     // The sticky UI flag is independent of the one-shot notification edge.
-    assert!(terminal.has_bell(), "has_bell stays set until focus clears it");
+    assert!(
+        terminal.has_bell(),
+        "has_bell stays set until focus clears it"
+    );
 }
 
 #[test]
@@ -642,7 +763,10 @@ fn test_osc52_read_request_queues_responder() {
         "/tmp".into(),
     );
 
-    assert!(!terminal.has_pending_clipboard_reads(), "nothing queued yet");
+    assert!(
+        !terminal.has_pending_clipboard_reads(),
+        "nothing queued yet"
+    );
 
     // OSC 52 ; c ; ? — the app asks to READ the clipboard.
     terminal.process_output(b"\x1b]52;c;?\x07");
@@ -685,7 +809,10 @@ fn test_osc52_answer_clipboard_reads_replies_and_drains() {
     assert_eq!(writes.len(), 1, "expected exactly one PTY reply");
     assert!(!writes[0].is_empty(), "reply must not be empty");
     let body = std::str::from_utf8(&writes[0]).unwrap();
-    assert!(body.contains("52;"), "reply should be an OSC 52 sequence: {body:?}");
+    assert!(
+        body.contains("52;"),
+        "reply should be an OSC 52 sequence: {body:?}"
+    );
 }
 
 #[test]
@@ -704,7 +831,10 @@ fn test_osc52_drop_clipboard_reads_clears_without_reply() {
     // Silent deny: drop the request without writing anything to the PTY.
     terminal.drop_clipboard_reads();
 
-    assert!(!terminal.has_pending_clipboard_reads(), "queue must be cleared");
+    assert!(
+        !terminal.has_pending_clipboard_reads(),
+        "queue must be cleared"
+    );
     assert!(
         transport.writes().is_empty(),
         "dropping must not reply: {:?}",
@@ -804,7 +934,10 @@ fn test_xtversion_responds_with_okena_name() {
     // set_app_version uses OnceLock, we can't rely on the exact string
     // across tests. Assert that *some* non-empty version is reported.
     assert!(body.contains("okena("), "got: {body:?}");
-    assert!(!body.contains("okena()"), "version must not be empty: {body:?}");
+    assert!(
+        !body.contains("okena()"),
+        "version must not be empty: {body:?}"
+    );
 }
 
 #[test]
@@ -915,7 +1048,9 @@ fn test_osc133_d_parses_nonzero_exit_code() {
     let marks = terminal.prompt_marks();
     assert_eq!(
         marks[0].kind,
-        PromptMarkKind::CommandFinished { exit_code: Some(127) },
+        PromptMarkKind::CommandFinished {
+            exit_code: Some(127)
+        },
     );
 }
 
@@ -1029,12 +1164,23 @@ fn test_osc133_ring_buffer_evicts_oldest() {
 #[test]
 fn test_parse_osc133_kind() {
     use super::super::prompt_marks::parse_osc133_kind;
-    assert_eq!(parse_osc133_kind(b'A', &[]), Some(PromptMarkKind::PromptStart));
-    assert_eq!(parse_osc133_kind(b'B', &[]), Some(PromptMarkKind::CommandStart));
-    assert_eq!(parse_osc133_kind(b'C', &[]), Some(PromptMarkKind::CommandExecuted));
+    assert_eq!(
+        parse_osc133_kind(b'A', &[]),
+        Some(PromptMarkKind::PromptStart)
+    );
+    assert_eq!(
+        parse_osc133_kind(b'B', &[]),
+        Some(PromptMarkKind::CommandStart)
+    );
+    assert_eq!(
+        parse_osc133_kind(b'C', &[]),
+        Some(PromptMarkKind::CommandExecuted)
+    );
     assert_eq!(
         parse_osc133_kind(b'D', &[b"42"]),
-        Some(PromptMarkKind::CommandFinished { exit_code: Some(42) }),
+        Some(PromptMarkKind::CommandFinished {
+            exit_code: Some(42)
+        }),
     );
     // Non-numeric extra params mean "unknown exit".
     assert_eq!(
@@ -1042,4 +1188,65 @@ fn test_parse_osc133_kind() {
         Some(PromptMarkKind::CommandFinished { exit_code: None }),
     );
     assert_eq!(parse_osc133_kind(b'Z', &[]), None);
+}
+
+#[test]
+fn test_mirror_transport_does_not_answer_queries() {
+    use super::MirrorTransport;
+
+    let size = TerminalSize {
+        cols: 80,
+        rows: 24,
+        cell_width: 8.0,
+        cell_height: 16.0,
+    };
+    let transport = Arc::new(MirrorTransport::new());
+    let terminal = Terminal::new(
+        "remote:conn:t".into(),
+        size,
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // DSR cursor position, CSI 14/18 t size queries, DA1 — all answered by the
+    // PTY owner (daemon), never by a mirror: duplicated replies corrupt the
+    // app's input and count as user input for resize ownership on the server.
+    terminal.process_output(b"\x1b[6n");
+    terminal.process_output(b"\x1b[14t");
+    terminal.process_output(b"\x1b[18t");
+    terminal.process_output(b"\x1b[c");
+
+    assert!(
+        transport.inner.writes().is_empty(),
+        "mirror must not reply to terminal queries: {:?}",
+        transport.inner.writes(),
+    );
+}
+
+#[test]
+fn test_process_palette_answers_color_query_without_per_terminal_palette() {
+    use super::super::set_process_palette;
+
+    // Headless daemon: no view pushes a per-terminal palette, so OSC color
+    // queries fall back to the process palette set at boot.
+    set_process_palette(okena_core::theme::DARK_THEME);
+
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // OSC 11 — query the background color.
+    terminal.process_output(b"\x1b]11;?\x07");
+
+    let writes = transport.writes();
+    assert_eq!(writes.len(), 1, "expected one OSC 11 reply: {writes:?}");
+    let reply = String::from_utf8_lossy(&writes[0]).into_owned();
+    assert!(
+        reply.starts_with("\x1b]11;rgb:"),
+        "unexpected reply: {reply:?}"
+    );
 }

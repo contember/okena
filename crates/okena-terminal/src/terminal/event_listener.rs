@@ -101,7 +101,18 @@ impl ZedEventListener {
         }
 
         let palette = self.state.palette.lock();
-        let colors = palette.as_ref()?;
+        let process_palette;
+        let colors = match palette.as_ref() {
+            Some(colors) => colors,
+            None => {
+                // Headless daemon: no view ever pushes a per-terminal palette,
+                // so fall back to the process-wide palette set at boot / on
+                // theme change. Mirrors don't answer queries, so without this
+                // OSC color queries would go unanswered in daemon mode.
+                process_palette = process_palette_snapshot()?;
+                &process_palette
+            }
+        };
         let hex = match index {
             0 => colors.term_black,
             1 => colors.term_red,
@@ -126,6 +137,21 @@ impl ZedEventListener {
         };
         Some(((hex >> 16) as u8, (hex >> 8) as u8, hex as u8))
     }
+}
+
+/// Process-wide fallback palette for answering OSC color queries when no
+/// per-terminal palette was pushed (headless daemon — no views). Set once at
+/// boot and on theme changes via [`set_process_palette`].
+static PROCESS_PALETTE: Mutex<Option<okena_core::theme::ThemeColors>> = Mutex::new(None);
+
+/// Set the process-wide fallback palette used to answer OSC 10/11/12/4 color
+/// queries for terminals without a per-terminal palette (headless daemon).
+pub fn set_process_palette(colors: okena_core::theme::ThemeColors) {
+    *PROCESS_PALETTE.lock() = Some(colors);
+}
+
+fn process_palette_snapshot() -> Option<okena_core::theme::ThemeColors> {
+    *PROCESS_PALETTE.lock()
 }
 
 /// xterm 6x6x6 color cube for palette indices 16..=231.
@@ -174,13 +200,22 @@ impl EventListener for ZedEventListener {
                 self.clipboard.reads.lock().push(formatter);
             }
             TermEvent::ColorRequest(index, response_fn) => {
+                // Mirrors must not answer queries — the PTY owner is the
+                // single responder (duplicate replies corrupt the app's input
+                // and count as user input for resize ownership on the server).
+                if !self.transport.answers_terminal_queries() {
+                    return;
+                }
                 if let Some((r, g, b)) = self.resolve_color(index) {
-                    let reply =
-                        response_fn(alacritty_terminal::vte::ansi::Rgb { r, g, b });
-                    self.transport.send_input(&self.terminal_id, reply.as_bytes());
+                    let reply = response_fn(alacritty_terminal::vte::ansi::Rgb { r, g, b });
+                    self.transport
+                        .send_response(&self.terminal_id, reply.as_bytes());
                 }
             }
             TermEvent::TextAreaSizeRequest(formatter) => {
+                if !self.transport.answers_terminal_queries() {
+                    return;
+                }
                 // Answer `CSI 14 t` (report text-area size in pixels). alacritty
                 // hands us the formatter; we supply the current geometry. Cell
                 // dims are f32 pixels in TerminalSize; round to the nearest whole
@@ -193,12 +228,19 @@ impl EventListener for ZedEventListener {
                     cell_height: (size.cell_height.round() as u16).max(1),
                 };
                 let reply = formatter(window_size);
-                self.transport.send_input(&self.terminal_id, reply.as_bytes());
+                self.transport
+                    .send_response(&self.terminal_id, reply.as_bytes());
             }
             TermEvent::PtyWrite(data) => {
-                // Write response back to PTY (e.g., cursor position report)
+                if !self.transport.answers_terminal_queries() {
+                    return;
+                }
+                // Terminal→program reply (Device Attributes, cursor position
+                // report, DSR, …). Sent on the synchronous fast-lane so it beats
+                // the querying program's exit back to the shell.
                 log::debug!("PtyWrite event: {:?}", data);
-                self.transport.send_input(&self.terminal_id, data.as_bytes());
+                self.transport
+                    .send_response(&self.terminal_id, data.as_bytes());
             }
             _ => {
                 // Ignore other events

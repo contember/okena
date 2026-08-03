@@ -1,18 +1,144 @@
-use crate::terminal::TerminalTransport;
 use crate::pty_manager::PtyManager;
+#[cfg(windows)]
+use crate::session_backend::ResolvedBackend;
+use crate::session_backend::SessionBackend;
 use crate::shell_config::ShellType;
+use crate::terminal::TerminalTransport;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Exact startup command carried separately from the shell used to route it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLaunchCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Transient launch data; only `route` comes from persisted workspace state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLaunchPlan {
+    pub route: ShellType,
+    pub initial_command: Option<TerminalLaunchCommand>,
+    /// Environment owned by this launch, kept out of shell command strings.
+    pub environment: Vec<(String, String)>,
+}
+
+impl TerminalLaunchPlan {
+    pub fn for_shell(route: ShellType) -> Self {
+        Self {
+            route,
+            initial_command: None,
+            environment: Vec::new(),
+        }
+    }
+
+    pub fn with_environment(mut self, mut environment: Vec<(String, String)>) -> Self {
+        environment.sort_by(|a, b| a.0.cmp(&b.0));
+        self.environment = environment;
+        self
+    }
+
+    fn legacy_shell(&self) -> ShellType {
+        self.initial_command.as_ref().map_or_else(
+            || self.route.clone(),
+            |command| ShellType::Custom {
+                path: command.program.clone(),
+                args: command.args.clone(),
+            },
+        )
+    }
+}
+
+/// Route needed to remove a persistent session when no live PTY handle exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalTeardownRoute {
+    Host,
+    #[cfg(windows)]
+    Wsl {
+        distro: Option<String>,
+        backend: ResolvedBackend,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSessionTeardown {
+    pub terminal_id: String,
+    pub route: TerminalTeardownRoute,
+}
+
+impl TerminalSessionTeardown {
+    pub fn host(terminal_id: String) -> Self {
+        Self {
+            terminal_id,
+            route: TerminalTeardownRoute::Host,
+        }
+    }
+}
+
+impl PartialEq<String> for TerminalSessionTeardown {
+    fn eq(&self, other: &String) -> bool {
+        self.terminal_id == *other
+    }
+}
 
 /// Terminal lifecycle management trait.
 /// Used by TerminalPane and LayoutContainer.
 pub trait TerminalBackend: Send + Sync {
     fn transport(&self) -> Arc<dyn TerminalTransport>;
     fn create_terminal(&self, cwd: &str, shell: Option<&ShellType>) -> Result<String>;
-    fn reconnect_terminal(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> Result<String>;
+    fn create_terminal_with_plan(&self, cwd: &str, plan: &TerminalLaunchPlan) -> Result<String> {
+        let shell = plan.legacy_shell();
+        self.create_terminal(cwd, Some(&shell))
+    }
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&ShellType>,
+    ) -> Result<String>;
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
+        let shell = plan.legacy_shell();
+        self.reconnect_terminal(terminal_id, cwd, Some(&shell))
+    }
     fn kill(&self, terminal_id: &str);
+    fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        self.kill(&teardown.terminal_id);
+    }
+    /// Wait for teardown work queued before this call to finish.
+    fn flush_teardown(&self) {}
+    /// Bounded teardown wait for destructive operations. `false` means the wait
+    /// timed out, or one of `terminal_ids` may still own its former working
+    /// directory. An empty slice asks only about the drain.
+    fn flush_teardown_with_timeout(&self, _timeout: Duration, _terminal_ids: &[String]) -> bool {
+        self.flush_teardown();
+        true
+    }
+    /// Whether this backend can switch persistence routes without replacement.
+    fn supports_session_backend_reconfiguration(&self) -> bool {
+        false
+    }
+    /// Fence new PTY creation before draining the old persistence route.
+    fn begin_session_backend_reconfiguration(&self) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
+    /// Verify that the old persistence route no longer owns live work.
+    fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
+    /// Switch the live persistence route after old teardown and settings commit.
+    fn apply_session_backend(&self, _backend: SessionBackend) -> Result<()> {
+        anyhow::bail!("terminal backend does not support live session route changes")
+    }
+    /// Release a creation fence without changing the active route.
+    fn cancel_session_backend_reconfiguration(&self) {}
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
@@ -57,12 +183,66 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.create_terminal_with_shell(cwd, shell)
     }
 
-    fn reconnect_terminal(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> Result<String> {
-        self.pty_manager.create_or_reconnect_terminal_with_shell(Some(terminal_id), cwd, shell)
+    fn create_terminal_with_plan(&self, cwd: &str, plan: &TerminalLaunchPlan) -> Result<String> {
+        self.pty_manager.create_terminal_with_plan(cwd, plan)
+    }
+
+    fn reconnect_terminal(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&ShellType>,
+    ) -> Result<String> {
+        self.pty_manager
+            .create_or_reconnect_terminal_with_shell(Some(terminal_id), cwd, shell)
+    }
+
+    fn reconnect_terminal_with_plan(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        plan: &TerminalLaunchPlan,
+    ) -> Result<String> {
+        self.pty_manager
+            .create_or_reconnect_terminal_with_plan(Some(terminal_id), cwd, plan)
     }
 
     fn kill(&self, terminal_id: &str) {
         self.pty_manager.kill(terminal_id)
+    }
+
+    fn kill_session(&self, teardown: &TerminalSessionTeardown) {
+        self.pty_manager.kill_session(teardown)
+    }
+
+    fn flush_teardown(&self) {
+        self.pty_manager.flush_teardown()
+    }
+
+    fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+        self.pty_manager
+            .flush_teardown_with_timeout(timeout, terminal_ids)
+    }
+
+    fn supports_session_backend_reconfiguration(&self) -> bool {
+        true
+    }
+
+    fn begin_session_backend_reconfiguration(&self) -> Result<()> {
+        self.pty_manager.begin_session_backend_reconfiguration()
+    }
+
+    fn ensure_session_backend_reconfigurable(&self) -> Result<()> {
+        self.pty_manager.ensure_session_backend_reconfigurable()
+    }
+
+    fn apply_session_backend(&self, backend: SessionBackend) -> Result<()> {
+        self.pty_manager.apply_session_backend(backend);
+        Ok(())
+    }
+
+    fn cancel_session_backend_reconfiguration(&self) {
+        self.pty_manager.cancel_session_backend_reconfiguration();
     }
 
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf> {

@@ -2,20 +2,19 @@
 
 use crate::keybindings::Cancel;
 use crate::remote_client::manager::RemoteConnectionManager;
-use crate::settings::settings;
 use crate::theme::theme;
-use crate::views::components::{
-    button, input_container, labeled_input, modal_backdrop, modal_content,
-    modal_header, PathAutoCompleteState, SimpleInput, SimpleInputState,
-};
-use okena_ui::dialog_actions::dialog_actions;
-use crate::workspace::state::{WindowId, Workspace};
 use crate::ui::tokens::{ui_text_md, ui_text_ms};
+use crate::views::components::{
+    PathAutoCompleteState, SimpleInput, SimpleInputState, button, input_container, labeled_input,
+    modal_backdrop, modal_content, modal_header,
+};
+use crate::workspace::state::{WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
-use okena_transport::client::ConnectionStatus;
+use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+use okena_ui::dialog_actions::dialog_actions;
 
 enum AddProjectTarget {
     Local,
@@ -56,14 +55,21 @@ impl AddProjectDialog {
         window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
+        let name_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
         let path_input = cx.new(PathAutoCompleteState::new);
 
-        // Build targets list: Local + connected remote connections
+        // Build targets list: Local (the implicit loopback local-daemon
+        // connection) + connected remote connections. The local-daemon
+        // connection itself is hidden from the remote list — "Local" already
+        // represents it.
         let mut targets = vec![AddProjectTarget::Local];
         if let Some(ref rm) = remote_manager {
             let rm = rm.read(cx);
             for (config, status, _state) in rm.connections() {
+                if config.id == LOCAL_DAEMON_CONNECTION_ID {
+                    continue;
+                }
                 if matches!(status, ConnectionStatus::Connected) {
                     targets.push(AddProjectTarget::Remote {
                         connection_id: config.id.clone(),
@@ -107,42 +113,34 @@ impl AddProjectDialog {
             return;
         }
 
-        match self.targets.get(self.selected_target) {
-            Some(AddProjectTarget::Local) | None => {
+        // Resolve the target connection. "Local" is just the implicit loopback
+        // local-daemon connection; every project (local or remote) is added by
+        // dispatching `AddProject` to a daemon over the same mechanism — the GUI
+        // never mutates its read-only mirror directly.
+        let connection_id = match self.targets.get(self.selected_target) {
+            Some(AddProjectTarget::Local) | None => LOCAL_DAEMON_CONNECTION_ID.to_string(),
+            Some(AddProjectTarget::Remote { connection_id, .. }) => connection_id.clone(),
+        };
+
+        if let Some(ref rm) = self.remote_manager {
+            let connection_available = rm
+                .read(cx)
+                .connections()
+                .iter()
+                .any(|(config, _, _)| config.id == connection_id);
+            if connection_available {
                 let window_id = self.window_id;
-                self.workspace.update(cx, |ws, cx| {
-                    ws.add_project(name, path, true, &settings(cx).hooks, window_id, cx);
+                self.workspace.update(cx, |ws, _cx| {
+                    ws.queue_pending_remote_project_visibility(
+                        window_id,
+                        &connection_id,
+                        &name,
+                        Some(&path),
+                    );
                 });
-            }
-            Some(AddProjectTarget::Remote {
-                connection_id, ..
-            }) => {
-                if let Some(ref rm) = self.remote_manager {
-                    let cid = connection_id.clone();
-                    let connection_available = rm
-                        .read(cx)
-                        .connections()
-                        .iter()
-                        .any(|(config, _, _)| config.id == cid);
-                    if connection_available {
-                        let window_id = self.window_id;
-                        self.workspace.update(cx, |ws, _cx| {
-                            ws.queue_pending_remote_project_visibility(
-                                window_id,
-                                &cid,
-                                &name,
-                                Some(&path),
-                            );
-                        });
-                        rm.update(cx, |rm, cx| {
-                            rm.send_action(
-                                &cid,
-                                ActionRequest::AddProject { name, path },
-                                cx,
-                            );
-                        });
-                    }
-                }
+                rm.update(cx, |rm, cx| {
+                    rm.send_action(&connection_id, ActionRequest::AddProject { name, path }, cx);
+                });
             }
         }
 
@@ -159,20 +157,21 @@ impl AddProjectDialog {
 
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(selected_paths))) = paths.await
-                && let Some(path) = selected_paths.first() {
-                    let path_str = path.to_string_lossy().to_string();
-                    let name_str = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Project".to_string());
+                && let Some(path) = selected_paths.first()
+            {
+                let path_str = path.to_string_lossy().to_string();
+                let name_str = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Project".to_string());
 
-                    this.update(cx, |this, cx| {
-                        this.pending_path_value = Some(path_str);
-                        this.pending_name_value = Some(name_str);
-                        cx.notify();
-                    })
-                    .ok();
-                }
+                this.update(cx, |this, cx| {
+                    this.pending_path_value = Some(path_str);
+                    this.pending_name_value = Some(name_str);
+                    cx.notify();
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -200,8 +199,7 @@ impl AddProjectDialog {
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .when(is_selected, |d| {
-                        d.bg(rgb(t.border_active))
-                            .text_color(rgb(t.bg_primary))
+                        d.bg(rgb(t.border_active)).text_color(rgb(t.bg_primary))
                     })
                     .when(!is_selected, |d| {
                         d.bg(rgb(t.bg_secondary))
@@ -211,6 +209,11 @@ impl AddProjectDialog {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.selected_target = i;
+                        let local_completion_enabled =
+                            matches!(this.targets.get(i), Some(AddProjectTarget::Local));
+                        this.path_input.update(cx, |input, cx| {
+                            input.set_local_completion_enabled(local_completion_enabled, cx);
+                        });
                         cx.notify();
                     }))
             }))
@@ -230,11 +233,7 @@ impl AddProjectDialog {
         }
 
         // Adjust top offset when target selector is visible
-        let top_offset = if self.targets.len() > 1 {
-            210.0
-        } else {
-            180.0
-        };
+        let top_offset = if self.targets.len() > 1 { 210.0 } else { 180.0 };
 
         div()
             .absolute()
@@ -258,61 +257,54 @@ impl AddProjectDialog {
                 cx.stop_propagation();
             })
             .child(
-                v_flex().children(
-                    suggestions
-                        .iter()
-                        .enumerate()
-                        .map(|(i, suggestion)| {
-                            let is_selected = i == selected_index;
-                            let path_input = path_input.clone();
+                v_flex().children(suggestions.iter().enumerate().map(|(i, suggestion)| {
+                    let is_selected = i == selected_index;
+                    let path_input = path_input.clone();
 
-                            div()
-                                .id(ElementId::Name(
-                                    format!("path-suggestion-{}", i).into(),
-                                ))
-                                .px(px(8.0))
-                                .py(px(6.0))
-                                .cursor_pointer()
-                                .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    svg()
-                                        .path(if suggestion.is_select_current {
-                                            "icons/check.svg"
-                                        } else if suggestion.is_directory {
-                                            "icons/folder.svg"
-                                        } else {
-                                            "icons/file.svg"
-                                        })
-                                        .size(px(14.0))
-                                        .text_color(if suggestion.is_select_current
-                                            || suggestion.is_directory
-                                        {
-                                            rgb(t.border_active)
-                                        } else {
-                                            rgb(t.text_muted)
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(if suggestion.is_select_current {
-                                            rgb(t.border_active)
-                                        } else {
-                                            rgb(t.text_primary)
-                                        })
-                                        .child(suggestion.display_name.clone()),
-                                )
-                                .on_click(move |_, _window, cx| {
-                                    path_input.update(cx, |state, cx| {
-                                        state.select_and_complete(i, cx);
-                                    });
+                    div()
+                        .id(ElementId::Name(format!("path-suggestion-{}", i).into()))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .cursor_pointer()
+                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            svg()
+                                .path(if suggestion.is_select_current {
+                                    "icons/check.svg"
+                                } else if suggestion.is_directory {
+                                    "icons/folder.svg"
+                                } else {
+                                    "icons/file.svg"
                                 })
-                        }),
-                ),
+                                .size(px(14.0))
+                                .text_color(
+                                    if suggestion.is_select_current || suggestion.is_directory {
+                                        rgb(t.border_active)
+                                    } else {
+                                        rgb(t.text_muted)
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(if suggestion.is_select_current {
+                                    rgb(t.border_active)
+                                } else {
+                                    rgb(t.text_primary)
+                                })
+                                .child(suggestion.display_name.clone()),
+                        )
+                        .on_click(move |_, _window, cx| {
+                            path_input.update(cx, |state, cx| {
+                                state.select_and_complete(i, cx);
+                            });
+                        })
+                })),
             )
             .into_any_element()
     }
@@ -389,26 +381,20 @@ impl Render for AddProjectDialog {
                                 )
                             })
                             // Name input
-                            .child(
-                                labeled_input("Name:", &t).child(
-                                    input_container(&t, None).child(
-                                        SimpleInput::new(&self.name_input).text_size(ui_text_md(cx)),
-                                    ),
+                            .child(labeled_input("Name:", &t).child(
+                                input_container(&t, None).child(
+                                    SimpleInput::new(&self.name_input).text_size(ui_text_md(cx)),
                                 ),
-                            )
+                            ))
                             // Path input with auto-complete (or plain input for remote)
                             .child(
                                 labeled_input(path_label, &t)
-                                    .when(!is_remote, |d| {
-                                        d.child(self.path_input.clone())
-                                    })
+                                    .when(!is_remote, |d| d.child(self.path_input.clone()))
                                     .when(is_remote, |d| {
                                         d.child(
                                             input_container(&t, None).child(
-                                                SimpleInput::new(
-                                                    self.path_input.read(cx).input(),
-                                                )
-                                                .text_size(ui_text_md(cx)),
+                                                SimpleInput::new(self.path_input.read(cx).input())
+                                                    .text_size(ui_text_md(cx)),
                                             ),
                                         )
                                     }),
@@ -427,15 +413,17 @@ impl Render for AddProjectDialog {
                                 )
                             })
                             // Action buttons
-                            .child(
-                                dialog_actions(
-                                    "Cancel",
-                                    cx.listener(|this, _, _window, cx| { this.close(cx); }),
-                                    "Add",
-                                    cx.listener(|this, _, window, cx| { this.add_project(window, cx); }),
-                                    &t,
-                                ),
-                            ),
+                            .child(dialog_actions(
+                                "Cancel",
+                                cx.listener(|this, _, _window, cx| {
+                                    this.close(cx);
+                                }),
+                                "Add",
+                                cx.listener(|this, _, window, cx| {
+                                    this.add_project(window, cx);
+                                }),
+                                &t,
+                            )),
                     )
                     // Path suggestions overlay (only for local target)
                     .when(has_suggestions, |d| {

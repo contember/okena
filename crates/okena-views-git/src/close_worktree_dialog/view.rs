@@ -24,15 +24,10 @@ impl Render for CloseWorktreeDialog {
         }
 
         let is_processing = self.processing != ProcessingState::Idle;
+        let is_unavailable = is_processing || self.loading_info;
 
         let status_text = match &self.processing {
-            ProcessingState::Stashing => Some("Stashing changes..."),
-            ProcessingState::Fetching => Some("Fetching remote..."),
-            ProcessingState::Rebasing => Some("Rebasing..."),
-            ProcessingState::Merging => Some("Merging..."),
-            ProcessingState::Pushing => Some("Pushing branch..."),
-            ProcessingState::DeletingBranch => Some("Deleting branch..."),
-            ProcessingState::Removing => Some("Removing worktree..."),
+            ProcessingState::Working => Some("Closing worktree..."),
             ProcessingState::Idle => None,
         };
 
@@ -120,6 +115,14 @@ impl Render for CloseWorktreeDialog {
                             .flex()
                             .flex_col()
                             .gap(px(8.0))
+                            .when(self.loading_info, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(ui_text_md(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child("Loading worktree info\u{2026}")
+                                )
+                            })
                             // Project info
                             .child(
                                 div()
@@ -573,12 +576,12 @@ impl Render for CloseWorktreeDialog {
                                 button_primary("confirm-close-wt-btn", confirm_label, &t)
                                     .px(px(16.0))
                                     .py(px(8.0))
-                                    .when(!is_processing, |d| {
+                                    .when(!is_unavailable, |d| {
                                         d.on_click(cx.listener(|this, _, _, cx| {
                                             this.execute(cx);
                                         }))
                                     })
-                                    .when(is_processing, |d| {
+                                    .when(is_unavailable, |d| {
                                         d.opacity(0.5).cursor(CursorStyle::default())
                                     }),
                             ),

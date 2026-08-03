@@ -1,14 +1,16 @@
 //! Side-by-side diff view transformation and rendering.
 
-use super::line_render::{rgba, ACCENT_WIDTH};
-use super::types::{ChangedRange, DisplayItem, DisplayLine, SideBySideLine, SideBySideSide, SideContent};
 use super::DiffViewer;
-use okena_git::DiffLineType;
-use okena_core::theme::ThemeColors;
-use okena_files::selection::{Selection2DExtension, Selection2DNonEmpty};
-use okena_files::code_view::{find_word_boundaries, selection_bg_ranges};
+use super::line_render::{ACCENT_WIDTH, rgba};
+use super::types::{
+    ChangedRange, DisplayItem, DisplayLine, SideBySideLine, SideBySideSide, SideContent,
+};
 use gpui::prelude::*;
 use gpui::*;
+use okena_core::theme::ThemeColors;
+use okena_files::code_view::{find_word_boundaries, selection_bg_ranges};
+use okena_files::selection::{Selection2DExtension, Selection2DNonEmpty};
+use okena_git::DiffLineType;
 
 /// Compute the changed character ranges between two strings.
 /// Returns (old_ranges, new_ranges) - the ranges in each string that differ.
@@ -127,7 +129,9 @@ pub fn to_side_by_side(items: &[DisplayItem]) -> Vec<SideBySideLine> {
                         // Collect consecutive removed lines
                         let mut removed_lines = Vec::new();
                         while let Some(l) = get_line(i) {
-                            if l.line_type != DiffLineType::Removed { break; }
+                            if l.line_type != DiffLineType::Removed {
+                                break;
+                            }
                             removed_lines.push(l);
                             i += 1;
                         }
@@ -135,7 +139,9 @@ pub fn to_side_by_side(items: &[DisplayItem]) -> Vec<SideBySideLine> {
                         // Collect following consecutive added lines
                         let mut added_lines = Vec::new();
                         while let Some(l) = get_line(i) {
-                            if l.line_type != DiffLineType::Added { break; }
+                            if l.line_type != DiffLineType::Added {
+                                break;
+                            }
                             added_lines.push(l);
                             i += 1;
                         }
@@ -143,14 +149,13 @@ pub fn to_side_by_side(items: &[DisplayItem]) -> Vec<SideBySideLine> {
                         // Pair them up with word-level diff
                         let max_len = removed_lines.len().max(added_lines.len());
                         for j in 0..max_len {
-                            let (old_ranges, new_ranges) =
-                                if let (Some(old_line), Some(new_line)) =
-                                    (removed_lines.get(j), added_lines.get(j))
-                                {
-                                    compute_changed_ranges(&old_line.plain_text, &new_line.plain_text)
-                                } else {
-                                    (vec![], vec![])
-                                };
+                            let (old_ranges, new_ranges) = if let (Some(old_line), Some(new_line)) =
+                                (removed_lines.get(j), added_lines.get(j))
+                            {
+                                compute_changed_ranges(&old_line.plain_text, &new_line.plain_text)
+                            } else {
+                                (vec![], vec![])
+                            };
 
                             let left = removed_lines.get(j).map(|l| SideContent {
                                 line_num: l.old_line_num.unwrap_or(0),
@@ -218,9 +223,10 @@ impl DiffViewer {
     ) -> Vec<AnyElement> {
         range
             .filter_map(|i| {
-                self.side_by_side_lines
-                    .get(i)
-                    .map(|line| self.render_side_by_side_line(i, line, t, cx).into_any_element())
+                self.side_by_side_lines.get(i).map(|line| {
+                    self.render_side_by_side_line(i, line, t, cx)
+                        .into_any_element()
+                })
             })
             .collect()
     }
@@ -256,7 +262,14 @@ impl DiffViewer {
             .text_size(px(font_size))
             .font_family("monospace")
             .flex()
-            .child(self.render_side_column_content(&left, SideBySideSide::Left, idx, t, line_height, cx))
+            .child(self.render_side_column_content(
+                &left,
+                SideBySideSide::Left,
+                idx,
+                t,
+                line_height,
+                cx,
+            ))
             .child(
                 div()
                     .w(px(1.0))
@@ -264,7 +277,14 @@ impl DiffViewer {
                     .bg(rgb(border_color))
                     .flex_shrink_0(),
             )
-            .child(self.render_side_column_content(&right, SideBySideSide::Right, idx, t, line_height, cx))
+            .child(self.render_side_column_content(
+                &right,
+                SideBySideSide::Right,
+                idx,
+                t,
+                line_height,
+                cx,
+            ))
     }
 
     /// Render one column (left or right) of a side-by-side line.
@@ -327,45 +347,46 @@ impl DiffViewer {
                 };
 
                 let mut column = div()
-                    .id(ElementId::Name(format!("sbs-{}-{}", side_label, sbs_line_index).into()))
+                    .id(ElementId::Name(
+                        format!("sbs-{}-{}", side_label, sbs_line_index).into(),
+                    ))
                     .flex_1()
                     .h(px(line_height))
                     .flex()
                     .items_center()
                     .overflow_hidden()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        {
-                            let text_layout = text_layout.clone();
-                            let sbs_plain_text = sbs_plain_text.clone();
-                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                let col = text_layout.index_for_position(event.position)
-                                    .unwrap_or_else(|ix| ix)
-                                    .min(sbs_line_len);
-                                if event.click_count >= 3 {
-                                    this.selection.start = Some((sbs_line_index, 0));
-                                    this.selection.end = Some((sbs_line_index, sbs_line_len));
-                                    this.selection.finish();
-                                } else if event.click_count == 2 {
-                                    let (start, end) = find_word_boundaries(&sbs_plain_text, col);
-                                    this.selection.start = Some((sbs_line_index, start));
-                                    this.selection.end = Some((sbs_line_index, end));
-                                    this.selection.finish();
-                                } else {
-                                    this.selection.start = Some((sbs_line_index, col));
-                                    this.selection.end = Some((sbs_line_index, col));
-                                    this.selection.is_selecting = true;
-                                }
-                                this.selection_side = Some(side);
-                                cx.notify();
-                            })
-                        },
-                    )
+                    .on_mouse_down(MouseButton::Left, {
+                        let text_layout = text_layout.clone();
+                        let sbs_plain_text = sbs_plain_text.clone();
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            let col = text_layout
+                                .index_for_position(event.position)
+                                .unwrap_or_else(|ix| ix)
+                                .min(sbs_line_len);
+                            if event.click_count >= 3 {
+                                this.selection.start = Some((sbs_line_index, 0));
+                                this.selection.end = Some((sbs_line_index, sbs_line_len));
+                                this.selection.finish();
+                            } else if event.click_count == 2 {
+                                let (start, end) = find_word_boundaries(&sbs_plain_text, col);
+                                this.selection.start = Some((sbs_line_index, start));
+                                this.selection.end = Some((sbs_line_index, end));
+                                this.selection.finish();
+                            } else {
+                                this.selection.start = Some((sbs_line_index, col));
+                                this.selection.end = Some((sbs_line_index, col));
+                                this.selection.is_selecting = true;
+                            }
+                            this.selection_side = Some(side);
+                            cx.notify();
+                        })
+                    })
                     .on_mouse_move({
                         let text_layout = text_layout.clone();
                         cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
                             if this.selection.is_selecting && this.selection_side == Some(side) {
-                                let col = text_layout.index_for_position(event.position)
+                                let col = text_layout
+                                    .index_for_position(event.position)
                                     .unwrap_or_else(|ix| ix)
                                     .min(sbs_line_len);
                                 this.selection.end = Some((sbs_line_index, col));
@@ -429,16 +450,20 @@ impl DiffViewer {
             None => {
                 // Empty side - very subtle background, with drag-through support
                 div()
-                    .id(ElementId::Name(format!("sbs-{}-{}", side_label, sbs_line_index).into()))
+                    .id(ElementId::Name(
+                        format!("sbs-{}-{}", side_label, sbs_line_index).into(),
+                    ))
                     .flex_1()
                     .h(px(line_height))
                     .bg(rgba(t.bg_secondary, 0.5))
-                    .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                        if this.selection.is_selecting && this.selection_side == Some(side) {
-                            this.selection.end = Some((sbs_line_index, 0));
-                            cx.notify();
-                        }
-                    }))
+                    .on_mouse_move(cx.listener(
+                        move |this, _event: &MouseMoveEvent, _window, cx| {
+                            if this.selection.is_selecting && this.selection_side == Some(side) {
+                                this.selection.end = Some((sbs_line_index, 0));
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {

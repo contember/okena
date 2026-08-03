@@ -127,6 +127,7 @@ fn paint_rails(
 
 /// Render a ref label pill (e.g. "HEAD -> main", "origin/main", "tag: v1.0").
 fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement {
+    let line_h = ui_text_md(cx) * 1.25;
     let color = if ref_name.contains("HEAD") {
         t.term_cyan
     } else if ref_name.starts_with("tag:") {
@@ -142,7 +143,9 @@ fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement {
     };
     div()
         .px(px(4.0))
-        .py(px(1.0))
+        .h(line_h)
+        .flex()
+        .items_center()
         .rounded(px(3.0))
         .bg(bg)
         .text_size(ui_text_sm(cx))
@@ -177,6 +180,7 @@ pub(super) fn render_lane_row(
     cx: &App,
 ) -> AnyElement {
     let row_h = COMMIT_ROW_H;
+    let line_h = ui_text_md(cx) * 1.25;
     let graph_width = (max_col + 1) as f32 * GRAPH_CELL_W;
 
     let rails = row.rails.clone();
@@ -235,13 +239,18 @@ pub(super) fn render_lane_row(
                 .min_w_0()
                 .h(px(row_h))
                 .items_center()
+                .flex_nowrap()
+                .overflow_hidden()
                 .gap(px(6.0))
                 .child(
                     div()
+                        .h(line_h)
+                        .line_height(line_h)
                         .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_primary))
                         .text_ellipsis()
                         .overflow_hidden()
+                        .whitespace_nowrap()
                         .flex_shrink(1.0)
                         .min_w_0()
                         .child(entry.message.clone()),
@@ -249,9 +258,12 @@ pub(super) fn render_lane_row(
                 .children(entry.refs.iter().map(|r| render_ref_label(r, t, cx)))
                 .child(
                     div()
+                        .h(line_h)
+                        .line_height(line_h)
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_muted))
                         .flex_shrink_0()
+                        .ml_auto()
                         .child(entry.author.clone()),
                 ),
         );

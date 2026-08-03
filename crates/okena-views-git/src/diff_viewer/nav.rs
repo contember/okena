@@ -1,17 +1,24 @@
 //! Navigation actions for the diff viewer: file/commit/folder selection,
 //! view-mode toggles, detach handling, close.
 
-use super::side_by_side;
 use super::DiffViewer;
 use super::DiffViewerEvent;
+use super::side_by_side;
 use crate::settings::{git_settings, set_git_settings};
 
 use okena_core::types::DiffViewMode;
+use okena_files::file_tree::{
+    FileTreeNavigationDirection, FileTreeRow, adjacent_file_tree_item, indexed_file_tree_rows,
+};
 use okena_git::DiffMode;
 
 use gpui::*;
 
 impl DiffViewer {
+    pub(super) fn file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<usize>> {
+        indexed_file_tree_rows(&self.file_tree, &self.expanded_folders, include_collapsed)
+    }
+
     pub(super) fn toggle_folder(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.expanded_folders.contains(path) {
             self.expanded_folders.remove(path);
@@ -78,16 +85,26 @@ impl DiffViewer {
         cx.notify();
     }
 
-    pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {
-        if self.selected_file_index > 0 {
-            self.select_file(self.selected_file_index - 1, cx);
+    fn navigate_file_tree(
+        &mut self,
+        direction: FileTreeNavigationDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.file_tree_rows(false);
+        let all = self.file_tree_rows(true);
+        if let Some(index) =
+            adjacent_file_tree_item(&visible, &all, Some(&self.selected_file_index), direction)
+        {
+            self.select_file(index, cx);
         }
     }
 
+    pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {
+        self.navigate_file_tree(FileTreeNavigationDirection::Previous, cx);
+    }
+
     pub(super) fn next_file(&mut self, cx: &mut Context<Self>) {
-        if self.selected_file_index + 1 < self.file_stats.len() {
-            self.select_file(self.selected_file_index + 1, cx);
-        }
+        self.navigate_file_tree(FileTreeNavigationDirection::Next, cx);
     }
 
     pub(super) fn close(&self, cx: &mut Context<Self>) {
@@ -125,13 +142,17 @@ impl DiffViewer {
     }
 
     pub(super) fn prev_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_prev_commit() { return; }
+        if !self.can_prev_commit() {
+            return;
+        }
         self.commit_index -= 1;
         self.navigate_to_current_commit(cx);
     }
 
     pub(super) fn next_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_next_commit() { return; }
+        if !self.can_next_commit() {
+            return;
+        }
         self.commit_index += 1;
         self.navigate_to_current_commit(cx);
     }

@@ -2,21 +2,21 @@
 
 mod shell_selector;
 
-use crate::actions::Cancel;
 use crate::ActionDispatch;
-use crate::terminal_view_settings;
-use okena_files::theme::theme;
-use okena_ui::theme::with_alpha;
-use okena_ui::tokens::{ui_text_sm, ui_text_md};
-use okena_ui::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::actions::Cancel;
 use crate::layout::layout_container::{LayoutContainer, is_renaming, rename_input};
 use crate::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::simple_input::SimpleInput;
-use okena_terminal::terminal::TerminalProgressState;
-use okena_workspace::state::{LayoutNode, SplitDirection};
+use crate::terminal_view_settings;
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use gpui::prelude::*;
+use okena_files::theme::theme;
+use okena_terminal::terminal::TerminalProgressState;
+use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+use okena_ui::theme::with_alpha;
+use okena_ui::tokens::{ui_text_md, ui_text_sm};
+use okena_workspace::state::{LayoutNode, SplitDirection};
 use std::collections::HashSet;
 
 /// Context for tab action button closures.
@@ -29,7 +29,6 @@ pub(super) struct TabActionContext<D: ActionDispatch> {
     pub standalone: bool,
     pub action_dispatcher: Option<D>,
 }
-
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub(super) fn start_drop_animation(&mut self, tab_index: usize, cx: &mut Context<Self>) {
@@ -63,7 +62,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 this.drop_animation = None;
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(super) fn render_tab_action_buttons(
@@ -76,7 +76,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
         let supports_buffer_capture = self.backend.supports_buffer_capture();
-        let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
@@ -85,6 +84,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let ctx_split_h = ctx.clone();
         let ctx_add_tab = ctx.clone();
         let ctx_minimize = ctx.clone();
+        let ctx_export = ctx.clone();
         let ctx_fullscreen = ctx.clone();
         let ctx_detach = ctx.clone();
         let ctx_close = ctx.clone();
@@ -154,9 +154,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                         .on_click(move |_, _window, cx| {
                             if let Some(ref tid) = terminal_id_for_export
-                                && let Some(path) = backend_for_export.capture_buffer(tid) {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-                                    log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                && let Some(ref dispatcher) = ctx_export.action_dispatcher {
+                                    if let Some(path) = dispatcher.export_buffer(tid, cx) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+                                        log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                    } else {
+                                        log::warn!("Buffer export unavailable for terminal {} (server needs a tmux session backend)", tid);
+                                    }
                                 }
                         }),
                 )
@@ -241,9 +245,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
             return v_flex()
                 .size_full()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ));
+                .child(AnyView::from(container).cached(StyleRefinement::default().size_full()));
         }
 
         let num_children = children.len();
@@ -261,7 +263,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         };
         let visible_paths = HashSet::from([active_path]);
         self.deregister_child_resize_viewers_except(&visible_paths, cx);
-        self.child_containers.retain(|path, _| valid_paths.contains(path));
+        self.child_containers
+            .retain(|path, _| valid_paths.contains(path));
 
         // Deregister pane map entries for inactive tabs so stale entries
         // don't interfere with spatial navigation
@@ -271,7 +274,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             if i != active_tab {
                 path.truncate(base_len);
                 path.push(i);
-                crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &path);
+                crate::layout::navigation::deregister_pane_bounds(
+                    self.window_id,
+                    &self.project_id,
+                    &path,
+                );
             }
         }
 
@@ -280,45 +287,48 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         v_flex()
             .size_full()
             .relative()
-            .child(canvas(
-                {
-                    let container_bounds_ref = container_bounds_ref.clone();
-                    move |bounds, _window, _cx| {
-                        *container_bounds_ref.borrow_mut() = bounds;
-                    }
-                },
-                |_bounds, _prepaint, _window, _cx| {},
-            ).absolute().size_full())
-            .child(self.render_tab_bar(children, active_tab, false, cx))
             .child(
-                div().flex_1().child({
-                    let mut child_path = self.layout_path.clone();
-                    child_path.push(active_tab);
-
-                    let container = self.child_containers
-                        .entry(child_path.clone())
-                        .or_insert_with(|| {
-                            cx.new(|_cx| {
-                                LayoutContainer::new(
-                                    self.workspace.clone(),
-                                    self.focus_manager.clone(),
-                                    self.request_broker.clone(),
-                                    self.window_id,
-                                    self.project_id.clone(),
-                                    self.project_path.clone(),
-                                    child_path.clone(),
-                                    self.backend.clone(),
-                                    self.terminals.clone(),
-                                    self.active_drag.clone(),
-                                    self.action_dispatcher.clone(),
-                                )
-                            })
-                        })
-                        .clone();
-
-                    AnyView::from(container).cached(StyleRefinement::default().size_full())
-                }),
+                canvas(
+                    {
+                        let container_bounds_ref = container_bounds_ref.clone();
+                        move |bounds, _window, _cx| {
+                            *container_bounds_ref.borrow_mut() = bounds;
+                        }
+                    },
+                    |_bounds, _prepaint, _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
             )
+            .child(self.render_tab_bar(children, active_tab, false, cx))
+            .child(div().flex_1().child({
+                let mut child_path = self.layout_path.clone();
+                child_path.push(active_tab);
+
+                let container = self
+                    .child_containers
+                    .entry(child_path.clone())
+                    .or_insert_with(|| {
+                        cx.new(|_cx| {
+                            LayoutContainer::new(
+                                self.workspace.clone(),
+                                self.focus_manager.clone(),
+                                self.request_broker.clone(),
+                                self.window_id,
+                                self.project_id.clone(),
+                                self.project_path.clone(),
+                                child_path.clone(),
+                                self.backend.clone(),
+                                self.terminals.clone(),
+                                self.active_drag.clone(),
+                                self.action_dispatcher.clone(),
+                            )
+                        })
+                    })
+                    .clone();
+
+                AnyView::from(container).cached(StyleRefinement::default().size_full())
+            }))
     }
 
     pub(super) fn render_standalone_tab_bar(
@@ -359,11 +369,12 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let project = workspace_reader.project(&self.project_id);
         let project_for_names = project.cloned();
 
-        let is_pane_focused = self.focus_manager.read(cx)
+        let is_pane_focused = self
+            .focus_manager
+            .read(cx)
             .focused_terminal_state()
             .is_some_and(|f| {
-                f.project_id == self.project_id
-                    && f.layout_path.starts_with(&self.layout_path)
+                f.project_id == self.project_id && f.layout_path.starts_with(&self.layout_path)
             });
 
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
@@ -713,21 +724,19 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let dispatcher_for_new = self.action_dispatcher.clone();
 
         let mut end_drop_zone = div()
-            .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
+            .id(ElementId::Name(
+                format!("tab-end-drop-{:?}", self.layout_path).into(),
+            ))
             .flex_1()
             .flex_shrink_0()
             .h_full()
             .min_w(px(20.0))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if this.empty_area_click_detector.check(())
-                    && let Some(ref dispatcher) = dispatcher_for_new {
-                        dispatcher.add_tab(
-                            &project_id_for_new,
-                            &layout_path_for_new,
-                            !standalone,
-                            cx,
-                        );
-                    }
+                    && let Some(ref dispatcher) = dispatcher_for_new
+                {
+                    dispatcher.add_tab(&project_id_for_new, &layout_path_for_new, !standalone, cx);
+                }
             }));
 
         if !standalone {
@@ -762,24 +771,30 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             let target_index = num_children;
                             if from_index != target_index - 1 {
                                 if let Some(ref dispatcher) = dispatcher_for_end {
-                                    dispatcher.dispatch(okena_core::api::ActionRequest::MoveTab {
-                                        project_id: project_id_for_end.clone(),
-                                        path: layout_path_for_end.clone(),
-                                        from_index,
-                                        to_index: target_index,
-                                    }, cx);
+                                    dispatcher.dispatch(
+                                        okena_core::api::ActionRequest::MoveTab {
+                                            project_id: project_id_for_end.clone(),
+                                            path: layout_path_for_end.clone(),
+                                            from_index,
+                                            to_index: target_index,
+                                        },
+                                        cx,
+                                    );
                                 }
                                 this.start_drop_animation(num_children - 1, cx);
                             }
                         }
                     } else if let Some(ref dispatcher) = dispatcher_for_end {
-                        dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
-                            project_id: drag.project_id.clone(),
-                            terminal_id: drag.terminal_id.clone(),
-                            target_path: layout_path_for_end.clone(),
-                            position: None,
-                            target_project_id: Some(project_id_for_end.clone()),
-                        }, cx);
+                        dispatcher.dispatch(
+                            okena_core::api::ActionRequest::MoveTerminalToTabGroup {
+                                project_id: drag.project_id.clone(),
+                                terminal_id: drag.terminal_id.clone(),
+                                target_path: layout_path_for_end.clone(),
+                                position: None,
+                                target_project_id: Some(project_id_for_end.clone()),
+                            },
+                            cx,
+                        );
                     }
                 }));
         }
@@ -802,9 +817,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             self.get_active_terminal_id(active_tab, cx)
         };
 
-        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
+        let action_buttons =
+            self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
 
-        let show_shell = terminal_view_settings(cx).show_shell_selector && !self.backend.is_remote();
+        // Shell switching is routed through the daemon (SwitchTerminalShell) and
+        // the current shell comes from mirrored layout state, so the selector
+        // works for remote backends too — gate only on the user setting.
+        let show_shell = terminal_view_settings(cx).show_shell_selector;
 
         if self.last_scrolled_to_tab != Some(active_tab) {
             self.tab_scroll_handle.scroll_to_item(active_tab);
@@ -818,10 +837,16 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .flex()
             .items_center()
             .gap(px(0.0))
-            .bg(rgb(if is_pane_focused { t.term_background_unfocused } else { t.bg_header }))
+            .bg(rgb(if is_pane_focused {
+                t.term_background_unfocused
+            } else {
+                t.bg_header
+            }))
             .child(
                 div()
-                    .id(ElementId::Name(format!("tab-scroll-{:?}", self.layout_path).into()))
+                    .id(ElementId::Name(
+                        format!("tab-scroll-{:?}", self.layout_path).into(),
+                    ))
                     .flex_1()
                     .min_w_0()
                     .flex()

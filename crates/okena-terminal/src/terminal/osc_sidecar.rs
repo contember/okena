@@ -153,8 +153,7 @@ impl SidecarPerform {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(payload_raw.as_bytes())
                 .or_else(|_| {
-                    base64::engine::general_purpose::STANDARD_NO_PAD
-                        .decode(payload_raw.as_bytes())
+                    base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload_raw.as_bytes())
                 });
             match decoded.ok().and_then(|b| String::from_utf8(b).ok()) {
                 Some(s) => s,
@@ -165,13 +164,15 @@ impl SidecarPerform {
         };
 
         // Bound memory: ignore a brand-new id once too many are in flight.
-        if !self.osc99_pending.contains_key(&id)
-            && self.osc99_pending.len() >= OSC99_MAX_PENDING
-        {
+        if !self.osc99_pending.contains_key(&id) && self.osc99_pending.len() >= OSC99_MAX_PENDING {
             return;
         }
         let acc = self.osc99_pending.entry(id.clone()).or_default();
-        let target = if ptype == "body" { &mut acc.body } else { &mut acc.title };
+        let target = if ptype == "body" {
+            &mut acc.body
+        } else {
+            &mut acc.title
+        };
         if target.len() + payload.len() <= OSC99_MAX_FIELD_LEN {
             target.push_str(&payload);
         }
@@ -196,7 +197,10 @@ impl SidecarPerform {
                 body: body.to_string(),
             }
         } else if !title.is_empty() {
-            TerminalNotification { title: None, body: title.to_string() }
+            TerminalNotification {
+                title: None,
+                body: title.to_string(),
+            }
         } else {
             return; // nothing to show
         };
@@ -321,10 +325,12 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let message = message.trim();
                 if !message.is_empty() {
-                    self.pending_notifications.lock().push(TerminalNotification {
-                        title: None,
-                        body: message.to_string(),
-                    });
+                    self.pending_notifications
+                        .lock()
+                        .push(TerminalNotification {
+                            title: None,
+                            body: message.to_string(),
+                        });
                 }
             }
             b"777" => {
@@ -350,10 +356,12 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let body = body.trim();
                 if !body.is_empty() {
-                    self.pending_notifications.lock().push(TerminalNotification {
-                        title: (!title.is_empty()).then(|| title.to_string()),
-                        body: body.to_string(),
-                    });
+                    self.pending_notifications
+                        .lock()
+                        .push(TerminalNotification {
+                            title: (!title.is_empty()).then(|| title.to_string()),
+                            body: body.to_string(),
+                        });
                 }
             }
             b"99" => self.handle_osc99(params),
@@ -383,7 +391,8 @@ impl Perform for SidecarPerform {
             return;
         }
         let response = format!("\x1bP>|okena({})\x1b\\", app_version());
-        self.transport.send_input(&self.terminal_id, response.as_bytes());
+        self.transport
+            .send_input(&self.terminal_id, response.as_bytes());
     }
 }
 

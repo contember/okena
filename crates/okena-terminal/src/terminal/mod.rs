@@ -1,9 +1,11 @@
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term};
-use alacritty_terminal::vte::ansi::{CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, Processor};
+use alacritty_terminal::vte::ansi::{
+    CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, Processor,
+};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Instant;
 
 mod ansi_snapshot;
@@ -14,8 +16,8 @@ mod idle;
 mod io;
 mod links;
 mod meta;
-mod mouse;
 mod modes;
+mod mouse;
 mod osc_sidecar;
 mod prompt_jump;
 mod prompt_marks;
@@ -34,8 +36,11 @@ mod tests;
 
 pub use app_version::set_app_version;
 pub use child_processes::{foreground_command, has_child_processes};
+pub use event_listener::set_process_palette;
 pub use resize_authority::{
-    claim_resize_authority_local, claim_resize_authority_remote, is_resize_authority_local,
+    claim_remote_resize_if_allowed, claim_resize_authority_local, claim_resize_authority_remote,
+    claim_resize_authority_remote_owner, is_resize_authority_local, release_remote_resize_owner,
+    resize_authority_snapshot,
 };
 pub use transport::TerminalTransport;
 pub use types::{
@@ -49,6 +54,12 @@ use event_listener::{ClipboardQueues, CurrentState, ZedEventListener};
 use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
 use types::FocusReportState;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InputRepaintRequest {
+    after_output_epoch: u64,
+    expires_at: Instant,
+}
 
 /// A terminal instance wrapping alacritty_terminal
 /// Terminal emulator state.
@@ -66,7 +77,7 @@ use types::FocusReportState;
 ///
 /// 2. **Tokio reader task** (remote connections only) — calls `enqueue_output`
 ///    to buffer incoming data without holding `term.lock()`. Only touches
-///    `pending_output`, `dirty`, and `last_output_time`.
+///    `pending_output`, output epochs, `dirty`, and `last_output_time`.
 ///
 /// 3. **Resize debounce timer** — a short-lived `std::thread::spawn` that
 ///    flushes a trailing-edge resize after the debounce window. Only touches
@@ -89,13 +100,12 @@ use types::FocusReportState;
 ///   threads contend.
 ///
 /// - **`AtomicBool` / `AtomicU64`** — lock-free signaling between the GPUI
-///   thread and the tokio reader task (for `dirty`), or between the GPUI
-///   thread's output path and its render path (for `content_generation`,
+///   thread and the tokio reader task (for `dirty` and output epochs), or between
+///   the GPUI thread's output path and its render path (for `content_generation`,
 ///   `waiting_for_input`, `had_user_input`) to avoid mutex overhead on every
 ///   frame.
 pub struct Terminal {
     // ── Immutable after construction ─────────────────────────────────
-
     /// Unique identifier for this terminal instance. Immutable after
     /// construction; read freely from any thread.
     pub terminal_id: String,
@@ -113,7 +123,6 @@ pub struct Terminal {
     // All fields below are accessed exclusively from the GPUI thread.
     // `Mutex` provides interior mutability for `&self` methods, not
     // cross-thread safety.
-
     /// ANSI parser state (alacritty_terminal `Term`). Locked by
     /// `process_output`, `with_content`, `resize`, `scroll`, and selection
     /// methods — all on the GPUI thread. The `Arc` is structural: it doesn't
@@ -159,8 +168,8 @@ pub struct Terminal {
     pub(super) has_notification: AtomicBool,
 
     /// Pending OSC 52 clipboard writes requested by the running app. `Arc`
-    /// shared with `ZedEventListener`: pushed during `process_output`,
-    /// drained by the GPUI render path via `drain_clipboard_writes`.
+    /// shared with `ZedEventListener`: pushed during `process_output`, then
+    /// drained by the GPUI activity handler (or render fallback).
     /// GPUI thread only.
     pub(super) pending_clipboard: Arc<Mutex<Vec<String>>>,
 
@@ -255,7 +264,6 @@ pub struct Terminal {
     pub(super) last_viewed_time: Arc<Mutex<Instant>>,
 
     // ── GPUI + resize debounce timer ─────────────────────────────────
-
     /// Terminal size, debounce state, and pending PTY resize. `Arc` is
     /// required: a clone is handed to the short-lived debounce timer thread
     /// (`std::thread::spawn` in `resize`) which flushes the trailing-edge
@@ -266,13 +274,28 @@ pub struct Terminal {
     // These fields are touched by the remote-connection tokio reader task
     // via `enqueue_output`. The tokio task buffers data and sets flags;
     // the GPUI thread drains and clears them.
-
     /// Buffer for remote-connection output. Written by the tokio reader
     /// task (`enqueue_output`), drained by the GPUI thread
     /// (`drain_pending_output` inside `with_content`). Decouples the tokio
     /// task from `term.lock()`, preventing lock contention that would
     /// freeze the UI.
     pub(super) pending_output: Mutex<Vec<u8>>,
+
+    /// Monotonic arrival epoch for local and remotely enqueued output. Input
+    /// captures the next epoch as its causal repaint boundary.
+    pub(super) output_epoch: AtomicU64,
+
+    /// Last remote-output epoch represented by `pending_output`. Updated while
+    /// holding `pending_output` so a drain captures bytes and epoch atomically.
+    pub(super) pending_output_epoch: AtomicU64,
+
+    /// Highest output epoch incorporated into the terminal model.
+    pub(super) processed_output_epoch: AtomicU64,
+
+    /// Output-after-input promotion request. The epoch prevents pre-input
+    /// backlog from consuming it; expiry prevents an unanswered input from
+    /// promoting unrelated output indefinitely.
+    pub(super) input_repaint_request: Mutex<Option<InputRepaintRequest>>,
 
     /// Content-changed flag. Set by `process_output` (GPUI) and
     /// `enqueue_output` (tokio). Cleared by `take_dirty` (GPUI render).
@@ -290,13 +313,15 @@ pub struct Terminal {
     // ── Atomics (lock-free render reads) ─────────────────────────────
     // These use atomics so the GPUI render path can read them without
     // taking a mutex on every frame.
-
     /// Monotonically-increasing counter bumped on every `process_output`,
     /// `drain_pending_output`, resize, scroll, and selection change. Used
     /// by `UrlDetector` and `SearchBar` to skip redundant work when
     /// content hasn't changed. GPUI thread only (despite being atomic —
     /// the atomic avoids locking, not cross-thread access).
     pub(super) content_generation: AtomicU64,
+
+    /// Latest broadcaster sequence incorporated into the terminal model.
+    pub(super) processed_output_sequence: AtomicU64,
 
     /// Cached "waiting for input" state. Written by the GPUI idle-check
     /// loop (`set_waiting_for_input`), read lock-free by renderers
@@ -399,8 +424,13 @@ impl Terminal {
             pending_clipboard_reads,
             palette,
             pending_output: Mutex::new(Vec::new()),
+            output_epoch: AtomicU64::new(0),
+            pending_output_epoch: AtomicU64::new(0),
+            processed_output_epoch: AtomicU64::new(0),
+            input_repaint_request: Mutex::new(None),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
+            processed_output_sequence: AtomicU64::new(0),
             initial_cwd,
             reported_cwd,
             pending_notifications,

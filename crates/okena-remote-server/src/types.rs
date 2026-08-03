@@ -1,13 +1,13 @@
 #[allow(unused_imports)]
 pub use okena_core::api::{
     ActionRequest, ApiFolder, ApiFullscreen, ApiGitStatus, ApiLayoutNode, ApiProject,
-    ApiServiceInfo, ApiWindow, ApiWindowBounds, ErrorResponse, HealthResponse, PairRequest,
-    PairResponse, StateResponse,
+    ApiServiceInfo, ApiSystemStats, ApiWindow, ApiWindowBounds, ErrorResponse, HealthResponse,
+    PairRequest, PairResponse, StateResponse,
 };
 #[allow(unused_imports)]
 pub use okena_core::ws::{
-    WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
-    parse_pty_frame, FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION,
+    FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION, WsInbound, WsOutbound,
+    build_binary_frame, build_pty_frame, parse_binary_frame, parse_pty_frame,
 };
 
 // LayoutNode conversion helpers (from_api, from_api_prefixed, to_api) are now
@@ -15,9 +15,9 @@ pub use okena_core::ws::{
 
 #[cfg(test)]
 mod tests {
-    use okena_workspace::state::LayoutNode;
     use okena_core::api::ApiLayoutNode;
     use okena_core::types::SplitDirection;
+    use okena_workspace::state::LayoutNode;
 
     #[test]
     fn prefixed_terminal_id() {
@@ -25,6 +25,7 @@ mod tests {
             terminal_id: Some("abc-123".into()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };
@@ -43,6 +44,7 @@ mod tests {
             terminal_id: None,
             minimized: true,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };
@@ -70,6 +72,7 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    shell_type: Default::default(),
                     cols: None,
                     rows: None,
                 },
@@ -80,6 +83,7 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            shell_type: Default::default(),
                             cols: None,
                             rows: None,
                         },
@@ -87,6 +91,7 @@ mod tests {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            shell_type: Default::default(),
                             cols: None,
                             rows: None,
                         },
@@ -105,6 +110,7 @@ mod tests {
             terminal_id: Some("raw-id".into()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         };

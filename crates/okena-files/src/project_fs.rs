@@ -1,15 +1,20 @@
-//! ProjectFs trait and implementations for local and remote file operations.
+//! ProjectFs trait and the remote-server (HTTP) implementation.
 
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
-use crate::file_search::FileEntry;
+use crate::file_scan::FileEntry;
 use crate::list_directory::DirEntry;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectFileMetadata {
+    pub size: u64,
+    pub modified_at_millis: Option<u64>,
+}
 
 /// Provides file system operations from either local disk or a remote server.
 pub trait ProjectFs: Send + Sync + 'static {
     /// List files in the project (for file search dialog).
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry>;
+    fn list_files(&self, show_ignored: bool) -> Result<Vec<FileEntry>, String>;
 
     /// List immediate children of a project-relative directory (for the lazy
     /// file viewer tree). `relative_path = ""` lists the project root.
@@ -25,8 +30,14 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Read file content as raw bytes. Used for binary previews (images).
     fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String>;
 
-    /// Get file size in bytes.
-    fn file_size(&self, relative_path: &str) -> Result<u64, String>;
+    /// Get daemon-side file metadata used for size limits and freshness checks.
+    fn file_metadata(&self, relative_path: &str) -> Result<ProjectFileMetadata, String>;
+
+    /// Rename a file or folder (project-relative path) to `new_name`.
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String>;
+
+    /// Delete a file or folder (project-relative path).
+    fn delete_file(&self, relative_path: &str) -> Result<(), String>;
 
     /// Search content across project files.
     fn search_content(
@@ -35,7 +46,7 @@ pub trait ProjectFs: Send + Sync + 'static {
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
         on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    );
+    ) -> Result<(), String>;
 
     /// Project display name (directory name).
     fn project_name(&self) -> String;
@@ -43,131 +54,54 @@ pub trait ProjectFs: Send + Sync + 'static {
     /// Unique project identifier (used for caching).
     fn project_id(&self) -> String;
 
-    /// Local absolute path to the project root, if available. Used to convert
-    /// project-relative paths into absolute `PathBuf`s for filesystem
-    /// operations (e.g. context-menu rename/delete). Remote projects return
-    /// `None` because the root only exists on the remote machine.
-    fn project_root(&self) -> Option<PathBuf>;
-}
-
-/// Local file system provider — delegates to existing functions.
-pub struct LocalProjectFs {
-    path: PathBuf,
-}
-
-impl LocalProjectFs {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    /// Canonicalize `relative_path` inside the project root and reject any
-    /// path that escapes via `..` or absolute-path replacement. Mirrors the
-    /// server-side `resolve_project_file` so the trait has the same
-    /// containment guarantee on both implementations.
-    fn resolve(&self, relative_path: &str) -> Result<PathBuf, String> {
-        let joined = self.path.join(relative_path);
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| format!("Cannot read file: {}", e))?;
-        let root = self
-            .path
-            .canonicalize()
-            .map_err(|e| format!("Cannot resolve project path: {}", e))?;
-        if !canonical.starts_with(&root) {
-            return Err("path traversal not allowed".to_string());
-        }
-        Ok(canonical)
-    }
-}
-
-impl ProjectFs for LocalProjectFs {
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
-        crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored)
-    }
-
-    fn list_directory(
-        &self,
-        relative_path: &str,
-        show_ignored: bool,
-    ) -> Result<Vec<DirEntry>, String> {
-        crate::list_directory::list_directory(&self.path, relative_path, show_ignored)
-    }
-
-    fn read_file(&self, relative_path: &str) -> Result<String, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read_to_string(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn read_file_bytes(&self, relative_path: &str) -> Result<Vec<u8>, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::read(&full).map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn file_size(&self, relative_path: &str) -> Result<u64, String> {
-        let full = self.resolve(relative_path)?;
-        std::fs::metadata(&full)
-            .map(|m| m.len())
-            .map_err(|e| format!("Cannot read file: {}", e))
-    }
-
-    fn search_content(
-        &self,
-        query: &str,
-        config: &ContentSearchConfig,
-        cancelled: &AtomicBool,
-        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    ) {
-        crate::content_search::search_content(&self.path, query, config, cancelled, on_result);
-    }
-
-    fn project_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Project".to_string())
-    }
-
-    fn project_id(&self) -> String {
-        self.path.to_string_lossy().to_string()
-    }
-
-    fn project_root(&self) -> Option<PathBuf> {
-        Some(self.path.clone())
-    }
+    /// Daemon-side absolute path for a project-relative path, for display/copy
+    /// (e.g. the "Copy Absolute Path" context-menu action). The path lives on
+    /// the daemon's filesystem. Returns `None` when the daemon root is unknown.
+    fn absolute_path(&self, relative_path: &str) -> Option<String>;
 }
 
 /// Remote file system provider — fetches data via HTTP from a remote server.
 pub struct RemoteProjectFs {
-    host: String,
-    port: u16,
-    token: String,
+    client: okena_transport::remote_action::RemoteActionClient,
     project_id: String,
     project_name: String,
+    root: String,
 }
 
 impl RemoteProjectFs {
-    pub fn new(host: String, port: u16, token: String, project_id: String, project_name: String) -> Self {
-        Self { host, port, token, project_id, project_name }
+    pub fn new(
+        client: okena_transport::remote_action::RemoteActionClient,
+        project_id: String,
+        project_name: String,
+        root: String,
+    ) -> Self {
+        Self {
+            client,
+            project_id,
+            project_name,
+            root,
+        }
     }
 
-    fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        okena_transport::remote_action::post_action(&self.host, self.port, &self.token, action)
+    fn post_action(
+        &self,
+        action: okena_core::api::ActionRequest,
+    ) -> Result<Option<serde_json::Value>, String> {
+        self.client.post_action(action)
     }
 }
 
 impl ProjectFs for RemoteProjectFs {
-    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
+    fn list_files(&self, show_ignored: bool) -> Result<Vec<FileEntry>, String> {
         let action = okena_core::api::ActionRequest::ListFiles {
             project_id: self.project_id.clone(),
             show_ignored,
         };
-        match self.post_action(action) {
-            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize file list: {}", e);
-                Vec::new()
-            }),
-            _ => Vec::new(),
-        }
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| "Missing file list response".to_string())?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid file list response: {error}"))
     }
 
     fn list_directory(
@@ -193,12 +127,11 @@ impl ProjectFs for RemoteProjectFs {
             relative_path: relative_path.to_string(),
         };
         match self.post_action(action)? {
-            Some(value) => {
-                value.get("content")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .ok_or_else(|| "Missing content in response".to_string())
-            }
+            Some(value) => value
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| "Missing content in response".to_string()),
             None => Err("Empty response".to_string()),
         }
     }
@@ -223,19 +156,38 @@ impl ProjectFs for RemoteProjectFs {
         }
     }
 
-    fn file_size(&self, relative_path: &str) -> Result<u64, String> {
+    fn file_metadata(&self, relative_path: &str) -> Result<ProjectFileMetadata, String> {
         let action = okena_core::api::ActionRequest::FileSize {
             project_id: self.project_id.clone(),
             relative_path: relative_path.to_string(),
         };
         match self.post_action(action)? {
-            Some(value) => {
-                value.get("size")
+            Some(value) => Ok(ProjectFileMetadata {
+                size: value
+                    .get("size")
                     .and_then(|v| v.as_u64())
-                    .ok_or_else(|| "Missing size in response".to_string())
-            }
+                    .ok_or_else(|| "Missing size in response".to_string())?,
+                modified_at_millis: value.get("modified_at_millis").and_then(|v| v.as_u64()),
+            }),
             None => Err("Empty response".to_string()),
         }
+    }
+
+    fn rename_file(&self, relative_path: &str, new_name: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::RenameFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+            new_name: new_name.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn delete_file(&self, relative_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::DeleteFile {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
     }
 
     fn search_content(
@@ -244,7 +196,7 @@ impl ProjectFs for RemoteProjectFs {
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
         on_result: &mut (dyn FnMut(FileSearchResult) + Send),
-    ) {
+    ) -> Result<(), String> {
         let mode = match config.mode {
             SearchMode::Literal => "literal",
             SearchMode::Regex => "regex",
@@ -258,19 +210,21 @@ impl ProjectFs for RemoteProjectFs {
             max_results: config.max_results,
             file_glob: config.file_glob.clone(),
             context_lines: config.context_lines,
+            show_ignored: config.show_ignored,
         };
-        if let Ok(Some(value)) = self.post_action(action) {
-            let results: Vec<FileSearchResult> = serde_json::from_value(value).unwrap_or_else(|e| {
-                log::warn!("Failed to deserialize search results: {}", e);
-                Vec::new()
-            });
-            for result in results {
-                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                on_result(result);
+        let value = self
+            .client
+            .post_action_cancellable(action, cancelled)?
+            .ok_or_else(|| "Missing content search response".to_string())?;
+        let results: Vec<FileSearchResult> = serde_json::from_value(value)
+            .map_err(|error| format!("Invalid content search response: {error}"))?;
+        for result in results {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
             }
+            on_result(result);
         }
+        Ok(())
     }
 
     fn project_name(&self) -> String {
@@ -281,7 +235,11 @@ impl ProjectFs for RemoteProjectFs {
         self.project_id.clone()
     }
 
-    fn project_root(&self) -> Option<PathBuf> {
-        None
+    fn absolute_path(&self, relative_path: &str) -> Option<String> {
+        if self.root.is_empty() {
+            return None;
+        }
+        let base = self.root.trim_end_matches(['/', '\\']);
+        Some(format!("{}/{}", base, relative_path))
     }
 }

@@ -1,14 +1,174 @@
-use okena_core::api::StateResponse;
-use crate::client::config::RemoteConnectionConfig;
+use crate::client::config::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
 use crate::client::id::make_prefixed_id;
-use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states};
-use crate::client::types::{
-    ConnectionEvent, ConnectionStatus, SessionError, WsClientMessage, TOKEN_REFRESH_AGE_SECS,
+use crate::client::state::{
+    collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states,
 };
+use crate::client::types::{
+    ConnectionEvent, ConnectionStatus, SessionError, TOKEN_REFRESH_AGE_SECS, WsClientMessage,
+};
+use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 
+use futures::{Sink, Stream};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio_tungstenite::tungstenite;
+
+type TcpWsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[cfg(unix)]
+type UnixWsStream = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
+
+enum AnyWsStream {
+    Tcp(Box<TcpWsStream>),
+    #[cfg(unix)]
+    Unix(Box<UnixWsStream>),
+}
+
+impl Stream for AnyWsStream {
+    type Item = Result<tungstenite::Message, tungstenite::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_next(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_next(cx),
+        }
+    }
+}
+
+impl Sink<tungstenite::Message> for AnyWsStream {
+    type Error = tungstenite::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_ready(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_ready(cx),
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: tungstenite::Message) -> Result<(), Self::Error> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).start_send(item),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).start_send(item),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            AnyWsStream::Tcp(stream) => Pin::new(stream.as_mut()).poll_close(cx),
+            #[cfg(unix)]
+            AnyWsStream::Unix(stream) => Pin::new(stream.as_mut()).poll_close(cx),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_http_client(path: &str) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .unix_socket(path)
+        .build()
+        .map_err(|error| format!("Cannot initialise Unix socket HTTP client: {error}"))
+}
+
+#[cfg(not(unix))]
+fn unix_http_client(_path: &str) -> Result<reqwest::Client, String> {
+    Err("Unix socket HTTP transport is not supported on this platform".to_string())
+}
+
+fn local_unix_path(config: &RemoteConnectionConfig) -> Option<&str> {
+    #[cfg(unix)]
+    {
+        match &config.local_endpoint {
+            Some(LocalEndpoint::UnixSocket { path }) => Some(path.as_str()),
+            _ => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        None
+    }
+}
+
+fn initial_connect_attempts(config: &RemoteConnectionConfig) -> u32 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        // Fail fast: ensure_local_daemon() verified reachability right before
+        // this dial, and the app-layer self-heal re-runs it once Error fires.
+        5
+    } else if config.local_endpoint.is_some() {
+        30
+    } else {
+        1
+    }
+}
+
+fn initial_connect_retry_delay(attempt: u32) -> std::time::Duration {
+    let millis = match attempt {
+        1 => 100,
+        2 => 200,
+        3 => 400,
+        4 => 800,
+        _ => 1_200,
+    };
+    std::time::Duration::from_millis(millis)
+}
+
+fn ws_message_channel() -> (
+    async_channel::Sender<WsClientMessage>,
+    async_channel::Receiver<WsClientMessage>,
+) {
+    async_channel::unbounded()
+}
+
+async fn fetch_remote_settings(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    crate::remote_action::post_action_async_with_client(
+        client,
+        base_url,
+        token,
+        ActionRequest::GetSettings,
+    )
+    .await
+    .map_err(|error| format!("Failed to fetch settings: {error}"))?
+    .ok_or_else(|| "Settings fetch returned no payload".to_string())
+}
+
+/// Reconnect budget after an established WS drops. The local daemon connection
+/// dead-ends within a few seconds so the app-layer self-heal (re-running
+/// ensure_local_daemon, which can respawn the daemon) takes over quickly;
+/// user-managed remotes keep the patient schedule for flaky networks.
+fn ws_reconnect_max_attempts(config: &RemoteConnectionConfig) -> u32 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        3
+    } else {
+        10
+    }
+}
+
+/// Sleep before reconnect `attempt` (1-based). Local daemon: flat 1s (see
+/// [`ws_reconnect_max_attempts`]); remotes: exponential 1,2,4,… capped at 30s.
+fn ws_reconnect_backoff_secs(config: &RemoteConnectionConfig, attempt: u32) -> u64 {
+    if config.id == LOCAL_DAEMON_CONNECTION_ID {
+        1
+    } else {
+        std::cmp::min(2u64.saturating_pow(attempt.saturating_sub(1)), 30)
+    }
+}
 
 /// Platform-specific operations that the generic client delegates to.
 ///
@@ -46,7 +206,11 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     /// Remove terminals for this connection that are NOT in the given set of
     /// (unprefixed) terminal IDs.  Called on reconnect to clean up terminals
     /// that disappeared on the server while the client was offline.
-    fn remove_terminals_except(&self, connection_id: &str, keep_ids: &std::collections::HashSet<String>);
+    fn remove_terminals_except(
+        &self,
+        connection_id: &str,
+        keep_ids: &std::collections::HashSet<String>,
+    );
 }
 
 /// Generic remote client state machine, parameterized by a platform handler.
@@ -56,6 +220,7 @@ pub struct RemoteClient<H: ConnectionHandler> {
     runtime: Arc<tokio::runtime::Runtime>,
     ws_tx: Option<async_channel::Sender<WsClientMessage>>,
     remote_state: Option<StateResponse>,
+    system_stats: Option<ApiSystemStats>,
     stream_map: HashMap<String, u32>,
     reverse_stream_map: HashMap<u32, String>,
     handler: Arc<H>,
@@ -72,13 +237,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         handler: Arc<H>,
         event_tx: async_channel::Sender<ConnectionEvent>,
     ) -> Self {
-        let shared_token = Arc::new(std::sync::RwLock::new(config.saved_token.clone()));
+        let shared_token = Arc::new(std::sync::RwLock::new(config.effective_auth_token()));
         Self {
             config,
             status: ConnectionStatus::Disconnected,
             runtime,
             ws_tx: None,
             remote_state: None,
+            system_stats: None,
             stream_map: HashMap::new(),
             reverse_stream_map: HashMap::new(),
             handler,
@@ -120,6 +286,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.remote_state = state;
     }
 
+    pub fn system_stats(&self) -> Option<&ApiSystemStats> {
+        self.system_stats.as_ref()
+    }
+
+    pub fn set_system_stats(&mut self, stats: Option<ApiSystemStats>) {
+        self.system_stats = stats;
+    }
+
     /// Update the shared token so WS reconnect loop uses the latest token.
     pub fn update_shared_token(&self, token: &str) {
         if let Ok(mut guard) = self.shared_token.write() {
@@ -143,10 +317,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     /// Start the connection process.
     ///
     /// 1. GET /health to verify server is alive
-    /// 2. If saved_token: GET /v1/state to validate token
+    /// 2. If auth token or trusted local transport: GET /v1/state to validate/reach state
     ///    - 200: token valid, proceed to start_ws()
     ///    - 401: token expired, set Pairing status
-    /// 3. No saved_token: set Pairing status
+    /// 3. No auth token: set Pairing status
     pub fn connect(&mut self) {
         // Tear down any prior connection so we don't orphan its WS task.
         self.abort_ws_task();
@@ -159,11 +333,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Update shared token from config
         if let Ok(mut guard) = self.shared_token.write() {
-            *guard = config.saved_token.clone();
+            *guard = config.effective_auth_token();
         }
 
         // Create fresh WS message channel
-        let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
+        let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
 
         let task = self.runtime.spawn(async move {
@@ -174,26 +348,79 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             // tries TLS (never downgrade). A legacy plain connection prefers TLS
             // (auto-upgrade) but falls back to plain http so it keeps working
             // against a server that hasn't enabled TLS.
-            let schemes: &[bool] = if config.tls { &[true] } else { &[true, false] };
+            let local_unix = local_unix_path(&config).map(str::to_string);
+            let schemes: &[bool] = if local_unix.is_some() {
+                &[false]
+            } else if config.tls {
+                &[true]
+            } else {
+                &[true, false]
+            };
             let mut chosen: Option<(bool, reqwest::Client, String)> = None;
-            for &tls in schemes {
-                let client = crate::client::tls::build_reqwest_client(
-                    tls,
-                    config.pinned_cert_sha256.clone(),
-                    observed.clone(),
-                );
-                let scheme = if tls { "https" } else { "http" };
-                let base_url = format!("{}://{}:{}", scheme, config.host, config.port);
-                let ok = matches!(
-                    client
+            let attempts = initial_connect_attempts(&config);
+            let mut last_connect_failure: Option<String> = None;
+            for attempt in 1..=attempts {
+                if attempt > 1 {
+                    let delay = initial_connect_retry_delay(attempt - 1);
+                    let detail = last_connect_failure
+                        .as_deref()
+                        .map(|failure| format!(": {failure}"))
+                        .unwrap_or_default();
+                    log::warn!(
+                        "Initial connection to {} failed{}. Retrying in {}ms (attempt {}/{})",
+                        config.display_endpoint(),
+                        detail,
+                        delay.as_millis(),
+                        attempt,
+                        attempts
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+
+                for &tls in schemes {
+                    let client_and_url = if let Some(path) = local_unix.as_deref() {
+                        unix_http_client(path).map(|client| (client, config.http_origin()))
+                    } else {
+                        crate::client::tls::build_reqwest_client(
+                            tls,
+                            config.pinned_cert_sha256.clone(),
+                            observed.clone(),
+                        )
+                        .map(|client| {
+                            let scheme = if tls { "https" } else { "http" };
+                            (
+                                client,
+                                format!("{}://{}:{}", scheme, config.host, config.port),
+                            )
+                        })
+                    };
+                    let (client, base_url) = match client_and_url {
+                        Ok(client_and_url) => client_and_url,
+                        Err(error) => {
+                            last_connect_failure = Some(error);
+                            continue;
+                        }
+                    };
+                    let health_result = client
                         .get(format!("{}/health", base_url))
                         .timeout(std::time::Duration::from_secs(5))
                         .send()
-                        .await,
-                    Ok(resp) if resp.status().is_success()
-                );
-                if ok {
-                    chosen = Some((tls, client, base_url));
+                        .await;
+                    let ok = matches!(
+                        health_result.as_ref(),
+                        Ok(resp) if resp.status().is_success()
+                    );
+                    last_connect_failure = match health_result {
+                        Ok(resp) if resp.status().is_success() => None,
+                        Ok(resp) => Some(format!("health returned HTTP {}", resp.status())),
+                        Err(e) => Some(e.to_string()),
+                    };
+                    if ok {
+                        chosen = Some((tls, client, base_url));
+                        break;
+                    }
+                }
+                if chosen.is_some() {
                     break;
                 }
             }
@@ -201,7 +428,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             let (detected_tls, client, base_url) = match chosen {
                 Some(v) => v,
                 None => {
-                    let msg = format!("Cannot reach server {}:{}", config.host, config.port);
+                    let msg = match last_connect_failure {
+                        Some(failure) => format!(
+                            "Cannot reach server {} (last error: {})",
+                            config.display_endpoint(),
+                            failure
+                        ),
+                        None => format!("Cannot reach server {}", config.display_endpoint()),
+                    };
                     log::warn!("{}", msg);
                     let _ = event_tx
                         .send(ConnectionEvent::StatusChanged {
@@ -213,9 +447,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
             };
             log::info!(
-                "Remote server {}:{} is healthy ({})",
-                config.host,
-                config.port,
+                "Remote server {} is healthy ({})",
+                config.display_endpoint(),
                 if detected_tls { "TLS" } else { "plain http" }
             );
 
@@ -223,15 +456,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             // over TLS adopts TLS and pins the cert (TOFU), and asks the manager
             // to persist the upgrade so the sidebar reflects it and the pin is
             // enforced next time.
-            if detected_tls && !config.tls {
+            if local_unix.is_none() && detected_tls && !config.tls {
                 config.tls = true;
                 let fp = observed.lock().ok().and_then(|g| g.clone());
                 config.pinned_cert_sha256 = fp.clone();
-                log::info!(
-                    "Auto-upgraded {}:{} to TLS",
-                    config.host,
-                    config.port
-                );
+                log::info!("Auto-upgraded {}:{} to TLS", config.host, config.port);
                 let _ = event_tx
                     .send(ConnectionEvent::TlsUpgraded {
                         connection_id: config.id.clone(),
@@ -240,8 +469,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .await;
             }
 
-            // Step 2: Validate saved token (if any)
-            if let Some(token) = config.saved_token.clone() {
+            // Step 2: Validate saved token, or trust same-user Unix socket transport.
+            if let Some(token) = config.effective_auth_token() {
+                let trusted_local_transport =
+                    config.saved_token.is_none() && config.is_trusted_local_transport();
                 match client
                     .get(format!("{}/v1/state", base_url))
                     .header("Authorization", format!("Bearer {}", token))
@@ -250,16 +481,31 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .await
                 {
                     Ok(resp) if resp.status().is_success() => {
-                        log::info!("Token valid for {}:{}", config.host, config.port);
+                        if trusted_local_transport {
+                            log::info!(
+                                "Trusted local transport accepted for {}",
+                                config.display_endpoint()
+                            );
+                        } else {
+                            log::info!("Token valid for {}", config.display_endpoint());
+                        }
                         // Token is valid - start WebSocket
-                        Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler, shared_token).await;
+                        Self::run_ws_loop(
+                            config,
+                            token,
+                            event_tx,
+                            ws_tx,
+                            ws_rx,
+                            handler,
+                            shared_token,
+                        )
+                        .await;
                         return;
                     }
                     Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         log::info!(
-                            "Token expired for {}:{}, need re-pairing",
-                            config.host,
-                            config.port
+                            "Token expired for {}, need re-pairing",
+                            config.display_endpoint()
                         );
                         // Only 401 means the token is actually invalid → need pairing
                         let _ = event_tx
@@ -273,10 +519,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     Ok(resp) => {
                         // Transient server error (e.g. 500 during startup) —
                         // token may still be valid, don't discard it.
-                        let msg = format!(
-                            "Token validation: unexpected HTTP {}",
-                            resp.status()
-                        );
+                        let msg = format!("Token validation: unexpected HTTP {}", resp.status());
                         log::warn!("{}", msg);
                         let _ = event_tx
                             .send(ConnectionEvent::StatusChanged {
@@ -325,19 +568,37 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let shared_token = self.shared_token.clone();
 
         // Create fresh WS message channel
-        let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
+        let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
 
         self.status = ConnectionStatus::Connecting;
 
         let task = self.runtime.spawn(async move {
-            let base_url = config.base_url();
+            let local_unix = local_unix_path(&config).map(str::to_string);
+            let base_url = config.http_origin();
             let observed = crate::client::tls::new_observed();
-            let client = crate::client::tls::build_reqwest_client(
-                config.tls,
-                config.pinned_cert_sha256.clone(),
-                observed.clone(),
-            );
+            let client = if let Some(path) = local_unix.as_deref() {
+                unix_http_client(path)
+            } else {
+                crate::client::tls::build_reqwest_client(
+                    config.tls,
+                    config.pinned_cert_sha256.clone(),
+                    observed.clone(),
+                )
+            };
+            let client = match client {
+                Ok(client) => client,
+                Err(error) => {
+                    let msg = format!("Pairing client initialisation failed: {error}");
+                    let _ = event_tx
+                        .send(ConnectionEvent::StatusChanged {
+                            connection_id: config.id.clone(),
+                            status: ConnectionStatus::Error(msg),
+                        })
+                        .await;
+                    return;
+                }
+            };
 
             // POST /v1/pair with the code
             let pair_body = serde_json::json!({ "code": code });
@@ -366,8 +627,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
                             // Capture the cert fingerprint observed during the
                             // (TLS) pairing handshake so the manager can pin it.
-                            let cert_fingerprint =
-                                observed.lock().ok().and_then(|g| g.clone());
+                            let cert_fingerprint = observed.lock().ok().and_then(|g| g.clone());
 
                             // Notify manager to save the token (+ pin the cert)
                             let _ = event_tx
@@ -452,7 +712,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.stream_map.clear();
         self.reverse_stream_map.clear();
         self.remote_state = None;
+        self.system_stats = None;
         self.status = ConnectionStatus::Disconnected;
+    }
+
+    /// Restart the transport while retaining the last state and terminal
+    /// objects. The fresh state sync reconciles deletions after reconnect.
+    pub fn reconnect(&mut self) {
+        self.stream_map.clear();
+        self.reverse_stream_map.clear();
+        self.connect();
     }
 
     /// Run the main WebSocket loop with reconnection.
@@ -466,12 +735,13 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
     ) {
         let mut reconnect_attempt: u32 = 0;
-        let max_backoff_secs: u64 = 30;
-        let max_reconnect_attempts: u32 = 10;
+        let max_reconnect_attempts = ws_reconnect_max_attempts(&config);
         let mut current_token = token;
 
         loop {
-            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler).await {
+            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler)
+                .await
+            {
                 Ok(()) => {
                     // Clean disconnect requested
                     log::info!(
@@ -514,12 +784,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         break;
                     }
 
-                    let backoff = std::cmp::min(
-                        1u64.saturating_mul(
-                            2u64.saturating_pow(reconnect_attempt.saturating_sub(1)),
-                        ),
-                        max_backoff_secs,
-                    );
+                    let backoff = ws_reconnect_backoff_secs(&config, reconnect_attempt);
 
                     log::warn!(
                         "WebSocket connection to {}:{} lost: {}. Reconnecting in {}s (attempt {}/{})",
@@ -544,9 +809,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
                     // Read the latest token (may have been refreshed since last attempt)
                     if let Ok(guard) = shared_token.read()
-                        && let Some(ref latest) = *guard {
-                            current_token = latest.clone();
-                        }
+                        && let Some(ref latest) = *guard
+                    {
+                        current_token = latest.clone();
+                    }
                 }
             }
         }
@@ -570,19 +836,45 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Connect WebSocket. With TLS we go through connect_async_tls_with_config
         // using the pinned rustls connector; otherwise the plain ws:// path.
-        let (ws_stream, _response) = if config.tls {
+        let (ws_stream, _response) = if let Some(path) = local_unix_path(config) {
+            #[cfg(unix)]
+            {
+                let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
+                    SessionError::Transient(format!("Unix socket connect failed: {}", e))
+                })?;
+                let (ws, response) =
+                    tokio_tungstenite::client_async("ws://okena.local/v1/stream", stream)
+                        .await
+                        .map_err(|e| {
+                            SessionError::Transient(format!("WebSocket connect failed: {}", e))
+                        })?;
+                (AnyWsStream::Unix(Box::new(ws)), response)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                return Err(SessionError::Transient(
+                    "Unix socket transport is not supported on this platform".to_string(),
+                ));
+            }
+        } else if config.tls {
             let connector = crate::client::tls::ws_connector(
                 true,
                 config.pinned_cert_sha256.clone(),
                 observed.clone(),
             );
-            tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
-                .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+            let (ws, response) =
+                tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
+                    .await
+                    .map_err(|e| {
+                        SessionError::Transient(format!("WebSocket connect failed: {}", e))
+                    })?;
+            (AnyWsStream::Tcp(Box::new(ws)), response)
         } else {
-            tokio_tungstenite::connect_async(&ws_url)
+            let (ws, response) = tokio_tungstenite::connect_async(&ws_url)
                 .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?
+                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
+            (AnyWsStream::Tcp(Box::new(ws)), response)
         };
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
@@ -615,10 +907,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             tungstenite::Message::Text(text) => {
                 let parsed: serde_json::Value = serde_json::from_str(text)
                     .map_err(|e| SessionError::Transient(format!("Invalid JSON: {}", e)))?;
-                let msg_type = parsed
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if msg_type == "auth_ok" {
                     log::info!("Authenticated with {}:{}", config.host, config.port);
                 } else if msg_type == "auth_failed" {
@@ -642,12 +931,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Step 3: Fetch state via HTTP
-        let base_url = config.base_url();
-        let client = crate::client::tls::build_reqwest_client(
-            config.tls,
-            config.pinned_cert_sha256.clone(),
-            observed.clone(),
-        );
+        let base_url = config.http_origin();
+        let client = if let Some(path) = local_unix_path(config) {
+            unix_http_client(path)
+        } else {
+            crate::client::tls::build_reqwest_client(
+                config.tls,
+                config.pinned_cert_sha256.clone(),
+                observed.clone(),
+            )
+        }
+        .map_err(SessionError::Transient)?;
         let state_resp = client
             .get(format!("{}/v1/state", base_url))
             .header("Authorization", format!("Bearer {}", token))
@@ -697,6 +991,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 state: state.clone(),
             })
             .await;
+        match fetch_remote_settings(&client, &base_url, token).await {
+            Ok(settings) => {
+                let _ = event_tx
+                    .send(ConnectionEvent::SettingsChanged {
+                        connection_id: config.id.clone(),
+                        settings,
+                    })
+                    .await;
+            }
+            Err(error) => log::warn!("{error}"),
+        }
 
         // Step 5: Subscribe to all terminal streams
         if !terminal_ids.is_empty() {
@@ -733,8 +1038,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let stream_map_for_writer = stream_map.clone();
         let writer_handle = tokio::spawn(async move {
             while let Ok(msg) = ws_rx_clone.recv().await {
-                // For SendText, prefer binary frame when stream_id is known
-                if let WsClientMessage::SendText { terminal_id, text } = &msg {
+                // Prefer compact binary input when the subscription mapping is known.
+                if let WsClientMessage::SendInput { terminal_id, data } = &msg {
                     let stream_id = stream_map_for_writer
                         .read()
                         .ok()
@@ -743,7 +1048,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         let frame = okena_core::ws::build_binary_frame(
                             okena_core::ws::FRAME_TYPE_INPUT,
                             sid,
-                            text.as_bytes(),
+                            data,
                         );
                         if let Err(e) = futures::SinkExt::send(
                             &mut ws_write,
@@ -759,11 +1064,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
 
                 let json = match &msg {
-                    WsClientMessage::SendText { terminal_id, text } => {
+                    WsClientMessage::SendInput { terminal_id, data } => {
                         serde_json::json!({
-                            "type": "send_text",
+                            "type": "send_bytes",
                             "terminal_id": terminal_id,
-                            "text": text,
+                            "data": data,
                         })
                     }
                     WsClientMessage::Resize {
@@ -819,7 +1124,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         okena_core::ws::parse_binary_frame(&data)
                     {
                         match frame_type {
-                            okena_core::ws::FRAME_TYPE_PTY | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
+                            okena_core::ws::FRAME_TYPE_PTY
+                            | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
                                 // Route PTY output or snapshot to the correct terminal
                                 if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
                                     let prefixed = make_prefixed_id(&config_id, remote_tid);
@@ -836,54 +1142,57 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     // JSON message
                     match serde_json::from_str::<serde_json::Value>(&text) {
                         Ok(value) => {
-                            let msg_type = value
-                                .get("type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             match msg_type {
                                 "subscribed" => {
                                     if let Some(mappings) = value.get("mappings")
-                                        && let Ok(map) = serde_json::from_value::<
-                                            HashMap<String, u32>,
-                                        >(
-                                            mappings.clone()
-                                        ) {
-                                            log::info!(
-                                                "Subscribed to {} terminal streams",
-                                                map.len()
-                                            );
-                                            for (terminal_id, stream_id) in &map {
-                                                reverse_stream_map
-                                                    .insert(*stream_id, terminal_id.clone());
-                                            }
-                                            // Update shared stream_map for writer task
-                                            if let Ok(mut sm) = stream_map.write() {
-                                                for (terminal_id, stream_id) in &map {
-                                                    sm.insert(terminal_id.clone(), *stream_id);
-                                                }
-                                            }
-                                            // Pre-resize terminals to server dimensions before snapshots arrive
-                                            if let Some(sizes) = value.get("sizes")
-                                                && let Ok(size_map) = serde_json::from_value::<
-                                                    HashMap<String, (u16, u16)>,
-                                                >(sizes.clone()) {
-                                                    for (terminal_id, (cols, rows)) in &size_map {
-                                                        let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                                        // Pre-resize only sizes the grid for the snapshot;
-                                                        // it must not claim authority, so the client can
-                                                        // still enforce its own window size after connect.
-                                                        handler_clone.resize_terminal(&prefixed, *cols, *rows, false);
-                                                    }
-                                                    log::info!("Pre-resized {} terminals to server dimensions", size_map.len());
-                                                }
-
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::SubscriptionMappings {
-                                                    connection_id: config_id.clone(),
-                                                    mappings: map,
-                                                })
-                                                .await;
+                                        && let Ok(map) =
+                                            serde_json::from_value::<HashMap<String, u32>>(
+                                                mappings.clone(),
+                                            )
+                                    {
+                                        log::info!("Subscribed to {} terminal streams", map.len());
+                                        for (terminal_id, stream_id) in &map {
+                                            reverse_stream_map
+                                                .insert(*stream_id, terminal_id.clone());
                                         }
+                                        // Update shared stream_map for writer task
+                                        if let Ok(mut sm) = stream_map.write() {
+                                            for (terminal_id, stream_id) in &map {
+                                                sm.insert(terminal_id.clone(), *stream_id);
+                                            }
+                                        }
+                                        // Pre-resize terminals to server dimensions before snapshots arrive
+                                        if let Some(sizes) = value.get("sizes")
+                                            && let Ok(size_map) = serde_json::from_value::<
+                                                HashMap<String, (u16, u16)>,
+                                            >(
+                                                sizes.clone()
+                                            )
+                                        {
+                                            for (terminal_id, (cols, rows)) in &size_map {
+                                                let prefixed =
+                                                    make_prefixed_id(&config_id, terminal_id);
+                                                // Pre-resize only sizes the grid for the snapshot;
+                                                // it must not claim authority, so the client can
+                                                // still enforce its own window size after connect.
+                                                handler_clone.resize_terminal(
+                                                    &prefixed, *cols, *rows, false,
+                                                );
+                                            }
+                                            log::info!(
+                                                "Pre-resized {} terminals to server dimensions",
+                                                size_map.len()
+                                            );
+                                        }
+
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::SubscriptionMappings {
+                                                connection_id: config_id.clone(),
+                                                mappings: map,
+                                            })
+                                            .await;
+                                    }
                                 }
                                 "state_changed" => {
                                     log::info!("State changed on remote server");
@@ -893,10 +1202,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     // of rebuilding a client per event.
                                     match client
                                         .get(format!("{}/v1/state", base_url))
-                                        .header(
-                                            "Authorization",
-                                            format!("Bearer {}", token),
-                                        )
+                                        .header("Authorization", format!("Bearer {}", token))
                                         .timeout(std::time::Duration::from_secs(10))
                                         .send()
                                         .await
@@ -905,8 +1211,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             if let Ok(new_state) =
                                                 resp.json::<StateResponse>().await
                                             {
-                                                let diff =
-                                                    diff_states(&cached_state, &new_state);
+                                                let diff = diff_states(&cached_state, &new_state);
                                                 let new_size_map =
                                                     collect_terminal_sizes(&new_state);
 
@@ -940,29 +1245,39 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 // channel would leave the new terminals silently
                                                 // never streaming output.
                                                 if !diff.added_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone.send(
-                                                        WsClientMessage::Subscribe {
+                                                    && let Err(e) = ws_tx_clone
+                                                        .send(WsClientMessage::Subscribe {
                                                             terminal_ids: diff
                                                                 .added_terminals
                                                                 .clone(),
-                                                        },
-                                                    ).await {
-                                                        log::warn!("failed to send Subscribe for {} terminals: {}", diff.added_terminals.len(), e);
-                                                    }
+                                                        })
+                                                        .await
+                                                {
+                                                    log::warn!(
+                                                        "failed to send Subscribe for {} terminals: {}",
+                                                        diff.added_terminals.len(),
+                                                        e
+                                                    );
+                                                }
 
                                                 // Unsubscribe from removed terminals. Likewise
                                                 // blocking — a dropped Unsubscribe leaks a stream
                                                 // for an already-gone terminal.
                                                 if !diff.removed_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone.send(
-                                                        WsClientMessage::Unsubscribe {
+                                                    && let Err(e) = ws_tx_clone
+                                                        .send(WsClientMessage::Unsubscribe {
                                                             terminal_ids: diff
                                                                 .removed_terminals
                                                                 .clone(),
-                                                        },
-                                                    ).await {
-                                                        log::warn!("failed to send Unsubscribe for {} terminals: {}", diff.removed_terminals.len(), e);
-                                                    }
+                                                        })
+                                                        .await
+                                                {
+                                                    log::warn!(
+                                                        "failed to send Unsubscribe for {} terminals: {}",
+                                                        diff.removed_terminals.len(),
+                                                        e
+                                                    );
+                                                }
 
                                                 cached_state = new_state.clone();
 
@@ -984,15 +1299,24 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             log::warn!("State re-fetch failed: {}", e);
                                         }
                                     }
+                                    match fetch_remote_settings(&client, &base_url, token).await {
+                                        Ok(settings) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::SettingsChanged {
+                                                    connection_id: config_id.clone(),
+                                                    settings,
+                                                })
+                                                .await;
+                                        }
+                                        Err(error) => log::warn!("{error}"),
+                                    }
                                 }
                                 "pong" => {
                                     // Keep-alive response, ignore
                                 }
                                 "dropped" => {
-                                    let count = value
-                                        .get("count")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
+                                    let count =
+                                        value.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                                     log::warn!(
                                         "Server dropped {} messages for {}:{}",
                                         count,
@@ -1002,10 +1326,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     let _ = event_tx_clone
                                         .send(ConnectionEvent::ServerWarning {
                                             connection_id: config_id.clone(),
-                                            message: format!(
-                                                "Server dropped {} messages",
-                                                count
-                                            ),
+                                            message: format!("Server dropped {} messages", count),
                                         })
                                         .await;
                                 }
@@ -1035,21 +1356,86 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             .and_then(|v| v.as_bool())
                                             .unwrap_or(false);
                                         let prefixed = make_prefixed_id(&config_id, terminal_id);
-                                        handler_clone.resize_terminal(&prefixed, cols as u16, rows as u16, server_owns);
+                                        handler_clone.resize_terminal(
+                                            &prefixed,
+                                            cols as u16,
+                                            rows as u16,
+                                            server_owns,
+                                        );
                                     }
                                 }
                                 "git_status_changed" => {
                                     if let Some(projects) = value.get("projects")
                                         && let Ok(statuses) = serde_json::from_value::<
                                             HashMap<String, okena_core::api::ApiGitStatus>,
-                                        >(projects.clone()) {
+                                        >(
+                                            projects.clone()
+                                        )
+                                    {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::GitStatusChanged {
+                                                connection_id: config_id.clone(),
+                                                statuses,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "system_stats_changed" => {
+                                    if let Some(stats) = value.get("stats")
+                                        && let Ok(stats) = serde_json::from_value::<
+                                            okena_core::api::ApiSystemStats,
+                                        >(
+                                            stats.clone()
+                                        )
+                                    {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::SystemStatsChanged {
+                                                connection_id: config_id.clone(),
+                                                stats,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "terminal_focus_requested" => {
+                                    match serde_json::from_value::<
+                                        okena_core::api::ApiTerminalFocusRequest,
+                                    >(value.clone())
+                                    {
+                                        Ok(request) => {
                                             let _ = event_tx_clone
-                                                .send(ConnectionEvent::GitStatusChanged {
+                                                .send(ConnectionEvent::TerminalFocusRequested {
                                                     connection_id: config_id.clone(),
-                                                    statuses,
+                                                    request,
                                                 })
                                                 .await;
                                         }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to parse terminal focus request: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                "toast" => {
+                                    // `WsOutbound::Toast` is internally tagged, so
+                                    // the ApiToast fields sit at the top level of
+                                    // `value` alongside `"type":"toast"`.
+                                    match serde_json::from_value::<okena_core::api::ApiToast>(
+                                        value.clone(),
+                                    ) {
+                                        Ok(toast) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::Toast {
+                                                    connection_id: config_id.clone(),
+                                                    toast,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to parse toast message: {}", e);
+                                        }
+                                    }
                                 }
                                 _ => {
                                     log::debug!("Unknown WS message type: {}", msg_type);
@@ -1124,12 +1510,24 @@ pub async fn try_refresh_token(
     }
     // If token_obtained_at is None, attempt refresh (legacy token without timestamp)
 
-    let base_url = config.base_url();
-    let client = crate::client::tls::build_reqwest_client(
-        config.tls,
-        config.pinned_cert_sha256.clone(),
-        crate::client::tls::new_observed(),
-    );
+    let local_unix = local_unix_path(config);
+    let base_url = config.http_origin();
+    let client = if let Some(path) = local_unix {
+        unix_http_client(path)
+    } else {
+        crate::client::tls::build_reqwest_client(
+            config.tls,
+            config.pinned_cert_sha256.clone(),
+            crate::client::tls::new_observed(),
+        )
+    };
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Token refresh client initialisation failed: {error}");
+            return;
+        }
+    };
 
     match client
         .post(format!("{}/v1/refresh", base_url))
@@ -1147,7 +1545,7 @@ pub async fn try_refresh_token(
             }
             match resp.json::<RefreshResp>().await {
                 Ok(refresh_resp) => {
-                    log::info!("Token refreshed for {}:{}", config.host, config.port);
+                    log::info!("Token refreshed for {}", config.display_endpoint());
                     let _ = event_tx
                         .send(ConnectionEvent::TokenRefreshed {
                             connection_id: config.id.clone(),
@@ -1181,5 +1579,161 @@ pub async fn try_refresh_token(
                 e
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct TestHandler {
+        remove_all_calls: AtomicUsize,
+    }
+
+    impl ConnectionHandler for TestHandler {
+        fn create_terminal(
+            &self,
+            _connection_id: &str,
+            _terminal_id: &str,
+            _prefixed_id: &str,
+            _ws_sender: async_channel::Sender<WsClientMessage>,
+            _cols: u16,
+            _rows: u16,
+        ) {
+        }
+
+        fn on_terminal_output(&self, _prefixed_id: &str, _data: &[u8]) {}
+
+        fn remove_terminal(&self, _prefixed_id: &str) {}
+
+        fn resize_terminal(&self, _prefixed_id: &str, _cols: u16, _rows: u16, _server_owns: bool) {}
+
+        fn remove_all_terminals(&self, _connection_id: &str) {
+            self.remove_all_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn remove_terminals_except(
+            &self,
+            _connection_id: &str,
+            _keep_ids: &std::collections::HashSet<String>,
+        ) {
+        }
+    }
+
+    fn config(id: &str, local_endpoint: Option<LocalEndpoint>) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: id.to_string(),
+            name: "test".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 19100,
+            saved_token: None,
+            token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
+            local_endpoint,
+        }
+    }
+
+    fn unix_endpoint() -> Option<LocalEndpoint> {
+        Some(LocalEndpoint::UnixSocket {
+            path: "/tmp/okena-test.sock".to_string(),
+        })
+    }
+
+    #[test]
+    fn initial_attempts_local_daemon_fails_fast() {
+        // Small budget: the app-layer self-heal owns recovery once Error fires.
+        let cfg = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        assert_eq!(initial_connect_attempts(&cfg), 5);
+    }
+
+    #[test]
+    fn initial_attempts_other_local_endpoint_keeps_patient_budget() {
+        // Only the implicit local-daemon id fails fast — a local_endpoint alone
+        // does not opt a connection into the small budget.
+        let cfg = config("some-other-connection", unix_endpoint());
+        assert_eq!(initial_connect_attempts(&cfg), 30);
+    }
+
+    #[test]
+    fn initial_attempts_user_remote_single_try() {
+        assert_eq!(initial_connect_attempts(&config("user-remote", None)), 1);
+    }
+
+    #[test]
+    fn ws_reconnect_budget_local_vs_remote() {
+        let local = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        let remote = config("user-remote", None);
+        assert_eq!(ws_reconnect_max_attempts(&local), 3);
+        assert_eq!(ws_reconnect_max_attempts(&remote), 10);
+    }
+
+    #[test]
+    fn ws_reconnect_backoff_local_is_flat_and_short() {
+        // ~3s total to Error, so recovery kicks in within seconds of a WS drop.
+        let local = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
+        let total: u64 = (1..=ws_reconnect_max_attempts(&local))
+            .map(|attempt| ws_reconnect_backoff_secs(&local, attempt))
+            .sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn ws_reconnect_backoff_remote_is_exponential_capped() {
+        let remote = config("user-remote", None);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 1), 1);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 2), 2);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 3), 4);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 16);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 6), 30);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 30, "capped at 30s");
+    }
+
+    #[test]
+    fn ws_message_channel_absorbs_input_bursts_without_dropping() {
+        let (tx, rx) = ws_message_channel();
+        for byte in 0..=u8::MAX {
+            tx.try_send(WsClientMessage::SendInput {
+                terminal_id: "terminal".to_string(),
+                data: vec![byte],
+            })
+            .unwrap();
+        }
+        assert_eq!(rx.len(), usize::from(u8::MAX) + 1);
+    }
+
+    #[test]
+    fn explicit_reconnect_retains_last_state_and_terminal_objects() {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let handler = Arc::new(TestHandler::default());
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        let mut client = RemoteClient::new(
+            config("reconnect", None),
+            runtime,
+            handler.clone(),
+            event_tx,
+        );
+        client.set_remote_state(Some(StateResponse {
+            state_version: 1,
+            projects: Vec::new(),
+            focused_project_id: None,
+            fullscreen_terminal: None,
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            windows: Vec::new(),
+            hooks: Vec::new(),
+        }));
+
+        client.reconnect();
+
+        assert!(client.remote_state().is_some());
+        assert_eq!(handler.remove_all_calls.load(Ordering::Relaxed), 0);
     }
 }

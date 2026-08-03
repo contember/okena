@@ -75,8 +75,11 @@ pub struct ContentSearchDialog {
     pub(super) total_matches: usize,
     /// Whether a search is currently running.
     pub(super) searching: bool,
+    pub(super) error_message: Option<String>,
     /// Handle to cancel running search.
     pub(super) search_handle: Option<SearchHandle>,
+    /// Identity of the latest requested search, including its debounce period.
+    pub(super) search_generation: u64,
     /// Search config toggles.
     pub(super) case_sensitive: bool,
     pub(super) regex_mode: bool,
@@ -126,7 +129,11 @@ pub struct ContentSearchDialog {
 }
 
 impl ContentSearchDialog {
-    pub fn new(project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>, is_dark: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
         let syntax_set = load_syntax_set();
@@ -138,26 +145,33 @@ impl ContentSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<ContentSearchMemory>();
-        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored) =
-            memory
-                .map(|m| {
-                    (
-                        m.query.clone(),
-                        m.case_sensitive,
-                        m.regex,
-                        m.fuzzy,
-                        m.file_glob.clone(),
-                        m.glob_input.clone(),
-                        m.expanded,
-                        m.show_ignored,
-                    )
-                })
-                .unwrap_or_default();
+        let (
+            query,
+            case_sensitive,
+            regex_mode,
+            fuzzy_mode,
+            file_glob,
+            glob_input_text,
+            expanded,
+            show_ignored,
+        ) = memory
+            .map(|m| {
+                (
+                    m.query.clone(),
+                    m.case_sensitive,
+                    m.regex,
+                    m.fuzzy,
+                    m.file_glob.clone(),
+                    m.glob_input.clone(),
+                    m.expanded,
+                    m.show_ignored,
+                )
+            })
+            .unwrap_or_default();
 
         // Create search input entity
         let search_input = cx.new(|cx| {
-            let mut input = SimpleInputState::new(cx)
-                .placeholder("Search file contents...");
+            let mut input = SimpleInputState::new(cx).placeholder("Search file contents...");
             if !query.is_empty() {
                 input.set_value(&query, cx);
                 input.select_all(cx);
@@ -166,15 +180,17 @@ impl ContentSearchDialog {
         });
 
         // Subscribe to search input changes
-        cx.subscribe(&search_input, |this: &mut Self, _, _: &InputChangedEvent, cx| {
-            this.trigger_search(cx);
-        })
+        cx.subscribe(
+            &search_input,
+            |this: &mut Self, _, _: &InputChangedEvent, cx| {
+                this.trigger_search(cx);
+            },
+        )
         .detach();
 
         // Create glob filter input entity
         let glob_input = cx.new(|cx| {
-            let mut input = SimpleInputState::new(cx)
-                .placeholder("e.g. *.rs, src/**/*.ts");
+            let mut input = SimpleInputState::new(cx).placeholder("e.g. *.rs, src/**/*.ts");
             if !glob_input_text.is_empty() {
                 input.set_value(&glob_input_text, cx);
             }
@@ -182,11 +198,14 @@ impl ContentSearchDialog {
         });
 
         // Subscribe to glob input changes
-        cx.subscribe(&glob_input, |this: &mut Self, _, _: &InputChangedEvent, cx| {
-            let value = this.glob_input.read(cx).value().to_string();
-            this.file_glob = if value.is_empty() { None } else { Some(value) };
-            this.trigger_search(cx);
-        })
+        cx.subscribe(
+            &glob_input,
+            |this: &mut Self, _, _: &InputChangedEvent, cx| {
+                let value = this.glob_input.read(cx).value().to_string();
+                this.file_glob = if value.is_empty() { None } else { Some(value) };
+                this.trigger_search(cx);
+            },
+        )
         .detach();
 
         let has_query = !query.is_empty();
@@ -201,7 +220,9 @@ impl ContentSearchDialog {
             selected_index: 0,
             total_matches: 0,
             searching: false,
+            error_message: None,
             search_handle: None,
+            search_generation: 0,
             case_sensitive,
             regex_mode,
             fuzzy_mode,
@@ -262,13 +283,18 @@ impl ContentSearchDialog {
     pub(super) fn open_selected(&self, cx: &mut Context<Self>) {
         if let Some(row) = self.rows.get(self.selected_index) {
             let (relative_path, line) = match row {
-                ResultRow::Match { relative_path, line_number, .. } => {
-                    (relative_path.clone(), *line_number)
-                }
+                ResultRow::Match {
+                    relative_path,
+                    line_number,
+                    ..
+                } => (relative_path.clone(), *line_number),
                 ResultRow::FileHeader { relative_path, .. } => (relative_path.clone(), 1),
             };
             self.save_memory(cx);
-            cx.emit(ContentSearchDialogEvent::FileSelected { relative_path, line });
+            cx.emit(ContentSearchDialogEvent::FileSelected {
+                relative_path,
+                line,
+            });
         }
     }
 
@@ -277,7 +303,11 @@ impl ContentSearchDialog {
     }
 
     pub(super) fn select_next(&mut self) -> bool {
-        crate::list_overlay::select_next(&mut self.selected_index, self.rows.len(), &self.scroll_handle)
+        crate::list_overlay::select_next(
+            &mut self.selected_index,
+            self.rows.len(),
+            &self.scroll_handle,
+        )
     }
 
     /// Set scope to a folder or file path, updating the glob filter and re-searching.
@@ -314,7 +344,10 @@ pub enum ContentSearchDialogEvent {
     /// A match was opened. `relative_path` is project-relative; callers don't
     /// need to handle absolute path semantics (which differ between local and
     /// remote projects).
-    FileSelected { relative_path: String, line: usize },
+    FileSelected {
+        relative_path: String,
+        line: usize,
+    },
 }
 
 impl EventEmitter<ContentSearchDialogEvent> for ContentSearchDialog {}

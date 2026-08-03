@@ -16,17 +16,21 @@ mod side_by_side;
 mod syntax;
 mod types;
 
-use okena_git::{CommitLogEntry, DiffMode, FileDiff};
+use gpui::prelude::*;
+use gpui::*;
 use okena_core::selection::SelectionState;
 use okena_core::types::DiffViewMode;
 use okena_files::syntax::load_syntax_set;
-use gpui::prelude::*;
-use gpui::*;
+use okena_git::{CommitLogEntry, DiffMode, FileDiff};
+use okena_ui::resizable_sidebar::ResizableSidebarState;
 use std::collections::HashSet;
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
-use types::{DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine, SideBySideSide};
+use types::{
+    DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine,
+    SideBySideSide,
+};
 
 // Re-export for use in settings (and use locally)
 pub use types::DiffViewMode as DiffViewModeReexport;
@@ -51,9 +55,6 @@ type DiffSearchSig = (
     String,
     bool,
 );
-
-/// Width of file tree sidebar.
-const SIDEBAR_WIDTH: f32 = 240.0;
 
 use crate::settings::git_settings;
 
@@ -80,6 +81,8 @@ pub struct DiffViewer {
     pub(super) selection: Selection,
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) tree_scroll_handle: ScrollHandle,
+    /// Width and active resize gesture for the file tree sidebar.
+    pub(super) sidebar_resize: ResizableSidebarState,
     pub(super) error_message: Option<String>,
     pub(super) line_num_width: usize,
     pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
@@ -164,6 +167,7 @@ impl DiffViewer {
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
             tree_scroll_handle: ScrollHandle::new(),
+            sidebar_resize: ResizableSidebarState::default(),
             error_message: None,
             line_num_width: 4,
             syntax_set: load_syntax_set(),
@@ -202,10 +206,14 @@ impl DiffViewer {
     }
 
     /// Current diff view mode (for persisting on close).
-    pub fn view_mode(&self) -> DiffViewMode { self.view_mode }
+    pub fn view_mode(&self) -> DiffViewMode {
+        self.view_mode
+    }
 
     /// Current ignore-whitespace setting (for persisting on close).
-    pub fn ignore_whitespace(&self) -> bool { self.ignore_whitespace }
+    pub fn ignore_whitespace(&self) -> bool {
+        self.ignore_whitespace
+    }
 
     /// Update configuration (font size, theme) from outside.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
@@ -232,5 +240,7 @@ pub enum DiffViewerEvent {
 impl EventEmitter<DiffViewerEvent> for DiffViewer {}
 
 impl okena_ui::overlay::CloseEvent for DiffViewerEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }

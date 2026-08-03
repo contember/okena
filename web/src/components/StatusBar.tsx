@@ -1,16 +1,16 @@
 import { useApp } from "../state/store";
 
 const STATUS_COLORS: Record<string, string> = {
-  connected: "bg-green-500",
-  connecting: "bg-yellow-500",
-  disconnected: "bg-red-500",
+  connected: "bg-[var(--ok-green)]",
+  connecting: "bg-[var(--ok-yellow)]",
+  disconnected: "bg-[var(--ok-red)]",
 };
 
 export function StatusBar() {
   const { state } = useApp();
 
   return (
-    <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border-t border-zinc-800 text-xs text-zinc-500">
+    <div className="panel-rule flex items-center gap-2 border-t bg-[var(--ok-header)] px-3 py-1 text-[11px] text-[var(--ok-text-secondary)]">
       <span
         className={`inline-block w-2 h-2 rounded-full ${STATUS_COLORS[state.wsStatus]}`}
       />

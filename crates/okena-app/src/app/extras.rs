@@ -1,5 +1,4 @@
-//! Extra window observer + spawn-side OS window creation + CLI/remote
-//! focused-window routing.
+//! Extra window observer + spawn-side OS window creation.
 //!
 //! Slice 05 keystone. The `Workspace::spawn_extra_window` data-layer mutation
 //! pushes a fresh `WindowState` onto `WorkspaceData.extra_windows`; this module
@@ -16,26 +15,71 @@
 //! `WindowOptions::window_bounds`. When `os_bounds` is `None` (e.g. a future
 //! caller spawns without bounds, or a slice 07 restore loads an entry with no
 //! recorded bounds), the OS picks a default position.
-//!
-//! Beyond spawn, this module also hosts the focused-window routing helper
-//! `resolve_focused_window_id` used by the remote/CLI bridge to send actions
-//! to the per-window `FocusManager` of whichever Okena window currently has
-//! OS focus (PRD user story 27 / acceptance criterion 13). When no Okena
-//! window is focused (another app is in front, or focus is unknown), the
-//! helper falls back to `WindowId::Main`.
 
-use crate::remote::types::{ApiFullscreen, ApiWindow, ApiWindowBounds};
-use crate::workspace::focus::FocusManager;
-use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
+#[cfg(target_os = "linux")]
+use crate::simple_root::SimpleRoot as Root;
 use crate::views::window::{WindowView, WindowViewEvent};
+use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
 use gpui::*;
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::Okena;
+
+/// Grace before an OS-level extra-window close is committed as a "forget"
+/// (removed from the persisted layout). Quit flows deliver a close event to
+/// every window (GNOME dock Quit, logout, Alt+F4-ing each window to exit);
+/// committing the forget immediately made those quits wipe the multi-window
+/// layout before the final quit-time save. Deliberate single-window closes
+/// survive the delay: the app keeps running and the forget lands after it.
+const EXTRA_FORGET_GRACE: Duration = Duration::from_secs(5);
+
+/// Deferred forgets for OS-closed extra windows. Every OS close re-arms the
+/// whole pending set onto a fresh generation: a burst of closes is what
+/// "quitting by closing every window" looks like, so earlier timers go stale
+/// and only the last close's timer commits — after ITS full grace. Pure
+/// bookkeeping (no GPUI) so the re-arm semantics are unit-testable.
+#[derive(Default)]
+pub(super) struct PendingExtraForgets {
+    pending: HashSet<WindowId>,
+    generation: u64,
+}
+
+impl PendingExtraForgets {
+    /// Record an OS close for `id`, re-arming every pending forget. Returns
+    /// the generation the caller's grace timer must present to
+    /// [`take_due`](Self::take_due).
+    pub(super) fn note_close(&mut self, id: WindowId) -> u64 {
+        self.generation += 1;
+        self.pending.insert(id);
+        self.generation
+    }
+
+    /// Drain every pending forget if `generation` is still the latest; a
+    /// stale generation (some later close re-armed the set) drains nothing —
+    /// the later close's timer owns the set now. Sorted for deterministic
+    /// commit order.
+    pub(super) fn take_due(&mut self, generation: u64) -> Vec<WindowId> {
+        if generation != self.generation {
+            return Vec::new();
+        }
+        let mut due: Vec<WindowId> = self.pending.drain().collect();
+        due.sort_by_key(window_sort_key);
+        due
+    }
+}
+
+/// Stable sort key for window ids (uuid bytes; Main first). Ordering matters
+/// when two pending closes touch shared state — see `extras_to_close`.
+fn window_sort_key(id: &WindowId) -> [u8; 16] {
+    match id {
+        WindowId::Extra(uuid) => *uuid.as_bytes(),
+        WindowId::Main => [0u8; 16],
+    }
+}
 
 /// Compute which `WindowId::Extra` entries in `data.extra_windows` are NOT yet
 /// present in `opened`. Returned in `extra_windows` Vec order so the caller
@@ -44,10 +88,7 @@ use super::Okena;
 /// Pure function — separated from the observer body so the diff contract can
 /// be exercised without standing up the full `Okena` entity (whose
 /// construction pulls in PtyManager, settings, theme, remote, services, etc.).
-pub(super) fn extras_to_open(
-    data: &WorkspaceData,
-    opened: &HashSet<WindowId>,
-) -> Vec<WindowId> {
+pub(super) fn extras_to_open(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
     data.extra_windows
         .iter()
         .map(|w| WindowId::Extra(w.id))
@@ -62,10 +103,7 @@ pub(super) fn extras_to_open(
 /// even though `opened` is a `HashSet`. Iteration order matters when two
 /// pending closes touch shared state (e.g. the same terminal rendered in both
 /// windows); a flaky order would surface as intermittent test failures.
-pub(super) fn extras_to_close(
-    data: &WorkspaceData,
-    opened: &HashSet<WindowId>,
-) -> Vec<WindowId> {
+pub(super) fn extras_to_close(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
     let desired: HashSet<WindowId> = data
         .extra_windows
         .iter()
@@ -77,12 +115,7 @@ pub(super) fn extras_to_close(
         .copied()
         .filter(|id| matches!(id, WindowId::Extra(_)) && !desired.contains(id))
         .collect();
-    result.sort_by_key(|id| match id {
-        WindowId::Extra(uuid) => *uuid.as_bytes(),
-        // Filter above guarantees Extra(_) only; the arm is unreachable in
-        // practice but keeps the match total without an unwrap.
-        WindowId::Main => [0u8; 16],
-    });
+    result.sort_by_key(window_sort_key);
     result
 }
 
@@ -113,37 +146,6 @@ pub(super) fn resolve_extra_window_bounds(
     })
 }
 
-/// Resolve the `WindowId` that the currently focused OS window corresponds to,
-/// or fall back to `WindowId::Main` if no Okena window is focused (e.g. another
-/// application has focus, or the active window isn't tracked).
-///
-/// Pure function — generic over the handle type so the routing rule can be
-/// exercised without standing up real `gpui::AnyWindowHandle` values (which
-/// have private fields and can only be constructed via `cx.open_window`). The
-/// production caller passes `gpui::AnyWindowHandle`; tests use a trivial
-/// stand-in.
-///
-/// PRD ref: `plans/multi-window.md` user story 27 ("CLI lands its action in
-/// the focused window if any, falling back to main otherwise") +
-/// `plans/issues/multi-window/05-spawn-extra-window.md` acceptance criterion
-/// 13 (CLI fallback). Used by `Okena::focus_manager_for_active_window` to
-/// route remote-bridge actions (the existing `okena action` CLI verb +
-/// future `okena open <path>`-style verbs) to the correct per-window
-/// `FocusManager`.
-pub(super) fn resolve_focused_window_id<H: PartialEq + Copy>(
-    active: Option<H>,
-    window_handles: &[(WindowId, H)],
-) -> WindowId {
-    match active {
-        Some(a) => window_handles
-            .iter()
-            .find(|(_, h)| *h == a)
-            .map(|(id, _)| *id)
-            .unwrap_or(WindowId::Main),
-        None => WindowId::Main,
-    }
-}
-
 impl Okena {
     /// Workspace observer body: walk `extra_windows`, open an OS window for
     /// each entry not yet tracked in `Okena.extra_windows`. Idempotent —
@@ -161,196 +163,58 @@ impl Okena {
             self.extra_windows.remove(&window_id);
         }
 
-        for window_id in extras_to_open(&data, &opened) {
+        let to_open = extras_to_open(&data, &opened);
+        if !to_open.is_empty() {
+            log::info!("Opening {} extra window(s)", to_open.len());
+        }
+        for window_id in to_open {
             self.open_extra_window(window_id, cx);
         }
     }
 
-    /// Resolve the `(WindowId, Entity<FocusManager>)` of whichever Okena
-    /// window currently has OS focus, falling back to
-    /// `(WindowId::Main, main_window.focus_manager())` if no Okena window is
-    /// focused (e.g. another app is in front, or the active window isn't
-    /// tracked). Used by the remote-bridge command loop so CLI/remote-driven
-    /// actions land in the focused window's per-window state per PRD user
-    /// story 27 + slice 05 cri 13. The `WindowId` flows into `execute_action`
-    /// so per-window data mutations (e.g. `SetProjectShowInOverview`)
-    /// also target the focused window, not just focus state.
-    pub(super) fn focus_manager_for_active_window(
-        &self,
-        cx: &App,
-    ) -> (WindowId, Entity<FocusManager>) {
-        let active = cx.active_window();
-        let mut handles: Vec<(WindowId, AnyWindowHandle)> = Vec::with_capacity(1 + self.extra_window_handles.len());
-        handles.push((WindowId::Main, self.main_window_handle));
-        handles.extend(self.extra_window_handles.iter().map(|(id, h)| (*id, *h)));
-        let resolved = resolve_focused_window_id(active, &handles);
-        match resolved {
-            WindowId::Main => (WindowId::Main, self.main_window.read(cx).focus_manager()),
-            extra_id @ WindowId::Extra(_) => match self.extra_windows.get(&extra_id) {
-                // Drop-race fallback: the resolver matched on a tracked extra
-                // handle but the corresponding `WindowView` entity has been
-                // dropped between handle-tracking and resolution. Fall back
-                // to main's `(WindowId, FocusManager)` so per-window data
-                // mutations target a slot that exists.
-                Some(view) => (extra_id, view.read(cx).focus_manager()),
-                None => (WindowId::Main, self.main_window.read(cx).focus_manager()),
-            },
+    /// React to an OS-level close of an extra window: arm a deferred forget
+    /// instead of committing it now. If the app is quitting, do nothing at all
+    /// — the final quit-time save must keep the window so the next launch
+    /// restores it. While the forget is pending the window stays in
+    /// `WorkspaceData.extra_windows` AND in the Okena-side maps: dead handles
+    /// are tolerated by every consumer, and keeping `extra_windows` populated
+    /// stops `handle_extra_windows_changed` from reopening the entry.
+    pub(super) fn handle_extra_window_os_close(
+        &mut self,
+        window_id: WindowId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
         }
+        let generation = self.pending_extra_forgets.note_close(window_id);
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(EXTRA_FORGET_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_due_extra_forgets(generation, cx);
+            });
+        })
+        .detach();
     }
 
-    /// Resolve the `(WindowId, Entity<FocusManager>)` of a remote-bridge
-    /// action's target window.
-    ///
-    /// `target == None` reuses the focused-window default
-    /// (`focus_manager_for_active_window`, which always resolves to Some).
-    /// `Some(WindowId::Main)` always resolves to the main window.
-    /// `Some(WindowId::Extra(_))` resolves to that extra's `WindowView` if it
-    /// is currently open, or `None` if no such extra exists (so the caller can
-    /// report "window not found"). The `WindowId` flows into `execute_action`
-    /// so per-window data mutations target the addressed window.
-    pub(super) fn focus_manager_for_window(
-        &self,
-        cx: &App,
-        target: Option<WindowId>,
-    ) -> Option<(WindowId, Entity<FocusManager>)> {
-        match target {
-            None => Some(self.focus_manager_for_active_window(cx)),
-            Some(WindowId::Main) => {
-                Some((WindowId::Main, self.main_window.read(cx).focus_manager()))
+    /// Commit the deferred forgets armed on `generation`. Bails when the app
+    /// is quitting (quit-time closes must survive into the final save) or when
+    /// a later close re-armed the entries (that close's timer owns them). The
+    /// workspace mutation fires the extras observer, which sweeps the
+    /// forgotten ids out of `extra_windows` / `extra_window_handles`.
+    fn apply_due_extra_forgets(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        let due = self.pending_extra_forgets.take_due(generation);
+        if due.is_empty() {
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            for window_id in due {
+                ws.close_extra_window(window_id, cx);
             }
-            Some(extra @ WindowId::Extra(_)) => self
-                .extra_windows
-                .get(&extra)
-                .map(|view| (extra, view.read(cx).focus_manager())),
-        }
-    }
-
-    /// Resolve a target window to its OS handle, for dispatching GUI actions
-    /// (the command palette) from the remote bridge. `None` → the focused
-    /// window (falling back to main); `Some(id)` → that window, or `None` if it
-    /// doesn't exist.
-    pub(super) fn window_handle_for(
-        &self,
-        cx: &App,
-        target: Option<WindowId>,
-    ) -> Option<AnyWindowHandle> {
-        match target {
-            None => cx.active_window().or(Some(self.main_window_handle)),
-            Some(WindowId::Main) => Some(self.main_window_handle),
-            Some(extra @ WindowId::Extra(_)) => self.extra_window_handles.get(&extra).copied(),
-        }
-    }
-
-    /// Enumerate the open OS windows for `GET /v1/state`.
-    ///
-    /// Stable order: main first, then extras in `WorkspaceData.extra_windows`
-    /// Vec order (NOT `Okena.extra_windows` HashMap order) so a client sees a
-    /// deterministic list that matches persistence. For each window the result
-    /// reports its OS-focus flag, per-window focus (project + terminal),
-    /// fullscreen target, the persistent visible-project set (after
-    /// `hidden_project_ids` + `folder_filter`), the active folder filter, OS
-    /// bounds, and sidebar state.
-    pub(super) fn build_api_windows(&self, cx: &App) -> Vec<ApiWindow> {
-        let active = cx.active_window();
-        let workspace = self.workspace.read(cx);
-
-        // Drive enumeration from the persisted `extra_windows` Vec so the
-        // ordering is stable, regardless of the `Okena.extra_windows` HashMap
-        // iteration order. Main is always first.
-        let mut order: Vec<WindowId> = Vec::with_capacity(1 + workspace.data().extra_windows.len());
-        order.push(WindowId::Main);
-        order.extend(
-            workspace
-                .data()
-                .extra_windows
-                .iter()
-                .map(|w| WindowId::Extra(w.id)),
-        );
-
-        order
-            .into_iter()
-            .filter_map(|window_id| {
-                // Resolve the per-window view + OS handle. An extra present in
-                // persistence but not yet tracked on `Okena` (spawn observer
-                // hasn't run, or a close race) is skipped — it has no live
-                // window to report.
-                let (view, handle) = match window_id {
-                    WindowId::Main => (&self.main_window, Some(self.main_window_handle)),
-                    extra @ WindowId::Extra(_) => match self.extra_windows.get(&extra) {
-                        Some(v) => (v, self.extra_window_handles.get(&extra).copied()),
-                        None => return None,
-                    },
-                };
-
-                let (id, kind) = match window_id {
-                    WindowId::Main => ("main".to_string(), "main"),
-                    WindowId::Extra(uuid) => (uuid.to_string(), "extra"),
-                };
-
-                let is_active = match (active, handle) {
-                    (Some(a), Some(h)) => a == h,
-                    _ => false,
-                };
-
-                let fm = view.read(cx).focus_manager().read(cx);
-
-                // Resolve the focused terminal id: the FocusManager tracks a
-                // (project_id, layout_path) target; map the path to the
-                // terminal id at that path in the project's current layout.
-                let focused_terminal_id = fm.focused_terminal_state().and_then(|ft| {
-                    workspace
-                        .project(&ft.project_id)
-                        .and_then(|p| p.layout.as_ref())
-                        .and_then(|layout| layout.get_at_path(&ft.layout_path))
-                        .and_then(|node| match node {
-                            crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => {
-                                terminal_id.clone()
-                            }
-                            _ => None,
-                        })
-                });
-
-                let fullscreen = fm.fullscreen_state().map(|(pid, tid)| ApiFullscreen {
-                    project_id: pid.to_string(),
-                    terminal_id: tid.to_string(),
-                });
-
-                let focused_project_id = fm.focused_project_id().cloned();
-
-                // Persistent visible set: hidden_project_ids + folder_filter
-                // only (NOT the transient focus narrowing), matching what the
-                // sidebar persists rather than the momentary zoom state.
-                let visible_project_ids: Vec<String> = workspace
-                    .visible_projects(window_id, None, false)
-                    .iter()
-                    .map(|p| p.id.clone())
-                    .collect();
-
-                let window_state = workspace.data().window(window_id);
-                let folder_filter =
-                    window_state.and_then(|w| w.folder_filter.clone());
-                let bounds = window_state.and_then(|w| w.os_bounds).map(|b| ApiWindowBounds {
-                    x: b.origin_x,
-                    y: b.origin_y,
-                    width: b.width,
-                    height: b.height,
-                });
-                let sidebar_open = window_state.and_then(|w| w.sidebar_open);
-
-                Some(ApiWindow {
-                    id,
-                    kind: kind.to_string(),
-                    active: is_active,
-                    focused_project_id,
-                    focused_terminal_id,
-                    fullscreen,
-                    visible_project_ids,
-                    folder_filter,
-                    bounds,
-                    sidebar_open,
-                })
-            })
-            .collect()
+        });
     }
 
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.
@@ -364,6 +228,8 @@ impl Okena {
             WindowViewEvent::JumpToProject { origin, project_id } => {
                 self.jump_to_project_terminal(*origin, project_id, cx);
             }
+            WindowViewEvent::RebuildLocal => self.rebuild_local(cx),
+            WindowViewEvent::RestartLocalBuild => self.restart_local_build(cx),
         }
     }
 
@@ -406,7 +272,10 @@ impl Okena {
         // Resolve the target window's view + OS handle.
         let (view, handle) = match target {
             WindowId::Main => (self.main_window.clone(), self.main_window_handle),
-            id => match (self.extra_windows.get(&id), self.extra_window_handles.get(&id)) {
+            id => match (
+                self.extra_windows.get(&id),
+                self.extra_window_handles.get(&id),
+            ) {
                 (Some(v), Some(h)) => (v.clone(), *h),
                 _ => return,
             },
@@ -458,7 +327,6 @@ impl Okena {
     /// `extra_window_handles` maps.
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let pty_manager = self.pty_manager.clone();
         let terminals = self.terminals.clone();
         let okena = cx.entity().clone();
 
@@ -489,15 +357,15 @@ impl Okena {
                 width: f32::from(b.size.width),
                 height: f32::from(b.size.height),
             });
-        let window_bounds = resolve_extra_window_bounds(persisted, main_bounds).map(
-            |b: PersistedWindowBounds| {
+        let window_bounds =
+            resolve_extra_window_bounds(persisted, main_bounds).map(|b: PersistedWindowBounds| {
                 WindowBounds::Windowed(Bounds {
                     origin: point(px(b.origin_x), px(b.origin_y)),
                     size: size(px(b.width), px(b.height)),
                 })
-            },
-        );
+            });
 
+        let mut opened_view = None;
         let result = cx.open_window(
             WindowOptions {
                 titlebar: if cfg!(target_os = "windows") {
@@ -523,71 +391,33 @@ impl Okena {
                 app_id: Some("okena".to_string()),
                 ..Default::default()
             },
-            move |window, cx| {
+            |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), terminals.clone(), window, cx)
+                    WindowView::new(window_id, workspace.clone(), terminals.clone(), window, cx)
                 });
-                let view_for_okena = view.clone();
-                let handle = window.window_handle();
-                // Defer the registration: this build closure runs while Okena
-                // is already leased (the workspace observer that triggered
-                // `open_extra_window` holds the Okena update lease for the
-                // duration of `flush_effects`). Calling `okena.update` here
-                // synchronously would double-lease and panic. `cx.defer`
-                // schedules the registration to run after the current effect
-                // flush completes, when the lease has released.
-                let okena_for_register = okena.clone();
-                cx.defer(move |cx| {
-                    okena_for_register.update(cx, |this, cx| {
-                        this.extra_windows.insert(window_id, view_for_okena.clone());
-                        // Track the OS window handle so the remote-bridge
-                        // command loop can resolve actions to whichever window
-                        // is focused (PRD cri 13). The handle is removed on
-                        // close below.
-                        this.extra_window_handles.insert(window_id, handle);
+                opened_view = Some(view.clone());
 
-                        // Same cross-window event channel main is wired with, so
-                        // a "jump into project" can target this window too.
-                        cx.subscribe(&view_for_okena, Okena::handle_window_view_event).detach();
-
-                        // Wire the per-window UI to the shared singletons
-                        // main was wired with at startup. Without this, the
-                        // extra's ProjectColumns have no git_watcher (no +/-
-                        // diff badges), no service_manager (service panel
-                        // dead), and no remote_manager (remote actions don't
-                        // route).
-                        let git_watcher = this.git_watcher.clone();
-                        let service_manager = this.service_manager.clone();
-                        let remote_manager = this.remote_manager.clone();
-                        view_for_okena.update(cx, |rv, cx| {
-                            rv.set_git_watcher(git_watcher, cx);
-                            rv.set_service_manager(service_manager, cx);
-                            rv.set_remote_manager(remote_manager, cx);
-                        });
-                    });
+                window.on_next_frame(move |_window, _cx| {
+                    log::info!("Extra window {window_id:?} received its first platform frame");
                 });
 
-                // Slice 07 cri 3 close-flow: when the user closes this OS
-                // window, drop the entry from `WorkspaceData.extra_windows`
-                // (so persistence forgets it -- PRD user story 22) and from
-                // `Okena.extra_windows` + `extra_window_handles` (so the
-                // remote-bridge resolver and the spawn-side observer stop
-                // seeing it). Order matters: the workspace mutation runs
-                // FIRST so save/observers fire on a still-alive
-                // `Entity<WindowView>` (the strong handle in
-                // `Okena.extra_windows` keeps it alive until the second
-                // step). The Okena-side removes drop the strong handle so
-                // the entity then drops with the OS window. Returning
-                // `true` allows the OS close to proceed.
-                let workspace_for_close = workspace.clone();
+                // Slice 07 cri 3 close-flow, quit-aware: an OS-level close
+                // (X button, Alt+F4, compositor quit-all) does NOT commit
+                // the "forget" (PRD user story 22) immediately — quit flows
+                // deliver a close to every window and an eager forget wiped
+                // the multi-window layout right before the quit-time save
+                // (the recurring restore-only-one-window bug). Instead the
+                // forget is deferred via `handle_extra_window_os_close`;
+                // the Okena-side maps stay populated until it commits so
+                // the extras observer can't mistake the still-persisted
+                // entry for a fresh one and reopen a zombie window. The
+                // explicit in-app CloseWindow action keeps its immediate
+                // forget (see views/window/render.rs). Returning `true`
+                // allows the OS close to proceed.
                 let okena_for_close = okena.clone();
                 window.on_window_should_close(cx, move |_window, cx| {
-                    workspace_for_close.update(cx, |ws, cx| {
-                        ws.close_extra_window(window_id, cx);
-                    });
-                    okena_for_close.update(cx, |this, _cx| {
-                        this.extra_windows.remove(&window_id);
-                        this.extra_window_handles.remove(&window_id);
+                    okena_for_close.update(cx, |this, cx| {
+                        this.handle_extra_window_os_close(window_id, cx);
                     });
                     true
                 });
@@ -596,16 +426,44 @@ impl Okena {
             },
         );
 
-        if let Err(e) = result {
-            log::error!("Failed to open extra window: {e}");
+        // open_window is synchronous, so register before observers can run again.
+        match result {
+            Ok(handle) => {
+                let Some(view) = opened_view else {
+                    log::error!("Extra window {window_id:?} opened without a WindowView");
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    return;
+                };
+                let handle: AnyWindowHandle = handle.into();
+                self.extra_windows.insert(window_id, view.clone());
+                self.extra_window_handles.insert(window_id, handle);
+                cx.subscribe(&view, Okena::handle_window_view_event)
+                    .detach();
+
+                let remote_manager = self.remote_manager.clone();
+                view.update(cx, |view, cx| {
+                    view.set_remote_manager(remote_manager, cx);
+                });
+                log::info!(
+                    "Registered extra window {window_id:?} as GPUI window {}",
+                    handle.window_id().as_u64()
+                );
+            }
+            Err(error) => {
+                log::error!("Failed to open extra window {window_id:?}: {error}");
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extras_to_close, extras_to_open, resolve_extra_window_bounds, resolve_focused_window_id};
-    use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData};
+    use super::{
+        PendingExtraForgets, extras_to_close, extras_to_open, resolve_extra_window_bounds,
+    };
+    use crate::workspace::state::{
+        WindowBounds as PersistedWindowBounds, WindowId, WindowState, WorkspaceData,
+    };
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
@@ -622,11 +480,15 @@ mod tests {
         }
     }
 
+    fn extras_not_opened(data: &WorkspaceData, opened: &HashSet<WindowId>) -> Vec<WindowId> {
+        extras_to_open(data, opened)
+    }
+
     #[test]
     fn empty_extras_returns_empty() {
         let data = empty_workspace();
         let opened = HashSet::new();
-        assert!(extras_to_open(&data, &opened).is_empty());
+        assert!(extras_not_opened(&data, &opened).is_empty());
     }
 
     #[test]
@@ -635,7 +497,7 @@ mod tests {
         let id1 = data.spawn_extra_window(None);
         let id2 = data.spawn_extra_window(None);
         let opened = HashSet::new();
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert_eq!(pending, vec![id1, id2]);
     }
 
@@ -646,7 +508,7 @@ mod tests {
         let id2 = data.spawn_extra_window(None);
         let mut opened = HashSet::new();
         opened.insert(id1);
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert_eq!(pending, vec![id2]);
     }
 
@@ -658,7 +520,7 @@ mod tests {
         let mut opened = HashSet::new();
         opened.insert(id1);
         opened.insert(id2);
-        assert!(extras_to_open(&data, &opened).is_empty());
+        assert!(extras_not_opened(&data, &opened).is_empty());
     }
 
     #[test]
@@ -698,7 +560,7 @@ mod tests {
         // if the caller mistakenly passes an empty `opened` set.
         let data = empty_workspace();
         let opened = HashSet::new();
-        let pending = extras_to_open(&data, &opened);
+        let pending = extras_not_opened(&data, &opened);
         assert!(!pending.contains(&WindowId::Main));
     }
 
@@ -710,7 +572,7 @@ mod tests {
         let mut data = empty_workspace();
         let ids: Vec<WindowId> = (0..5).map(|_| data.spawn_extra_window(None)).collect();
         let opened = HashSet::new();
-        assert_eq!(extras_to_open(&data, &opened), ids);
+        assert_eq!(extras_not_opened(&data, &opened), ids);
     }
 
     #[test]
@@ -740,7 +602,7 @@ mod tests {
         );
         let opened = HashSet::new();
         assert!(
-            extras_to_open(&data, &opened).is_empty(),
+            extras_not_opened(&data, &opened).is_empty(),
             "restore-at-launch kickoff must find no extras to open on the default workspace"
         );
     }
@@ -812,70 +674,72 @@ mod tests {
         // direction fails this test.
         let mut data = empty_workspace();
         let ids: Vec<WindowId> = (0..25).map(|_| data.spawn_extra_window(None)).collect();
-        assert_eq!(data.extra_windows.len(), 25, "data layer must accept every spawn");
-        let opened = HashSet::new();
-        assert_eq!(extras_to_open(&data, &opened), ids, "helper must surface every pending entry");
-    }
-
-    // ── Focused-window routing ───────────────────────────────────────────
-
-    #[test]
-    fn no_active_window_falls_back_to_main() {
-        // Another OS app is in front (or focus is unknown). The CLI/remote
-        // action must still land somewhere — main is the fallback per PRD
-        // user story 27 ("falling back to main otherwise").
-        let main_handle: u32 = 1;
-        let extra_id = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, main_handle), (extra_id, 2)];
-        assert_eq!(resolve_focused_window_id::<u32>(None, &handles), WindowId::Main);
-    }
-
-    #[test]
-    fn active_main_resolves_to_main() {
-        let main_handle: u32 = 1;
-        let extra_id = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, main_handle), (extra_id, 2)];
         assert_eq!(
-            resolve_focused_window_id(Some(main_handle), &handles),
-            WindowId::Main,
+            data.extra_windows.len(),
+            25,
+            "data layer must accept every spawn"
+        );
+        let opened = HashSet::new();
+        assert_eq!(
+            extras_not_opened(&data, &opened),
+            ids,
+            "helper must surface every pending entry"
+        );
+    }
+
+    // ── Deferred OS-close forgets ────────────────────────────────────────
+
+    #[test]
+    fn single_close_commits_on_its_own_generation() {
+        // The plain case: one extra is OS-closed, nothing else happens, its
+        // grace timer fires with the generation note_close returned — the
+        // forget commits.
+        let mut forgets = PendingExtraForgets::default();
+        let id = WindowId::Extra(Uuid::new_v4());
+        let generation = forgets.note_close(id);
+        assert_eq!(forgets.take_due(generation), vec![id]);
+        // Drained: a duplicate timer fire (or a retry) finds nothing.
+        assert!(forgets.take_due(generation).is_empty());
+    }
+
+    #[test]
+    fn later_close_rearms_earlier_pending_forgets() {
+        // Quit-by-closing-windows: extra A closes, then extra B closes before
+        // A's grace expires. A's timer must find nothing (its generation went
+        // stale) and B's timer must commit BOTH — so a close burst always gets
+        // the full grace of its last close, during which the quit signal can
+        // arrive and cancel everything.
+        let mut forgets = PendingExtraForgets::default();
+        let a = WindowId::Extra(Uuid::new_v4());
+        let b = WindowId::Extra(Uuid::new_v4());
+        let gen_a = forgets.note_close(a);
+        let gen_b = forgets.note_close(b);
+
+        assert!(
+            forgets.take_due(gen_a).is_empty(),
+            "stale timer must not commit"
+        );
+        let due: HashSet<WindowId> = forgets.take_due(gen_b).into_iter().collect();
+        assert_eq!(
+            due,
+            HashSet::from([a, b]),
+            "last close owns every pending forget"
         );
     }
 
     #[test]
-    fn active_extra_resolves_to_that_extra() {
-        // PRD cri 13's W2-focused branch: the focused window is an extra;
-        // routing must land on that extra's WindowId so the remote bridge
-        // mutates that extra's per-window FocusManager.
-        let main_handle: u32 = 1;
-        let extra_a = WindowId::Extra(Uuid::new_v4());
-        let extra_b = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![
-            (WindowId::Main, main_handle),
-            (extra_a, 2),
-            (extra_b, 3),
-        ];
-        assert_eq!(resolve_focused_window_id(Some(2), &handles), extra_a);
-        assert_eq!(resolve_focused_window_id(Some(3), &handles), extra_b);
-    }
-
-    #[test]
-    fn unknown_active_window_falls_back_to_main() {
-        // The active window isn't tracked (e.g. detached terminal popup, or
-        // a window opened by a future feature that doesn't register here).
-        // Fall back to main rather than dropping the action.
-        let main_handle: u32 = 1;
-        let handles = vec![(WindowId::Main, main_handle)];
-        assert_eq!(resolve_focused_window_id(Some(99), &handles), WindowId::Main);
-    }
-
-    #[test]
-    fn empty_handles_falls_back_to_main() {
-        // Defensive — should never happen in practice (main is always tracked)
-        // but the helper stays total: any input shape produces a valid
-        // WindowId, never panics.
-        let handles: Vec<(WindowId, u32)> = Vec::new();
-        assert_eq!(resolve_focused_window_id(Some(1), &handles), WindowId::Main);
-        assert_eq!(resolve_focused_window_id::<u32>(None, &handles), WindowId::Main);
+    fn commit_order_is_deterministic_by_uuid() {
+        // Mirrors extras_to_close's contract: shared-state teardown order must
+        // not depend on HashMap iteration order.
+        let mut forgets = PendingExtraForgets::default();
+        let ids: Vec<WindowId> = (0..5).map(|_| WindowId::Extra(Uuid::new_v4())).collect();
+        let mut generation = 0;
+        for id in &ids {
+            generation = forgets.note_close(*id);
+        }
+        let mut expected = ids.clone();
+        expected.sort_by_key(super::window_sort_key);
+        assert_eq!(forgets.take_due(generation), expected);
     }
 
     // ── Restore-bounds resolver ──────────────────────────────────────────
@@ -950,17 +814,5 @@ mod tests {
         let resolved = resolve_extra_window_bounds(Some(persisted), None)
             .expect("persisted alone is sufficient");
         assert_eq!(resolved, persisted);
-    }
-
-    #[test]
-    fn first_match_wins_on_duplicate_handles() {
-        // Pathological input — two entries point at the same handle. The
-        // helper picks the first match (Vec order). In production, handles
-        // are unique per OS window, but pinning the rule keeps the helper
-        // deterministic if a future bug duplicates an entry.
-        let extra_a = WindowId::Extra(Uuid::new_v4());
-        let extra_b = WindowId::Extra(Uuid::new_v4());
-        let handles = vec![(WindowId::Main, 1u32), (extra_a, 2), (extra_b, 2)];
-        assert_eq!(resolve_focused_window_id(Some(2), &handles), extra_a);
     }
 }

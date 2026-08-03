@@ -143,8 +143,13 @@ impl TerminalHolder {
         // Hide cursor when scrolled into history (cursor would be off-screen)
         let cursor_visual_line = cursor.line.0 + display_offset;
         let screen_lines = term.grid().screen_lines() as i32;
-        let visible = term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
-            && !matches!(cursor_shape, alacritty_terminal::vte::ansi::CursorShape::Hidden)
+        let visible = term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
+            && !matches!(
+                cursor_shape,
+                alacritty_terminal::vte::ansi::CursorShape::Hidden
+            )
             && cursor_visual_line >= 0
             && cursor_visual_line < screen_lines;
 
@@ -233,11 +238,12 @@ impl TerminalHolder {
     pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
         if let Some(ref selection) = term.selection
-            && let Some(range) = selection.to_range(&*term) {
-                let start = (range.start.column.0, range.start.line.0);
-                let end = (range.end.column.0, range.end.line.0);
-                return Some((start, end));
-            }
+            && let Some(range) = selection.to_range(&*term)
+        {
+            let start = (range.start.column.0, range.start.line.0);
+            let end = (range.end.column.0, range.end.line.0);
+            return Some((start, end));
+        }
         None
     }
 
@@ -268,7 +274,11 @@ mod tests {
         holder.process_output(b"Hello, world!");
         let cells = holder.get_visible_cells(&DARK_THEME);
         // Cells should contain H, e, l, l, o, etc. (minus WIDE_CHAR_SPACERs)
-        let text: String = cells.iter().take(13).map(|c| c.character.as_str()).collect();
+        let text: String = cells
+            .iter()
+            .take(13)
+            .map(|c| c.character.as_str())
+            .collect();
         assert_eq!(text, "Hello, world!");
     }
 

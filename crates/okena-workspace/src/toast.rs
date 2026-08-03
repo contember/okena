@@ -2,13 +2,17 @@
 
 pub use okena_state::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 
+#[cfg(feature = "gpui")]
 use gpui::{App, Global};
+#[cfg(feature = "gpui")]
 use parking_lot::Mutex;
+#[cfg(feature = "gpui")]
 use std::sync::Arc;
 
 // ─── ToastManager (Global) ─────────────────────────────────────────────────
 
 /// Maximum number of visible toasts
+#[cfg(any(feature = "gpui", test))]
 const MAX_VISIBLE_TOASTS: usize = 5;
 
 /// Trim the queue to `MAX_VISIBLE_TOASTS`, preferring to drop the oldest toast
@@ -17,27 +21,29 @@ const MAX_VISIBLE_TOASTS: usize = 5;
 /// its TTL — evicting one early would silently strip the user's undo affordance
 /// while the underlying close still goes through. Falls back to the oldest toast
 /// when every toast has actions, so the hard cap is always honoured.
+#[cfg(any(feature = "gpui", test))]
 fn trim_to_cap(queue: &mut Vec<Toast>) {
     while queue.len() > MAX_VISIBLE_TOASTS {
-        let idx = queue
-            .iter()
-            .position(|t| t.actions.is_empty())
-            .unwrap_or(0);
+        let idx = queue.iter().position(|t| t.actions.is_empty()).unwrap_or(0);
         queue.remove(idx);
     }
 }
 
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct ToastManager(pub Arc<Mutex<Vec<Toast>>>);
 
+#[cfg(feature = "gpui")]
 impl Global for ToastManager {}
 
+#[cfg(feature = "gpui")]
 impl Default for ToastManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "gpui")]
 impl ToastManager {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(Vec::new())))
@@ -112,11 +118,14 @@ impl ToastManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{trim_to_cap, Toast, ToastAction, ToastActionStyle, MAX_VISIBLE_TOASTS};
+    use super::{MAX_VISIBLE_TOASTS, Toast, ToastAction, ToastActionStyle, trim_to_cap};
 
     fn action_toast(msg: &str) -> Toast {
-        Toast::info(msg)
-            .with_actions(vec![ToastAction::new("undo", "Undo", ToastActionStyle::Primary)])
+        Toast::info(msg).with_actions(vec![ToastAction::new(
+            "undo",
+            "Undo",
+            ToastActionStyle::Primary,
+        )])
     }
 
     #[test]
@@ -140,6 +149,9 @@ mod tests {
             .collect();
         trim_to_cap(&mut q);
         assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
-        assert_eq!(q[0].message, "a1", "oldest action toast dropped as fallback");
+        assert_eq!(
+            q[0].message, "a1",
+            "oldest action toast dropped as fallback"
+        );
     }
 }

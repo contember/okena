@@ -10,12 +10,12 @@ use crate::types::ServiceSnapshot;
 use okena_core::api::ActionRequest;
 use okena_core::process::open_url;
 use okena_services::manager::{ServiceKind, ServiceManager, ServiceStatus};
-use okena_terminal::backend::TerminalBackend;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_views_terminal::ActionDispatch;
+use okena_views_terminal::elements::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::{ActiveDrag, DragState};
 use okena_views_terminal::layout::terminal_pane::TerminalPane;
-use okena_views_terminal::elements::resize_handle::ResizeHandle;
-use okena_views_terminal::ActionDispatch;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
 
@@ -99,14 +99,19 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
         let project_id = self.project_id.clone();
         cx.observe(&manager, move |this, sm, cx| {
-            let Some(ref active_name) = this.active_service_name else { return };
-            let current_tid = sm.read(cx)
+            let Some(ref active_name) = this.active_service_name else {
+                return;
+            };
+            let current_tid = sm
+                .read(cx)
                 .terminal_id_for(&project_id, active_name)
                 .cloned();
 
             match current_tid {
                 Some(new_tid) => {
-                    let pane_tid = this.service_terminal_pane.as_ref()
+                    let pane_tid = this
+                        .service_terminal_pane
+                        .as_ref()
                         .and_then(|p| p.read(cx).terminal_id());
                     if pane_tid.as_deref() != Some(&new_tid) {
                         let name = active_name.clone();
@@ -114,12 +119,16 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     }
                 }
                 None => {
-                    let is_active_docker = sm.read(cx)
+                    let is_active_docker = sm
+                        .read(cx)
                         .instances()
                         .get(&(project_id.clone(), active_name.clone()))
                         .is_some_and(|i| {
                             matches!(i.kind, ServiceKind::DockerCompose { .. })
-                                && matches!(i.status, ServiceStatus::Running | ServiceStatus::Restarting)
+                                && matches!(
+                                    i.status,
+                                    ServiceStatus::Running | ServiceStatus::Restarting
+                                )
                         });
 
                     if is_active_docker {
@@ -131,7 +140,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     }
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         self.service_manager = Some(manager);
     }
@@ -145,10 +155,15 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     pub fn show_service(&mut self, service_name: &str, cx: &mut Context<Self>) {
         // For Docker services with no terminal_id, spawn a log viewer PTY on demand
         if let Some(ref sm) = self.service_manager {
-            let is_docker = sm.read(cx).instances()
+            let is_docker = sm
+                .read(cx)
+                .instances()
                 .get(&(self.project_id.clone(), service_name.to_string()))
                 .is_some_and(|i| matches!(i.kind, ServiceKind::DockerCompose { .. }));
-            let has_terminal = sm.read(cx).terminal_id_for(&self.project_id, service_name).is_some();
+            let has_terminal = sm
+                .read(cx)
+                .terminal_id_for(&self.project_id, service_name)
+                .is_some();
             if is_docker && !has_terminal {
                 let pid = self.project_id.clone();
                 let name = service_name.to_string();
@@ -160,11 +175,16 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
 
         // Look up terminal_id from either ServiceManager or remote services
         let terminal_id = if let Some(ref sm) = self.service_manager {
-            sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned()
+            sm.read(cx)
+                .terminal_id_for(&self.project_id, service_name)
+                .cloned()
         } else {
-            self.workspace.read(cx).remote_snapshot(&self.project_id)
+            self.workspace
+                .read(cx)
+                .remote_snapshot(&self.project_id)
                 .and_then(|snap| {
-                    snap.services.iter()
+                    snap.services
+                        .iter()
                         .find(|s| s.name == service_name)
                         .and_then(|s| s.terminal_id.clone())
                 })
@@ -174,10 +194,14 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         self.service_panel_open = true;
 
         if let Some(tid) = terminal_id {
-            let project_path = self.service_manager.as_ref()
+            let project_path = self
+                .service_manager
+                .as_ref()
                 .and_then(|sm| sm.read(cx).project_path(&self.project_id).cloned())
                 .or_else(|| {
-                    self.workspace.read(cx).project(&self.project_id)
+                    self.workspace
+                        .read(cx)
+                        .project(&self.project_id)
                         .map(|p| p.path.clone())
                 })
                 .unwrap_or_default();
@@ -245,21 +269,29 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     }
 
     /// Observe workspace for remote service state changes (used for remote project columns).
-    pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
+    pub fn observe_remote_services(
+        &mut self,
+        workspace: Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
         let project_id = self.project_id.clone();
         cx.observe(&workspace, move |this, ws, cx| {
-            let Some(ref active_name) = this.active_service_name else { return };
+            let Some(ref active_name) = this.active_service_name else {
+                return;
+            };
 
-            let current_tid = ws.read(cx).remote_snapshot(&project_id)
-                .and_then(|snap| {
-                    snap.services.iter()
-                        .find(|s| s.name == *active_name)
-                        .and_then(|s| s.terminal_id.clone())
-                });
+            let current_tid = ws.read(cx).remote_snapshot(&project_id).and_then(|snap| {
+                snap.services
+                    .iter()
+                    .find(|s| s.name == *active_name)
+                    .and_then(|s| s.terminal_id.clone())
+            });
 
             match current_tid {
                 Some(new_tid) => {
-                    let pane_tid = this.service_terminal_pane.as_ref()
+                    let pane_tid = this
+                        .service_terminal_pane
+                        .as_ref()
                         .and_then(|p| p.read(cx).terminal_id());
                     if pane_tid.as_deref() != Some(&new_tid) {
                         let name = active_name.clone();
@@ -271,7 +303,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     cx.notify();
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 
     /// Get the list of services for this project, from either ServiceManager (local)
@@ -280,26 +313,34 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         if let Some(ref sm) = self.service_manager {
             let services = sm.read(cx).services_for_project(&self.project_id);
             if !services.is_empty() {
-                return services.iter().map(|inst| ServiceSnapshot {
-                    name: inst.definition.name.clone(),
-                    status: inst.status.clone(),
-                    terminal_id: inst.terminal_id.clone(),
-                    ports: inst.detected_ports.clone(),
-                    is_docker: matches!(inst.kind, ServiceKind::DockerCompose { .. }),
-                    is_extra: inst.is_extra,
-                }).collect();
+                return services
+                    .iter()
+                    .map(|inst| ServiceSnapshot {
+                        name: inst.definition.name.clone(),
+                        status: inst.status.clone(),
+                        terminal_id: inst.terminal_id.clone(),
+                        ports: inst.detected_ports.clone(),
+                        is_docker: matches!(inst.kind, ServiceKind::DockerCompose { .. }),
+                        is_extra: inst.is_extra,
+                    })
+                    .collect();
             }
         }
         let ws = self.workspace.read(cx);
         ws.remote_snapshot(&self.project_id)
-            .map(|snap| snap.services.iter().map(|api_svc| ServiceSnapshot {
-                name: api_svc.name.clone(),
-                status: ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
-                terminal_id: api_svc.terminal_id.clone(),
-                ports: api_svc.ports.clone(),
-                is_docker: api_svc.kind == "docker_compose",
-                is_extra: api_svc.is_extra,
-            }).collect())
+            .map(|snap| {
+                snap.services
+                    .iter()
+                    .map(|api_svc| ServiceSnapshot {
+                        name: api_svc.name.clone(),
+                        status: ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
+                        terminal_id: api_svc.terminal_id.clone(),
+                        ports: api_svc.ports.clone(),
+                        is_docker: api_svc.kind == "docker_compose",
+                        is_extra: api_svc.is_extra,
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -317,21 +358,17 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         let services = self.get_service_list(cx);
         let entity = cx.entity().downgrade();
 
-        panel::render_service_indicator(
-            &services,
-            t,
-            move |_window, cx| {
-                if let Some(e) = entity.upgrade() {
-                    e.update(cx, |this, cx| {
-                        if this.service_panel_open {
-                            this.close(cx);
-                        } else {
-                            this.show_overview(cx);
-                        }
-                    });
-                }
-            },
-        )
+        panel::render_service_indicator(&services, t, move |_window, cx| {
+            if let Some(e) = entity.upgrade() {
+                e.update(cx, |this, cx| {
+                    if this.service_panel_open {
+                        this.close(cx);
+                    } else {
+                        this.show_overview(cx);
+                    }
+                });
+            }
+        })
     }
 
     /// Render the per-project service log panel (resize handle + tab header + terminal pane).
@@ -349,7 +386,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         let is_overview = active_name.is_none();
 
         let active_status = active_name.as_ref().and_then(|name| {
-            services.iter()
+            services
+                .iter()
                 .find(|s| s.name == *name)
                 .map(|s| s.status.clone())
         });
@@ -365,147 +403,162 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             .flex_col()
             .h(px(panel_height))
             .flex_shrink_0()
-            .child(
-                ResizeHandle::new(
-                    true,
-                    t.border,
-                    t.border_active,
-                    move |mouse_pos, _cx| {
-                        *active_drag.borrow_mut() = Some(DragState::ServicePanel {
-                            project_id: project_id.clone(),
-                            initial_mouse_y: f32::from(mouse_pos.y),
-                            initial_height: panel_height,
-                        });
-                    },
-                ),
-            )
-            .child(
-                panel::render_service_panel_header(
-                    &services,
-                    active_name.as_deref(),
-                    t,
-                    cx,
-                    // on_overview_click
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| this.show_overview(cx));
-                            }
+            .child(ResizeHandle::new(
+                true,
+                t.border,
+                t.border_active,
+                move |mouse_pos, _cx| {
+                    *active_drag.borrow_mut() = Some(DragState::ServicePanel {
+                        project_id: project_id.clone(),
+                        initial_mouse_y: f32::from(mouse_pos.y),
+                        initial_height: panel_height,
+                    });
+                },
+            ))
+            .child(panel::render_service_panel_header(
+                &services,
+                active_name.as_deref(),
+                t,
+                cx,
+                // on_overview_click
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| this.show_overview(cx));
                         }
-                    },
-                    // on_tab_click
-                    {
-                        let entity = entity.clone();
-                        move |name: String, _window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| this.show_service(&name, cx));
-                            }
+                    }
+                },
+                // on_tab_click
+                {
+                    let entity = entity.clone();
+                    move |name: String, _window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| this.show_service(&name, cx));
                         }
-                    },
-                    // on_start_all
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    this.dispatch_service_action(ActionRequest::StartAllServices {
+                    }
+                },
+                // on_start_all
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.dispatch_service_action(
+                                    ActionRequest::StartAllServices {
                                         project_id: this.project_id.clone(),
-                                    }, cx);
-                                });
-                            }
+                                    },
+                                    cx,
+                                );
+                            });
                         }
-                    },
-                    // on_stop_all
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    this.dispatch_service_action(ActionRequest::StopAllServices {
+                    }
+                },
+                // on_stop_all
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.dispatch_service_action(
+                                    ActionRequest::StopAllServices {
                                         project_id: this.project_id.clone(),
-                                    }, cx);
-                                });
-                            }
+                                    },
+                                    cx,
+                                );
+                            });
                         }
-                    },
-                    // on_reload
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    this.dispatch_service_action(ActionRequest::ReloadServices {
+                    }
+                },
+                // on_reload
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.dispatch_service_action(
+                                    ActionRequest::ReloadServices {
                                         project_id: this.project_id.clone(),
-                                    }, cx);
-                                });
-                            }
+                                    },
+                                    cx,
+                                );
+                            });
                         }
-                    },
-                    // on_start (active service)
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    if let Some(name) = this.active_service_name.clone() {
-                                        this.dispatch_service_action(ActionRequest::StartService {
+                    }
+                },
+                // on_start (active service)
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                if let Some(name) = this.active_service_name.clone() {
+                                    this.dispatch_service_action(
+                                        ActionRequest::StartService {
                                             project_id: this.project_id.clone(),
                                             service_name: name,
-                                        }, cx);
-                                    }
-                                });
-                            }
+                                        },
+                                        cx,
+                                    );
+                                }
+                            });
                         }
-                    },
-                    // on_stop (active service)
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    if let Some(name) = this.active_service_name.clone() {
-                                        this.dispatch_service_action(ActionRequest::StopService {
+                    }
+                },
+                // on_stop (active service)
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                if let Some(name) = this.active_service_name.clone() {
+                                    this.dispatch_service_action(
+                                        ActionRequest::StopService {
                                             project_id: this.project_id.clone(),
                                             service_name: name,
-                                        }, cx);
-                                    }
-                                });
-                            }
+                                        },
+                                        cx,
+                                    );
+                                }
+                            });
                         }
-                    },
-                    // on_restart (active service)
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    if let Some(name) = this.active_service_name.clone() {
-                                        this.dispatch_service_action(ActionRequest::RestartService {
+                    }
+                },
+                // on_restart (active service)
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                if let Some(name) = this.active_service_name.clone() {
+                                    this.dispatch_service_action(
+                                        ActionRequest::RestartService {
                                             project_id: this.project_id.clone(),
                                             service_name: name,
-                                        }, cx);
-                                    }
-                                });
-                            }
+                                        },
+                                        cx,
+                                    );
+                                }
+                            });
                         }
-                    },
-                    // on_close
-                    {
-                        let entity = entity.clone();
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| this.close(cx));
-                            }
+                    }
+                },
+                // on_close
+                {
+                    let entity = entity.clone();
+                    move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| this.close(cx));
                         }
-                    },
-                    active_status.as_ref(),
-                ),
-            )
+                    }
+                },
+                active_status.as_ref(),
+            ))
             .child(
                 // Content area
                 if is_overview {
-                    self.render_overview_content(t, &services, cx).into_any_element()
+                    self.render_overview_content(t, &services, cx)
+                        .into_any_element()
                 } else if self.service_terminal_pane.is_some() {
                     div()
                         .flex_1()
@@ -516,32 +569,45 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                         .into_any_element()
                 } else {
                     let entity = entity.clone();
-                    panel::render_not_running_placeholder(
-                        t,
-                        cx,
-                        move |_window, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    if let Some(name) = this.active_service_name.clone() {
-                                        this.dispatch_service_action(ActionRequest::StartService {
+                    panel::render_not_running_placeholder(t, cx, move |_window, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                if let Some(name) = this.active_service_name.clone() {
+                                    this.dispatch_service_action(
+                                        ActionRequest::StartService {
                                             project_id: this.project_id.clone(),
                                             service_name: name,
-                                        }, cx);
-                                    }
-                                });
-                            }
-                        },
-                    ).into_any_element()
+                                        },
+                                        cx,
+                                    );
+                                }
+                            });
+                        }
+                    })
+                    .into_any_element()
                 },
             )
             .into_any_element()
     }
 
     /// Render the overview content showing all services in a table layout.
-    fn render_overview_content(&self, t: &ThemeColors, services: &[ServiceSnapshot], cx: &mut Context<Self>) -> impl IntoElement {
-
-        let remote_host = self.workspace.read(cx).remote_snapshot(&self.project_id)
+    fn render_overview_content(
+        &self,
+        t: &ThemeColors,
+        services: &[ServiceSnapshot],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let remote_host = self
+            .workspace
+            .read(cx)
+            .remote_snapshot(&self.project_id)
             .and_then(|snap| snap.host.clone());
+        // Port links must target the daemon's host, not the client's localhost
+        // (the service runs on the daemon machine). Falls back to localhost for
+        // a loopback/local daemon that reports no host.
+        let port_host = remote_host
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
 
         let project_id = self.project_id.clone();
         let entity = cx.entity().downgrade();
@@ -567,10 +633,13 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                 move |name: String, _window, cx| {
                     if let Some(e) = entity.upgrade() {
                         e.update(cx, |this, cx| {
-                            this.dispatch_service_action(ActionRequest::StartService {
-                                project_id: this.project_id.clone(),
-                                service_name: name.clone(),
-                            }, cx);
+                            this.dispatch_service_action(
+                                ActionRequest::StartService {
+                                    project_id: this.project_id.clone(),
+                                    service_name: name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }
@@ -581,10 +650,13 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                 move |name: String, _window, cx| {
                     if let Some(e) = entity.upgrade() {
                         e.update(cx, |this, cx| {
-                            this.dispatch_service_action(ActionRequest::StopService {
-                                project_id: this.project_id.clone(),
-                                service_name: name.clone(),
-                            }, cx);
+                            this.dispatch_service_action(
+                                ActionRequest::StopService {
+                                    project_id: this.project_id.clone(),
+                                    service_name: name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }
@@ -595,17 +667,20 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                 move |name: String, _window, cx| {
                     if let Some(e) = entity.upgrade() {
                         e.update(cx, |this, cx| {
-                            this.dispatch_service_action(ActionRequest::RestartService {
-                                project_id: this.project_id.clone(),
-                                service_name: name.clone(),
-                            }, cx);
+                            this.dispatch_service_action(
+                                ActionRequest::RestartService {
+                                    project_id: this.project_id.clone(),
+                                    service_name: name.clone(),
+                                },
+                                cx,
+                            );
                         });
                     }
                 }
             },
             // on_port_click
-            |port: u16| {
-                let url = format!("http://localhost:{}", port);
+            move |port: u16| {
+                let url = format!("http://{}:{}", port_host, port);
                 open_url(&url);
             },
         )

@@ -5,6 +5,7 @@
 //! filter, per-project column widths, sidebar folder-collapse map, and OS
 //! window bounds. Pure data — see PRD `plans/multi-window.md`.
 
+use okena_core::types::SplitDirection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -38,6 +39,15 @@ impl ProjectLayoutMode {
     /// True when projects are stacked vertically.
     pub fn is_rows(self) -> bool {
         matches!(self, ProjectLayoutMode::Rows)
+    }
+
+    /// Transform the daemon's canonical split direction for this window.
+    pub fn presented_split_direction(self, direction: SplitDirection) -> SplitDirection {
+        if self.is_rows() {
+            direction.flipped()
+        } else {
+            direction
+        }
     }
 }
 
@@ -219,7 +229,10 @@ mod tests {
         assert_eq!(reloaded.project_widths, original.project_widths);
         assert_eq!(reloaded.project_layout, original.project_layout);
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
-        assert_eq!(reloaded.show_attention_section, original.show_attention_section);
+        assert_eq!(
+            reloaded.show_attention_section,
+            original.show_attention_section
+        );
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
         assert_eq!(reloaded.sidebar_open, original.sidebar_open);
@@ -272,5 +285,21 @@ mod tests {
         assert_eq!(s.project_layout, ProjectLayoutMode::Columns);
         assert_eq!(s.project_sort_mode, ProjectSortMode::Manual);
         assert!(!s.show_attention_section);
+    }
+
+    #[test]
+    fn rows_present_canonical_splits_on_the_opposite_axis() {
+        assert_eq!(
+            ProjectLayoutMode::Columns.presented_split_direction(SplitDirection::Horizontal),
+            SplitDirection::Horizontal
+        );
+        assert_eq!(
+            ProjectLayoutMode::Rows.presented_split_direction(SplitDirection::Horizontal),
+            SplitDirection::Vertical
+        );
+        assert_eq!(
+            ProjectLayoutMode::Rows.presented_split_direction(SplitDirection::Vertical),
+            SplitDirection::Horizontal
+        );
     }
 }

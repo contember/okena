@@ -13,13 +13,13 @@ use crate::diff_viewer::provider::GitProvider;
 use crate::watcher::GitStatusWatcher;
 
 use gpui::*;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 mod branch_picker;
+mod ci_checks_popover;
 mod commit_log;
 mod diff_popover;
-mod ci_checks_popover;
 mod status_pill;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -91,6 +91,7 @@ pub struct GitHeader {
     // ── Diff popover state ──────────────────────────────────────────
     diff_popover_visible: bool,
     diff_file_summaries: Vec<FileDiffSummary>,
+    diff_popover_error: Option<String>,
     hover_token: Arc<AtomicU64>,
     diff_stats_bounds: Bounds<Pixels>,
 
@@ -98,6 +99,7 @@ pub struct GitHeader {
     commit_log_visible: bool,
     commit_log_entries: Vec<CommitLogEntry>,
     commit_log_loading: bool,
+    commit_log_error: Option<String>,
     commit_log_bounds: Bounds<Pixels>,
     commit_log_count: usize,
     commit_log_has_more: bool,
@@ -151,9 +153,8 @@ impl GitHeader {
                 .placeholder("Filter branches\u{2026}")
                 .icon("icons/search.svg")
         });
-        let branch_picker_create_name = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("New branch name")
-        });
+        let branch_picker_create_name =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("New branch name"));
         // Re-filter the branch list (and reset the keyboard selection) as the
         // user types. Without this the parent `GitHeader` wouldn't re-run its
         // own filtering when only the child input entity notifies.
@@ -175,11 +176,13 @@ impl GitHeader {
             current_branch: None,
             diff_popover_visible: false,
             diff_file_summaries: Vec::new(),
+            diff_popover_error: None,
             hover_token: Arc::new(AtomicU64::new(0)),
             diff_stats_bounds: Bounds::default(),
             commit_log_visible: false,
             commit_log_entries: Vec::new(),
             commit_log_loading: false,
+            commit_log_error: None,
             commit_log_bounds: Bounds::default(),
             commit_log_count: 0,
             commit_log_has_more: false,
@@ -218,10 +221,12 @@ impl GitHeader {
     pub fn set_git_provider(&mut self, provider: Arc<dyn GitProvider>, cx: &mut Context<Self>) {
         self.git_provider = provider;
         self.diff_file_summaries.clear();
+        self.diff_popover_error = None;
         self.commit_log_entries.clear();
         self.commit_log_count = 0;
         self.commit_log_has_more = false;
         self.commit_log_loading = false;
+        self.commit_log_error = None;
         self.commit_log_branches.clear();
         cx.notify();
     }

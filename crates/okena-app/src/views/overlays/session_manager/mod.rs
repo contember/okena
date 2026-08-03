@@ -2,15 +2,19 @@ mod actions;
 mod render;
 
 use crate::views::components::SimpleInputState;
-use crate::workspace::persistence::{list_sessions, SessionInfo};
-use crate::workspace::state::{Workspace, WorkspaceData};
+use crate::workspace::persistence::SessionInfo;
 use gpui::*;
 
-/// Session Manager overlay for managing multiple workspaces
+/// Session Manager overlay for managing multiple workspaces.
+///
+/// Holds no workspace handle: sessions are daemon-owned, so every mutating
+/// action is dispatched (via `SessionManagerEvent::Action`) to the local daemon
+/// rather than read/written from the client mirror.
 pub struct SessionManager {
-    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) client: okena_transport::remote_action::RemoteActionClient,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) sessions: Vec<SessionInfo>,
+    pub(crate) loading_sessions: bool,
     /// Input for new session name
     pub(crate) new_session_input: Entity<SimpleInputState>,
     /// Input for renaming session (created when rename starts)
@@ -32,18 +36,23 @@ pub(crate) enum SessionManagerTab {
 }
 
 impl SessionManager {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let sessions = list_sessions().unwrap_or_default();
+    pub fn new(
+        client: okena_transport::remote_action::RemoteActionClient,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         // Default export path
         let default_export_path = dirs::home_dir()
-            .map(|p| p.join("workspace-export.json").to_string_lossy().to_string())
+            .map(|p| {
+                p.join("workspace-export.json")
+                    .to_string_lossy()
+                    .to_string()
+            })
             .unwrap_or_else(|| "workspace-export.json".to_string());
 
-        let new_session_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter session name...")
-        });
+        let new_session_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter session name..."));
 
         let export_path_input = cx.new(|cx| {
             SimpleInputState::new(cx)
@@ -51,14 +60,14 @@ impl SessionManager {
                 .default_value(default_export_path)
         });
 
-        let import_path_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter path to import...")
-        });
+        let import_path_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter path to import..."));
 
-        Self {
-            workspace,
+        let mut manager = Self {
+            client,
             focus_handle,
-            sessions,
+            sessions: Vec::new(),
+            loading_sessions: true,
             new_session_input,
             rename_input: None,
             renaming_session: None,
@@ -67,14 +76,18 @@ impl SessionManager {
             export_path_input,
             import_path_input,
             active_tab: SessionManagerTab::Sessions,
-        }
+        };
+        manager.refresh_sessions(cx);
+        manager
     }
 }
 
 pub enum SessionManagerEvent {
     Close,
-    // Boxed: WorkspaceData is large and would bloat every event otherwise.
-    SwitchWorkspace(Box<WorkspaceData>),
+    /// A ready-to-dispatch session/workspace action for the host to route to the
+    /// local daemon (load/save/import/export). The daemon owns session files and
+    /// the authoritative workspace, so these never touch the client's mirror.
+    Action(okena_core::api::ActionRequest),
 }
 
 impl EventEmitter<SessionManagerEvent> for SessionManager {}

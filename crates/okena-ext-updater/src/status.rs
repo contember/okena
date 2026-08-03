@@ -1,14 +1,19 @@
-use okena_extensions::ThemeColors;
-use okena_ui::tokens::ui_text_sm;
-use gpui::*;
-use gpui_component::h_flex;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(feature = "gpui-ui")]
+use gpui::*;
+#[cfg(feature = "gpui-ui")]
+use gpui_component::h_flex;
+#[cfg(feature = "gpui-ui")]
+use okena_extensions::ThemeColors;
+#[cfg(feature = "gpui-ui")]
+use okena_ui::tokens::ui_text_sm;
 
 /// Status of the update process.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateStatus {
     Idle,
     Checking,
@@ -38,6 +43,15 @@ pub enum UpdateStatus {
     Failed {
         error: String,
     },
+}
+
+/// Serializable view of the daemon-owned update state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateStatusSnapshot {
+    pub app_version: String,
+    pub status: UpdateStatus,
+    pub dismissed: bool,
+    pub is_homebrew: bool,
 }
 
 struct UpdateInfoInner {
@@ -77,6 +91,23 @@ impl UpdateInfo {
 
     pub fn status(&self) -> UpdateStatus {
         self.inner.lock().status.clone()
+    }
+
+    pub fn snapshot(&self) -> UpdateStatusSnapshot {
+        let inner = self.inner.lock();
+        UpdateStatusSnapshot {
+            app_version: self.app_version(),
+            status: inner.status.clone(),
+            dismissed: inner.dismissed,
+            is_homebrew: inner.is_homebrew,
+        }
+    }
+
+    pub fn apply_snapshot(&self, snapshot: UpdateStatusSnapshot) {
+        let mut inner = self.inner.lock();
+        inner.status = snapshot.status;
+        inner.dismissed = snapshot.dismissed;
+        inner.is_homebrew = snapshot.is_homebrew;
     }
 
     pub fn set_status(&self, status: UpdateStatus) {
@@ -183,35 +214,132 @@ pub fn is_homebrew_install() -> bool {
 #[derive(Clone)]
 pub struct GlobalUpdateInfo(pub UpdateInfo);
 
+#[cfg(feature = "gpui-ui")]
 impl Global for GlobalUpdateInfo {}
 
+#[cfg(feature = "gpui-ui")]
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
 }
 
+#[cfg(feature = "gpui-ui")]
 fn open_url(url: &str) {
     okena_core::process::open_url(url);
 }
 
 /// Status bar widget that shows update status.
+#[cfg(feature = "gpui-ui")]
 pub struct UpdateStatusWidget {
-    _subscription: Option<()>,
+    _subscription: Option<Subscription>,
 }
 
+#[cfg(feature = "gpui-ui")]
 impl UpdateStatusWidget {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Start the background checker when the widget is created
-        if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
+        let subscription = cx
+            .try_global::<crate::GlobalLocalBuild>()
+            .map(|local| local.0.clone())
+            .map(|state| cx.observe(&state, |_this, _state, cx| cx.notify()));
+
+        // Installed builds mirror daemon-owned update state into this process.
+        if subscription.is_none()
+            && let Some(gui) = cx.try_global::<GlobalUpdateInfo>()
+        {
             let info = gui.0.clone();
-            crate::update_checker::start_update_checker(info, cx);
+            crate::update_checker::start_update_status_poll(info, cx);
         }
 
-        Self { _subscription: None }
+        Self {
+            _subscription: subscription,
+        }
     }
 }
 
+#[cfg(feature = "gpui-ui")]
 impl Render for UpdateStatusWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(local) = cx
+            .try_global::<crate::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            let t = theme(cx);
+            let state = local.read(cx);
+            let text = |label: String, color| {
+                div()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(color)
+                    .text_size(ui_text_sm(cx))
+                    .child(label)
+                    .into_any_element()
+            };
+
+            if state.daemon_ui_owned() == Some(false) {
+                return text(
+                    "Local build · external daemon".to_string(),
+                    rgb(t.text_muted),
+                );
+            }
+
+            return match state.status() {
+                crate::LocalBuildStatus::Idle => div()
+                    .id("local-rebuild")
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(rgb(t.term_green))
+                    .text_size(ui_text_sm(cx))
+                    .child("Local build · Rebuild")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::RebuildLocal), cx);
+                    })
+                    .into_any_element(),
+                crate::LocalBuildStatus::Building => {
+                    text("Building release…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::ReadyToRestart => div()
+                    .id("local-restart")
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .text_color(rgb(t.term_green))
+                    .text_size(ui_text_sm(cx))
+                    .child("Local build · Restart")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::RestartLocalBuild), cx);
+                    })
+                    .into_any_element(),
+                crate::LocalBuildStatus::RestartingDaemon => {
+                    text("Restarting daemon…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::RestartingApp => {
+                    text("Restarting Okena…".to_string(), rgb(t.term_yellow))
+                }
+                crate::LocalBuildStatus::Failed { error } => h_flex()
+                    .id("local-rebuild-failed")
+                    .gap(px(6.0))
+                    .items_center()
+                    .text_size(ui_text_sm(cx))
+                    .child(
+                        div()
+                            .text_color(rgb(t.term_red))
+                            .child(format!("Rebuild failed: {error}")),
+                    )
+                    .child(
+                        div()
+                            .id("local-rebuild-retry")
+                            .cursor_pointer()
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.text_color(rgb(t.text_primary)))
+                            .child("Retry")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::RebuildLocal), cx);
+                            }),
+                    )
+                    .into_any_element(),
+            };
+        }
+
         let Some(update_info) = cx.try_global::<GlobalUpdateInfo>() else {
             return div().size_0().into_any_element();
         };
@@ -242,26 +370,20 @@ impl Render for UpdateStatusWidget {
                             .on_click(cx.listener(|_this, _, _window, cx| {
                                 if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
                                     let info = gui.0.clone();
-                                    if let UpdateStatus::Ready { version, path } = info.status() {
-                                        info.set_status(UpdateStatus::Installing {
-                                            version: version.clone(),
-                                        });
-                                        cx.notify();
-                                        cx.spawn(async move |this, cx| {
-                                            crate::orchestrator::run_install(
-                                                info,
-                                                version,
-                                                path,
-                                                cx,
-                                                move |cx| {
-                                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                                },
-                                            )
-                                            .await;
-                                        }).detach();
-                                    }
+                                    cx.spawn(async move |this, cx| {
+                                        match smol::unblock(crate::daemon_client::request_install)
+                                            .await
+                                        {
+                                            Ok(snapshot) => info.apply_snapshot(snapshot),
+                                            Err(e) => info.set_status(UpdateStatus::Failed {
+                                                error: e.to_string(),
+                                            }),
+                                        }
+                                        let _ = this.update(cx, |_, cx| cx.notify());
+                                    })
+                                    .detach();
                                 }
-                            }))
+                            })),
                     )
                     .child(
                         div()
@@ -272,53 +394,45 @@ impl Render for UpdateStatusWidget {
                             .child("What's new")
                             .on_click(move |_, _, _cx| {
                                 open_url(&release_url);
-                            })
+                            }),
                     )
                     .into_any_element()
             }
-            UpdateStatus::Installing { version } => {
-                div()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .text_color(rgb(t.term_yellow))
-                    .text_size(ui_text_sm(cx))
-                    .child(format!("Installing v{}...", version))
-                    .into_any_element()
-            }
-            UpdateStatus::ReadyToRestart { .. } => {
-                div()
-                    .id("update-restart")
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .text_color(rgb(t.term_green))
-                    .text_size(ui_text_sm(cx))
-                    .child("Restart to update")
-                    .on_click(move |_, _, cx| {
-                        crate::installer::restart_app(cx);
-                    })
-                    .into_any_element()
-            }
-            UpdateStatus::Downloading { version, progress } => {
-                h_flex()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_color(rgb(t.term_yellow))
-                            .text_size(ui_text_sm(cx))
-                            .child(format!("Downloading v{}... {}%", version, progress))
-                    )
-                    .into_any_element()
-            }
-            UpdateStatus::Checking => {
-                div()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .text_color(rgb(t.text_muted))
-                    .text_size(ui_text_sm(cx))
-                    .child("Checking for updates...")
-                    .into_any_element()
-            }
+            UpdateStatus::Installing { version } => div()
+                .px(px(6.0))
+                .py(px(1.0))
+                .text_color(rgb(t.term_yellow))
+                .text_size(ui_text_sm(cx))
+                .child(format!("Installing v{}...", version))
+                .into_any_element(),
+            UpdateStatus::ReadyToRestart { .. } => div()
+                .id("update-restart")
+                .cursor_pointer()
+                .px(px(6.0))
+                .py(px(1.0))
+                .text_color(rgb(t.term_green))
+                .text_size(ui_text_sm(cx))
+                .child("Restart to update")
+                .on_click(move |_, _, cx| {
+                    crate::installer::restart_app(cx);
+                })
+                .into_any_element(),
+            UpdateStatus::Downloading { version, progress } => h_flex()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_color(rgb(t.term_yellow))
+                        .text_size(ui_text_sm(cx))
+                        .child(format!("Downloading v{}... {}%", version, progress)),
+                )
+                .into_any_element(),
+            UpdateStatus::Checking => div()
+                .px(px(6.0))
+                .py(px(1.0))
+                .text_color(rgb(t.text_muted))
+                .text_size(ui_text_sm(cx))
+                .child("Checking for updates...")
+                .into_any_element(),
             UpdateStatus::Failed { ref error } => {
                 let info_dismiss = info.clone();
                 div()
@@ -330,7 +444,7 @@ impl Render for UpdateStatusWidget {
                         div()
                             .text_color(rgb(t.term_red))
                             .text_size(ui_text_sm(cx))
-                            .child(format!("Update failed: {}", error))
+                            .child(format!("Update failed: {}", error)),
                     )
                     .child(
                         div()
@@ -341,7 +455,8 @@ impl Render for UpdateStatusWidget {
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();
-                            })
+                                let _ = crate::daemon_client::request_dismiss();
+                            }),
                     )
                     .into_any_element()
             }
@@ -356,7 +471,7 @@ impl Render for UpdateStatusWidget {
                         div()
                             .text_color(rgb(t.text_muted))
                             .text_size(ui_text_sm(cx))
-                            .child(format!("v{} — brew upgrade okena", version))
+                            .child(format!("v{} — brew upgrade okena", version)),
                     )
                     .child(
                         div()
@@ -367,7 +482,8 @@ impl Render for UpdateStatusWidget {
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();
-                            })
+                                let _ = crate::daemon_client::request_dismiss();
+                            }),
                     )
                     .into_any_element()
             }

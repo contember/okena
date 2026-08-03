@@ -1,12 +1,15 @@
 use crate::keybindings::ToggleSidebar;
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::workspace::state::Workspace;
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
+use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
+use okena_core::api::{ApiLayoutNode, ApiSystemStats};
 use okena_extensions::{ExtensionInstance, ExtensionRegistry};
+use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,6 +26,20 @@ struct SystemStats {
     cpu_usage: f32,
     memory_used_gb: f32,
     memory_total_gb: f32,
+}
+
+#[derive(Clone)]
+struct RemoteStatusSnapshot {
+    id: String,
+    name: String,
+    endpoint: String,
+    status: ConnectionStatus,
+    tls: bool,
+    project_count: usize,
+    window_count: usize,
+    terminal_count: usize,
+    has_state: bool,
+    system_stats: Option<ApiSystemStats>,
 }
 
 /// Global system info cache
@@ -48,9 +65,13 @@ impl SystemInfoCache {
         self.system.refresh_memory();
 
         // Calculate average CPU usage across all cores
-        let cpu_usage = self.system.cpus().iter()
+        let cpu_usage = self
+            .system
+            .cpus()
+            .iter()
             .map(|cpu| cpu.cpu_usage())
-            .sum::<f32>() / self.system.cpus().len().max(1) as f32;
+            .sum::<f32>()
+            / self.system.cpus().len().max(1) as f32;
 
         let memory_used = self.system.used_memory() as f64 / 1_073_741_824.0; // bytes to GB
         let memory_total = self.system.total_memory() as f64 / 1_073_741_824.0;
@@ -78,10 +99,17 @@ pub struct StatusBar {
     /// (cancels background tasks, releases views).
     active_extensions: HashMap<String, ExtensionInstance>,
     sidebar_open: bool,
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
+    remote_status_bounds: Bounds<Pixels>,
+    remote_popover_visible: bool,
 }
 
 impl StatusBar {
-    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<crate::workspace::focus::FocusManager>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
 
         // Initial refresh
@@ -105,19 +133,27 @@ impl StatusBar {
                     break; // View was dropped
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         // Clone activate functions from the global registry.
-        let activate_fns: Vec<_> = cx.try_global::<ExtensionRegistry>()
+        let activate_fns: Vec<_> = cx
+            .try_global::<ExtensionRegistry>()
             .map(|registry| {
-                registry.extensions().iter()
+                registry
+                    .extensions()
+                    .iter()
                     .map(|ext| (ext.manifest.id.to_string(), ext.activate.clone()))
                     .collect()
             })
             .unwrap_or_default();
 
         // Activate initially enabled extensions
-        let enabled = settings_entity(cx).read(cx).settings.enabled_extensions.clone();
+        let enabled = settings_entity(cx)
+            .read(cx)
+            .settings
+            .enabled_extensions
+            .clone();
         let active_extensions = Self::activate_extensions(&activate_fns, &enabled, cx);
 
         // Observe settings to sync extensions when enabled_extensions changes
@@ -125,7 +161,8 @@ impl StatusBar {
         cx.observe(&settings, |this, entity, cx| {
             let enabled = entity.read(cx).settings.enabled_extensions.clone();
             this.sync_extensions(&enabled, cx);
-        }).detach();
+        })
+        .detach();
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
@@ -133,7 +170,15 @@ impl StatusBar {
         cx.observe(&focus_manager, |_, _, cx| cx.notify()).detach();
 
         Self {
-            workspace, focus_manager, cache, activate_fns, active_extensions, sidebar_open: true,
+            workspace,
+            focus_manager,
+            cache,
+            activate_fns,
+            active_extensions,
+            sidebar_open: true,
+            remote_manager: None,
+            remote_status_bounds: Bounds::default(),
+            remote_popover_visible: false,
         }
     }
 
@@ -143,7 +188,8 @@ impl StatusBar {
         enabled: &HashSet<String>,
         cx: &mut App,
     ) -> HashMap<String, ExtensionInstance> {
-        activate_fns.iter()
+        activate_fns
+            .iter()
             .filter(|(id, _)| enabled.contains(id.as_str()))
             .map(|(id, activate)| (id.clone(), activate(cx)))
             .collect()
@@ -154,7 +200,8 @@ impl StatusBar {
     /// (dropping the instance cancels background tasks and releases views).
     fn sync_extensions(&mut self, enabled: &HashSet<String>, cx: &mut Context<Self>) {
         // Deactivate disabled (drop instances → cancel tasks)
-        self.active_extensions.retain(|id, _| enabled.contains(id.as_str()));
+        self.active_extensions
+            .retain(|id, _| enabled.contains(id.as_str()));
 
         // Activate newly enabled
         for (id, activate) in &self.activate_fns {
@@ -173,6 +220,15 @@ impl StatusBar {
         }
     }
 
+    pub fn set_remote_manager(
+        &mut self,
+        manager: Entity<RemoteConnectionManager>,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_manager = Some(manager);
+        cx.notify();
+    }
+
     fn format_time() -> String {
         match OffsetDateTime::now_local() {
             Ok(now) => format!("{:02}:{:02}", now.hour(), now.minute()),
@@ -183,18 +239,381 @@ impl StatusBar {
             }
         }
     }
+
+    fn remote_snapshots(&self, cx: &App) -> Vec<RemoteStatusSnapshot> {
+        let Some(manager) = &self.remote_manager else {
+            return Vec::new();
+        };
+
+        manager
+            .read(cx)
+            .connections_with_system_stats()
+            .into_iter()
+            .filter(|(config, _, _, _)| config.id != LOCAL_DAEMON_CONNECTION_ID)
+            .map(|(config, status, state, system_stats)| {
+                let (project_count, window_count, terminal_count) = match state {
+                    Some(state) => {
+                        let terminals = state
+                            .projects
+                            .iter()
+                            .map(|project| Self::layout_terminal_count(project.layout.as_ref()))
+                            .sum();
+                        (state.projects.len(), state.windows.len(), terminals)
+                    }
+                    None => (0, 0, 0),
+                };
+
+                RemoteStatusSnapshot {
+                    id: config.id.clone(),
+                    name: config.name.clone(),
+                    endpoint: config.display_endpoint(),
+                    status: status.clone(),
+                    tls: config.tls,
+                    project_count,
+                    window_count,
+                    terminal_count,
+                    has_state: state.is_some(),
+                    system_stats: system_stats.cloned(),
+                }
+            })
+            .collect()
+    }
+
+    fn layout_terminal_count(node: Option<&ApiLayoutNode>) -> usize {
+        match node {
+            Some(ApiLayoutNode::Terminal {
+                terminal_id: Some(_),
+                ..
+            }) => 1,
+            Some(ApiLayoutNode::Terminal { .. }) => 0,
+            Some(ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. }) => {
+                children
+                    .iter()
+                    .map(|child| Self::layout_terminal_count(Some(child)))
+                    .sum()
+            }
+            None => 0,
+        }
+    }
+
+    fn count_label(count: usize, singular: &str) -> String {
+        if count == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{count} {singular}s")
+        }
+    }
+
+    fn status_label(status: &ConnectionStatus) -> String {
+        match status {
+            ConnectionStatus::Disconnected => "Disconnected".to_string(),
+            ConnectionStatus::Connecting => "Connecting".to_string(),
+            ConnectionStatus::Pairing => "Pairing".to_string(),
+            ConnectionStatus::Connected => "Connected".to_string(),
+            ConnectionStatus::Reconnecting { attempt } => format!("Reconnecting #{attempt}"),
+            ConnectionStatus::Error(message) => {
+                if message.is_empty() {
+                    "Error".to_string()
+                } else {
+                    format!("Error: {message}")
+                }
+            }
+        }
+    }
+
+    fn status_color(status: &ConnectionStatus, t: &okena_core::theme::ThemeColors) -> u32 {
+        match status {
+            ConnectionStatus::Connected => t.term_green,
+            ConnectionStatus::Connecting
+            | ConnectionStatus::Pairing
+            | ConnectionStatus::Reconnecting { .. } => t.term_yellow,
+            ConnectionStatus::Disconnected => t.text_muted,
+            ConnectionStatus::Error(_) => t.term_red,
+        }
+    }
+
+    fn cpu_metric_color(cpu_usage: f32, t: &okena_core::theme::ThemeColors) -> u32 {
+        if cpu_usage > 80.0 {
+            t.metric_critical
+        } else if cpu_usage > 50.0 {
+            t.metric_warning
+        } else {
+            t.metric_normal
+        }
+    }
+
+    fn memory_metric_color(memory_percent: u64, t: &okena_core::theme::ThemeColors) -> u32 {
+        if memory_percent > 80 {
+            t.metric_critical
+        } else if memory_percent > 60 {
+            t.metric_warning
+        } else {
+            t.metric_normal
+        }
+    }
+
+    fn memory_percent_from_bytes(stats: &ApiSystemStats) -> u64 {
+        stats
+            .memory_used_bytes
+            .saturating_mul(100)
+            .checked_div(stats.memory_total_bytes)
+            .unwrap_or(0)
+    }
+
+    fn format_gib_tenths(bytes: u64) -> String {
+        const GIB: u64 = 1_073_741_824;
+        let tenths = bytes.saturating_mul(10).saturating_add(GIB / 2) / GIB;
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+
+    fn format_memory_bytes(stats: &ApiSystemStats) -> String {
+        format!(
+            "{}/{} GB",
+            Self::format_gib_tenths(stats.memory_used_bytes),
+            Self::format_gib_tenths(stats.memory_total_bytes),
+        )
+    }
+
+    fn aggregate_remote_color(
+        snapshots: &[RemoteStatusSnapshot],
+        t: &okena_core::theme::ThemeColors,
+    ) -> u32 {
+        if snapshots
+            .iter()
+            .any(|snap| matches!(snap.status, ConnectionStatus::Error(_)))
+        {
+            return t.term_red;
+        }
+        if snapshots.iter().any(|snap| {
+            matches!(
+                snap.status,
+                ConnectionStatus::Connecting
+                    | ConnectionStatus::Pairing
+                    | ConnectionStatus::Reconnecting { .. }
+            )
+        }) {
+            return t.term_yellow;
+        }
+        if snapshots
+            .iter()
+            .all(|snap| matches!(snap.status, ConnectionStatus::Connected))
+        {
+            return t.term_green;
+        }
+        t.text_muted
+    }
+
+    fn render_remote_status_popover(
+        &self,
+        snapshots: &[RemoteStatusSnapshot],
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.remote_popover_visible || snapshots.is_empty() {
+            return div().size_0().into_any_element();
+        }
+
+        let bounds = self.remote_status_bounds;
+        let position = point(
+            bounds.origin.x + bounds.size.width,
+            bounds.origin.y - px(6.0),
+        );
+
+        let mut rows = Vec::new();
+        for snapshot in snapshots {
+            let status_label = Self::status_label(&snapshot.status);
+            let detail = if snapshot.has_state {
+                format!(
+                    "{} / {} / {}",
+                    Self::count_label(snapshot.project_count, "project"),
+                    Self::count_label(snapshot.terminal_count, "terminal"),
+                    Self::count_label(snapshot.window_count, "window"),
+                )
+            } else {
+                "Waiting for state".to_string()
+            };
+            let security = if snapshot.tls { "TLS" } else { "no TLS" };
+            let status_color = Self::status_color(&snapshot.status, t);
+            let system_stats = snapshot.system_stats.clone();
+
+            rows.push(
+                div()
+                    .id(ElementId::Name(
+                        format!("remote-status-row-{}", snapshot.id).into(),
+                    ))
+                    .py(px(6.0))
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .flex()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .w(px(7.0))
+                            .h(px(7.0))
+                            .rounded_full()
+                            .bg(rgb(status_color))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        v_flex()
+                            .gap(px(2.0))
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                h_flex()
+                                    .gap(px(6.0))
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(ui_text_ms(cx))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(t.text_primary))
+                                            .child(snapshot.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(if snapshot.tls {
+                                                t.text_muted
+                                            } else {
+                                                t.term_yellow
+                                            }))
+                                            .child(security),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(snapshot.endpoint.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(status_color))
+                                    .child(status_label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(detail),
+                            )
+                            .when_some(system_stats, |el, stats| {
+                                let memory_percent = Self::memory_percent_from_bytes(&stats);
+                                el.child(
+                                    h_flex()
+                                        .gap(px(10.0))
+                                        .text_size(ui_text_sm(cx))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(4.0))
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child("CPU"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(Self::cpu_metric_color(
+                                                            stats.cpu_usage,
+                                                            t,
+                                                        )))
+                                                        .child(format!(
+                                                            "{:02.0}%",
+                                                            stats.cpu_usage
+                                                        )),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap(px(4.0))
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child("MEM"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .text_color(rgb(Self::memory_metric_color(
+                                                            memory_percent,
+                                                            t,
+                                                        )))
+                                                        .child(Self::format_memory_bytes(&stats)),
+                                                ),
+                                        ),
+                                )
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        deferred(
+            anchored()
+                .position(position)
+                .anchor(Anchor::BottomRight)
+                .snap_to_window()
+                .child(
+                    okena_ui::popover::popover_panel("remote-status-popover", t)
+                        .w(px(360.0))
+                        .max_h(px(280.0))
+                        .overflow_y_scroll()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .pb(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(t.text_secondary))
+                                        .child("REMOTE CONNECTIONS"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("{}", snapshots.len())),
+                                ),
+                        )
+                        .children(rows),
+                ),
+        )
+        .into_any_element()
+    }
 }
 
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let stats = self.cache.lock().stats();
+        let remote_snapshots = self.remote_snapshots(cx);
 
         // Get current time using chrono-free approach
         let time_str = Self::format_time();
 
         // Format memory
-        let memory_str = format!("{:.1}/{:.1} GB", stats.memory_used_gb, stats.memory_total_gb);
+        let memory_str = format!(
+            "{:.1}/{:.1} GB",
+            stats.memory_used_gb, stats.memory_total_gb
+        );
         let memory_percent = if stats.memory_total_gb > 0.0 {
             (stats.memory_used_gb / stats.memory_total_gb * 100.0) as u32
         } else {
@@ -218,12 +637,16 @@ impl Render for StatusBar {
         };
 
         // Collect widgets in stable registry order from active extensions
-        let left_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+        let left_widgets: Vec<&Vec<AnyView>> = self
+            .activate_fns
+            .iter()
             .filter_map(|(id, _)| self.active_extensions.get(id))
             .map(|inst| &inst.status_bar_widgets)
             .filter(|w| !w.is_empty())
             .collect();
-        let right_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+        let right_widgets: Vec<&Vec<AnyView>> = self
+            .activate_fns
+            .iter()
             .filter_map(|(id, _)| self.active_extensions.get(id))
             .map(|inst| &inst.status_bar_right_widgets)
             .filter(|w| !w.is_empty())
@@ -242,7 +665,8 @@ impl Render for StatusBar {
             .text_size(ui_text_ms(cx))
             // Left side - sidebar toggle (macOS only) + system stats
             .child({
-                let mut left = h_flex().gap(px(16.0))
+                let mut left = h_flex()
+                    .gap(px(16.0))
                     // On macOS, sidebar toggle lives in the status bar footer
                     .when(cfg!(target_os = "macos"), |d| {
                         d.child(
@@ -269,31 +693,19 @@ impl Render for StatusBar {
                     .child(
                         h_flex()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_muted))
-                                    .child("CPU")
-                            )
+                            .child(div().text_color(rgb(t.text_muted)).child("CPU"))
                             .child(
                                 div()
                                     .text_color(rgb(cpu_color))
-                                    .child(format!("{:02.0}%", stats.cpu_usage))
-                            )
+                                    .child(format!("{:02.0}%", stats.cpu_usage)),
+                            ),
                     )
                     // Memory
                     .child(
                         h_flex()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_muted))
-                                    .child("MEM")
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(mem_color))
-                                    .child(memory_str)
-                            )
+                            .child(div().text_color(rgb(t.text_muted)).child("MEM"))
+                            .child(div().text_color(rgb(mem_color)).child(memory_str)),
                     );
 
                 // Left-side extension widgets
@@ -307,8 +719,7 @@ impl Render for StatusBar {
             })
             // Right side - remote info + version + time
             .child({
-                let mut right = h_flex()
-                    .gap(px(8.0));
+                let mut right = h_flex().gap(px(8.0));
 
                 // Right-side extension widgets
                 for widgets in &right_widgets {
@@ -317,41 +728,106 @@ impl Render for StatusBar {
                     }
                 }
 
-                // Show remote server status if active
-                if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>()
-                    && let Some(port) = remote_info.0.port() {
-                        right = right.child(
-                            div()
-                                .id("remote-info")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .text_color(rgb(t.term_cyan))
-                                        .child(format!("REMOTE :{}", port))
+                // Show daemon remote endpoint when active. In thin-client mode
+                // the server lives in the daemon process, so the GUI no longer
+                // has an in-process GlobalRemoteInfo/AuthStore to inspect.
+                if let Some(daemon) = crate::remote::local::running_daemon() {
+                    let port = daemon.port;
+                    right = right.child(
+                        div()
+                            .id("remote-info")
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    // Neutral footer chrome (matches version/time),
+                                    // not a terminal ANSI accent — the accent read
+                                    // inconsistent in themes like Pastel.
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(format!("REMOTE :{}", port)),
+                            )
+                            .child(
+                                div()
+                                    .id("pair-btn")
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    // White label + hover bg for the clickable
+                                    // affordance, instead of the ANSI yellow accent.
+                                    .text_color(rgb(t.text_primary))
+                                    .text_size(ui_text_sm(cx))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .child("Pair")
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::keybindings::ShowPairingDialog),
+                                            cx,
+                                        );
+                                    }),
+                            ),
+                    );
+                }
+
+                if !remote_snapshots.is_empty() {
+                    let connected = remote_snapshots
+                        .iter()
+                        .filter(|snap| matches!(snap.status, ConnectionStatus::Connected))
+                        .count();
+                    let status_color = Self::aggregate_remote_color(&remote_snapshots, &t);
+                    let entity_for_bounds = cx.entity().clone();
+
+                    right = right.child(
+                        div()
+                            .id("remote-status-pill")
+                            .relative()
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.remote_popover_visible = !this.remote_popover_visible;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(7.0))
+                                    .h(px(7.0))
+                                    .rounded_full()
+                                    .bg(rgb(status_color)),
+                            )
+                            .child(div().text_color(rgb(t.text_secondary)).child("REMOTES"))
+                            .child(
+                                div()
+                                    .text_color(rgb(status_color))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{}/{}", connected, remote_snapshots.len())),
+                            )
+                            .child(
+                                canvas(
+                                    move |bounds, _window, app| {
+                                        entity_for_bounds.update(
+                                            app,
+                                            |this: &mut StatusBar, _cx| {
+                                                this.remote_status_bounds = bounds;
+                                            },
+                                        );
+                                    },
+                                    |_, _, _, _| {},
                                 )
-                                .child(
-                                    div()
-                                        .id("pair-btn")
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded(px(3.0))
-                                        .text_color(rgb(t.term_yellow))
-                                        .text_size(ui_text_sm(cx))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .child("Pair")
-                                        .on_click(|_, window, cx| {
-                                            window.dispatch_action(
-                                                Box::new(crate::keybindings::ShowPairingDialog),
-                                                cx,
-                                            );
-                                        })
-                                )
-                        );
-                    }
+                                .absolute()
+                                .size_full(),
+                            ),
+                    );
+                } else if self.remote_popover_visible {
+                    self.remote_popover_visible = false;
+                }
 
                 // Focused project indicator
                 let focused_project = {
@@ -402,7 +878,7 @@ impl Render for StatusBar {
                                             cx.notify();
                                         });
                                     }),
-                            )
+                            ),
                     );
                 }
 
@@ -411,14 +887,11 @@ impl Render for StatusBar {
                         el.child(
                             div()
                                 .text_color(rgb(t.text_muted))
-                                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                         )
                     })
-                    .child(
-                        div()
-                            .text_color(rgb(t.text_secondary))
-                            .child(time_str)
-                    )
+                    .child(div().text_color(rgb(t.text_secondary)).child(time_str))
+                    .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
     }
 }

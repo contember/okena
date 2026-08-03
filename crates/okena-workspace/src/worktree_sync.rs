@@ -1,7 +1,6 @@
 use crate::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
-use std::path::Path;
 use std::time::Duration;
 
 /// Periodically removes stale worktree projects whose directories no longer exist.
@@ -28,27 +27,36 @@ impl WorktreeSyncWatcher {
                 smol::Timer::after(Duration::from_secs(30)).await;
 
                 // Collect current worktree projects, skipping those being actively managed
-                let current_worktrees: Vec<(String, String)> = cx.update(|cx| {
+                let current_worktrees: Vec<(String, std::path::PathBuf)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
-                    ws.data().projects.iter()
+                    ws.data()
+                        .projects
+                        .iter()
                         .filter(|p| p.worktree_info.is_some())
                         .filter(|p| !p.is_remote)
                         .filter(|p| !ws.is_project_closing(&p.id))
                         .filter(|p| !ws.is_creating_project(&p.id))
                         .filter(|p| !ws.lifecycle.is_worktree_removing(&p.path))
-                        .map(|p| (p.id.clone(), p.path.clone()))
+                        .map(|p| {
+                            (
+                                p.id.clone(),
+                                crate::persistence::worktree_checkout_path(p).to_path_buf(),
+                            )
+                        })
                         .collect()
                 });
 
                 // Check for stale worktrees on blocking thread
                 let stale_ids = smol::unblock({
                     move || {
-                        current_worktrees.iter()
-                            .filter(|(_, path)| !Path::new(path).exists())
+                        current_worktrees
+                            .iter()
+                            .filter(|(_, path)| !path.exists())
                             .map(|(id, _)| id.clone())
                             .collect::<Vec<_>>()
                     }
-                }).await;
+                })
+                .await;
 
                 // Remove stale worktrees
                 if !stale_ids.is_empty() {
@@ -68,6 +76,7 @@ impl WorktreeSyncWatcher {
                     break;
                 }
             }
-        }).detach();
+        })
+        .detach();
     }
 }

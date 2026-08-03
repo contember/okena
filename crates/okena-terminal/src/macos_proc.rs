@@ -12,10 +12,10 @@
 //! such cases.
 
 use libproc::libproc::bsd_info::BSDInfo;
-use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
+use libproc::libproc::file_info::{ListFDs, ProcFDType, pidfdinfo};
 use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind, TcpSIState};
 use libproc::libproc::proc_pid::{listpidinfo, name, pidinfo};
-use libproc::processes::{pids_by_type, ProcFilter};
+use libproc::processes::{ProcFilter, pids_by_type};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -54,6 +54,12 @@ pub fn process_tree() -> HashMap<u32, Vec<u32>> {
     tree
 }
 
+/// Stable process birth marker used to revalidate a PID before signalling it.
+pub fn process_start_time(pid: u32) -> Option<(u64, u64)> {
+    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
+    Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
 /// Map each given unix-socket path to the pids that have it open — equivalent to
 /// `lsof <paths>`. Scans every process's socket fds and matches the bound
 /// unix-domain address against the requested paths (exact match, like the lsof
@@ -65,7 +71,10 @@ pub fn pids_holding_unix_sockets(socket_paths: &[PathBuf]) -> HashMap<PathBuf, V
     }
     for pid in pids_by_type(ProcFilter::All).unwrap_or_default() {
         for socket in socket_fds(pid) {
-            if !matches!(SocketInfoKind::from(socket.psi.soi_kind), SocketInfoKind::Un) {
+            if !matches!(
+                SocketInfoKind::from(socket.psi.soi_kind),
+                SocketInfoKind::Un
+            ) {
                 continue;
             }
             // SAFETY: `soi_kind == Un` means `pri_un` is the active union arm.
@@ -89,7 +98,10 @@ pub fn listening_port_pairs() -> Vec<(u32, u16)> {
     let mut pairs = Vec::new();
     for pid in pids_by_type(ProcFilter::All).unwrap_or_default() {
         for socket in socket_fds(pid) {
-            if !matches!(SocketInfoKind::from(socket.psi.soi_kind), SocketInfoKind::Tcp) {
+            if !matches!(
+                SocketInfoKind::from(socket.psi.soi_kind),
+                SocketInfoKind::Tcp
+            ) {
                 continue;
             }
             // SAFETY: `soi_kind == Tcp` means `pri_tcp` is the active union arm.

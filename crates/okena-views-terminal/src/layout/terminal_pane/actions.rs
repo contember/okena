@@ -1,11 +1,11 @@
 //! Terminal pane action handlers.
 
-use crate::ActionDispatch;
+use crate::{ActionDispatch, RemotePasteFile};
+use gpui::*;
 use okena_core::api::ActionRequest;
 #[cfg(target_os = "windows")]
 use okena_terminal::shell_config::ShellType;
 use okena_workspace::state::SplitDirection;
-use gpui::*;
 
 use super::TerminalPane;
 
@@ -61,9 +61,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
     pub(super) fn handle_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && let Some(text) = terminal.get_selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+            && let Some(text) = terminal.get_selected_text()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     pub(super) fn handle_paste(&mut self, cx: &mut Context<Self>) {
@@ -90,7 +91,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         // writes the file and bracketed-pastes its path; the client-local temp
         // paths below would hand the server a path that doesn't exist on it.
         if let Some(ref dispatcher) = self.action_dispatcher
-            && dispatcher.is_remote()
+            && !dispatcher.shares_local_filesystem()
             && let Some(ref terminal_id) = self.terminal_id
         {
             dispatcher.upload_remote_paste_image(
@@ -132,7 +133,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 log::warn!("WSL UNC write to {} failed; falling back to /mnt/c", unc);
             }
 
-            let Some(path) = write_paste_image_to_temp(&image, &filename) else { return };
+            let Some(path) = write_paste_image_to_temp(&image, &filename) else {
+                return;
+            };
             let path_str = if matches!(shell, ShellType::Wsl { .. }) {
                 okena_terminal::shell_config::windows_path_to_wsl(&path.to_string_lossy())
             } else {
@@ -143,43 +146,101 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let Some(path) = write_paste_image_to_temp(&image, &filename) else { return };
+            let Some(path) = write_paste_image_to_temp(&image, &filename) else {
+                return;
+            };
             terminal.send_paste(&path.to_string_lossy());
         }
     }
 
     pub(super) fn handle_jump_prev_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prompt_above() {
-                cx.notify();
-            }
+            && terminal.jump_to_prompt_above()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_next_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prompt_below() {
-                cx.notify();
-            }
+            && terminal.jump_to_prompt_below()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_prev_failed(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_prev_failed_command() {
-                cx.notify();
-            }
+            && terminal.jump_to_prev_failed_command()
+        {
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_jump_next_failed(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal
-            && terminal.jump_to_next_failed_command() {
-                cx.notify();
-            }
+            && terminal.jump_to_next_failed_command()
+        {
+            cx.notify();
+        }
     }
 
-    pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
+    pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         let Some(ref terminal) = self.terminal else {
             return;
         };
+
+        let Some(ref dispatcher) = self.action_dispatcher else {
+            return;
+        };
+
+        if !dispatcher.shares_local_filesystem() {
+            let Some(terminal_id) = self.terminal_id.clone() else {
+                return;
+            };
+            let dispatcher = dispatcher.clone();
+            let paths = paths.paths().to_vec();
+            cx.spawn(async move |_this, cx| {
+                let files = smol::unblock(move || {
+                    let mut files = Vec::new();
+                    let mut total_bytes = 0usize;
+                    for path in paths.into_iter().take(20) {
+                        match read_remote_paste_file(&path) {
+                            Ok(file)
+                                if total_bytes + file.bytes.len()
+                                    <= REMOTE_FILE_UPLOAD_LIMIT as usize =>
+                            {
+                                total_bytes += file.bytes.len();
+                                files.push(file);
+                            }
+                            Ok(_) => {
+                                log::error!(
+                                    "Cannot upload dropped files: combined size exceeds {} MiB",
+                                    REMOTE_FILE_UPLOAD_LIMIT / 1024 / 1024
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "Cannot upload dropped file {}: {error}",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
+                    files
+                })
+                .await;
+                if files.is_empty() {
+                    return;
+                }
+                cx.update(|cx| {
+                    dispatcher.upload_remote_paste_files(&terminal_id, files, cx);
+                });
+            })
+            .detach();
+            return;
+        }
 
         for path in paths.paths() {
             let escaped_path = Self::shell_escape_path(path);
@@ -204,6 +265,36 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         escaped
     }
+}
+
+const REMOTE_FILE_UPLOAD_LIMIT: u64 = 64 * 1024 * 1024;
+
+fn read_remote_paste_file(path: &std::path::Path) -> Result<RemotePasteFile, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("only files can be dropped into a remote terminal".to_string());
+    }
+    if metadata.len() > REMOTE_FILE_UPLOAD_LIMIT {
+        return Err(format!(
+            "file is larger than the {} MiB upload limit",
+            REMOTE_FILE_UPLOAD_LIMIT / 1024 / 1024
+        ));
+    }
+
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 16
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "bin".to_string());
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok(RemotePasteFile { extension, bytes })
 }
 
 fn paste_filename(image: &Image) -> String {
@@ -237,13 +328,19 @@ fn write_paste_image_to_temp(image: &Image, filename: &str) -> Option<std::path:
 #[cfg(target_os = "windows")]
 fn wsl_distro(shell: &ShellType) -> Option<String> {
     use std::sync::OnceLock;
-    let ShellType::Wsl { distro } = shell else { return None };
+    let ShellType::Wsl { distro } = shell else {
+        return None;
+    };
     if let Some(d) = distro {
         return Some(d.clone());
     }
     static DEFAULT: OnceLock<Option<String>> = OnceLock::new();
     DEFAULT
-        .get_or_init(|| okena_terminal::shell_config::detect_wsl_distros().into_iter().next())
+        .get_or_init(|| {
+            okena_terminal::shell_config::detect_wsl_distros()
+                .into_iter()
+                .next()
+        })
         .clone()
 }
 

@@ -1,6 +1,6 @@
 //! Input field components.
 
-use crate::theme::{with_alpha, ThemeColors};
+use crate::theme::{ThemeColors, with_alpha};
 use crate::tokens::*;
 use gpui::*;
 use gpui_component::v_flex;
@@ -23,14 +23,12 @@ pub fn input_container(t: &ThemeColors, focused: Option<bool>) -> Div {
 
 /// Labeled input field with a label above the input container.
 pub fn labeled_input(label: impl Into<SharedString>, t: &ThemeColors) -> Div {
-    v_flex()
-        .gap(SPACE_XS)
-        .child(
-            div()
-                .text_size(TEXT_MS)
-                .text_color(rgb(t.text_muted))
-                .child(label.into()),
-        )
+    v_flex().gap(SPACE_XS).child(
+        div()
+            .text_size(TEXT_MS)
+            .text_color(rgb(t.text_muted))
+            .child(label.into()),
+    )
 }
 
 /// Search input area with ">" prefix prompt and query/placeholder display.
@@ -39,7 +37,12 @@ pub fn search_input_area(query: &str, placeholder: &str, t: &ThemeColors) -> Div
 }
 
 /// Search input area with optional text selection highlight.
-pub fn search_input_area_selected(query: &str, placeholder: &str, selected: bool, t: &ThemeColors) -> Div {
+pub fn search_input_area_selected(
+    query: &str,
+    placeholder: &str,
+    selected: bool,
+    t: &ThemeColors,
+) -> Div {
     search_input_area_impl(query, placeholder, selected, t)
 }
 

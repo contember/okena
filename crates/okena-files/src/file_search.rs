@@ -3,49 +3,34 @@
 //! Provides a searchable list of files in the active project,
 //! similar to VS Code's Cmd+P file picker.
 
+use crate::file_scan::scan_files;
 use crate::list_overlay::ListOverlayConfig;
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
-use ignore::WalkBuilder;
 use okena_ui::badge::keyboard_hint;
-use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text};
 use okena_ui::empty_state::empty_state;
 use okena_ui::file_icon::file_icon;
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::selectable_list::selectable_list_item;
 use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
-use std::path::PathBuf;
+use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
+use std::path::Path;
+
+/// The flat file entry produced by the gpui-free scanner. Re-exported so the
+/// dialog and existing `okena_files::file_search::FileEntry` imports keep
+/// working after the scan logic moved to [`crate::file_scan`].
+pub use crate::file_scan::FileEntry;
 
 // Define Cancel action locally so we don't depend on the main app's keybindings
 gpui::actions!(okena_files, [Cancel]);
 
 /// Binary/non-openable file extensions that get pushed to the bottom of results.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp",
-    "mp3", "mp4", "wav", "avi", "mov",
-    "zip", "tar", "gz", "rar", "7z",
-    "pdf", "woff", "woff2", "ttf", "eot", "exe", "bin",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "mp3", "mp4", "wav", "avi", "mov",
+    "zip", "tar", "gz", "rar", "7z", "pdf", "woff", "woff2", "ttf", "eot", "exe", "bin",
 ];
-
-/// Maximum number of files to keep in the fuzzy finder index.
-///
-/// The file viewer tree is now lazy (see `crate::list_directory`), so the cap
-/// only constrains the Cmd+P fuzzy finder. 25k covers all but the very
-/// largest monorepos while keeping `nucleo` per-keystroke matching snappy.
-const MAX_FILES: usize = 25_000;
-
-/// A file entry in the search list
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FileEntry {
-    /// Full path to the file
-    pub path: PathBuf,
-    /// Path relative to project root
-    pub relative_path: String,
-    /// Just the filename
-    pub filename: String,
-}
 
 /// Remembered state from the last file search session.
 ///
@@ -76,6 +61,7 @@ pub struct FileSearchDialog {
     filter_popover_open: bool,
     filter_button_bounds: Option<Bounds<Pixels>>,
     loading: bool,
+    error_message: Option<String>,
 }
 
 impl FileSearchDialog {
@@ -110,8 +96,7 @@ impl FileSearchDialog {
 
         // Create search input entity
         let search_input = cx.new(|cx| {
-            let mut input = SimpleInputState::new(cx)
-                .placeholder("Type to search files...");
+            let mut input = SimpleInputState::new(cx).placeholder("Type to search files...");
             if !query.is_empty() {
                 input.set_value(&query, cx);
                 input.select_all(cx);
@@ -120,25 +105,33 @@ impl FileSearchDialog {
         });
 
         // Subscribe to input changes for filtering
-        cx.subscribe(&search_input, |this: &mut Self, _, _: &InputChangedEvent, cx| {
-            this.filter_files(cx);
-            cx.notify();
-        })
+        cx.subscribe(
+            &search_input,
+            |this: &mut Self, _, _: &InputChangedEvent, cx| {
+                this.filter_files(cx);
+                cx.notify();
+            },
+        )
         .detach();
 
         // Load files asynchronously to avoid blocking the UI thread (important for remote projects)
         let fs_for_scan = fs.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move { fs_for_scan.list_files(show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
-                this.files = files;
                 this.loading = false;
-                this.filter_files(cx);
-                if restored_index < this.filtered_files.len() {
-                    this.selected_index = restored_index;
+                match result {
+                    Ok(files) => {
+                        this.files = files;
+                        this.filter_files(cx);
+                        if restored_index < this.filtered_files.len() {
+                            this.selected_index = restored_index;
+                        }
+                    }
+                    Err(error) => this.error_message = Some(error),
                 }
                 cx.notify();
             });
@@ -159,83 +152,17 @@ impl FileSearchDialog {
             filter_popover_open: false,
             filter_button_bounds: None,
             loading: true,
+            error_message: None,
         }
     }
 
     /// Scan files in the project directory using the `ignore` crate.
     ///
-    /// `show_ignored` is additive: regular (non-gitignored) files are scanned
-    /// first, then gitignored files are appended up to `MAX_FILES`. Without
-    /// this two-pass split, a single huge gitignored directory (e.g. an
-    /// Android `build/` tree) can fill the cap alphabetically and crowd out
-    /// real project files later in the walk.
-    pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
-        let mut files = Vec::new();
-        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-        Self::collect_files(project_path, false, &mut files, &mut seen);
-        if show_ignored {
-            Self::collect_files(project_path, true, &mut files, &mut seen);
-        }
-
-        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-        files
-    }
-
-    /// Walk the project, appending entries to `files` until `MAX_FILES` is
-    /// reached. `seen` tracks already-collected paths so the gitignored pass
-    /// doesn't duplicate the regular pass.
-    fn collect_files(
-        project_path: &PathBuf,
-        include_ignored: bool,
-        files: &mut Vec<FileEntry>,
-        seen: &mut std::collections::HashSet<PathBuf>,
-    ) {
-        let mut walk_builder = WalkBuilder::new(project_path);
-        walk_builder
-            .hidden(false)
-            .git_ignore(!include_ignored)
-            .git_global(!include_ignored)
-            .git_exclude(!include_ignored)
-            .max_depth(Some(15));
-
-        let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
-        for pattern in crate::content_search::ALWAYS_IGNORE {
-            let _ = override_builder.add(pattern);
-        }
-        if let Ok(overrides) = override_builder.build() {
-            walk_builder.overrides(overrides);
-        }
-
-        for entry in walk_builder.build().flatten() {
-            if files.len() >= MAX_FILES {
-                break;
-            }
-
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if !seen.insert(path.to_path_buf()) {
-                continue;
-            }
-
-            let filename = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            let relative_path = path
-                .strip_prefix(project_path)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| filename.clone());
-
-            files.push(FileEntry {
-                path: path.to_path_buf(),
-                relative_path,
-                filename,
-            });
-        }
+    /// Thin delegate to the gpui-free [`crate::file_scan::scan_files`] so the
+    /// dialog's behavior is unchanged while the scanning logic stays usable
+    /// from headless (gpui-free) builds.
+    pub fn scan_files(project_path: &Path, show_ignored: bool) -> Vec<FileEntry> {
+        scan_files(project_path, show_ignored)
     }
 
     /// Save current state for next open.
@@ -266,11 +193,12 @@ impl FileSearchDialog {
         let fs = self.fs.clone();
         let show_ignored = self.show_ignored;
         self.loading = true;
+        self.error_message = None;
         self.files.clear();
         self.filtered_files.clear();
         self.selected_index = 0;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move { fs.list_files(show_ignored) })
                 .await;
@@ -279,9 +207,14 @@ impl FileSearchDialog {
                 if this.show_ignored != show_ignored {
                     return;
                 }
-                this.files = files;
                 this.loading = false;
-                this.filter_files(cx);
+                match result {
+                    Ok(files) => {
+                        this.files = files;
+                        this.filter_files(cx);
+                    }
+                    Err(error) => this.error_message = Some(error),
+                }
                 cx.notify();
             });
         })
@@ -299,7 +232,9 @@ impl FileSearchDialog {
         if let Some(&(file_index, _)) = self.filtered_files.get(self.selected_index) {
             let file = &self.files[file_index];
             self.save_memory(cx);
-            cx.emit(FileSearchDialogEvent::FileSelected(file.relative_path.clone()));
+            cx.emit(FileSearchDialogEvent::FileSelected(
+                file.relative_path.clone(),
+            ));
         }
     }
 
@@ -308,7 +243,11 @@ impl FileSearchDialog {
     }
 
     fn select_next(&mut self) -> bool {
-        crate::list_overlay::select_next(&mut self.selected_index, self.filtered_files.len(), &self.scroll_handle)
+        crate::list_overlay::select_next(
+            &mut self.selected_index,
+            self.filtered_files.len(),
+            &self.scroll_handle,
+        )
     }
 
     /// Filter files based on the search query using fuzzy matching with scoring.
@@ -318,7 +257,8 @@ impl FileSearchDialog {
         if query.is_empty() {
             self.filtered_files = (0..self.files.len()).map(|i| (i, vec![])).collect();
         } else {
-            let mut scored: Vec<(usize, i32, Vec<usize>)> = self.files
+            let mut scored: Vec<(usize, i32, Vec<usize>)> = self
+                .files
                 .iter()
                 .enumerate()
                 .filter_map(|(i, file)| {
@@ -336,7 +276,12 @@ impl FileSearchDialog {
     }
 
     /// Fuzzy match with scoring using nucleo-matcher. Returns (score, matched_byte_positions) or None.
-    fn fuzzy_score(text: &str, query: &str, filename: &str, relative_path: &str) -> Option<(i32, Vec<usize>)> {
+    fn fuzzy_score(
+        text: &str,
+        query: &str,
+        filename: &str,
+        relative_path: &str,
+    ) -> Option<(i32, Vec<usize>)> {
         if query.is_empty() {
             return Some((0, vec![]));
         }
@@ -389,9 +334,10 @@ impl FileSearchDialog {
         if let Some(ext) = std::path::Path::new(relative_path)
             .extension()
             .and_then(|e| e.to_str())
-            && BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-                score -= 1000;
-            }
+            && BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+        {
+            score -= 1000;
+        }
 
         Some((score, positions))
     }
@@ -465,7 +411,8 @@ impl FileSearchDialog {
             .map(|&p| p - filename_start)
             .collect();
 
-        let filename_element = Self::styled_text_with_highlights(filename, &filename_positions, t.border_active);
+        let filename_element =
+            Self::styled_text_with_highlights(filename, &filename_positions, t.border_active);
         let dir_element = if dir_path.is_empty() {
             StyledText::new("\u{00A0}".to_string())
         } else {
@@ -473,45 +420,45 @@ impl FileSearchDialog {
         };
 
         selectable_list_item(
-                ElementId::Name(format!("file-{}", filtered_index).into()),
-                is_selected,
-                &t,
-            )
-            .w_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.selected_index = filtered_index;
-                    this.open_selected(cx);
-                }),
-            )
-            .gap(px(8.0))
-            .child(file_icon(filename, &t, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .text_size(ui_text(13.0, cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_primary))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(filename_element),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(dir_element),
-                    ),
-            )
+            ElementId::Name(format!("file-{}", filtered_index).into()),
+            is_selected,
+            &t,
+        )
+        .w_full()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _window, cx| {
+                this.selected_index = filtered_index;
+                this.open_selected(cx);
+            }),
+        )
+        .gap(px(8.0))
+        .child(file_icon(filename, &t, cx))
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(ui_text(13.0, cx))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(t.text_primary))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(filename_element),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(dir_element),
+                ),
+        )
     }
 
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -529,24 +476,25 @@ impl FileSearchDialog {
             .py(px(6.0))
             .border_b_1()
             .border_color(rgb(t.border))
-            .child(
-                crate::list_overlay::file_filter_button(
-                    "filter-btn", active_count, &t, cx,
-                    move |_, _, cx| {
-                        if let Some(e) = entity.upgrade() {
-                            e.update(cx, |this, cx| {
-                                this.filter_popover_open = !this.filter_popover_open;
-                                cx.notify();
-                            });
-                        }
-                    },
-                    move |bounds, _, cx| {
-                        if let Some(e) = entity2.upgrade() {
-                            e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
-                        }
-                    },
-                )
-            )
+            .child(crate::list_overlay::file_filter_button(
+                "filter-btn",
+                active_count,
+                &t,
+                cx,
+                move |_, _, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(cx, |this, cx| {
+                            this.filter_popover_open = !this.filter_popover_open;
+                            cx.notify();
+                        });
+                    }
+                },
+                move |bounds, _, cx| {
+                    if let Some(e) = entity2.upgrade() {
+                        e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                    }
+                },
+            ))
     }
 }
 
@@ -561,15 +509,15 @@ pub enum FileSearchDialogEvent {
     FileSelected(String),
     /// User toggled the gitignore filter. The caller persists this to
     /// settings so the new state becomes the default for future opens.
-    FiltersChanged {
-        show_ignored: bool,
-    },
+    FiltersChanged { show_ignored: bool },
 }
 
 impl EventEmitter<FileSearchDialogEvent> for FileSearchDialog {}
 
 impl okena_ui::overlay::CloseEvent for FileSearchDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl Render for FileSearchDialog {
@@ -581,7 +529,8 @@ impl Render for FileSearchDialog {
         // Focus search input on first render
         let input_focus = self.search_input.read(cx).focus_handle(cx);
         if !input_focus.is_focused(window) {
-            self.search_input.update(cx, |input, cx| input.focus(window, cx));
+            self.search_input
+                .update(cx, |input, cx| input.focus(window, cx));
         }
 
         modal_backdrop("file-search-backdrop", &t)
@@ -594,14 +543,12 @@ impl Render for FileSearchDialog {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "up"
-                        if this.select_prev() => {
-                            cx.notify();
-                        }
-                    "down"
-                        if this.select_next() => {
-                            cx.notify();
-                        }
+                    "up" if this.select_prev() => {
+                        cx.notify();
+                    }
+                    "down" if this.select_next() => {
+                        cx.notify();
+                    }
                     "enter" => this.open_selected(cx),
                     "escape" => this.close(cx),
                     _ => {}
@@ -625,18 +572,31 @@ impl Render for FileSearchDialog {
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(crate::list_overlay::search_input_row(&self.search_input, &t, cx))
+                    .child(crate::list_overlay::search_input_row(
+                        &self.search_input,
+                        &t,
+                        cx,
+                    ))
                     .child(self.render_filter_bar(cx))
                     .child(if self.loading {
                         div()
                             .flex_1()
                             .child(empty_state("Loading files…", &t, cx))
                             .into_any_element()
+                    } else if let Some(error) = &self.error_message {
+                        div()
+                            .flex_1()
+                            .child(empty_state(error, &t, cx))
+                            .into_any_element()
                     } else if self.filtered_files.is_empty() {
                         div()
                             .flex_1()
                             .child(empty_state(
-                                if self.files.is_empty() { "No files found in project" } else { "No matching files" },
+                                if self.files.is_empty() {
+                                    "No files found in project"
+                                } else {
+                                    "No matching files"
+                                },
                                 &t,
                                 cx,
                             ))
@@ -644,20 +604,16 @@ impl Render for FileSearchDialog {
                     } else {
                         let filtered = self.filtered_files.clone();
                         let view = cx.entity().clone();
-                        uniform_list(
-                            "file-list",
-                            filtered.len(),
-                            move |range, _window, cx| {
-                                view.update(cx, |this, cx| {
-                                    range
-                                        .map(|i| {
-                                            let (file_index, positions) = &filtered[i];
-                                            this.render_file_row(i, *file_index, positions, cx)
-                                        })
-                                        .collect()
-                                })
-                            },
-                        )
+                        uniform_list("file-list", filtered.len(), move |range, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                range
+                                    .map(|i| {
+                                        let (file_index, positions) = &filtered[i];
+                                        this.render_file_row(i, *file_index, positions, cx)
+                                    })
+                                    .collect()
+                            })
+                        })
                         .flex_1()
                         .track_scroll(&self.scroll_handle)
                         .into_any_element()
@@ -692,10 +648,13 @@ impl Render for FileSearchDialog {
                                 .id("filter-popover-backdrop")
                                 .absolute()
                                 .inset_0()
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                    this.filter_popover_open = false;
-                                    cx.notify();
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.filter_popover_open = false;
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                     })
                     .when_some(
@@ -705,7 +664,10 @@ impl Render for FileSearchDialog {
                         |modal, bounds| {
                             let entity = cx.entity().downgrade();
                             modal.child(crate::list_overlay::file_filter_popover(
-                                bounds, self.show_ignored, &t, cx,
+                                bounds,
+                                self.show_ignored,
+                                &t,
+                                cx,
                                 move |filter, _, cx| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(cx, |this, cx| this.toggle_filter(filter, cx));

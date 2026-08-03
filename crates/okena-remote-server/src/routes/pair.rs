@@ -1,8 +1,8 @@
 use crate::auth::{PairError, TOKEN_TTL_SECS};
-use crate::routes::AppState;
+use crate::routes::{AppState, PeerInfo};
 use crate::types::{PairRequest, PairResponse};
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use std::net::SocketAddr;
@@ -44,4 +44,32 @@ pub async fn post_pair(
                 .into_response()
         }
     }
+}
+
+pub async fn post_pair_code(
+    Extension(peer): Extension<PeerInfo>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !peer.is_local_trusted() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let code = state.auth_store.generate_fresh_code();
+    Json(serde_json::json!({
+        "code": code,
+        "expires_in": state.auth_store.code_remaining_secs(),
+    }))
+    .into_response()
+}
+
+pub async fn delete_pair_code(
+    Extension(peer): Extension<PeerInfo>,
+    State(state): State<AppState>,
+) -> StatusCode {
+    if !peer.is_local_trusted() {
+        return StatusCode::FORBIDDEN;
+    }
+
+    state.auth_store.invalidate_code();
+    StatusCode::NO_CONTENT
 }

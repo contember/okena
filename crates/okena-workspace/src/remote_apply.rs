@@ -13,9 +13,12 @@
 use std::collections::{HashMap, HashSet};
 
 use okena_core::api::StateResponse;
-use okena_transport::client::RemoteConnectionConfig;
 use okena_layout::LayoutNode;
-use okena_state::{FolderData, HooksConfig, ProjectData, WindowId, WorkspaceData, WorktreeMetadata};
+use okena_state::{
+    FolderData, HookTerminalEntry, HooksConfig, ProjectData, WindowId, WorkspaceData,
+    WorktreeMetadata,
+};
+use okena_transport::client::RemoteConnectionConfig;
 
 use crate::remote_sync::RemoteSyncState;
 
@@ -59,14 +62,14 @@ pub fn apply_remote_snapshot(
     window_id: WindowId,
 ) -> RemoteSyncOutcome {
     let mut expected_remote_ids: HashSet<String> = HashSet::new();
-    let active_conn_ids: HashSet<String> = snapshots.iter()
-        .map(|s| s.config.id.clone())
-        .collect();
+    let mut synced_conn_ids: HashSet<String> = HashSet::new();
+    let active_conn_ids: HashSet<String> = snapshots.iter().map(|s| s.config.id.clone()).collect();
 
     for snap in snapshots {
         let conn_id = &snap.config.id;
 
         if let Some(ref state) = snap.state {
+            synced_conn_ids.insert(conn_id.clone());
             // Build the server folder lookup
             let server_folder_map: HashMap<&str, &okena_core::api::ApiFolder> =
                 state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -80,7 +83,9 @@ pub fn apply_remote_snapshot(
                     if let Some(sf) = server_folder_map.get(order_id.as_str()) {
                         // This is a folder — create a prefixed FolderData
                         let prefixed_folder_id = format!("remote:{}:{}", conn_id, sf.id);
-                        let prefixed_project_ids: Vec<String> = sf.project_ids.iter()
+                        let prefixed_project_ids: Vec<String> = sf
+                            .project_ids
+                            .iter()
                             .map(|pid| format!("remote:{}:{}", conn_id, pid))
                             .collect();
                         remote_folders.push(FolderData {
@@ -106,11 +111,14 @@ pub fn apply_remote_snapshot(
                 let prefixed_id = format!("remote:{}:{}", conn_id, api_project.id);
                 expected_remote_ids.insert(prefixed_id.clone());
 
-                let layout = api_project.layout.as_ref().map(|l| {
-                    LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
-                });
+                let mut layout = api_project
+                    .layout
+                    .as_ref()
+                    .map(|l| LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id)));
 
-                let terminal_names: HashMap<String, String> = api_project.terminal_names.iter()
+                let terminal_names: HashMap<String, String> = api_project
+                    .terminal_names
+                    .iter()
                     .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
                     .collect();
 
@@ -118,14 +126,33 @@ pub fn apply_remote_snapshot(
                 let conn_id_owned = conn_id.clone();
 
                 // Build remote services with prefixed terminal IDs
-                let remote_services: Vec<okena_core::api::ApiServiceInfo> = api_project.services.iter().map(|s| {
-                    let mut svc = s.clone();
-                    svc.terminal_id = s.terminal_id.as_ref()
-                        .map(|tid| format!("remote:{}:{}", conn_id, tid));
-                    svc
-                }).collect();
+                let remote_services: Vec<okena_core::api::ApiServiceInfo> = api_project
+                    .services
+                    .iter()
+                    .map(|s| {
+                        let mut svc = s.clone();
+                        svc.terminal_id = s
+                            .terminal_id
+                            .as_ref()
+                            .map(|tid| format!("remote:{}:{}", conn_id, tid));
+                        svc
+                    })
+                    .collect();
                 let remote_host = Some(snap.config.host.clone());
                 let remote_git_status = api_project.git_status.clone();
+
+                // Daemon-owned per-project data surfaced for rendering: pin
+                // marker, activity-sort timestamp, shell-picker selection, and
+                // the hook terminals shown in the service panel (keys prefixed
+                // like terminal_names so they match the prefixed layout ids).
+                let remote_hook_terminals: HashMap<String, HookTerminalEntry> = api_project
+                    .hook_terminals
+                    .iter()
+                    .map(|api| {
+                        let (tid, entry) = HookTerminalEntry::from_api(api);
+                        (format!("remote:{}:{}", conn_id, tid), entry)
+                    })
+                    .collect();
 
                 if let Some(existing) = data.projects.iter_mut().find(|p| p.id == prefixed_id) {
                     existing.name = api_project.name.clone();
@@ -140,31 +167,69 @@ pub fn apply_remote_snapshot(
                     };
                     existing.terminal_names = terminal_names;
                     existing.folder_color = project_color;
-                    existing.worktree_info = api_project.worktree_info.as_ref().map(|wt| {
-                        WorktreeMetadata {
-                            parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
-                            color_override: wt.color_override,
-                            main_repo_path: String::new(),
-                            worktree_path: String::new(),
-                            branch_name: String::new(),
-                        }
-                    });
-                    existing.worktree_ids = api_project.worktree_ids.iter()
+                    existing.worktree_info =
+                        api_project
+                            .worktree_info
+                            .as_ref()
+                            .map(|wt| WorktreeMetadata {
+                                parent_project_id: format!(
+                                    "remote:{}:{}",
+                                    conn_id, wt.parent_project_id
+                                ),
+                                color_override: wt.color_override,
+                                main_repo_path: String::new(),
+                                worktree_path: String::new(),
+                                branch_name: String::new(),
+                            });
+                    existing.worktree_ids = api_project
+                        .worktree_ids
+                        .iter()
                         .map(|id| format!("remote:{}:{}", conn_id, id))
                         .collect();
+                    existing.pinned = api_project.pinned;
+                    existing.last_activity_at = api_project.last_activity_at;
+                    existing.default_shell = api_project.default_shell.clone();
+                    existing.hook_terminals = remote_hook_terminals;
+                    // Mid-create marker: drives the "Setting up worktree…"
+                    // placeholder. Mirrored (not derived from layout) so a
+                    // deliberately-emptied worktree bookmark (layout None) isn't
+                    // mistaken for a checkout in flight.
+                    existing.is_creating = api_project.is_creating;
+                    // Mirrored close-in-progress marker: drives the dimmed
+                    // "Closing…" row. The Workspace wrapper reconciles the local
+                    // optimistic closing flag against this after the snapshot
+                    // applies (see `Workspace::apply_remote_snapshot`).
+                    existing.is_closing = api_project.is_closing;
+                    // Per-project hooks are daemon-authoritative (it applies them on
+                    // PTY spawn). The settings panel edits a separate input buffer and
+                    // dispatches UpdateProjectHooks on close, so syncing here won't
+                    // clobber an in-progress edit.
+                    existing.hooks = HooksConfig::from_api(&api_project.hooks);
                     // Don't overwrite show_in_overview — it's client-side state
                     // (the user may have toggled visibility locally).
                 } else {
-                    let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
-                        WorktreeMetadata {
-                            parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
-                            color_override: wt.color_override,
-                            main_repo_path: String::new(),
-                            worktree_path: String::new(),
-                            branch_name: String::new(),
-                        }
-                    });
-                    let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
+                    if let Some(client_layout) = remote_sync.take_project_layout(&prefixed_id) {
+                        layout = layout
+                            .as_ref()
+                            .map(|server| LayoutNode::merge_visual_state(server, &client_layout));
+                    }
+                    let worktree_info =
+                        api_project
+                            .worktree_info
+                            .as_ref()
+                            .map(|wt| WorktreeMetadata {
+                                parent_project_id: format!(
+                                    "remote:{}:{}",
+                                    conn_id, wt.parent_project_id
+                                ),
+                                color_override: wt.color_override,
+                                main_repo_path: String::new(),
+                                worktree_path: String::new(),
+                                branch_name: String::new(),
+                            });
+                    let worktree_ids: Vec<String> = api_project
+                        .worktree_ids
+                        .iter()
                         .map(|id| format!("remote:{}:{}", conn_id, id))
                         .collect();
                     apply_initial_remote_project_visibility(
@@ -174,7 +239,6 @@ pub fn apply_remote_snapshot(
                         &prefixed_id,
                         &api_project.name,
                         &api_project.path,
-                        api_project.show_in_overview,
                     );
                     data.projects.push(ProjectData {
                         id: prefixed_id.clone(),
@@ -186,14 +250,16 @@ pub fn apply_remote_snapshot(
                         worktree_info,
                         worktree_ids,
                         folder_color: project_color,
-                        hooks: HooksConfig::default(),
+                        hooks: HooksConfig::from_api(&api_project.hooks),
                         is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
-                        default_shell: None,
-                        hook_terminals: HashMap::new(),
-                        pinned: false,
-                        last_activity_at: None,
+                        default_shell: api_project.default_shell.clone(),
+                        hook_terminals: remote_hook_terminals,
+                        pinned: api_project.pinned,
+                        last_activity_at: api_project.last_activity_at,
+                        is_creating: api_project.is_creating,
+                        is_closing: api_project.is_closing,
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -208,8 +274,12 @@ pub fn apply_remote_snapshot(
             // Scrub per-window state for remote folders that disappeared this sync.
             let next_remote_folder_ids: HashSet<String> =
                 remote_folders.iter().map(|f| f.id.clone()).collect();
-            let removed_folder_ids: Vec<String> = data.folders.iter()
-                .filter(|f| f.id.starts_with(&remote_prefix) && !next_remote_folder_ids.contains(&f.id))
+            let removed_folder_ids: Vec<String> = data
+                .folders
+                .iter()
+                .filter(|f| {
+                    f.id.starts_with(&remote_prefix) && !next_remote_folder_ids.contains(&f.id)
+                })
                 .map(|f| f.id.clone())
                 .collect();
             for folder_id in removed_folder_ids {
@@ -218,7 +288,8 @@ pub fn apply_remote_snapshot(
             // Remove old remote folders for this connection
             data.folders.retain(|f| !f.id.starts_with(&remote_prefix));
             // Remove old remote entries from project_order for this connection
-            data.project_order.retain(|id| !id.starts_with(&remote_prefix));
+            data.project_order
+                .retain(|id| !id.starts_with(&remote_prefix));
 
             // Add new remote folders
             for rf in remote_folders {
@@ -228,21 +299,18 @@ pub fn apply_remote_snapshot(
             // Add new remote project_order entries
             data.project_order.extend(remote_order);
         } else {
-            // No state (disconnected/connecting) — remove materialized projects and folders
+            // No state (disconnected/connecting) — remove materialized projects
+            // and folders, but keep per-window presentation state. The same
+            // connection may reconnect with the same prefixed ids; scrubbing
+            // hidden_project_ids here would make every project visible again.
+            // Permanent removals still scrub below when a connection disappears
+            // from `snapshots`, and server-side deletions scrub via the stale
+            // project pass after a successful state snapshot.
             let prefix = format!("remote:{}:", conn_id);
-            let removed_project_ids: Vec<String> = data.projects.iter()
-                .filter(|p| p.id.starts_with(&prefix))
-                .map(|p| p.id.clone())
-                .collect();
-            let removed_folder_ids: Vec<String> = data.folders.iter()
-                .filter(|f| f.id.starts_with(&prefix))
-                .map(|f| f.id.clone())
-                .collect();
-            for project_id in removed_project_ids {
-                data.delete_project_scrub_all_windows(&project_id);
-            }
-            for folder_id in removed_folder_ids {
-                data.delete_folder_scrub_all_windows(&folder_id);
+            for project in data.projects.iter().filter(|p| p.id.starts_with(&prefix)) {
+                if let Some(layout) = &project.layout {
+                    remote_sync.preserve_project_layout(project.id.clone(), layout.clone());
+                }
             }
             data.projects.retain(|p| !p.id.starts_with(&prefix));
             data.folders.retain(|f| !f.id.starts_with(&prefix));
@@ -250,12 +318,22 @@ pub fn apply_remote_snapshot(
         }
     }
 
+    for project_id in
+        remote_sync.prune_project_state(&active_conn_ids, &synced_conn_ids, &expected_remote_ids)
+    {
+        data.delete_project_scrub_all_windows(&project_id);
+    }
+
     // Remove stale remote projects/folders from connections that no longer exist
-    let removed_project_ids: Vec<String> = data.projects.iter()
+    let removed_project_ids: Vec<String> = data
+        .projects
+        .iter()
         .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
         .map(|p| p.id.clone())
         .collect();
-    let removed_folder_ids: Vec<String> = data.folders.iter()
+    let removed_folder_ids: Vec<String> = data
+        .folders
+        .iter()
         .filter(|f| {
             if f.id.starts_with("remote:") {
                 // Remote folder IDs are "remote:{conn_id}:{folder_id}"
@@ -271,6 +349,7 @@ pub fn apply_remote_snapshot(
         .collect();
     for project_id in removed_project_ids {
         data.delete_project_scrub_all_windows(&project_id);
+        remote_sync.remove_project(&project_id);
     }
     for folder_id in removed_folder_ids {
         data.delete_folder_scrub_all_windows(&folder_id);
@@ -293,24 +372,37 @@ pub fn apply_remote_snapshot(
             true
         }
     });
-    let valid_ids: HashSet<&str> = data.projects.iter().map(|p| p.id.as_str())
+    let valid_ids: HashSet<&str> = data
+        .projects
+        .iter()
+        .map(|p| p.id.as_str())
         .chain(data.folders.iter().map(|f| f.id.as_str()))
         .collect();
-    data.project_order.retain(|id| valid_ids.contains(id.as_str()));
+    data.project_order
+        .retain(|id| valid_ids.contains(id.as_str()));
 
     // Compute focus targets for projects that had a window-scoped pending
     // CreateTerminal and whose layout grew a new terminal during this sync.
     let mut outcome = RemoteSyncOutcome::default();
     for pending_focus in remote_sync.drain_pending_focus(window_id) {
         let pid = pending_focus.project_id;
-        let layout = match data.projects.iter().find(|p| p.id == pid).and_then(|p| p.layout.as_ref()) {
+        let layout = match data
+            .projects
+            .iter()
+            .find(|p| p.id == pid)
+            .and_then(|p| p.layout.as_ref())
+        {
             Some(layout) => layout,
             None => continue,
         };
         let new_ids = layout.collect_terminal_ids();
         // Find the first terminal ID that wasn't present when the
         // CreateTerminal action originated in this window.
-        let old_set: HashSet<&str> = pending_focus.old_terminal_ids.iter().map(|s| s.as_str()).collect();
+        let old_set: HashSet<&str> = pending_focus
+            .old_terminal_ids
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str()))
             && let Some(path) = layout.find_terminal_path(new_tid)
         {
@@ -326,9 +418,16 @@ pub fn apply_remote_snapshot(
 
 /// Apply one-shot per-window visibility for a freshly materialized remote
 /// project. When a local window issued the create, the spawn intent ("visible
-/// in this window, hidden everywhere else") wins over the wire
-/// `show_in_overview` flag; otherwise the wire flag is translated into
-/// per-window hidden state on this first sync.
+/// in this window, hidden everywhere else") is applied. Otherwise the project is
+/// left visible in every window.
+///
+/// Per-window project visibility is CLIENT-owned: each window's
+/// `hidden_project_ids` is toggled locally (`toggle_project_overview_visibility`)
+/// and persisted in window-layout.json. The daemon has a single synthetic main
+/// window, so its wire `show_in_overview` must NOT drive client visibility —
+/// re-applying the daemon's (frozen, single-window) hidden set on every
+/// reconnect compounded across restarts until every project was hidden and the
+/// main window came up empty.
 fn apply_initial_remote_project_visibility(
     data: &mut WorkspaceData,
     remote_sync: &mut RemoteSyncState,
@@ -336,21 +435,19 @@ fn apply_initial_remote_project_visibility(
     prefixed_id: &str,
     name: &str,
     path: &str,
-    show_in_overview: bool,
 ) {
     if let Some(spawning_window) = remote_sync.take_project_visibility(connection_id, name, path) {
         data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
-        return;
-    }
-    if !show_in_overview {
-        data.hide_project_in_all_windows(prefixed_id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okena_core::api::{ApiFolder, ApiLayoutNode, ApiProject, StateResponse};
+    use okena_core::api::{
+        ApiFolder, ApiHookTerminalEntry, ApiHookTerminalStatus, ApiLayoutNode, ApiProject,
+        StateResponse,
+    };
     use okena_core::theme::FolderColor;
 
     fn empty_data() -> WorkspaceData {
@@ -376,6 +473,7 @@ mod tests {
             token_obtained_at: None,
             tls: false,
             pinned_cert_sha256: None,
+            local_endpoint: None,
         }
     }
 
@@ -392,6 +490,13 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -400,12 +505,17 @@ mod tests {
             terminal_id: Some(id.to_string()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         }
     }
 
-    fn state_with(projects: Vec<ApiProject>, order: Vec<String>, folders: Vec<ApiFolder>) -> StateResponse {
+    fn state_with(
+        projects: Vec<ApiProject>,
+        order: Vec<String>,
+        folders: Vec<ApiFolder>,
+    ) -> StateResponse {
         StateResponse {
             state_version: 1,
             projects,
@@ -414,6 +524,7 @@ mod tests {
             project_order: order,
             folders,
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 
@@ -442,11 +553,60 @@ mod tests {
         assert_eq!(data.projects[0].connection_id.as_deref(), Some("c1"));
         // Terminal IDs in the layout are prefixed.
         assert_eq!(
-            data.projects[0].layout.as_ref().unwrap().collect_terminal_ids(),
+            data.projects[0]
+                .layout
+                .as_ref()
+                .unwrap()
+                .collect_terminal_ids(),
             vec!["remote:c1:ta"]
         );
         // Transient snapshot host recorded.
-        assert_eq!(rs.snapshot("remote:c1:a").unwrap().host.as_deref(), Some("c1.example.com"));
+        assert_eq!(
+            rs.snapshot("remote:c1:a").unwrap().host.as_deref(),
+            Some("c1.example.com")
+        );
+    }
+
+    #[test]
+    fn applies_pinned_activity_shell_and_prefixed_hook_terminals() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut p = api_project("a", Some(terminal("ta")));
+        p.pinned = true;
+        p.last_activity_at = Some(1_700_000_000_000);
+        p.default_shell = Some(okena_core::shell::ShellType::Default);
+        p.hook_terminals = vec![ApiHookTerminalEntry {
+            terminal_id: "h1".into(),
+            label: "on_project_open".into(),
+            status: ApiHookTerminalStatus::Failed { exit_code: 3 },
+            hook_type: "on_project_open".into(),
+            command: "make".into(),
+            cwd: "/srv/a".into(),
+        }];
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![p], vec!["a".into()], vec![])),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+
+        let proj = &data.projects[0];
+        assert!(proj.pinned);
+        assert_eq!(proj.last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(
+            proj.default_shell,
+            Some(okena_core::shell::ShellType::Default)
+        );
+        // Hook-terminal map key is prefixed like the layout terminal ids.
+        let entry = proj
+            .hook_terminals
+            .get("remote:c1:h1")
+            .expect("prefixed hook terminal");
+        assert_eq!(entry.command, "make");
+        assert!(matches!(
+            entry.status,
+            okena_state::HookTerminalStatus::Failed { exit_code: 3 }
+        ));
     }
 
     #[test]
@@ -476,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_visual_state_preserves_local_state_on_resync() {
+    fn merge_visual_state_preserves_local_presentation_on_resync() {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
 
@@ -487,30 +647,177 @@ mod tests {
         };
         let first = RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(layout.clone()))], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", Some(layout.clone()))],
+                vec!["a".into()],
+                vec![],
+            )),
         };
         apply_remote_snapshot(&mut data, &mut rs, &[first], WindowId::Main);
 
-        // Locally the user switched to tab 1 — mutate the materialized layout.
-        if let Some(LayoutNode::Tabs { active_tab, .. }) = data.projects[0].layout.as_mut() {
+        // Locally the user switched tabs and zoomed the first terminal.
+        if let Some(LayoutNode::Tabs {
+            active_tab,
+            children,
+        }) = data.projects[0].layout.as_mut()
+        {
             *active_tab = 1;
+            let LayoutNode::Terminal { zoom_level, .. } = &mut children[0] else {
+                panic!("expected terminal");
+            };
+            *zoom_level = 1.5;
         } else {
             panic!("expected tabs layout");
         }
 
-        // Re-sync with the same server layout (active_tab 0). Local active_tab must win.
+        // Re-sync with the daemon defaults. Client-owned presentation must win.
         let second = RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(layout))], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", Some(layout))],
+                vec!["a".into()],
+                vec![],
+            )),
         };
         apply_remote_snapshot(&mut data, &mut rs, &[second], WindowId::Main);
 
         match data.projects[0].layout.as_ref().unwrap() {
-            LayoutNode::Tabs { active_tab, .. } => assert_eq!(*active_tab, 1, "local active_tab preserved"),
+            LayoutNode::Tabs {
+                active_tab,
+                children,
+            } => {
+                assert_eq!(*active_tab, 1, "local active_tab preserved");
+                let LayoutNode::Terminal { zoom_level, .. } = &children[0] else {
+                    panic!("expected terminal");
+                };
+                assert_eq!(*zoom_level, 1.5, "local zoom preserved");
+            }
             _ => panic!("expected tabs layout"),
         }
         // Still only one materialized project (update, not duplicate).
         assert_eq!(data.projects.len(), 1);
+    }
+
+    #[test]
+    fn reordered_tabs_preserve_selected_terminal_and_terminal_presentation() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let initial_layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(initial_layout))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        let Some(LayoutNode::Tabs {
+            children,
+            active_tab,
+        }) = data.projects[0].layout.as_mut()
+        else {
+            panic!("expected tabs");
+        };
+        *active_tab = 0;
+        let LayoutNode::Terminal { zoom_level, .. } = &mut children[0] else {
+            panic!("expected terminal");
+        };
+        *zoom_level = 1.5;
+        let LayoutNode::Terminal { minimized, .. } = &mut children[1] else {
+            panic!("expected terminal");
+        };
+        *minimized = true;
+
+        let reordered = ApiLayoutNode::Tabs {
+            active_tab: 1,
+            children: vec![terminal("t2"), terminal("t1")],
+        };
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(reordered))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        let Some(LayoutNode::Tabs {
+            children,
+            active_tab,
+        }) = data.projects[0].layout.as_ref()
+        else {
+            panic!("expected tabs");
+        };
+        assert_eq!(*active_tab, 1);
+        assert!(matches!(
+            &children[0],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                minimized: true,
+                ..
+            } if id == "remote:c1:t2"
+        ));
+        assert!(matches!(
+            &children[1],
+            LayoutNode::Terminal {
+                terminal_id: Some(id),
+                zoom_level,
+                ..
+            } if id == "remote:c1:t1" && (*zoom_level - 1.5).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn restores_client_layout_on_first_snapshot() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let server_layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        rs.seed_project_layouts(HashMap::from([(
+            "remote:c1:a".to_string(),
+            LayoutNode::Tabs {
+                active_tab: 1,
+                children: vec![
+                    LayoutNode::from_api_prefixed(&terminal("t1"), "remote:c1"),
+                    LayoutNode::from_api_prefixed(&terminal("t2"), "remote:c1"),
+                ],
+            },
+        )]));
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(server_layout))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        assert!(matches!(
+            data.projects[0].layout,
+            Some(LayoutNode::Tabs { active_tab: 1, .. })
+        ));
     }
 
     #[test]
@@ -521,11 +828,19 @@ mod tests {
         // Sync two connections.
         let c1 = RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", None)],
+                vec!["a".into()],
+                vec![],
+            )),
         };
         let c2 = RemoteSnapshot {
             config: config("c2"),
-            state: Some(state_with(vec![api_project("x", None)], vec!["x".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("x", None)],
+                vec!["x".into()],
+                vec![],
+            )),
         };
         apply_remote_snapshot(&mut data, &mut rs, &[c1, c2], WindowId::Main);
         assert_eq!(data.projects.len(), 2);
@@ -533,7 +848,11 @@ mod tests {
         // Re-sync with only c1 present — c2's projects must be pruned.
         let c1_only = RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
+            state: Some(state_with(
+                vec![api_project("a", None)],
+                vec!["a".into()],
+                vec![],
+            )),
         };
         apply_remote_snapshot(&mut data, &mut rs, &[c1_only], WindowId::Main);
 
@@ -547,19 +866,156 @@ mod tests {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
 
-        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: Some(state_with(vec![api_project("a", None)], vec!["a".into()], vec![])),
-        }], WindowId::Main);
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", None)],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
         assert_eq!(data.projects.len(), 1);
 
         // Same connection now reports no state (disconnected).
-        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: None,
-        }], WindowId::Main);
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: None,
+            }],
+            WindowId::Main,
+        );
         assert!(data.projects.is_empty());
         assert!(data.project_order.is_empty());
+    }
+
+    #[test]
+    fn transient_disconnect_preserves_per_window_visibility_for_reconnect() {
+        let mut data = empty_data();
+        let extra = okena_state::WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let mut rs = RemoteSyncState::new();
+        let layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(layout.clone()))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+        if let Some(LayoutNode::Tabs { active_tab, .. }) = data.projects[0].layout.as_mut() {
+            *active_tab = 1;
+        }
+        data.main_window
+            .hidden_project_ids
+            .insert("remote:c1:a".to_string());
+        data.window_mut(WindowId::Extra(extra_id))
+            .unwrap()
+            .hidden_project_ids
+            .insert("remote:c1:a".to_string());
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: None,
+            }],
+            WindowId::Main,
+        );
+
+        assert!(data.projects.is_empty());
+        assert!(rs.preserved_project_layouts().contains_key("remote:c1:a"));
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(layout))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+
+        assert_eq!(data.projects.len(), 1);
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            data.window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+        assert!(matches!(
+            data.projects[0].layout.as_ref(),
+            Some(LayoutNode::Tabs { active_tab: 1, .. })
+        ));
+        assert!(rs.preserved_project_layouts().is_empty());
+    }
+
+    #[test]
+    fn permanent_disconnect_prunes_presentation_and_panel_state() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(terminal("t1")))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+        data.service_panel_heights
+            .insert("remote:c1:a".to_string(), 180.0);
+        data.hook_panel_heights
+            .insert("remote:c1:a".to_string(), 220.0);
+
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: None,
+            }],
+            WindowId::Main,
+        );
+        apply_remote_snapshot(&mut data, &mut rs, &[], WindowId::Main);
+
+        assert!(rs.preserved_project_layouts().is_empty());
+        assert!(!data.service_panel_heights.contains_key("remote:c1:a"));
+        assert!(!data.hook_panel_heights.contains_key("remote:c1:a"));
     }
 
     #[test]
@@ -568,13 +1024,26 @@ mod tests {
         let mut rs = RemoteSyncState::new();
 
         // Initial sync: project with one terminal.
-        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(terminal("t1")))], vec!["a".into()], vec![])),
-        }], WindowId::Main);
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(terminal("t1")))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
 
         // Queue pending focus for the project (as a CreateTerminal dispatch would).
-        rs.queue_focus(WindowId::Main, "remote:c1:a", vec!["remote:c1:t1".to_string()]);
+        rs.queue_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+        );
 
         // Next sync grows the layout with a second terminal.
         let grown = ApiLayoutNode::Split {
@@ -582,10 +1051,19 @@ mod tests {
             sizes: vec![50.0, 50.0],
             children: vec![terminal("t1"), terminal("t2")],
         };
-        let outcome = apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(grown))], vec!["a".into()], vec![])),
-        }], WindowId::Main);
+        let outcome = apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(grown))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
 
         assert_eq!(outcome.focus_targets.len(), 1);
         let target = &outcome.focus_targets[0];
@@ -601,17 +1079,39 @@ mod tests {
         let mut data = empty_data();
         let mut rs = RemoteSyncState::new();
 
-        apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(terminal("t1")))], vec!["a".into()], vec![])),
-        }], WindowId::Main);
-        rs.queue_focus(WindowId::Main, "remote:c1:a", vec!["remote:c1:t1".to_string()]);
+        apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(terminal("t1")))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
+        rs.queue_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+        );
 
         // Re-sync with the identical layout — nothing new appeared.
-        let outcome = apply_remote_snapshot(&mut data, &mut rs, &[RemoteSnapshot {
-            config: config("c1"),
-            state: Some(state_with(vec![api_project("a", Some(terminal("t1")))], vec!["a".into()], vec![])),
-        }], WindowId::Main);
+        let outcome = apply_remote_snapshot(
+            &mut data,
+            &mut rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", Some(terminal("t1")))],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        );
 
         assert!(outcome.focus_targets.is_empty());
         assert!(rs.drain_pending_focus(WindowId::Main).is_empty());
@@ -640,24 +1140,39 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            true,
         );
 
-        assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
         assert!(
-            !data.window(WindowId::Extra(extra_a_id)).unwrap()
-                .hidden_project_ids.contains("remote:conn:p1")
+            data.main_window
+                .hidden_project_ids
+                .contains("remote:conn:p1")
         );
         assert!(
-            data.window(WindowId::Extra(extra_b_id)).unwrap()
-                .hidden_project_ids.contains("remote:conn:p1")
+            !data
+                .window(WindowId::Extra(extra_a_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert!(
+            data.window(WindowId::Extra(extra_b_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
         );
         // The pending create-visibility request was consumed.
-        assert_eq!(rs.take_project_visibility("conn", "Project", "/repo/project"), None);
+        assert_eq!(
+            rs.take_project_visibility("conn", "Project", "/repo/project"),
+            None
+        );
     }
 
     #[test]
-    fn initial_visibility_without_pending_uses_wire_hidden_flag() {
+    fn initial_visibility_without_pending_leaves_project_visible() {
+        // Per-window visibility is client-owned: without a spawn intent a freshly
+        // synced project is left visible in every window. The daemon's
+        // single-window `show_in_overview` must NOT hide it (that compounded into
+        // an all-hidden main window across restarts).
         let mut data = empty_data();
         let extra = okena_state::WindowState::default();
         let extra_id = extra.id;
@@ -671,13 +1186,20 @@ mod tests {
             "remote:conn:p1",
             "Project",
             "/repo/project",
-            false,
         );
 
-        assert!(data.main_window.hidden_project_ids.contains("remote:conn:p1"));
         assert!(
-            data.window(WindowId::Extra(extra_id)).unwrap()
-                .hidden_project_ids.contains("remote:conn:p1")
+            !data
+                .main_window
+                .hidden_project_ids
+                .contains("remote:conn:p1")
+        );
+        assert!(
+            !data
+                .window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:conn:p1")
         );
     }
 }

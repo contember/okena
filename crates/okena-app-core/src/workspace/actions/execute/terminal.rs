@@ -5,19 +5,34 @@
 // more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use super::{
-    ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals,
-};
-use okena_terminal::backend::TerminalBackend;
-use okena_terminal::terminal::TerminalSize;
+use super::{ActionResult, ensure_terminal, find_terminal_path, spawn_uninitialized_terminals};
 use crate::workspace::focus::FocusManager;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::Workspace;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use gpui::*;
 use okena_core::keys::SpecialKey;
 use okena_core::types::SplitDirection;
 use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::Terminal;
+use okena_terminal::terminal::TerminalSize;
+use okena_workspace::context::WorkspaceCx;
+
+fn with_ensured_terminal(
+    ws: &Workspace,
+    terminal_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    f: impl FnOnce(&Terminal) -> ActionResult,
+) -> ActionResult {
+    match ensure_terminal(terminal_id, terminals, backend, ws, settings) {
+        Some(term) => f(&term),
+        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
+    }
+}
 
 pub(super) fn create(
     ws: &mut Workspace,
@@ -25,10 +40,25 @@ pub(super) fn create(
     project_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    // Open in the focused terminal's cwd (when one is focused in this project),
+    // else the project path.
+    let inherit_cwd = focus_manager
+        .focused_terminal_state()
+        .filter(|f| f.project_id == project_id)
+        .and_then(|f| super::inherited_cwd(ws, terminals, &project_id, &f.layout_path));
     ws.add_terminal(focus_manager, &project_id, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+    spawn_uninitialized_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        cx,
+    )
 }
 
 pub(super) fn split(
@@ -39,10 +69,58 @@ pub(super) fn split(
     direction: SplitDirection,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    // Inherit the split source terminal's live cwd (captured before the layout
+    // mutation invalidates `path`) so the new pane opens in the same directory.
+    let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+    spawn_uninitialized_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        cx,
+    )
+}
+
+/// Switch a terminal's shell: kill the old PTY, reset the layout node to
+/// uninitialized with the requested shell, then respawn it. Reuses
+/// `spawn_uninitialized_terminals` so the new PTY goes through the same
+/// shell-default resolution + shell-wrapper/on_create hook application as any
+/// freshly created terminal — keeping daemon shell-switch behavior identical to
+/// the old in-process GUI path.
+pub(super) fn switch_shell(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    shell: ShellType,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let path = match find_terminal_path(ws, &project_id, &terminal_id) {
+        Some(p) => p,
+        None => return ActionResult::Err(format!("terminal not found: {}", terminal_id)),
+    };
+    // No-op if the shell is unchanged (mirrors the old GUI guard).
+    if ws.get_terminal_shell(&project_id, &path).as_ref() == Some(&shell) {
+        return ActionResult::Ok(None);
+    }
+    if terminals.lock().contains_key(&terminal_id) {
+        ws.remember_closing_terminal_owner(&project_id, &terminal_id);
+    }
+    backend.kill(&terminal_id);
+    terminals.lock().remove(&terminal_id);
+    ws.set_terminal_shell(&project_id, &path, shell, cx);
+    ws.clear_terminal_id(&project_id, &path, cx);
+    // Shell-switch respawns the pane in place; keep the project path (the old
+    // terminal's cwd is gone with its PTY).
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx)
 }
 
 pub(super) fn close(
@@ -52,11 +130,14 @@ pub(super) fn close(
     terminal_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let path = find_terminal_path(ws, &project_id, &terminal_id);
     match path {
         Some(path) => {
+            if terminals.lock().contains_key(&terminal_id) {
+                ws.remember_closing_terminal_owner(&project_id, &terminal_id);
+            }
             backend.kill(&terminal_id);
             terminals.lock().remove(&terminal_id);
             ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
@@ -73,13 +154,16 @@ pub(super) fn close_many(
     terminal_ids: Vec<String>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let mut last_err = None;
     for terminal_id in &terminal_ids {
         let path = find_terminal_path(ws, &project_id, terminal_id);
         match path {
             Some(path) => {
+                if terminals.lock().contains_key(terminal_id) {
+                    ws.remember_closing_terminal_owner(&project_id, terminal_id);
+                }
                 backend.kill(terminal_id);
                 terminals.lock().remove(terminal_id);
                 ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
@@ -100,7 +184,7 @@ pub(super) fn focus(
     focus_manager: &mut FocusManager,
     project_id: String,
     terminal_id: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let path = find_terminal_path(ws, &project_id, &terminal_id);
     match path {
@@ -118,15 +202,26 @@ pub(super) fn send_text(
     text: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.claim_resize_remote();
-            term.send_input(&text);
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        term.send_input(&text);
+        ActionResult::Ok(None)
+    })
+}
+
+pub(super) fn send_bytes(
+    ws: &mut Workspace,
+    terminal_id: String,
+    data: Vec<u8>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+) -> ActionResult {
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        term.send_bytes(&data);
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn run_command(
@@ -135,15 +230,12 @@ pub(super) fn run_command(
     command: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.claim_resize_remote();
-            term.send_input(&format!("{}\r", command));
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        term.send_input(&format!("{}\r", command));
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn send_special_key(
@@ -152,15 +244,12 @@ pub(super) fn send_special_key(
     key: SpecialKey,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.claim_resize_remote();
-            term.send_bytes(&key.to_bytes());
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        term.send_bytes(&key.to_bytes());
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn resize(
@@ -170,21 +259,18 @@ pub(super) fn resize(
     rows: u16,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            term.claim_resize_remote();
-            let size = TerminalSize {
-                cols,
-                rows,
-                cell_width: 8.0,
-                cell_height: 16.0,
-            };
-            term.resize(size);
-            ActionResult::Ok(None)
-        }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
-    }
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        let size = TerminalSize {
+            cols,
+            rows,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        term.resize(size);
+        ActionResult::Ok(None)
+    })
 }
 
 pub(super) fn update_split_sizes(
@@ -192,7 +278,7 @@ pub(super) fn update_split_sizes(
     project_id: String,
     path: Vec<usize>,
     sizes: Vec<f32>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.update_split_sizes(&project_id, &path, sizes, cx);
     ActionResult::Ok(None)
@@ -202,7 +288,7 @@ pub(super) fn toggle_minimized(
     ws: &mut Workspace,
     project_id: String,
     terminal_id: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.toggle_terminal_minimized_by_id(&project_id, &terminal_id, cx);
     ActionResult::Ok(None)
@@ -213,7 +299,7 @@ pub(super) fn set_fullscreen(
     focus_manager: &mut FocusManager,
     project_id: String,
     terminal_id: Option<String>,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match terminal_id {
         Some(tid) => ws.set_fullscreen_terminal(focus_manager, project_id, tid, cx),
@@ -227,7 +313,7 @@ pub(super) fn rename(
     project_id: String,
     terminal_id: String,
     name: String,
-    cx: &mut Context<Workspace>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     ws.rename_terminal(&project_id, &terminal_id, name, cx);
     ActionResult::Ok(None)
@@ -238,33 +324,47 @@ pub(super) fn read_content(
     terminal_id: String,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
+    settings: &AppSettings,
 ) -> ActionResult {
-    match ensure_terminal(&terminal_id, terminals, backend, ws) {
-        Some(term) => {
-            let content = term.with_content(|term| {
-                let grid = term.grid();
-                let screen_lines = grid.screen_lines();
-                let cols = grid.columns();
-                let mut lines = Vec::with_capacity(screen_lines);
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        let content = term.with_content(|term| {
+            let grid = term.grid();
+            let screen_lines = grid.screen_lines();
+            let cols = grid.columns();
+            let mut lines = Vec::with_capacity(screen_lines);
 
-                for row in 0..screen_lines as i32 {
-                    let mut line = String::with_capacity(cols);
-                    for col in 0..cols {
-                        let cell = &grid[Point::new(Line(row), Column(col))];
-                        line.push(cell.c);
-                    }
-                    let trimmed = line.trim_end().to_string();
-                    lines.push(trimmed);
+            for row in 0..screen_lines as i32 {
+                let mut line = String::with_capacity(cols);
+                for col in 0..cols {
+                    let cell = &grid[Point::new(Line(row), Column(col))];
+                    line.push(cell.c);
                 }
+                let trimmed = line.trim_end().to_string();
+                lines.push(trimmed);
+            }
 
-                while lines.last().is_some_and(|l| l.is_empty()) {
-                    lines.pop();
-                }
+            while lines.last().is_some_and(|l| l.is_empty()) {
+                lines.pop();
+            }
 
-                lines.join("\n")
-            });
-            ActionResult::Ok(Some(serde_json::json!({"content": content})))
+            lines.join("\n")
+        });
+        ActionResult::Ok(Some(serde_json::json!({"content": content})))
+    })
+}
+
+pub(super) fn export_buffer(terminal_id: String, backend: &dyn TerminalBackend) -> ActionResult {
+    match backend.capture_buffer(&terminal_id) {
+        Some(path) => {
+            // capture_buffer wrote a daemon-side temp file; read it back and
+            // drop it — the real export is the client's own copy.
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            let content = String::from_utf8_lossy(&bytes).to_string();
+            ActionResult::Ok(Some(serde_json::json!({ "content": content })))
         }
-        None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
+        None => {
+            ActionResult::Err("buffer capture unavailable (requires a tmux session backend)".into())
+        }
     }
 }

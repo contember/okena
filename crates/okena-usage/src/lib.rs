@@ -223,9 +223,7 @@ pub fn reset_aligned_segments(
         && (2..=8).contains(&day_units);
     // If no working day lands in the window, `working_day_reshape` returns
     // `None` and we fall through to the plain grid below.
-    if remap
-        && let Some(seg) = working_day_reshape(start_epoch, reset_epoch, working, now_epoch)
-    {
+    if remap && let Some(seg) = working_day_reshape(start_epoch, reset_epoch, working, now_epoch) {
         return seg;
     }
 
@@ -268,8 +266,7 @@ pub fn reset_aligned_segments(
         .collect();
     let epochs: Vec<f64> = bounds.iter().map(epoch_of).collect();
     let current = epochs.windows(2).find_map(|w| {
-        (now_epoch >= w[0] && now_epoch < w[1])
-            .then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
+        (now_epoch >= w[0] && now_epoch < w[1]).then(|| (frac(w[0]).max(0.0), frac(w[1]).min(1.0)))
     });
     Segments {
         dividers,
@@ -515,7 +512,9 @@ pub fn usage_popover_header(
                         .on_click(move |_, _, _cx| {
                             okena_core::process::open_url(settings_url);
                         })
-                        .tooltip(move |window, cx| Tooltip::new(settings_tooltip).build(window, cx)),
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(settings_tooltip).build(window, cx)
+                        }),
                 ),
         )
 }
@@ -563,9 +562,7 @@ pub fn render_usage_row(
     working: WorkingDays,
 ) -> impl IntoElement {
     let seg = match (row.unit, row.reset_epoch) {
-        (Some(unit), Some(reset)) => {
-            reset_aligned_segments(reset, row.period_secs, unit, working)
-        }
+        (Some(unit), Some(reset)) => reset_aligned_segments(reset, row.period_secs, unit, working),
         _ => Segments::default(),
     };
     // Working-day reshaping overrides the linear pace value when active.
@@ -1018,7 +1015,12 @@ mod tests {
     fn all_days_keeps_calendar_grid() {
         // All days selected → no reshaping → linear grid, no working-time override.
         let period = 7.0 * 86_400.0;
-        let seg = reset_aligned_segments(1_700_000_000.0, period, SegmentUnit::Day, WorkingDays::all());
+        let seg = reset_aligned_segments(
+            1_700_000_000.0,
+            period,
+            SegmentUnit::Day,
+            WorkingDays::all(),
+        );
         assert!(seg.time_pct.is_none(), "all-days must not override pace");
         assert!(
             (5..=7).contains(&seg.dividers.len()),
@@ -1038,13 +1040,24 @@ mod tests {
             days: [true, true, true, true, true, false, false],
         };
         let seg = reset_aligned_segments(1_700_000_000.0, period, SegmentUnit::Day, mon_fri);
-        assert_eq!(seg.dividers.len(), 4, "5 blocks → 4 dividers, got {:?}", seg.dividers);
+        assert_eq!(
+            seg.dividers.len(),
+            4,
+            "5 blocks → 4 dividers, got {:?}",
+            seg.dividers
+        );
         // Equal blocks at 1/5, 2/5, 3/5, 4/5.
         for (i, &d) in seg.dividers.iter().enumerate() {
             let expected = (i + 1) as f32 / 5.0;
-            assert!((d - expected).abs() < 1e-4, "divider {i} = {d}, expected {expected}");
+            assert!(
+                (d - expected).abs() < 1e-4,
+                "divider {i} = {d}, expected {expected}"
+            );
         }
-        assert!(seg.time_pct.is_some(), "reshaping must provide a working-time pace");
+        assert!(
+            seg.time_pct.is_some(),
+            "reshaping must provide a working-time pace"
+        );
         let tp = seg.time_pct.unwrap();
         assert!((0.0..=100.0).contains(&tp));
     }
@@ -1064,7 +1077,9 @@ mod tests {
         };
         let seg = working_day_reshape(start, reset, mon_fri, now).expect("reshape");
         assert_eq!(seg.dividers, vec![0.2, 0.4, 0.6, 0.8], "5 equal blocks");
-        let (cs, ce) = seg.current.expect("Thursday is a working day → highlighted");
+        let (cs, ce) = seg
+            .current
+            .expect("Thursday is a working day → highlighted");
         assert!(
             (cs - 0.6).abs() < 1e-4 && (ce - 0.8).abs() < 1e-4,
             "Thursday must be the 4th block, got ({cs}, {ce})"
@@ -1094,7 +1109,8 @@ mod tests {
         let mon_fri = WorkingDays {
             days: [true, true, true, true, true, false, false],
         };
-        let seg = reset_aligned_segments(1_700_000_000.0, 5.0 * 3_600.0, SegmentUnit::Hour, mon_fri);
+        let seg =
+            reset_aligned_segments(1_700_000_000.0, 5.0 * 3_600.0, SegmentUnit::Hour, mon_fri);
         assert!(seg.time_pct.is_none(), "hour windows keep linear pace");
     }
 
@@ -1102,7 +1118,8 @@ mod tests {
     fn guards_reject_bad_input() {
         let seg = reset_aligned_segments(0.0, 7.0 * 86_400.0, SegmentUnit::Day, WorkingDays::all());
         assert!(seg.dividers.is_empty() && seg.current.is_none());
-        let seg = reset_aligned_segments(1_700_000_000.0, 0.0, SegmentUnit::Day, WorkingDays::all());
+        let seg =
+            reset_aligned_segments(1_700_000_000.0, 0.0, SegmentUnit::Day, WorkingDays::all());
         assert!(seg.dividers.is_empty() && seg.current.is_none());
     }
 
@@ -1121,10 +1138,16 @@ mod tests {
     fn divider_overlay_contrasts_background() {
         // Dark track (neumie-contrast bg_secondary) → light line.
         let on_dark = divider_overlay(0x252526);
-        assert!(on_dark.r > 0.5 && on_dark.a > 0.0, "dark bg → light divider");
+        assert!(
+            on_dark.r > 0.5 && on_dark.a > 0.0,
+            "dark bg → light divider"
+        );
         // Pale fill (neumie-contrast metric_normal/warning) → dark line.
         let on_pale = divider_overlay(0xa0a0a0);
-        assert!(on_pale.r < 0.5 && on_pale.a > 0.0, "light bg → dark divider");
+        assert!(
+            on_pale.r < 0.5 && on_pale.a > 0.0,
+            "light bg → dark divider"
+        );
         // Bright yellow fill → still a dark line (the earlier complaint).
         let on_yellow = divider_overlay(0xe5e510);
         assert!(on_yellow.r < 0.5, "bright bg → dark divider");

@@ -56,11 +56,19 @@ impl GitHeader {
 
         let provider = self.git_provider.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let list = smol::unblock(move || provider.list_branches_classified()).await;
+            let result = smol::unblock(move || provider.list_branches_classified()).await;
             let _ = this.update(cx, |this, cx| {
-                this.branch_picker_list = list;
-                if matches!(this.branch_picker_status, BranchPickerStatus::Loading) {
-                    this.branch_picker_status = BranchPickerStatus::Idle;
+                match result {
+                    Ok(list) => {
+                        this.branch_picker_list = list;
+                        if matches!(this.branch_picker_status, BranchPickerStatus::Loading) {
+                            this.branch_picker_status = BranchPickerStatus::Idle;
+                        }
+                    }
+                    Err(error) => {
+                        this.branch_picker_list = BranchList::default();
+                        this.branch_picker_status = BranchPickerStatus::Error(error);
+                    }
                 }
                 this.recompute_branch_filtered(cx);
                 cx.notify();
@@ -251,10 +259,8 @@ impl GitHeader {
         let provider = self.git_provider.clone();
         let name = raw.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = smol::unblock(move || {
-                provider.create_and_checkout_branch(&name, None)
-            })
-            .await;
+            let result =
+                smol::unblock(move || provider.create_and_checkout_branch(&name, None)).await;
 
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
@@ -309,8 +315,12 @@ impl GitHeader {
         // Flat, display-ordered nav list (local-first). Cloned up-front so row
         // building can borrow `cx` mutably without also holding a borrow on
         // `self.branch_picker_filtered`.
-        let nav: Vec<(usize, BranchNavItem)> =
-            self.branch_picker_filtered.iter().cloned().enumerate().collect();
+        let nav: Vec<(usize, BranchNavItem)> = self
+            .branch_picker_filtered
+            .iter()
+            .cloned()
+            .enumerate()
+            .collect();
         let local: Vec<(usize, BranchNavItem)> = nav
             .iter()
             .filter(|(_, b)| b.kind == BranchKind::Local)
@@ -322,10 +332,8 @@ impl GitHeader {
             .cloned()
             .collect();
         let is_create = self.branch_picker_create_mode;
-        let is_working =
-            matches!(self.branch_picker_status, BranchPickerStatus::Working);
-        let is_loading =
-            matches!(self.branch_picker_status, BranchPickerStatus::Loading);
+        let is_working = matches!(self.branch_picker_status, BranchPickerStatus::Working);
+        let is_loading = matches!(self.branch_picker_status, BranchPickerStatus::Loading);
         let error = match &self.branch_picker_status {
             BranchPickerStatus::Error(msg) => Some(msg.clone()),
             _ => None,
@@ -348,7 +356,11 @@ impl GitHeader {
                 .items_center()
                 .cursor_pointer()
                 .text_size(ui_text_ms(cx))
-                .text_color(rgb(if is_current { t.text_primary } else { t.text_secondary }))
+                .text_color(rgb(if is_current {
+                    t.text_primary
+                } else {
+                    t.text_secondary
+                }))
                 .when(is_current, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.15)))
                 .hover(|s| s.bg(rgb(t.bg_hover)))
@@ -356,9 +368,20 @@ impl GitHeader {
                     svg()
                         .path("icons/git-branch.svg")
                         .size(px(10.0))
-                        .text_color(rgb(if is_remote { t.term_green } else { t.text_muted })),
+                        .text_color(rgb(if is_remote {
+                            t.term_green
+                        } else {
+                            t.text_muted
+                        })),
                 )
-                .child(div().flex_1().min_w_0().text_ellipsis().overflow_hidden().child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(name),
+                )
                 .when(is_current, |d| {
                     d.child(
                         div()
@@ -386,60 +409,36 @@ impl GitHeader {
         };
 
         deferred(
-            anchored()
-                .position(position)
-                .snap_to_window()
-                .child(
-                    v_flex()
-                        .id("branch-picker-popover")
-                        .occlude()
-                        .w(px(320.0))
-                        .max_h(px(420.0))
-                        .bg(rgb(t.bg_primary))
-                        .border_1()
-                        .border_color(rgb(t.border))
-                        .rounded(px(8.0))
-                        .shadow_lg()
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.hide_branch_picker(cx);
-                        }))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        // Keyboard navigation. The focused filter/create input
-                        // leaves arrows, Enter and Escape unhandled (it returns
-                        // `KeyHandled::Ignored`/`NotHandled` without stopping
-                        // propagation), so they bubble up to this popover.
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                            let key = event.keystroke.key.as_str();
-                            if this.branch_picker_create_mode {
-                                match key {
-                                    "enter" => {
-                                        this.create_branch_from_current(cx);
-                                        cx.stop_propagation();
-                                    }
-                                    "escape" => {
-                                        this.hide_branch_picker(cx);
-                                        cx.stop_propagation();
-                                    }
-                                    _ => {}
-                                }
-                                return;
-                            }
+            anchored().position(position).snap_to_window().child(
+                v_flex()
+                    .id("branch-picker-popover")
+                    .occlude()
+                    .w(px(320.0))
+                    .max_h(px(420.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.hide_branch_picker(cx);
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_scroll_wheel(|_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // Keyboard navigation. The focused filter/create input
+                    // leaves arrows, Enter and Escape unhandled (it returns
+                    // `KeyHandled::Ignored`/`NotHandled` without stopping
+                    // propagation), so they bubble up to this popover.
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if this.branch_picker_create_mode {
                             match key {
-                                "up" => {
-                                    this.select_prev_branch(cx);
-                                    cx.stop_propagation();
-                                }
-                                "down" => {
-                                    this.select_next_branch(cx);
-                                    cx.stop_propagation();
-                                }
                                 "enter" => {
-                                    this.confirm_branch_selection(cx);
+                                    this.create_branch_from_current(cx);
                                     cx.stop_propagation();
                                 }
                                 "escape" => {
@@ -448,180 +447,200 @@ impl GitHeader {
                                 }
                                 _ => {}
                             }
-                        }))
-                        // Filter / create input
-                        .child(
-                            div()
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .border_b_1()
-                                .border_color(rgb(t.border))
-                                .child(if is_create {
-                                    v_flex()
-                                        .gap(px(6.0))
-                                        .child(
-                                            div()
-                                                .text_size(ui_text_sm(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(format!(
-                                                    "New branch from {}",
-                                                    current.clone().unwrap_or_else(|| "HEAD".to_string())
-                                                )),
-                                        )
-                                        .child(
-                                            SimpleInput::new(&self.branch_picker_create_name)
-                                                .text_size(ui_text_md(cx)),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    SimpleInput::new(&self.branch_picker_filter)
-                                        .text_size(ui_text_md(cx))
-                                        .into_any_element()
-                                }),
-                        )
-                        // Error banner
-                        .when_some(error, |d, msg| {
-                            d.child(
-                                div()
-                                    .px(px(10.0))
-                                    .py(px(4.0))
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.term_red))
-                                    .child(msg),
-                            )
-                        })
-                        .when(!is_create, |d| {
-                            let total = nav.len();
-                            let local_rows: Vec<AnyElement> = local
-                                .iter()
-                                .map(|(flat, b)| {
-                                    row(
-                                        b.name.clone(),
-                                        b.is_current,
-                                        *flat == selected,
-                                        BranchKind::Local,
-                                        format!("branch-picker-row-{}", flat),
-                                        cx,
-                                    )
-                                })
-                                .collect();
-                            let remote_rows: Vec<AnyElement> = remote
-                                .iter()
-                                .map(|(flat, b)| {
-                                    row(
-                                        b.name.clone(),
-                                        false,
-                                        *flat == selected,
-                                        BranchKind::Remote,
-                                        format!("branch-picker-row-{}", flat),
-                                        cx,
-                                    )
-                                })
-                                .collect();
-                            d.child(
+                            return;
+                        }
+                        match key {
+                            "up" => {
+                                this.select_prev_branch(cx);
+                                cx.stop_propagation();
+                            }
+                            "down" => {
+                                this.select_next_branch(cx);
+                                cx.stop_propagation();
+                            }
+                            "enter" => {
+                                this.confirm_branch_selection(cx);
+                                cx.stop_propagation();
+                            }
+                            "escape" => {
+                                this.hide_branch_picker(cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {}
+                        }
+                    }))
+                    // Filter / create input
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .border_b_1()
+                            .border_color(rgb(t.border))
+                            .child(if is_create {
                                 v_flex()
-                                    .id("branch-picker-list")
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&scroll)
-                                    .py(px(4.0))
-                                    .when(is_loading && total == 0, |d| {
-                                        d.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .py(px(8.0))
-                                                .text_size(ui_text_sm(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child("Loading\u{2026}"),
-                                        )
-                                    })
-                                    .when(!is_loading && total == 0, |d| {
-                                        d.child(
-                                            div()
-                                                .px(px(10.0))
-                                                .py(px(8.0))
-                                                .text_size(ui_text_sm(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(if filter_text.is_empty() {
-                                                    "No branches".to_string()
-                                                } else {
-                                                    format!("No matches for \"{}\"", filter_text)
-                                                }),
-                                        )
-                                    })
-                                    .when(!local_rows.is_empty(), |d| {
-                                        d.child(section_header("LOCAL", cx))
-                                            .children(local_rows)
-                                    })
-                                    .when(!remote_rows.is_empty(), |d| {
-                                        d.child(section_header("REMOTE", cx))
-                                            .children(remote_rows)
-                                    }),
-                            )
-                        })
-                        .child(
-                            h_flex()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .gap(px(8.0))
-                                .border_t_1()
-                                .border_color(rgb(t.border))
-                                .items_center()
-                                .child({
-                                    let label = if is_create { "Cancel" } else { "+ New branch" };
-                                    div()
-                                        .id("branch-picker-toggle-create")
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(3.0))
-                                        .rounded(px(4.0))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(ui_text_sm(cx))
-                                        .text_color(rgb(t.text_secondary))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.toggle_branch_create_mode(window, cx);
-                                        }))
-                                        .child(label)
-                                })
-                                .when(is_create, |d| {
-                                    d.child(
-                                        div()
-                                            .id("branch-picker-create-confirm")
-                                            .cursor_pointer()
-                                            .px(px(8.0))
-                                            .py(px(3.0))
-                                            .rounded(px(4.0))
-                                            .bg(rgb(t.term_cyan))
-                                            .text_size(ui_text_sm(cx))
-                                            .text_color(rgb(t.bg_primary))
-                                            .opacity(if is_working { 0.5 } else { 1.0 })
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation();
-                                            })
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.create_branch_from_current(cx);
-                                            }))
-                                            .child("Create & checkout"),
-                                    )
-                                })
-                                .when(is_working, |d| {
-                                    d.child(
+                                    .gap(px(6.0))
+                                    .child(
                                         div()
                                             .text_size(ui_text_sm(cx))
                                             .text_color(rgb(t.text_muted))
-                                            .child("Working\u{2026}"),
+                                            .child(format!(
+                                                "New branch from {}",
+                                                current
+                                                    .clone()
+                                                    .unwrap_or_else(|| "HEAD".to_string())
+                                            )),
                                     )
+                                    .child(
+                                        SimpleInput::new(&self.branch_picker_create_name)
+                                            .text_size(ui_text_md(cx)),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                SimpleInput::new(&self.branch_picker_filter)
+                                    .text_size(ui_text_md(cx))
+                                    .into_any_element()
+                            }),
+                    )
+                    // Error banner
+                    .when_some(error, |d, msg| {
+                        d.child(
+                            div()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.term_red))
+                                .child(msg),
+                        )
+                    })
+                    .when(!is_create, |d| {
+                        let total = nav.len();
+                        let local_rows: Vec<AnyElement> = local
+                            .iter()
+                            .map(|(flat, b)| {
+                                row(
+                                    b.name.clone(),
+                                    b.is_current,
+                                    *flat == selected,
+                                    BranchKind::Local,
+                                    format!("branch-picker-row-{}", flat),
+                                    cx,
+                                )
+                            })
+                            .collect();
+                        let remote_rows: Vec<AnyElement> = remote
+                            .iter()
+                            .map(|(flat, b)| {
+                                row(
+                                    b.name.clone(),
+                                    false,
+                                    *flat == selected,
+                                    BranchKind::Remote,
+                                    format!("branch-picker-row-{}", flat),
+                                    cx,
+                                )
+                            })
+                            .collect();
+                        d.child(
+                            v_flex()
+                                .id("branch-picker-list")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&scroll)
+                                .py(px(4.0))
+                                .when(is_loading && total == 0, |d| {
+                                    d.child(
+                                        div()
+                                            .px(px(10.0))
+                                            .py(px(8.0))
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .child("Loading\u{2026}"),
+                                    )
+                                })
+                                .when(!is_loading && total == 0, |d| {
+                                    d.child(
+                                        div()
+                                            .px(px(10.0))
+                                            .py(px(8.0))
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .child(if filter_text.is_empty() {
+                                                "No branches".to_string()
+                                            } else {
+                                                format!("No matches for \"{}\"", filter_text)
+                                            }),
+                                    )
+                                })
+                                .when(!local_rows.is_empty(), |d| {
+                                    d.child(section_header("LOCAL", cx)).children(local_rows)
+                                })
+                                .when(!remote_rows.is_empty(), |d| {
+                                    d.child(section_header("REMOTE", cx)).children(remote_rows)
                                 }),
-                        ),
-                ),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .gap(px(8.0))
+                            .border_t_1()
+                            .border_color(rgb(t.border))
+                            .items_center()
+                            .child({
+                                let label = if is_create { "Cancel" } else { "+ New branch" };
+                                div()
+                                    .id("branch-picker-toggle-create")
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_secondary))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_branch_create_mode(window, cx);
+                                    }))
+                                    .child(label)
+                            })
+                            .when(is_create, |d| {
+                                d.child(
+                                    div()
+                                        .id("branch-picker-create-confirm")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgb(t.term_cyan))
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.bg_primary))
+                                        .opacity(if is_working { 0.5 } else { 1.0 })
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.create_branch_from_current(cx);
+                                        }))
+                                        .child("Create & checkout"),
+                                )
+                            })
+                            .when(is_working, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child("Working\u{2026}"),
+                                )
+                            }),
+                    ),
+            ),
         )
         .into_any_element()
     }
-
 }
 
 /// Map a flat selection index (local-first) to its child position within the

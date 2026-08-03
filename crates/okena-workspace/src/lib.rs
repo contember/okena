@@ -2,6 +2,8 @@
 
 pub mod access_history;
 pub mod actions;
+pub mod claude_env;
+pub mod context;
 pub mod focus;
 pub mod hook_monitor;
 pub mod hooks;
@@ -9,12 +11,15 @@ pub mod lifecycle;
 pub mod persistence;
 pub mod remote_apply;
 pub mod remote_sync;
+#[cfg(feature = "gpui")]
 pub mod request_broker;
+#[cfg(feature = "gpui")]
 pub mod requests;
 pub mod sessions;
-pub mod sidebar_controller;
 pub mod settings;
+pub mod sidebar_controller;
 pub mod state;
 pub mod toast;
 pub mod visibility;
+#[cfg(feature = "gpui")]
 pub mod worktree_sync;

@@ -64,6 +64,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Daemon/client split gates
+        run: |
+          scripts/audit-daemon-client-gaps.sh
+          if cargo tree -p okena-daemon --edges no-dev | grep -E 'gpui|gpui-component'; then
+            echo "okena-daemon must stay GPUI-free"
+            exit 1
+          fi
+
       - name: Run tests
         run: cargo test
 
@@ -163,7 +171,7 @@ jobs:
         run: cd web && bun install --frozen-lockfile && bun run build
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p okena -p okena-daemon
 
       - name: Prepare artifact (Linux)
         if: runner.os == 'Linux'
@@ -171,6 +179,10 @@ jobs:
           mkdir -p dist/icons
           cp target/${{ matrix.target }}/release/okena dist/
           chmod +x dist/okena
+          # Ship the GPUI-free daemon sibling so the app runs the real daemon
+          # binary instead of falling back to `okena --headless`.
+          cp target/${{ matrix.target }}/release/okena-daemon dist/
+          chmod +x dist/okena-daemon
           # Bundle icons for Linux installation
           cp assets/app-icon-16.png assets/app-icon-32.png assets/app-icon-48.png \
              assets/app-icon-64.png assets/app-icon-128.png assets/app-icon-256.png \
@@ -188,6 +200,8 @@ jobs:
         run: |
           mkdir dist
           copy target\${{ matrix.target }}\release\okena.exe dist\
+          rem Ship the GPUI-free daemon sibling (see Linux step).
+          copy target\${{ matrix.target }}\release\okena-daemon.exe dist\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

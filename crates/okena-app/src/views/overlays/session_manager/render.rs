@@ -1,11 +1,11 @@
 use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
-use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl};
-use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
-use crate::workspace::persistence::{config_dir, SessionInfo};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use crate::views::components::{SimpleInput, modal_backdrop, modal_content, modal_header};
+use crate::workspace::persistence::SessionInfo;
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use gpui::prelude::*;
 
 use super::{SessionManager, SessionManagerTab};
 
@@ -196,18 +196,22 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border_active))
-                                    .child(SimpleInput::new(rename_input).text_size(ui_text(13.0, cx)))
+                                    .child(
+                                        SimpleInput::new(rename_input).text_size(ui_text(13.0, cx)),
+                                    )
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                        cx.stop_propagation();
-                                        match event.keystroke.key.as_str() {
-                                            "enter" => this.confirm_rename(cx),
-                                            "escape" => this.cancel_rename(cx),
-                                            _ => {}
-                                        }
-                                    })),
+                                    .on_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            match event.keystroke.key.as_str() {
+                                                "enter" => this.confirm_rename(cx),
+                                                "escape" => this.cancel_rename(cx),
+                                                _ => {}
+                                            }
+                                        },
+                                    )),
                             )
                             .child(
                                 h_flex()
@@ -261,6 +265,7 @@ impl SessionManager {
     pub(super) fn render_sessions_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let sessions = self.sessions.clone();
+        let loading_sessions = self.loading_sessions;
         let new_session_input = self.new_session_input.clone();
 
         v_flex()
@@ -284,16 +289,21 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border))
-                                    .child(SimpleInput::new(&new_session_input).text_size(ui_text(13.0, cx)))
+                                    .child(
+                                        SimpleInput::new(&new_session_input)
+                                            .text_size(ui_text(13.0, cx)),
+                                    )
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                        cx.stop_propagation();
-                                        if event.keystroke.key.as_str() == "enter" {
-                                            this.save_new_session(cx);
-                                        }
-                                    })),
+                                    .on_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            if event.keystroke.key.as_str() == "enter" {
+                                                this.save_new_session(cx);
+                                            }
+                                        },
+                                    )),
                             )
                             .child(
                                 div()
@@ -322,18 +332,23 @@ impl SessionManager {
                     .id("sessions-list")
                     .flex_1()
                     .overflow_y_scroll()
-                    .when(sessions.is_empty(), |d| {
-                        d.flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .text_size(ui_text_xl(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("No saved sessions"),
-                            )
+                    .when(loading_sessions, |d| {
+                        d.flex().items_center().justify_center().child(
+                            div()
+                                .text_size(ui_text_xl(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("Loading sessions…"),
+                        )
                     })
-                    .when(!sessions.is_empty(), |d| {
+                    .when(!loading_sessions && sessions.is_empty(), |d| {
+                        d.flex().items_center().justify_center().child(
+                            div()
+                                .text_size(ui_text_xl(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("No saved sessions"),
+                        )
+                    })
+                    .when(!loading_sessions && !sessions.is_empty(), |d| {
                         d.children(
                             sessions
                                 .iter()
@@ -479,25 +494,13 @@ impl SessionManager {
                     ),
             )
             .child(
-                // Config directory info
-                v_flex()
-                    .gap(px(4.0))
+                div()
                     .pt(px(16.0))
                     .border_t_1()
                     .border_color(rgb(t.border))
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child("Sessions are stored in:"),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .font_family("monospace")
-                            .text_color(rgb(t.text_secondary))
-                            .child(config_dir().join("sessions").display().to_string()),
-                    ),
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Sessions are stored by the local daemon."),
             )
     }
 }
@@ -622,7 +625,9 @@ impl Render for SessionManager {
                     })
                     // Tab content
                     .child(match active_tab {
-                        SessionManagerTab::Sessions => self.render_sessions_tab(cx).into_any_element(),
+                        SessionManagerTab::Sessions => {
+                            self.render_sessions_tab(cx).into_any_element()
+                        }
                         SessionManagerTab::ExportImport => {
                             self.render_export_import_tab(cx).into_any_element()
                         }

@@ -69,8 +69,6 @@ impl<K: Eq + Clone> ClickDetector<K> {
             false
         }
     }
-
-
 }
 
 #[cfg(test)]

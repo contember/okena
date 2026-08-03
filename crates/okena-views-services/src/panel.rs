@@ -1,13 +1,13 @@
 //! Pure render functions for the per-project service panel in ProjectColumn.
 
 use crate::types::{ServiceSnapshot, status_color, status_label};
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button;
 use okena_ui::theme::ThemeColors;
-use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md, ui_text};
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xs};
 use std::sync::Arc;
 
 /// Callback taking a service name (e.g. start/stop/restart a named service).
@@ -81,8 +81,7 @@ pub fn render_service_panel_header(
                         .flex_shrink_0()
                         .text_size(ui_text_md(cx))
                         .when(is_overview, |d| {
-                            d.bg(rgb(t.bg_primary))
-                                .text_color(rgb(t.text_primary))
+                            d.bg(rgb(t.bg_primary)).text_color(rgb(t.text_primary))
                         })
                         .when(!is_overview, |d| {
                             d.text_color(rgb(t.text_secondary))
@@ -97,9 +96,7 @@ pub fn render_service_panel_header(
                 .children(
                     services
                         .iter()
-                        .filter(|svc| {
-                            !svc.is_extra || active_service_name == Some(&svc.name)
-                        })
+                        .filter(|svc| !svc.is_extra || active_service_name == Some(&svc.name))
                         .map(|svc| {
                             let name = svc.name.clone();
                             let is_active = active_service_name == Some(&name);
@@ -107,9 +104,7 @@ pub fn render_service_panel_header(
                             let on_tab_click = on_tab_click.clone();
 
                             div()
-                                .id(ElementId::Name(
-                                    format!("svc-tab-{}", name).into(),
-                                ))
+                                .id(ElementId::Name(format!("svc-tab-{}", name).into()))
                                 .cursor_pointer()
                                 .h(px(34.0))
                                 .px(px(12.0))
@@ -119,8 +114,7 @@ pub fn render_service_panel_header(
                                 .gap(px(6.0))
                                 .text_size(ui_text_md(cx))
                                 .when(is_active, |d| {
-                                    d.bg(rgb(t.bg_primary))
-                                        .text_color(rgb(t.text_primary))
+                                    d.bg(rgb(t.bg_primary)).text_color(rgb(t.text_primary))
                                 })
                                 .when(!is_active, |d| {
                                     d.text_color(rgb(t.text_secondary))
@@ -158,36 +152,50 @@ pub fn render_service_panel_header(
                     d
                         // Start All
                         .child(
-                            icon_action_button("svc-panel-start-all", "\u{25B6}\u{25B6}", t.term_green, t, cx)
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    on_start_all(window, cx);
-                                })
-                                .tooltip(|_window, cx| {
-                                    Tooltip::new("Start All").build(_window, cx)
-                                }),
+                            icon_action_button(
+                                "svc-panel-start-all",
+                                "\u{25B6}\u{25B6}",
+                                t.term_green,
+                                t,
+                                cx,
+                            )
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                on_start_all(window, cx);
+                            })
+                            .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
                         )
                         // Stop All
                         .child(
-                            icon_action_button("svc-panel-stop-all", "\u{25A0}\u{25A0}", t.term_red, t, cx)
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    on_stop_all(window, cx);
-                                })
-                                .tooltip(|_window, cx| {
-                                    Tooltip::new("Stop All").build(_window, cx)
-                                }),
+                            icon_action_button(
+                                "svc-panel-stop-all",
+                                "\u{25A0}\u{25A0}",
+                                t.term_red,
+                                t,
+                                cx,
+                            )
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                on_stop_all(window, cx);
+                            })
+                            .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
                         )
                         // Reload
                         .child(
-                            icon_action_button("svc-panel-reload", "\u{27F3}", t.text_secondary, t, cx)
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    on_reload(window, cx);
-                                })
-                                .tooltip(|_window, cx| {
-                                    Tooltip::new("Reload Services").build(_window, cx)
-                                }),
+                            icon_action_button(
+                                "svc-panel-reload",
+                                "\u{27F3}",
+                                t.text_secondary,
+                                t,
+                                cx,
+                            )
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                on_reload(window, cx);
+                            })
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Reload Services").build(_window, cx)
+                            }),
                         )
                 })
                 // --- Detail tab actions ---
@@ -212,27 +220,35 @@ pub fn render_service_panel_header(
                         // Start button (when stopped/crashed)
                         .when(active_is_stopped, |d| {
                             d.child(
-                                icon_action_button("svc-panel-start", "\u{25B6}", t.term_green, t, cx)
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        on_start(window, cx);
-                                    })
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::new("Start").build(_window, cx)
-                                    }),
+                                icon_action_button(
+                                    "svc-panel-start",
+                                    "\u{25B6}",
+                                    t.term_green,
+                                    t,
+                                    cx,
+                                )
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    on_start(window, cx);
+                                })
+                                .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
                             )
                         })
                         // Restart button (when running)
                         .when(active_is_running, |d| {
                             d.child(
-                                icon_action_button("svc-panel-restart", "\u{27F3}", t.text_secondary, t, cx)
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        on_restart(window, cx);
-                                    })
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::new("Restart").build(_window, cx)
-                                    }),
+                                icon_action_button(
+                                    "svc-panel-restart",
+                                    "\u{27F3}",
+                                    t.text_secondary,
+                                    t,
+                                    cx,
+                                )
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    on_restart(window, cx);
+                                })
+                                .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
                             )
                         })
                         // Stop button (when running)
@@ -243,9 +259,7 @@ pub fn render_service_panel_header(
                                         cx.stop_propagation();
                                         on_stop(window, cx);
                                     })
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::new("Stop").build(_window, cx)
-                                    }),
+                                    .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
                             )
                         })
                 }),
@@ -434,7 +448,11 @@ fn render_overview_row(
 
     let sc = status_color(&status, t);
     let sl = status_label(&status);
-    let name_color = if is_extra { t.text_muted } else { t.text_primary };
+    let name_color = if is_extra {
+        t.text_muted
+    } else {
+        t.text_primary
+    };
     let project_id = project_id.to_string();
 
     div()
@@ -461,9 +479,7 @@ fn render_overview_row(
             let on_service_click = on_service_click.clone();
             let name = name.clone();
             div()
-                .id(ElementId::Name(
-                    format!("svc-overview-name-{}", idx).into(),
-                ))
+                .id(ElementId::Name(format!("svc-overview-name-{}", idx).into()))
                 .cursor_pointer()
                 .flex_1()
                 .min_w(px(80.0))
@@ -488,25 +504,20 @@ fn render_overview_row(
         )
         // Type column
         .when(has_docker, |d| {
-            d.child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(56.0))
-                    .when(is_docker, |d| {
-                        d.child(
-                            div()
-                                .px(px(3.0))
-                                .h(px(14.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(2.0))
-                                .bg(rgb(t.bg_secondary))
-                                .text_size(ui_text_xs(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("docker"),
-                        )
-                    }),
-            )
+            d.child(div().flex_shrink_0().w(px(56.0)).when(is_docker, |d| {
+                d.child(
+                    div()
+                        .px(px(3.0))
+                        .h(px(14.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(2.0))
+                        .bg(rgb(t.bg_secondary))
+                        .text_size(ui_text_xs(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("docker"),
+                )
+            }))
         })
         // Ports column
         .when(has_ports, |d| {
@@ -530,11 +541,8 @@ fn render_overview_row(
                             let on_port_click = on_port_click.clone();
                             div()
                                 .id(ElementId::Name(
-                                    format!(
-                                        "svc-overview-port-{}-{}-{}",
-                                        project_id, name, port
-                                    )
-                                    .into(),
+                                    format!("svc-overview-port-{}-{}-{}", project_id, name, port)
+                                        .into(),
                                 ))
                                 .flex_shrink_0()
                                 .cursor_pointer()
@@ -548,9 +556,7 @@ fn render_overview_row(
                                 .text_size(ui_text_sm(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child(format!(":{}", port))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, _cx| {
                                     on_port_click(port);
                                 })
@@ -579,9 +585,7 @@ fn render_overview_row(
                     let on_start = on_start.clone();
                     d.child(
                         icon_action_button(
-                            ElementId::Name(
-                                format!("svc-overview-play-{}", idx).into(),
-                            ),
+                            ElementId::Name(format!("svc-overview-play-{}", idx).into()),
                             "\u{25B6}",
                             t.term_green,
                             t,
@@ -599,9 +603,7 @@ fn render_overview_row(
                     let on_stop = on_stop.clone();
                     d.child(
                         icon_action_button(
-                            ElementId::Name(
-                                format!("svc-overview-restart-{}", idx).into(),
-                            ),
+                            ElementId::Name(format!("svc-overview-restart-{}", idx).into()),
                             "\u{27F3}",
                             t.text_secondary,
                             t,
@@ -611,15 +613,11 @@ fn render_overview_row(
                             cx.stop_propagation();
                             on_restart(name_for_restart.clone(), window, cx);
                         })
-                        .tooltip(|_window, cx| {
-                            Tooltip::new("Restart").build(_window, cx)
-                        }),
+                        .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
                     )
                     .child(
                         icon_action_button(
-                            ElementId::Name(
-                                format!("svc-overview-stop-{}", idx).into(),
-                            ),
+                            ElementId::Name(format!("svc-overview-stop-{}", idx).into()),
                             "\u{25A0}",
                             t.term_red,
                             t,
@@ -629,9 +627,7 @@ fn render_overview_row(
                             cx.stop_propagation();
                             on_stop(name_for_stop.clone(), window, cx);
                         })
-                        .tooltip(|_window, cx| {
-                            Tooltip::new("Stop").build(_window, cx)
-                        }),
+                        .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
                     )
                 })
         })
@@ -653,15 +649,16 @@ pub fn render_service_indicator(
     }
 
     // Compute aggregate status color
-    let has_running = services
-        .iter()
-        .any(|s| s.status == ServiceStatus::Running);
+    let has_running = services.iter().any(|s| s.status == ServiceStatus::Running);
     let has_crashed = services
         .iter()
         .any(|s| matches!(s.status, ServiceStatus::Crashed { .. }));
-    let has_starting = services
-        .iter()
-        .any(|s| matches!(s.status, ServiceStatus::Starting | ServiceStatus::Restarting));
+    let has_starting = services.iter().any(|s| {
+        matches!(
+            s.status,
+            ServiceStatus::Starting | ServiceStatus::Restarting
+        )
+    });
 
     let dot_color = if has_crashed {
         t.term_red

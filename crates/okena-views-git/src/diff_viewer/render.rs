@@ -1,20 +1,22 @@
 //! Render trait impl and helper methods for the diff viewer.
 
-use super::types::{DiffViewMode, FileTreeNode};
-use super::{Cancel, DiffViewer, SIDEBAR_WIDTH};
+use super::types::DiffViewMode;
+use super::{Cancel, DiffViewer};
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::h_flex;
 use okena_core::theme::ThemeColors;
+use okena_files::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use okena_files::selection::Selection2DNonEmpty;
 use okena_files::theme::theme;
+use okena_git::DiffMode;
 use okena_ui::modal::{
     detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
     window_min_max_controls,
 };
+use okena_ui::resizable_sidebar::resizable_sidebar;
 use okena_ui::toggle::segmented_toggle;
-use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
-use okena_git::DiffMode;
-use gpui::prelude::*;
-use gpui::*;
-use gpui_component::h_flex;
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
 impl DiffViewer {
@@ -35,7 +37,10 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_working = *diff_mode == DiffMode::WorkingTree;
-        let hide_mode_toggle = matches!(diff_mode, DiffMode::Commit(_) | DiffMode::BranchCompare { .. });
+        let hide_mode_toggle = matches!(
+            diff_mode,
+            DiffMode::Commit(_) | DiffMode::BranchCompare { .. }
+        );
         let is_unified = self.view_mode == DiffViewMode::Unified;
         let detached = self.is_detached;
 
@@ -54,7 +59,9 @@ impl DiffViewer {
                     .child({
                         let title = match diff_mode {
                             DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
-                            DiffMode::BranchCompare { base, head } => format!("{base} \u{2192} {head}"),
+                            DiffMode::BranchCompare { base, head } => {
+                                format!("{base} \u{2192} {head}")
+                            }
                             _ => "Changes".to_string(),
                         };
                         div()
@@ -75,7 +82,11 @@ impl DiffViewer {
                             None
                         },
                         |d, hash| {
-                            let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                            let short = if hash.len() > 7 {
+                                hash[..7].to_string()
+                            } else {
+                                hash.clone()
+                            };
                             let hash_for_click = hash.clone();
                             let hash_for_rclick = hash.clone();
                             d.child(
@@ -90,15 +101,26 @@ impl DiffViewer {
                                     .rounded(px(4.0))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
                                     .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            hash_for_click.clone(),
+                                        ));
                                     })
                                     .on_mouse_down(
                                         MouseButton::Right,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                            this.open_commit_hash_menu(
+                                                event.position,
+                                                hash_for_rclick.clone(),
+                                                cx,
+                                            );
                                         }),
                                     )
-                                    .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
+                                    .tooltip(|_window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            "Click: copy hash \u{00B7} Right-click: more",
+                                        )
+                                        .build(_window, cx)
+                                    })
                                     .child(short),
                             )
                         },
@@ -160,9 +182,11 @@ impl DiffViewer {
                                 t.bg_secondary
                             }))
                             .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.toggle_ignore_whitespace(cx)
-                            }))
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| {
+                                    this.toggle_ignore_whitespace(cx)
+                                }),
+                            )
                             .child(
                                 div()
                                     .text_size(ui_text_md(cx))
@@ -175,13 +199,7 @@ impl DiffViewer {
                             ),
                     )
                     // Separator
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border))
-                            .mx(px(4.0)),
-                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                     // View mode toggle
                     .child(
                         div()
@@ -207,13 +225,7 @@ impl DiffViewer {
                         )
                     })
                     // Separator
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border))
-                            .mx(px(4.0)),
-                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                     // Window min/max controls (only when detached + client decorations)
                     .when(detached, |d| {
                         d.child(window_min_max_controls(needs_controls, is_maximized, t, cx))
@@ -232,9 +244,12 @@ impl DiffViewer {
                                 .rounded(px(6.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                 .tooltip(|window, cx| {
-                                    gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
+                                    gpui_component::tooltip::Tooltip::new("Open in new window")
+                                        .build(window, cx)
                                 })
-                                .on_click(cx.listener(|this, _, _window, cx| this.request_detach(cx)))
+                                .on_click(
+                                    cx.listener(|this, _, _window, cx| this.request_detach(cx)),
+                                )
                                 .child(
                                     svg()
                                         .path("icons/external-link.svg")
@@ -267,7 +282,11 @@ impl DiffViewer {
     }
 
     /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
-    pub(super) fn render_commit_info_bar(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_commit_info_bar(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use gpui_component::tooltip::Tooltip;
 
         let commit = self.commits.get(self.commit_index);
@@ -287,7 +306,11 @@ impl DiffViewer {
             .child(
                 div()
                     .id("commit-nav-prev")
-                    .cursor(if can_prev { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .cursor(if can_prev {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::default()
+                    })
                     .w(px(24.0))
                     .h(px(22.0))
                     .flex()
@@ -296,12 +319,18 @@ impl DiffViewer {
                     .rounded(px(4.0))
                     .when(can_prev, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_prev { t.text_secondary } else { t.text_muted }))
+                    .text_color(rgb(if can_prev {
+                        t.text_secondary
+                    } else {
+                        t.text_muted
+                    }))
                     .when(can_prev, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.prev_commit(cx)))
                     })
                     .child("\u{25C0}")
-                    .tooltip(move |_window, cx| Tooltip::new("Previous commit  [").build(_window, cx)),
+                    .tooltip(move |_window, cx| {
+                        Tooltip::new("Previous commit  [").build(_window, cx)
+                    }),
             )
             // Position
             .child(
@@ -316,7 +345,11 @@ impl DiffViewer {
             .child(
                 div()
                     .id("commit-nav-next")
-                    .cursor(if can_next { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .cursor(if can_next {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::default()
+                    })
                     .w(px(24.0))
                     .h(px(22.0))
                     .flex()
@@ -325,7 +358,11 @@ impl DiffViewer {
                     .rounded(px(4.0))
                     .when(can_next, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_next { t.text_secondary } else { t.text_muted }))
+                    .text_color(rgb(if can_next {
+                        t.text_secondary
+                    } else {
+                        t.text_muted
+                    }))
                     .when(can_next, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.next_commit(cx)))
                     })
@@ -337,7 +374,11 @@ impl DiffViewer {
             // Commit metadata
             .when_some(commit.cloned(), |d, commit| {
                 let hash = commit.hash.clone();
-                let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                let short = if hash.len() > 7 {
+                    hash[..7].to_string()
+                } else {
+                    hash.clone()
+                };
                 let hash_for_click = hash.clone();
                 let hash_for_rclick = hash.clone();
                 let time_str = okena_git::format_relative_time(commit.timestamp);
@@ -355,15 +396,24 @@ impl DiffViewer {
                             .rounded(px(3.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(hash_for_click.clone()));
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    hash_for_click.clone(),
+                                ));
                             })
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.open_commit_hash_menu(event.position, hash_for_rclick.clone(), cx);
+                                    this.open_commit_hash_menu(
+                                        event.position,
+                                        hash_for_rclick.clone(),
+                                        cx,
+                                    );
                                 }),
                             )
-                            .tooltip(|_window, cx| Tooltip::new("Click: copy hash \u{00B7} Right-click: more").build(_window, cx))
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Click: copy hash \u{00B7} Right-click: more")
+                                    .build(_window, cx)
+                            })
                             .child(short),
                     )
                     // Author
@@ -406,37 +456,27 @@ impl DiffViewer {
             .min_h_0()
             .when(loading, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("Loading..."),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Loading..."),
+                    ),
                 )
             })
             .when(!loading && has_error, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(error_message.unwrap_or_default()),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(error_message.unwrap_or_default()),
+                    ),
                 )
             })
             .when(!loading && !has_error && has_files, |d| {
-                d.child(self.render_sidebar(t, tree_elements, cx)).child(
-                    self.render_diff_pane(
+                d.child(self.render_sidebar(t, tree_elements, cx))
+                    .child(self.render_diff_pane(
                         t,
                         is_binary,
                         file_path,
@@ -444,8 +484,7 @@ impl DiffViewer {
                         gutter_width,
                         theme_colors,
                         cx,
-                    ),
-                )
+                    ))
             })
     }
 
@@ -453,37 +492,47 @@ impl DiffViewer {
         &self,
         t: &ThemeColors,
         tree_elements: Vec<AnyElement>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .border_r_1()
+        let header = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .border_b_1()
             .border_color(rgb(t.border))
-            .bg(rgb(t.bg_primary))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .text_size(ui_text_ms(cx))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text_muted))
-                    .line_height(px(11.0))
-                    .child("Files"),
-            )
-            .child(
-                div()
-                    .id("file-tree")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll_handle)
-                    .py(px(6.0))
-                    .children(tree_elements),
-            )
+            .text_size(ui_text_ms(cx))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(t.text_muted))
+            .line_height(px(11.0))
+            .child("Files");
+        let tree = div()
+            .id("file-tree")
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll_handle)
+            .py(px(6.0))
+            .children(tree_elements);
+
+        let entity = cx.entity().downgrade();
+        let entity_for_end = entity.clone();
+        resizable_sidebar(
+            self.sidebar_resize.width(),
+            t.bg_primary,
+            t.border,
+            t.border_active,
+            vec![header.into_any_element(), tree.into_any_element()],
+            move |mouse_pos, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, _| {
+                        this.sidebar_resize.start_resize(f32::from(mouse_pos.x));
+                    });
+                }
+            },
+            move |cx| {
+                if let Some(entity) = entity_for_end.upgrade() {
+                    entity.update(cx, |this, _| this.sidebar_resize.end_resize());
+                }
+            },
+        )
     }
 
     // GPUI render helper: params are render inputs (theme, flags, callbacks).
@@ -544,17 +593,12 @@ impl DiffViewer {
             .children(search_bar)
             .when(is_binary, |d| {
                 d.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(ui_text_xl(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child("Binary file - cannot display diff"),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Binary file - cannot display diff"),
+                    ),
                 )
             })
             .when(!is_binary, |d| {
@@ -571,14 +615,12 @@ impl DiffViewer {
                         .child(
                             uniform_list("diff-lines", item_count, move |range, _window, cx| {
                                 let tc = tc.clone();
-                                view.update(cx, |this, cx| {
-                                    match view_mode {
-                                        DiffViewMode::Unified => {
-                                            this.render_visible_lines(range, &tc, gutter_width, cx)
-                                        }
-                                        DiffViewMode::SideBySide => {
-                                            this.render_side_by_side_lines(range, &tc, cx)
-                                        }
+                                view.update(cx, |this, cx| match view_mode {
+                                    DiffViewMode::Unified => {
+                                        this.render_visible_lines(range, &tc, gutter_width, cx)
+                                    }
+                                    DiffViewMode::SideBySide => {
+                                        this.render_side_by_side_lines(range, &tc, cx)
                                     }
                                 })
                             })
@@ -592,9 +634,11 @@ impl DiffViewer {
                                 list.style().restrict_scroll_to_axis = Some(true);
                                 list
                             })
-                            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
-                                this.handle_scroll_x(event, cx);
-                            }))
+                            .on_scroll_wheel(cx.listener(
+                                move |this, event: &ScrollWheelEvent, _window, cx| {
+                                    this.handle_scroll_x(event, cx);
+                                },
+                            ))
                             .track_scroll(&self.scroll_handle),
                         )
                         .when_some(scrollbar_geometry, |d, (_, _, thumb_y, thumb_height)| {
@@ -813,112 +857,108 @@ impl DiffViewer {
             )
     }
 
-    pub(super) fn render_tree_node(
+    pub(super) fn render_file_tree(
         &self,
-        node: &FileTreeNode,
-        depth: usize,
-        parent_path: &str,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        use okena_files::file_tree::{expandable_folder_row, expandable_file_row};
         use super::context_menu::DiffTargetKind;
 
         let mut elements: Vec<AnyElement> = Vec::new();
 
-        for (name, child) in &node.children {
-            let folder_path = if parent_path.is_empty() {
-                name.clone()
-            } else {
-                format!("{parent_path}/{name}")
-            };
-            let is_expanded = self.expanded_folders.contains(&folder_path);
-
-            let fp_toggle = folder_path.clone();
-            let fp_menu = folder_path.clone();
-            elements.push(
-                expandable_folder_row(name, depth, is_expanded, t, cx)
-                    .id(ElementId::Name(format!("dv-folder-{}", folder_path).into()))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_folder(&fp_toggle, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            this.open_context_menu(
-                                event.position,
-                                fp_menu.clone(),
-                                DiffTargetKind::Folder,
-                                cx,
-                            );
-                        }),
-                    )
-                    .into_any_element(),
-            );
-
-            if is_expanded {
-                elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
-            }
-        }
-
-        for &file_index in &node.files {
-            if let Some(file) = self.file_stats.get(file_index) {
-                let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
-                let is_selected = file_index == self.selected_file_index;
-                let file_path_for_menu = file.path.clone();
-
-                let name_color = if file.is_new {
-                    Some(t.diff_added_fg)
-                } else if file.is_deleted {
-                    Some(t.diff_removed_fg)
-                } else {
-                    None
-                };
-
-                elements.push(
-                    expandable_file_row(filename, depth, name_color, false, t, cx)
-                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
-                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.select_file(file_index, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                this.select_file(file_index, cx);
-                                this.open_context_menu(
-                                    event.position,
-                                    file_path_for_menu.clone(),
-                                    DiffTargetKind::File,
-                                    cx,
-                                );
-                            }),
-                        )
-                        // Line counts
-                        .when(file.added > 0 || file.removed > 0, |d| {
-                            d.child(
-                                h_flex()
-                                    .gap(px(4.0))
-                                    .text_size(ui_text_ms(cx))
-                                    .flex_shrink_0()
-                                    .when(file.added > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_added_fg))
-                                                .child(format!("+{}", file.added)),
-                                        )
-                                    })
-                                    .when(file.removed > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_removed_fg))
-                                                .child(format!("-{}", file.removed)),
-                                        )
-                                    }),
+        for row in self.file_tree_rows(false) {
+            match row {
+                FileTreeRow::Folder {
+                    path,
+                    name,
+                    depth,
+                    is_expanded,
+                } => {
+                    let path_for_toggle = path.clone();
+                    let path_for_menu = path.clone();
+                    elements.push(
+                        expandable_folder_row(&name, depth, is_expanded, t, cx)
+                            .id(ElementId::Name(format!("dv-folder-{path}").into()))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.toggle_folder(&path_for_toggle, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_context_menu(
+                                        event.position,
+                                        path_for_menu.clone(),
+                                        DiffTargetKind::Folder,
+                                        cx,
+                                    );
+                                }),
                             )
-                        })
-                        .into_any_element(),
-                );
+                            .into_any_element(),
+                    );
+                }
+                FileTreeRow::File {
+                    item: file_index,
+                    depth,
+                } => {
+                    let Some(file) = self.file_stats.get(file_index) else {
+                        continue;
+                    };
+                    let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
+                    let is_selected = file_index == self.selected_file_index;
+                    let file_path_for_menu = file.path.clone();
+                    let name_color = if file.is_new {
+                        Some(t.diff_added_fg)
+                    } else if file.is_deleted {
+                        Some(t.diff_removed_fg)
+                    } else {
+                        None
+                    };
+
+                    elements.push(
+                        expandable_file_row(filename, depth, name_color, false, t, cx)
+                            .id(ElementId::Name(format!("tree-file-{file_index}").into()))
+                            .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.select_file(file_index, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.select_file(file_index, cx);
+                                    this.open_context_menu(
+                                        event.position,
+                                        file_path_for_menu.clone(),
+                                        DiffTargetKind::File,
+                                        cx,
+                                    );
+                                }),
+                            )
+                            .when(file.added > 0 || file.removed > 0, |d| {
+                                d.child(
+                                    h_flex()
+                                        .gap(px(4.0))
+                                        .text_size(ui_text_ms(cx))
+                                        .flex_shrink_0()
+                                        .when(file.added > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_color(rgb(t.diff_added_fg))
+                                                    .child(format!("+{}", file.added)),
+                                            )
+                                        })
+                                        .when(file.removed > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_color(rgb(t.diff_removed_fg))
+                                                    .child(format!("-{}", file.removed)),
+                                            )
+                                        }),
+                                )
+                            })
+                            .into_any_element(),
+                    );
+                }
+                FileTreeRow::Loading { .. } => {}
             }
         }
 
@@ -956,10 +996,14 @@ impl Render for DiffViewer {
         let current_stats = self.file_stats.get(self.selected_file_index);
         let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
         let is_binary = current_stats.map(|f| f.is_binary).unwrap_or(false);
-        let line_count = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
+        let line_count = self
+            .current_file
+            .as_ref()
+            .map(|f| f.items.len())
+            .unwrap_or(0);
 
         let tree_elements = if has_files {
-            self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
+            self.render_file_tree(&t, cx)
         } else {
             Vec::new()
         };
@@ -1033,6 +1077,10 @@ impl Render for DiffViewer {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let x = f32::from(event.position.x);
+                if this.sidebar_resize.update_resize(x) {
+                    cx.notify();
+                }
                 if this.scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
@@ -1063,13 +1111,38 @@ impl Render for DiffViewer {
             .child({
                 let needs_controls = self.is_detached && detached_needs_controls(window);
                 let is_maximized = window.is_maximized();
-                self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), needs_controls, is_maximized, cx)
+                self.render_header(
+                    &t,
+                    has_files,
+                    self.file_stats.len(),
+                    total_added,
+                    total_removed,
+                    &diff_mode,
+                    self.ignore_whitespace,
+                    self.commit_message.as_deref(),
+                    needs_controls,
+                    is_maximized,
+                    cx,
+                )
             })
             // Commit info bar (when viewing a commit with navigation)
             .when(self.has_commits(), |d| {
                 d.child(self.render_commit_info_bar(&t, cx))
             })
-            .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
+            .child(self.render_content(
+                &t,
+                self.loading,
+                has_error,
+                error_message,
+                has_files,
+                is_binary,
+                file_path,
+                line_count,
+                gutter_width,
+                tree_elements,
+                theme_colors,
+                cx,
+            ))
             .child(self.render_footer(&t, cx))
             .children(self.render_context_overlays(&t, cx))
     }

@@ -1,8 +1,12 @@
+use anyhow::Result;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
-use anyhow::Result;
-use okena_transport::client::{make_prefixed_id, strip_prefix, WsClientMessage};
+use okena_transport::client::{
+    REMOTE_TERMINAL_ANSWERS_QUERIES, REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS,
+    REMOTE_TERMINAL_USES_MOUSE_BACKEND, WsClientMessage, close_remote_terminal, make_prefixed_id,
+    resize_remote_terminal, send_remote_terminal_input,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,34 +16,61 @@ use std::sync::Arc;
 /// Used inside `Terminal` objects for I/O - the Terminal doesn't know
 /// it's remote vs local.
 pub struct RemoteTransport {
-    pub(crate) ws_tx: async_channel::Sender<WsClientMessage>,
+    ws_tx: parking_lot::RwLock<async_channel::Sender<WsClientMessage>>,
     pub(crate) connection_id: String,
+}
+
+impl RemoteTransport {
+    pub(crate) fn new(
+        ws_tx: async_channel::Sender<WsClientMessage>,
+        connection_id: String,
+    ) -> Self {
+        Self {
+            ws_tx: parking_lot::RwLock::new(ws_tx),
+            connection_id,
+        }
+    }
+
+    pub(crate) fn replace_sender(&self, ws_tx: async_channel::Sender<WsClientMessage>) {
+        *self.ws_tx.write() = ws_tx;
+    }
+
+    fn sender(&self) -> async_channel::Sender<WsClientMessage> {
+        self.ws_tx.read().clone()
+    }
 }
 
 impl TerminalTransport for RemoteTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::SendText {
-            terminal_id: remote_id,
-            text: String::from_utf8_lossy(data).to_string(),
-        });
+        send_remote_terminal_input(&self.sender(), &self.connection_id, terminal_id, data);
     }
 
+    /// No-op: the daemon owns the PTY and is the sole responder to terminal
+    /// queries (Device Attributes, DSR, DECRQM, …). A remote client is a
+    /// render-only mirror of the daemon's grid — if it also answered, the reply
+    /// would be a duplicate that round-trips over the WebSocket and lands at the
+    /// PTY long after the querying program exited (the stray `6c` at the shell
+    /// prompt after closing nvim). The default `send_response` routes to
+    /// `send_input`, so we must explicitly suppress it here.
+    fn send_response(&self, _terminal_id: &str, _data: &[u8]) {}
+
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self.ws_tx.try_send(WsClientMessage::Resize {
-            terminal_id: remote_id,
-            cols,
-            rows,
-        });
+        resize_remote_terminal(&self.sender(), &self.connection_id, terminal_id, cols, rows);
     }
 
     fn uses_mouse_backend(&self) -> bool {
-        false
+        REMOTE_TERMINAL_USES_MOUSE_BACKEND
     }
 
     fn resize_debounce_ms(&self) -> u64 {
-        150
+        REMOTE_TERMINAL_RESIZE_DEBOUNCE_MS
+    }
+
+    fn answers_terminal_queries(&self) -> bool {
+        // Mirror of a server-owned PTY: the server's emulator answers DSR/DA/
+        // OSC-color queries. Answering here too would duplicate every reply
+        // and let emulator chatter steal the server's resize ownership.
+        REMOTE_TERMINAL_ANSWERS_QUERIES
     }
 }
 
@@ -80,13 +111,7 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn kill(&self, terminal_id: &str) {
-        let remote_id = strip_prefix(terminal_id, &self.connection_id);
-        let _ = self
-            .transport
-            .ws_tx
-            .try_send(WsClientMessage::CloseTerminal {
-                terminal_id: remote_id,
-            });
+        close_remote_terminal(&self.transport.sender(), &self.connection_id, terminal_id);
     }
 
     fn capture_buffer(&self, _terminal_id: &str) -> Option<PathBuf> {
@@ -94,7 +119,10 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn supports_buffer_capture(&self) -> bool {
-        false
+        // The daemon performs the actual `capture-pane`; the GUI routes the
+        // export through the action dispatcher (server-side op over HTTP), so
+        // the button stays visible for remote terminals.
+        true
     }
 
     fn is_remote(&self) -> bool {

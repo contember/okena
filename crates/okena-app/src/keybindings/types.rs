@@ -26,7 +26,6 @@ impl KeybindingEntry {
             enabled: true,
         }
     }
-
 }
 
 /// Represents a conflict between two keybindings

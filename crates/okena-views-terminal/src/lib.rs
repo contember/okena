@@ -16,6 +16,12 @@ mod simple_input;
 use okena_core::api::ActionRequest;
 use okena_workspace::state::SplitDirection;
 
+/// Client-local file bytes to materialize beside a truly remote daemon.
+pub struct RemotePasteFile {
+    pub extension: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Trait for dispatching terminal actions (local or remote).
 ///
 /// This abstracts the `ActionDispatcher` enum from the main application,
@@ -25,8 +31,8 @@ pub trait ActionDispatch: Clone + 'static {
     /// Dispatch a standard action.
     fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App);
 
-    /// Whether this dispatcher targets a remote project.
-    fn is_remote(&self) -> bool;
+    /// Whether the client and daemon see the same local filesystem.
+    fn shares_local_filesystem(&self) -> bool;
 
     /// Split a terminal.
     fn split_terminal(
@@ -38,13 +44,7 @@ pub trait ActionDispatch: Clone + 'static {
     );
 
     /// Add a tab.
-    fn add_tab(
-        &self,
-        project_id: &str,
-        layout_path: &[usize],
-        in_group: bool,
-        cx: &mut gpui::App,
-    );
+    fn add_tab(&self, project_id: &str, layout_path: &[usize], in_group: bool, cx: &mut gpui::App);
 
     /// Upload a clipboard image pasted into a remote terminal.
     ///
@@ -61,6 +61,26 @@ pub trait ActionDispatch: Clone + 'static {
         cx: &mut gpui::App,
     ) {
         let _ = (terminal_id, mime, bytes, cx);
+    }
+
+    /// Materialize dropped client files on a truly remote daemon and paste
+    /// their server-local paths into the terminal.
+    fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<RemotePasteFile>,
+        cx: &mut gpui::App,
+    ) {
+        let _ = (terminal_id, files, cx);
+    }
+
+    /// Export a terminal's scrollback buffer to a client-side temp file and
+    /// return its path (the caller copies it to the clipboard). The capture
+    /// runs on the server; remote dispatchers fetch the content over HTTP and
+    /// write the local file. Default: `None`.
+    fn export_buffer(&self, terminal_id: &str, cx: &mut gpui::App) -> Option<std::path::PathBuf> {
+        let _ = (terminal_id, cx);
+        None
     }
 }
 
@@ -121,10 +141,12 @@ pub fn set_terminal_view_settings(settings: &TerminalViewSettings, cx: &mut gpui
 }
 
 /// Callback type for registering content panes for dirty notification.
-pub type RegisterContentPaneFn = Box<dyn Fn(String, gpui::WeakEntity<layout::terminal_pane::TerminalContent>) + Send + Sync>;
+pub type RegisterContentPaneFn =
+    Box<dyn Fn(String, gpui::WeakEntity<layout::terminal_pane::TerminalContent>) + Send + Sync>;
 
 /// Global content pane registration function.
-static REGISTER_CONTENT_PANE_FN: std::sync::OnceLock<RegisterContentPaneFn> = std::sync::OnceLock::new();
+static REGISTER_CONTENT_PANE_FN: std::sync::OnceLock<RegisterContentPaneFn> =
+    std::sync::OnceLock::new();
 
 /// Set the global content pane registration function.
 /// Called once by the main app at startup.

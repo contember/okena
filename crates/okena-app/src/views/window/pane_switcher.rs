@@ -1,8 +1,8 @@
 use crate::theme::theme;
+use crate::ui::tokens::ui_text;
 use crate::views::layout::navigation::PaneMap;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::Workspace;
-use crate::ui::tokens::ui_text;
 use gpui::*;
 
 use super::WindowView;
@@ -41,7 +41,12 @@ pub(super) struct PaneSwitcher {
 }
 
 impl PaneSwitcher {
-    pub fn new(workspace: Entity<Workspace>, focus_manager: Entity<FocusManager>, pane_map: &PaneMap, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        focus_manager: Entity<FocusManager>,
+        pane_map: &PaneMap,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let panes = pane_map
             .sorted_by_reading_order()
             .into_iter()
@@ -114,19 +119,20 @@ impl Render for PaneSwitcher {
 
                 // Try to map key to pane index (0-9, a-z)
                 if let Some(index) = key_to_pane_index(key)
-                    && let Some((project_id, layout_path, _)) = this.panes.get(index) {
-                        let pid = project_id.clone();
-                        let lp = layout_path.clone();
-                        let workspace = this.workspace.clone();
-                        this.focus_manager.update(cx, |fm, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.set_focused_terminal(fm, pid, lp, cx);
-                            });
-                            cx.notify();
+                    && let Some((project_id, layout_path, _)) = this.panes.get(index)
+                {
+                    let pid = project_id.clone();
+                    let lp = layout_path.clone();
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_terminal(fm, pid, lp, cx);
                         });
-                        cx.emit(PaneSwitcherEvent::Close);
-                        return;
-                    }
+                        cx.notify();
+                    });
+                    cx.emit(PaneSwitcherEvent::Close);
+                    return;
+                }
 
                 // Any other key deactivates without switching
                 cx.emit(PaneSwitcherEvent::Close);
@@ -163,8 +169,9 @@ impl WindowView {
         let focus_manager = self.focus_manager.clone();
         let entity = cx.new(|cx| PaneSwitcher::new(workspace, focus_manager, &pane_map, cx));
 
-        cx.subscribe(&entity, |this, _, event: &PaneSwitcherEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            |this, _, event: &PaneSwitcherEvent, cx| match event {
                 PaneSwitcherEvent::Close => {
                     this.pane_switch_active = false;
                     this.pane_switcher_entity = None;
@@ -175,8 +182,8 @@ impl WindowView {
                     });
                     cx.notify();
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.pane_switcher_entity = Some(entity);

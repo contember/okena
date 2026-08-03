@@ -13,8 +13,8 @@ impl Terminal {
         *self.has_bell.lock()
     }
 
-    /// Take any pending OSC 52 clipboard writes. Called by the GPUI thread
-    /// on each render; returns the texts to write to the system clipboard.
+    /// Take any pending OSC 52 clipboard writes. Called by the GPUI activity
+    /// handler (with render as a fallback); returns texts for the system clipboard.
     pub fn take_pending_clipboard_writes(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_clipboard.lock())
     }
@@ -38,7 +38,8 @@ impl Terminal {
         let responders = std::mem::take(&mut *self.pending_clipboard_reads.lock());
         for responder in responders {
             let reply = responder(content);
-            self.transport.send_input(&self.terminal_id, reply.as_bytes());
+            self.transport
+                .send_input(&self.terminal_id, reply.as_bytes());
         }
     }
 

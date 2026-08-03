@@ -1,7 +1,7 @@
 //! Settings panel components.
 
 use crate::theme::ThemeColors;
-use crate::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_xl};
+use crate::tokens::{ui_text, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::*;
 use gpui_component::v_flex;
 
@@ -28,7 +28,13 @@ pub fn section_container(t: &ThemeColors) -> Div {
 }
 
 /// Render a settings row container.
-pub fn settings_row(id: impl Into<SharedString>, label: &str, t: &ThemeColors, cx: &App, has_border: bool) -> Stateful<Div> {
+pub fn settings_row(
+    id: impl Into<SharedString>,
+    label: &str,
+    t: &ThemeColors,
+    cx: &App,
+    has_border: bool,
+) -> Stateful<Div> {
     let row = div()
         .id(ElementId::Name(id.into()))
         .px(px(12.0))
@@ -51,7 +57,14 @@ pub fn settings_row(id: impl Into<SharedString>, label: &str, t: &ThemeColors, c
 }
 
 /// Render a settings row with label and description.
-pub fn settings_row_with_desc(id: impl Into<SharedString>, label: &str, desc: &str, t: &ThemeColors, cx: &App, has_border: bool) -> Stateful<Div> {
+pub fn settings_row_with_desc(
+    id: impl Into<SharedString>,
+    label: &str,
+    desc: &str,
+    t: &ThemeColors,
+    cx: &App,
+    has_border: bool,
+) -> Stateful<Div> {
     let row = div()
         .id(ElementId::Name(id.into()))
         .px(px(12.0))
@@ -84,7 +97,12 @@ pub fn settings_row_with_desc(id: impl Into<SharedString>, label: &str, desc: &s
 }
 
 /// Render a +/- stepper button.
-pub fn stepper_button(id: impl Into<SharedString>, label: &str, t: &ThemeColors, cx: &App) -> Stateful<Div> {
+pub fn stepper_button(
+    id: impl Into<SharedString>,
+    label: &str,
+    t: &ThemeColors,
+    cx: &App,
+) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
         .cursor_pointer()

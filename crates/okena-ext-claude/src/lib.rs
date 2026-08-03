@@ -1,13 +1,13 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
-mod status;
 mod settings;
-pub mod usage;
+mod status;
 mod ui_helpers;
+pub mod usage;
 
 pub use usage::resolve_claude_dir;
 
-use gpui::{AppContext as _, AnyView};
+use gpui::{AnyView, AppContext as _};
 use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};
 use std::sync::Arc;
 
@@ -26,6 +26,8 @@ pub fn register() -> ExtensionRegistration {
                 status_bar_right_widgets: vec![],
             }
         }),
-        settings_view: Some(Arc::new(|app| AnyView::from(app.new(settings::ClaudeSettingsView::new)))),
+        settings_view: Some(Arc::new(|app| {
+            AnyView::from(app.new(settings::ClaudeSettingsView::new))
+        })),
     }
 }

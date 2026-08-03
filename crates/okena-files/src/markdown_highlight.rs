@@ -253,7 +253,12 @@ fn syntax_for_lang<'a>(
 
 /// Build spans for one (non-code) line from the per-byte colour buffer,
 /// coalescing equal-coloured runs, expanding tabs, and dropping line endings.
-fn line_spans(line: &str, base: usize, colors: &[Option<Rgba>], default: Rgba) -> Vec<HighlightedSpan> {
+fn line_spans(
+    line: &str,
+    base: usize,
+    colors: &[Option<Rgba>],
+    default: Rgba,
+) -> Vec<HighlightedSpan> {
     let mut spans: Vec<HighlightedSpan> = Vec::new();
     for (i, ch) in line.char_indices() {
         if ch == '\n' || ch == '\r' {
@@ -295,7 +300,10 @@ fn plain_line_spans(content: &str, default: Rgba, max_lines: usize) -> Vec<Vec<H
         let spans = if text.is_empty() {
             Vec::new()
         } else {
-            vec![HighlightedSpan { color: default, text }]
+            vec![HighlightedSpan {
+                color: default,
+                text,
+            }]
         };
         result.push(spans);
     }
@@ -388,7 +396,11 @@ impl MarkdownPalette {
 /// Resolve a TextMate scope through a theme. Returns `None` when the theme has
 /// no specific rule (the highlighter then yields the default text colour), so
 /// the caller can fall back.
-fn resolve_scope(highlighter: &Highlighter, default_fg: Option<Color>, scope: &str) -> Option<Rgba> {
+fn resolve_scope(
+    highlighter: &Highlighter,
+    default_fg: Option<Color>,
+    scope: &str,
+) -> Option<Rgba> {
     let stack = ScopeStack::from_str(scope).ok()?;
     let fg = highlighter.style_for_stack(stack.as_slice()).foreground;
     if let Some(d) = default_fg

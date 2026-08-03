@@ -1724,6 +1724,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+dependencies = [
+ "bitflags 2.11.0",
+ "crossterm_winapi",
+ "mio",
+ "parking_lot",
+ "rustix 0.38.44",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm_winapi"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2462,6 +2487,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88a41f105fe1d5b6b34b2055e3dc59bb79b46b48b2040b9e6c7b4b5de097aa41"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -6052,12 +6087,14 @@ dependencies = [
  "okena-app",
  "okena-cli",
  "okena-core",
+ "okena-daemon-core",
  "okena-ext-claude",
  "okena-ext-codex",
  "okena-ext-github",
  "okena-ext-updater",
  "okena-extensions",
  "okena-files",
+ "okena-remote-server",
  "okena-terminal",
  "okena-ui",
  "okena-views-git",
@@ -6071,7 +6108,7 @@ dependencies = [
 
 [[package]]
 name = "okena-app"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6119,12 +6156,14 @@ name = "okena-app-core"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "base64",
  "gpui",
  "log",
  "okena-core",
  "okena-files",
  "okena-git",
+ "okena-hooks",
  "okena-terminal",
  "okena-theme",
  "okena-workspace",
@@ -6140,7 +6179,6 @@ dependencies = [
  "base64",
  "clap",
  "dirs 5.0.1",
- "libc",
  "okena-core",
  "okena-remote-server",
  "okena-transport",
@@ -6165,6 +6203,42 @@ dependencies = [
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "okena-daemon"
+version = "0.27.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "okena-core",
+ "okena-daemon-core",
+ "okena-remote-server",
+ "okena-workspace",
+]
+
+[[package]]
+name = "okena-daemon-core"
+version = "0.27.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "log",
+ "okena-app-core",
+ "okena-core",
+ "okena-git",
+ "okena-hooks",
+ "okena-remote-server",
+ "okena-services",
+ "okena-state",
+ "okena-terminal",
+ "okena-theme",
+ "okena-workspace",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6238,7 +6312,9 @@ dependencies = [
  "okena-transport",
  "okena-ui",
  "parking_lot",
+ "reqwest",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "smol",
@@ -6302,6 +6378,7 @@ dependencies = [
 name = "okena-hooks"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "gpui",
  "libc",
  "log",
@@ -6345,7 +6422,6 @@ dependencies = [
  "okena-core",
  "okena-transport",
  "parking_lot",
- "reqwest",
  "serde_json",
  "tokio",
  "uniffi",
@@ -6366,26 +6442,28 @@ dependencies = [
  "okena-workspace",
  "parking_lot",
  "reqwest",
+ "serde_json",
  "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "okena-remote-server"
-version = "0.1.0"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "axum",
  "base64",
+ "fs2",
  "futures",
  "gpui",
  "hmac",
  "hyper",
  "hyper-util",
- "libc",
  "log",
  "okena-core",
+ "okena-ext-updater",
  "okena-terminal",
  "okena-transport",
  "okena-workspace",
@@ -6400,6 +6478,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "sysinfo 0.33.1",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -6411,9 +6490,9 @@ dependencies = [
 name = "okena-services"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-channel 2.5.0",
  "gpui",
- "libc",
  "log",
  "okena-core",
  "okena-terminal",
@@ -6422,6 +6501,7 @@ dependencies = [
  "serde_yaml_ng",
  "smol",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -6485,6 +6565,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
+]
+
+[[package]]
+name = "okena-tui"
+version = "0.27.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "clap",
+ "crossterm",
+ "env_logger",
+ "log",
+ "okena-core",
+ "okena-terminal",
+ "okena-transport",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6575,7 +6674,6 @@ dependencies = [
  "gpui-component",
  "log",
  "okena-core",
- "okena-git",
  "okena-services",
  "okena-terminal",
  "okena-transport",
@@ -6583,6 +6681,7 @@ dependencies = [
  "okena-views-services",
  "okena-views-terminal",
  "okena-workspace",
+ "serde_json",
  "smol",
 ]
 
@@ -6612,6 +6711,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "fs2",
  "gpui",
  "libc",
  "log",
@@ -8496,6 +8596,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook-mio"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
+dependencies = [
+ "libc",
+ "mio",
+ "signal-hook",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9275,6 +9386,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

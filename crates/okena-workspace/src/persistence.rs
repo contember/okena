@@ -1,11 +1,15 @@
-use okena_terminal::session_backend::SessionBackend;
-use okena_core::theme::FolderColor;
-use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WindowState, WorkspaceData};
 #[cfg(test)]
 use crate::state::WorktreeMetadata;
+use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WindowState, WorkspaceData};
+use okena_core::theme::FolderColor;
+use okena_terminal::backend::{TerminalSessionTeardown, TerminalTeardownRoute};
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,22 +30,28 @@ static WORKSPACE_LOCK: Mutex<()> = Mutex::new(());
 // Re-export from settings module for backward compatibility
 #[allow(unused_imports)]
 pub use super::settings::{
-    load_settings, save_settings, get_settings_path,
-    AppSettings, CursorShape, DiffViewMode, HooksConfig, ProjectHooks, TerminalHooks, WorktreeHooks, SidebarSettings,
-    DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
-    SETTINGS_VERSION,
+    AppSettings, CursorShape, DEFAULT_SIDEBAR_WIDTH, DiffViewMode, HooksConfig, MAX_SIDEBAR_WIDTH,
+    MIN_SIDEBAR_WIDTH, ProjectHooks, SETTINGS_VERSION, SidebarSettings, TerminalHooks,
+    WorktreeHooks, get_settings_path, load_settings, save_settings,
 };
 
 // Re-export from sessions module for backward compatibility
 #[allow(unused_imports)]
 pub use super::sessions::{
-    list_sessions, save_session, load_session, delete_session, rename_session, session_exists,
-    export_workspace, import_workspace,
-    SessionInfo, ExportedWorkspace,
+    ExportedWorkspace, SessionInfo, delete_session, export_workspace, import_workspace,
+    list_sessions, load_session, load_session_with_cleanup, load_session_with_cleanup_for_shell,
+    rename_session, save_session, session_exists,
 };
 
 /// Current workspace schema version - increment when making breaking changes
 pub const WORKSPACE_VERSION: u32 = 2;
+
+/// Workspace data plus persistent terminal sessions orphaned by load-time
+/// cleanup. Startup kills these ids after constructing its terminal backend.
+pub struct LoadedWorkspace {
+    pub data: WorkspaceData,
+    pub stale_terminal_ids: Vec<TerminalSessionTeardown>,
+}
 
 /// Get the config directory for the active profile.
 ///
@@ -69,67 +79,79 @@ pub fn get_workspace_path() -> PathBuf {
     }
 }
 
+/// Path to the instance lock file for the active profile (falling back to the
+/// legacy flat layout). Shared by lock acquisition and lifecycle diagnostics so
+/// every process resolves the same ownership boundary.
+pub fn instance_lock_path() -> PathBuf {
+    okena_core::profiles::try_current()
+        .map(|p| p.lock_path())
+        .unwrap_or_else(|| get_config_dir().join("okena.lock"))
+}
+
 /// Acquire a lock file to prevent multiple instances from running simultaneously.
 /// Returns a held `LockGuard` that releases the lock on drop.
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
     let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
-    let lock_path = okena_core::profiles::try_current()
-        .map(|p| p.lock_path())
-        .unwrap_or_else(|| get_config_dir().join("okena.lock"));
+    acquire_instance_lock_at(instance_lock_path())
+}
 
+fn acquire_instance_lock_at(lock_path: PathBuf) -> Result<LockGuard> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Check if a lock file already exists with a live process
-    if lock_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&lock_path)
-            && let Ok(pid) = content.trim().parse::<u32>() {
-                if is_process_alive(pid) {
-                    anyhow::bail!(
-                        "Another Okena instance is already running (PID {pid}). \
-                         If this is incorrect, delete {lock_path:?} and try again."
-                    );
-                }
-                // Stale lock file from a crashed process — safe to take over
-                log::info!("Removing stale lock file from PID {pid}");
-            }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
 
-    let my_pid = std::process::id();
-    std::fs::write(&lock_path, my_pid.to_string())?;
+    if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+        let mut content = String::new();
+        let _ = file.read_to_string(&mut content);
+        let owner = instance_lock_pid(&content)
+            .map(|pid| format!("PID {pid}"))
+            .unwrap_or_else(|| "another process".to_string());
+        anyhow::bail!(
+            "Another Okena instance is already running ({owner}): {error}. \
+             If this is incorrect, delete {lock_path:?} and try again."
+        );
+    }
 
-    Ok(LockGuard { path: lock_path })
+    let identity = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+    file.set_len(0)?;
+    file.rewind()?;
+    file.write_all(identity.as_bytes())?;
+    file.sync_data()?;
+
+    Ok(LockGuard {
+        path: lock_path,
+        identity,
+        file: Some(file),
+    })
 }
 
-/// Guard that removes the lock file on drop
+pub fn instance_lock_pid(content: &str) -> Option<u32> {
+    content.trim().split(':').next()?.parse().ok()
+}
+
+/// Guard that keeps the OS lock held and removes only its own lock file.
 pub struct LockGuard {
     path: PathBuf,
+    identity: String,
+    file: Option<File>,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Check whether a process with the given PID is still alive
-fn is_process_alive(pid: u32) -> bool {
-    let _slow = okena_core::timing::SlowGuard::new("is_process_alive");
-    #[cfg(unix)]
-    {
-        // kill(pid, 0) checks existence without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        // On Windows, try tasklist to check if PID exists
-        okena_core::process::safe_output(
-            okena_core::process::command("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/NH"]),
-        )
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-            .unwrap_or(false)
+        if std::fs::read_to_string(&self.path).is_ok_and(|content| content == self.identity) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+        if let Some(file) = self.file.take() {
+            let _ = fs2::FileExt::unlock(&file);
+        }
     }
 }
 
@@ -138,15 +160,16 @@ fn is_process_alive(pid: u32) -> bool {
 pub(crate) fn validate_workspace_data(
     data: &mut WorkspaceData,
     clear_terminal_ids: bool,
-    #[cfg_attr(not(windows), allow(unused))]
-    backend_preference: SessionBackend,
+    #[cfg_attr(not(windows), allow(unused))] backend_preference: SessionBackend,
 ) {
     // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set.
     // This must run BEFORE clearing terminal IDs so we can check WSL backend availability.
     #[cfg(windows)]
     for project in &mut data.projects {
         if project.default_shell.is_none() {
-            if let Some((distro, _)) = okena_terminal::shell_config::parse_wsl_unc_path(&project.path) {
+            if let Some((distro, _)) =
+                okena_terminal::shell_config::parse_wsl_unc_path(&project.path)
+            {
                 project.default_shell = Some(okena_terminal::shell_config::ShellType::Wsl {
                     distro: Some(distro),
                 });
@@ -175,8 +198,8 @@ pub(crate) fn validate_workspace_data(
                 }
             }
             // Preserve hook terminal IDs so they're recognized after restart
-            let hook_ids: std::collections::HashSet<&str> = project.hook_terminals
-                .keys().map(|s| s.as_str()).collect();
+            let hook_ids: std::collections::HashSet<&str> =
+                project.hook_terminals.keys().map(|s| s.as_str()).collect();
             if let Some(ref mut layout) = project.layout {
                 layout.clear_terminal_ids_except(&hook_ids);
             }
@@ -201,11 +224,17 @@ pub(crate) fn validate_workspace_data(
     // Clean up orphaned terminal metadata (terminal_names/hidden_terminals entries
     // for terminals no longer in the layout tree)
     for project in &mut data.projects {
-        let layout_ids: std::collections::HashSet<String> = project.layout.as_ref()
+        let layout_ids: std::collections::HashSet<String> = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
-        project.terminal_names.retain(|id, _| layout_ids.contains(id));
-        project.hidden_terminals.retain(|id, _| layout_ids.contains(id));
+        project
+            .terminal_names
+            .retain(|id, _| layout_ids.contains(id));
+        project
+            .hidden_terminals
+            .retain(|id, _| layout_ids.contains(id));
     }
 
     // Populate worktree_ids from worktree_info back-references (migration for old data)
@@ -224,30 +253,40 @@ pub(crate) fn validate_workspace_data(
 
         for project in &mut data.projects {
             if project.worktree_ids.is_empty()
-                && let Some(mut children) = parent_to_children.remove(&project.id) {
-                    // Sort by position in project_order for deterministic migration
-                    children.sort_by_key(|(_, pos)| pos.unwrap_or(usize::MAX));
-                    project.worktree_ids = children.into_iter().map(|(id, _)| id).collect();
-                }
+                && let Some(mut children) = parent_to_children.remove(&project.id)
+            {
+                // Sort by position in project_order for deterministic migration
+                children.sort_by_key(|(_, pos)| pos.unwrap_or(usize::MAX));
+                project.worktree_ids = children.into_iter().map(|(id, _)| id).collect();
+            }
         }
 
         // Remove non-orphan worktrees from project_order (they live in parent's worktree_ids now)
-        let worktree_ids_in_parents: std::collections::HashSet<String> = data.projects.iter()
+        let worktree_ids_in_parents: std::collections::HashSet<String> = data
+            .projects
+            .iter()
             .flat_map(|p| p.worktree_ids.iter().cloned())
             .collect();
-        data.project_order.retain(|id| !worktree_ids_in_parents.contains(id));
+        data.project_order
+            .retain(|id| !worktree_ids_in_parents.contains(id));
 
         // Also remove from folder project_ids
         for folder in &mut data.folders {
-            folder.project_ids.retain(|id| !worktree_ids_in_parents.contains(id));
+            folder
+                .project_ids
+                .retain(|id| !worktree_ids_in_parents.contains(id));
         }
     }
 
     // Ensure project_order contains all project IDs (that aren't in a folder or worktree_ids)
-    let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
+    let folder_project_ids: std::collections::HashSet<String> = data
+        .folders
+        .iter()
         .flat_map(|f| f.project_ids.iter().cloned())
         .collect();
-    let worktree_child_ids: std::collections::HashSet<String> = data.projects.iter()
+    let worktree_child_ids: std::collections::HashSet<String> = data
+        .projects
+        .iter()
         .flat_map(|p| p.worktree_ids.iter().cloned())
         .collect();
     for project in &data.projects {
@@ -261,15 +300,19 @@ pub(crate) fn validate_workspace_data(
 
     // Folder consistency checks
     {
-        let valid_project_ids: std::collections::HashSet<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
+        let valid_project_ids: std::collections::HashSet<&str> =
+            data.projects.iter().map(|p| p.id.as_str()).collect();
 
         // Remove stale project refs from folders
         for folder in &mut data.folders {
-            folder.project_ids.retain(|pid| valid_project_ids.contains(pid.as_str()));
+            folder
+                .project_ids
+                .retain(|pid| valid_project_ids.contains(pid.as_str()));
         }
 
         // Ensure folder IDs in project_order match actual folders
-        let valid_folder_ids: std::collections::HashSet<&str> = data.folders.iter().map(|f| f.id.as_str()).collect();
+        let valid_folder_ids: std::collections::HashSet<&str> =
+            data.folders.iter().map(|f| f.id.as_str()).collect();
         data.project_order.retain(|id| {
             valid_project_ids.contains(id.as_str()) || valid_folder_ids.contains(id.as_str())
         });
@@ -286,6 +329,19 @@ pub(crate) fn validate_workspace_data(
 /// On error, the caller should fall back to `default_workspace()` — auto-save is
 /// automatically blocked to prevent overwriting valid data on disk.
 pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
+    load_workspace_with_cleanup(backend).map(|loaded| loaded.data)
+}
+
+/// Load workspace data while retaining ids owned by stale worktree rows.
+pub fn load_workspace_with_cleanup(backend: SessionBackend) -> Result<LoadedWorkspace> {
+    load_workspace_with_cleanup_for_shell(backend, &ShellType::Default)
+}
+
+/// Load workspace data with the transient global shell needed for stale cleanup routing.
+pub fn load_workspace_with_cleanup_for_shell(
+    backend: SessionBackend,
+    global_default_shell: &ShellType,
+) -> Result<LoadedWorkspace> {
     let path = get_workspace_path();
 
     // If workspace.json is missing, try to auto-recover from backup
@@ -340,9 +396,16 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
                     bak_path
                 };
                 if let Err(backup_err) = std::fs::copy(&path, &backup_path) {
-                    log::error!("Failed to back up corrupted workspace to {:?}: {}", backup_path, backup_err);
+                    log::error!(
+                        "Failed to back up corrupted workspace to {:?}: {}",
+                        backup_path,
+                        backup_err
+                    );
                 } else {
-                    log::error!("Workspace file is corrupted, backed up to {:?}", backup_path);
+                    log::error!(
+                        "Workspace file is corrupted, backed up to {:?}",
+                        backup_path
+                    );
                 }
                 // Block auto-save so the default workspace doesn't overwrite the real file
                 LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
@@ -355,11 +418,15 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        sync_worktrees(&mut data);
+        let stale_terminal_ids =
+            sync_worktrees_with_backend_and_shell(&mut data, backend, global_default_shell);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
-        Ok(data)
+        Ok(LoadedWorkspace {
+            data,
+            stale_terminal_ids,
+        })
     } else {
         let bak_path = path.with_extension("json.bak");
         if bak_path.exists() {
@@ -375,7 +442,10 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
             // Fresh install — no workspace.json and no backup. Allow saving.
             log::info!("No workspace file found — starting with default workspace.");
         }
-        Ok(default_workspace())
+        Ok(LoadedWorkspace {
+            data: default_workspace(),
+            stale_terminal_ids: Vec::new(),
+        })
     }
 }
 
@@ -393,7 +463,9 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     let _guard = WORKSPACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Layer 1: block save if we loaded from fallback default
     if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
-        log::warn!("Skipping workspace save — loaded from fallback default, protecting file on disk.");
+        log::warn!(
+            "Skipping workspace save — loaded from fallback default, protecting file on disk."
+        );
         return Ok(());
     }
 
@@ -442,6 +514,295 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     }
     std::fs::rename(&tmp_path, &path)?;
 
+    Ok(())
+}
+
+/// Version that introduced client-owned project presentation fields.
+const WINDOW_LAYOUT_PROJECT_PRESENTATION_VERSION: u32 = 3;
+
+/// Schema version for the client-owned window-layout file.
+///
+/// This file is a pure PRESENTATION cache (which windows are open, their OS
+/// bounds, per-window visibility). It must NEVER be migrated destructively:
+/// dropping an unknown field degrades to a sensible default, but wiping user
+/// state (e.g. per-window `hidden_project_ids`) on upgrade is unacceptable.
+/// Schema evolution is handled by `#[serde(default)]` on the fields;
+/// [`migrate_window_layout`] only performs forward-compatible, non-destructive
+/// transforms and stamps the version.
+///
+/// History: v2 once reset per-window visibility to "recover" a supposed
+/// compounded hidden-set bug. That recovery was wrong — most users legitimately
+/// hide most projects per window, so it just discarded their curation on
+/// upgrade — and has been removed. The actual fix lives in
+/// `apply_initial_remote_project_visibility` (the daemon's single-window
+/// `show_in_overview` no longer drives client visibility). The version is kept
+/// v3 adds project layout presentation and panel heights so those client-owned
+/// values survive a desktop restart without entering daemon persistence.
+pub const WINDOW_LAYOUT_VERSION: u32 = WINDOW_LAYOUT_PROJECT_PRESENTATION_VERSION;
+
+/// Process-level mutex serializing window-layout saves (mirrors WORKSPACE_LOCK
+/// — the debounced client save can fire concurrently during a window drag).
+static WINDOW_LAYOUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Client-owned presentation: windows, OS bounds, per-window viewport, panel
+/// heights, and visual project-layout state. The desktop GUI persists it locally
+/// separate from the daemon-owned `workspace.json`.
+///
+/// The GUI is a thin client of the daemon: the daemon owns project DATA (and is
+/// the single writer of workspace.json), while window geometry/visibility is
+/// client presentation and must not be round-tripped through the daemon — doing
+/// so clobbered multi-window state (see the `quit` handler in src/main.rs).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ClientWindowLayout {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub main_window: WindowState,
+    #[serde(default)]
+    pub extra_windows: Vec<WindowState>,
+    /// Client-owned visual state keyed by prefixed project ID. The daemon's
+    /// layout remains structurally authoritative when this is restored.
+    #[serde(default)]
+    pub project_layouts: HashMap<String, LayoutNode>,
+    #[serde(default)]
+    pub service_panel_heights: HashMap<String, f32>,
+    #[serde(default)]
+    pub hook_panel_heights: HashMap<String, f32>,
+}
+
+/// Path to the client-owned window-layout file (alongside settings.json).
+pub fn get_window_layout_path() -> PathBuf {
+    get_config_dir().join("window-layout.json")
+}
+
+/// Load the client window layout. A missing file falls back to the pre-daemon
+/// workspace presentation once; an unreadable or corrupt client file returns
+/// `None`. Migrates older schema versions in place (see
+/// [`WINDOW_LAYOUT_VERSION`]).
+pub fn load_window_layout() -> Option<ClientWindowLayout> {
+    let path = get_window_layout_path();
+    load_window_layout_at(&path, load_workspace_window_layout)
+}
+
+fn load_window_layout_at(
+    path: &Path,
+    load_legacy_layout: impl FnOnce() -> Option<ClientWindowLayout>,
+) -> Option<ClientWindowLayout> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return load_legacy_layout();
+        }
+        Err(error) => {
+            log::warn!("Failed to read window-layout.json: {error}; ignoring.");
+            return None;
+        }
+    };
+    match serde_json::from_str::<ClientWindowLayout>(&content) {
+        Ok(mut layout) => {
+            if layout.version < WINDOW_LAYOUT_PROJECT_PRESENTATION_VERSION
+                && let Some(legacy_layout) = load_legacy_layout()
+            {
+                migrate_window_layout_v3_presentation(&mut layout, legacy_layout);
+            }
+            migrate_window_layout(&mut layout);
+            Some(layout)
+        }
+        Err(e) => {
+            log::warn!("Failed to parse window-layout.json: {e}; ignoring.");
+            None
+        }
+    }
+}
+
+/// Migrate a loaded window layout to the current schema version.
+///
+/// NON-DESTRUCTIVE by contract: this file is a presentation cache, so migration
+/// may only add or forward-transform state — never clear user choices like
+/// per-window `hidden_project_ids` or `folder_filter`. Version-specific
+/// backfills run before this common normalization and version stamp. (See
+/// [`WINDOW_LAYOUT_VERSION`] for why the old v1 → v2 visibility wipe was a
+/// regression and is gone.)
+fn migrate_window_layout(layout: &mut ClientWindowLayout) {
+    prefix_local_daemon_window_refs(layout);
+    layout.version = WINDOW_LAYOUT_VERSION;
+}
+
+/// Best-effort upgrade bridge from the pre-daemon-client layout shape.
+///
+/// Before `window-layout.json` existed, the main/extra window presentation lived
+/// inside `workspace.json` and referenced local project/folder ids directly
+/// (`p1`, `f1`). The GUI now mirrors the local daemon as
+/// `remote:local-daemon:p1`, while the daemon continues to persist the raw
+/// local ids in `workspace.json`. On first launch after the daemon-client
+/// upgrade, use the old workspace window state as the initial client layout and
+/// rewrite its local refs to the mirror ids.
+fn load_workspace_window_layout() -> Option<ClientWindowLayout> {
+    let content = std::fs::read_to_string(get_workspace_path()).ok()?;
+    let migrated = match migrate_legacy_json(&content) {
+        Ok(content) => content,
+        Err(e) => {
+            log::warn!("Failed to migrate workspace window layout JSON: {e}; ignoring.");
+            content
+        }
+    };
+    let data = match serde_json::from_str::<WorkspaceData>(&migrated) {
+        Ok(data) => migrate_workspace(data),
+        Err(e) => {
+            log::warn!("Failed to parse workspace window layout fallback: {e}; ignoring.");
+            return None;
+        }
+    };
+
+    let mut layout = ClientWindowLayout {
+        version: WINDOW_LAYOUT_VERSION,
+        main_window: data.main_window,
+        extra_windows: data.extra_windows,
+        project_layouts: data
+            .projects
+            .into_iter()
+            .filter_map(|project| project.layout.map(|layout| (project.id, layout)))
+            .collect(),
+        service_panel_heights: data.service_panel_heights,
+        hook_panel_heights: data.hook_panel_heights,
+    };
+    prefix_local_daemon_window_refs(&mut layout);
+    Some(layout)
+}
+
+fn migrate_window_layout_v3_presentation(
+    target: &mut ClientWindowLayout,
+    source: ClientWindowLayout,
+) {
+    for (project_id, project_layout) in source.project_layouts {
+        target
+            .project_layouts
+            .entry(project_id)
+            .or_insert(project_layout);
+    }
+    if target.service_panel_heights.is_empty() {
+        target.service_panel_heights = source.service_panel_heights;
+    }
+    if target.hook_panel_heights.is_empty() {
+        target.hook_panel_heights = source.hook_panel_heights;
+    }
+}
+
+fn prefix_local_daemon_window_refs(layout: &mut ClientWindowLayout) {
+    prefix_local_daemon_window_state_refs(&mut layout.main_window);
+    for extra in &mut layout.extra_windows {
+        prefix_local_daemon_window_state_refs(extra);
+    }
+    prefix_local_daemon_project_layouts(&mut layout.project_layouts);
+    prefix_local_daemon_keyed_values(&mut layout.service_panel_heights);
+    prefix_local_daemon_keyed_values(&mut layout.hook_panel_heights);
+}
+
+fn prefix_local_daemon_keyed_values<T>(values: &mut HashMap<String, T>) {
+    *values = std::mem::take(values)
+        .into_iter()
+        .map(|(id, value)| (prefix_local_daemon_id(&id), value))
+        .collect();
+}
+
+fn prefix_local_daemon_project_layouts(layouts: &mut HashMap<String, LayoutNode>) {
+    *layouts = std::mem::take(layouts)
+        .into_iter()
+        .map(|(project_id, mut layout)| {
+            prefix_local_daemon_terminal_ids(&mut layout);
+            (prefix_local_daemon_id(&project_id), layout)
+        })
+        .collect();
+}
+
+fn prefix_local_daemon_terminal_ids(layout: &mut LayoutNode) {
+    match layout {
+        LayoutNode::Terminal { terminal_id, .. } => {
+            if let Some(id) = terminal_id.take() {
+                *terminal_id = Some(prefix_local_daemon_id(&id));
+            }
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                prefix_local_daemon_terminal_ids(child);
+            }
+        }
+    }
+}
+
+fn prefix_local_daemon_window_state_refs(window: &mut WindowState) {
+    window.hidden_project_ids = window
+        .hidden_project_ids
+        .drain()
+        .map(|id| prefix_local_daemon_id(&id))
+        .collect();
+    window.project_widths = window
+        .project_widths
+        .drain()
+        .map(|(id, width)| (prefix_local_daemon_id(&id), width))
+        .collect();
+    window.folder_collapsed = window
+        .folder_collapsed
+        .drain()
+        .map(|(id, collapsed)| (prefix_local_daemon_id(&id), collapsed))
+        .collect();
+    if let Some(filter) = window.folder_filter.take() {
+        window.folder_filter = Some(prefix_local_daemon_id(&filter));
+    }
+}
+
+fn prefix_local_daemon_id(id: &str) -> String {
+    if id.starts_with("remote:") {
+        id.to_string()
+    } else {
+        format!(
+            "remote:{}:{}",
+            okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+            id
+        )
+    }
+}
+
+/// Save the client presentation atomically
+/// (tmp + fsync + rename). Extracts only the presentation state from `data`;
+/// never touches workspace.json. Best-effort — a failure just means stale
+/// window restore.
+pub fn save_window_layout(
+    data: &WorkspaceData,
+    project_layouts: HashMap<String, LayoutNode>,
+) -> Result<()> {
+    let _guard = WINDOW_LAYOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let layout = ClientWindowLayout {
+        version: WINDOW_LAYOUT_VERSION,
+        main_window: data.main_window.clone(),
+        extra_windows: data.extra_windows.clone(),
+        project_layouts,
+        service_panel_heights: data.service_panel_heights.clone(),
+        hook_panel_heights: data.hook_panel_heights.clone(),
+    };
+    let path = get_window_layout_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Multiple desktop clients can share one profile. Serialize their
+    // profile-wide snapshots across processes; the last completed save wins.
+    let lock_path = path.with_extension("json.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock_file)?;
+    let json = serde_json::to_string_pretty(&layout)?;
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -508,16 +869,10 @@ fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
     if let Some(Value::Array(projects)) = map.get_mut("projects") {
         for p in projects.iter_mut() {
             if let Value::Object(po) = p {
-                let show_in_overview = po
-                    .remove("show_in_overview")
-                    .and_then(|v| v.as_bool());
-                let is_visible = po
-                    .remove("is_visible")
-                    .and_then(|v| v.as_bool());
+                let show_in_overview = po.remove("show_in_overview").and_then(|v| v.as_bool());
+                let is_visible = po.remove("is_visible").and_then(|v| v.as_bool());
                 let visible = show_in_overview.or(is_visible).unwrap_or(true);
-                if !visible
-                    && let Some(id) = po.get("id").and_then(|v| v.as_str())
-                {
+                if !visible && let Some(id) = po.get("id").and_then(|v| v.as_str()) {
                     hidden_ids.push(id.to_string());
                 }
             }
@@ -545,9 +900,7 @@ fn migrate_legacy_workspace_value(value: &mut serde_json::Value) {
                     .remove("collapsed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if collapsed
-                    && let Some(id) = fo.get("id").and_then(|v| v.as_str())
-                {
+                if collapsed && let Some(id) = fo.get("id").and_then(|v| v.as_str()) {
                     collapsed_ids.push(id.to_string());
                 }
             }
@@ -593,7 +946,11 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
     }
 
     if original_version != data.version {
-        log::info!("Workspace migrated from v{} to v{}", original_version, data.version);
+        log::info!(
+            "Workspace migrated from v{} to v{}",
+            original_version,
+            data.version
+        );
     }
 
     data
@@ -604,12 +961,52 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 /// Worktrees are only added as projects explicitly by the user (via the worktree
 /// list popover or the create worktree dialog). This function only cleans up
 /// worktree projects that have become stale.
-pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
-    let stale_ids: Vec<String> = data.projects.iter()
+#[cfg(test)]
+pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<TerminalSessionTeardown> {
+    sync_worktrees_with_backend_and_shell(data, SessionBackend::None, &ShellType::Default)
+}
+
+pub(crate) fn sync_worktrees_with_backend_and_shell(
+    data: &mut WorkspaceData,
+    backend_preference: SessionBackend,
+    global_default_shell: &ShellType,
+) -> Vec<TerminalSessionTeardown> {
+    let stale_ids: Vec<String> = data
+        .projects
+        .iter()
         .filter(|p| p.worktree_info.is_some())
-        .filter(|p| !Path::new(&p.path).exists())
+        .filter(|p| !worktree_checkout_path(p).exists())
         .map(|p| p.id.clone())
         .collect();
+
+    let mut stale_terminal_ids: Vec<TerminalSessionTeardown> = data
+        .projects
+        .iter()
+        .filter(|project| stale_ids.contains(&project.id))
+        .flat_map(|project| {
+            let mut sessions = Vec::new();
+            if let Some(layout) = &project.layout {
+                collect_layout_teardowns(
+                    layout,
+                    project.default_shell.as_ref(),
+                    global_default_shell,
+                    backend_preference,
+                    &mut sessions,
+                );
+            }
+            sessions.extend(
+                project
+                    .service_terminals
+                    .values()
+                    .chain(project.hook_terminals.keys())
+                    .cloned()
+                    .map(TerminalSessionTeardown::host),
+            );
+            sessions
+        })
+        .collect();
+    stale_terminal_ids.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    stale_terminal_ids.dedup_by(|a, b| a.terminal_id == b.terminal_id);
 
     for id in &stale_ids {
         data.projects.retain(|p| p.id != *id);
@@ -617,7 +1014,129 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
         for folder in &mut data.folders {
             folder.project_ids.retain(|pid| pid != id);
         }
+        // A removed worktree stays referenced by its parent otherwise.
+        for parent in &mut data.projects {
+            parent.worktree_ids.retain(|pid| pid != id);
+        }
     }
+
+    let retained_terminal_ids: std::collections::HashSet<String> = data
+        .projects
+        .iter()
+        .flat_map(|project| {
+            let mut ids = project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, LayoutNode::collect_terminal_ids);
+            ids.extend(project.service_terminals.values().cloned());
+            ids.extend(project.hook_terminals.keys().cloned());
+            ids
+        })
+        .collect();
+    stale_terminal_ids.retain(|session| !retained_terminal_ids.contains(&session.terminal_id));
+
+    // Self-heal a worktree left mid-create by a daemon kill: optimistic create
+    // registers the row with layout:None before the git checkout, and the
+    // finalize (which seeds the layout + spawns the PTY) may not have persisted.
+    // If the checkout dir now EXISTS (so it isn't stale above), seed a terminal
+    // so it opens a shell instead of hanging on the "Setting up worktree…"
+    // placeholder forever.
+    //
+    // Gated on the persisted `is_creating` marker so we only touch worktrees
+    // genuinely interrupted mid-create. A worktree the user deliberately emptied
+    // (closed its last terminal -> layout:None bookmark) has is_creating == false
+    // and is left untouched — seeding a shell there would silently un-bookmark it
+    // and resurrect a shell on every restart.
+    for p in data.projects.iter_mut() {
+        if p.is_creating
+            && p.worktree_info.is_some()
+            && p.layout.is_none()
+            && Path::new(&p.path).exists()
+        {
+            p.layout = Some(LayoutNode::new_terminal());
+            // Checkout exists and the layout is now seeded — the create is
+            // effectively finalized, so clear the marker (materialize spawns the
+            // PTY and the row renders as a normal worktree, not "creating").
+            p.is_creating = false;
+        }
+    }
+
+    stale_terminal_ids
+}
+
+pub(crate) fn worktree_checkout_path(project: &ProjectData) -> &Path {
+    let path = project
+        .worktree_info
+        .as_ref()
+        .map(|metadata| metadata.worktree_path.as_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(project.path.as_str());
+    Path::new(path)
+}
+
+fn collect_layout_teardowns(
+    layout: &LayoutNode,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    backend_preference: SessionBackend,
+    sessions: &mut Vec<TerminalSessionTeardown>,
+) {
+    match layout {
+        LayoutNode::Terminal {
+            terminal_id: Some(terminal_id),
+            shell_type,
+            ..
+        } => sessions.push(TerminalSessionTeardown {
+            terminal_id: terminal_id.clone(),
+            route: teardown_route(
+                shell_type,
+                project_default_shell,
+                global_default_shell,
+                backend_preference,
+            ),
+        }),
+        LayoutNode::Terminal { .. } => {}
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_layout_teardowns(
+                    child,
+                    project_default_shell,
+                    global_default_shell,
+                    backend_preference,
+                    sessions,
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn teardown_route(
+    shell: &ShellType,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    backend_preference: SessionBackend,
+) -> TerminalTeardownRoute {
+    #[cfg(windows)]
+    if let ShellType::Wsl { distro } = shell
+        .clone()
+        .resolve_default(project_default_shell, global_default_shell)
+    {
+        return TerminalTeardownRoute::Wsl {
+            backend: okena_terminal::session_backend::resolve_for_wsl(
+                distro.as_deref(),
+                backend_preference,
+            ),
+            distro,
+        };
+    }
+    #[cfg(not(windows))]
+    let _ = (
+        shell,
+        project_default_shell,
+        global_default_shell,
+        backend_preference,
+    );
+    TerminalTeardownRoute::Host
 }
 
 /// Create a default workspace with one project
@@ -647,6 +1166,8 @@ pub fn default_workspace() -> WorkspaceData {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }],
         project_order: vec![project_id],
         service_panel_heights: HashMap::new(),
@@ -661,6 +1182,394 @@ pub fn default_workspace() -> WorkspaceData {
 mod tests {
     use super::*;
     use crate::state::{FolderData, SplitDirection};
+
+    fn test_lock_path() -> PathBuf {
+        std::env::temp_dir().join(format!("okena-lock-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn instance_lock_is_exclusive_and_reacquirable() {
+        let path = test_lock_path();
+        let first = acquire_instance_lock_at(path.clone()).expect("first lock");
+        let error = match acquire_instance_lock_at(path.clone()) {
+            Ok(_) => panic!("second lock must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Another Okena instance"));
+
+        drop(first);
+        assert!(!path.exists(), "owner removes its lock file");
+        let second = acquire_instance_lock_at(path.clone()).expect("lock after release");
+        drop(second);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn instance_lock_pid_accepts_legacy_and_owned_formats() {
+        assert_eq!(instance_lock_pid("1234"), Some(1234));
+        assert_eq!(instance_lock_pid("1234:owner-token"), Some(1234));
+        assert_eq!(instance_lock_pid("invalid"), None);
+    }
+
+    #[test]
+    fn client_window_layout_round_trips() {
+        let mut extra = WindowState::default();
+        extra
+            .hidden_project_ids
+            .insert("remote:local-daemon:p1".to_string());
+        extra.os_bounds = Some(crate::state::WindowBounds {
+            origin_x: 100.0,
+            origin_y: 200.0,
+            width: 1280.0,
+            height: 720.0,
+        });
+        let project_layout = LayoutNode::Terminal {
+            terminal_id: Some("remote:local-daemon:t1".to_string()),
+            minimized: true,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.25,
+        };
+        let layout = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: WindowState::default(),
+            extra_windows: vec![extra],
+            project_layouts: HashMap::from([(
+                "remote:local-daemon:p1".to_string(),
+                project_layout.clone(),
+            )]),
+            service_panel_heights: HashMap::from([("remote:local-daemon:p1".to_string(), 240.0)]),
+            hook_panel_heights: HashMap::from([("remote:local-daemon:p1".to_string(), 180.0)]),
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let parsed: ClientWindowLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.version, WINDOW_LAYOUT_VERSION);
+        assert_eq!(parsed.extra_windows.len(), 1);
+        let b = parsed.extra_windows[0].os_bounds.unwrap();
+        assert_eq!(b.width, 1280.0);
+        assert!(
+            parsed.extra_windows[0]
+                .hidden_project_ids
+                .contains("remote:local-daemon:p1")
+        );
+        assert_eq!(
+            parsed.project_layouts.get("remote:local-daemon:p1"),
+            Some(&project_layout)
+        );
+        assert_eq!(
+            parsed.service_panel_heights.get("remote:local-daemon:p1"),
+            Some(&240.0)
+        );
+        assert_eq!(
+            parsed.hook_panel_heights.get("remote:local-daemon:p1"),
+            Some(&180.0)
+        );
+
+        // An empty/absent file shape parses to defaults.
+        let empty: ClientWindowLayout = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.version, 0);
+        assert!(empty.extra_windows.is_empty());
+    }
+
+    #[test]
+    fn migrate_window_layout_preserves_visibility() {
+        // Migration is NON-DESTRUCTIVE: an old (v1) layout keeps its per-window
+        // hidden sets + folder filters and is merely stamped to the current
+        // version. Wiping them on upgrade was the regression this guards against
+        // (most users legitimately hide most projects per window).
+        let mut main = WindowState::default();
+        main.hidden_project_ids
+            .insert("remote:local-daemon:p1".to_string());
+        main.folder_filter = Some("f1".to_string());
+        let mut extra = WindowState::default();
+        extra
+            .hidden_project_ids
+            .insert("remote:local-daemon:p2".to_string());
+        let mut layout = ClientWindowLayout {
+            version: 1,
+            main_window: main,
+            extra_windows: vec![extra],
+            ..Default::default()
+        };
+
+        migrate_window_layout(&mut layout);
+
+        assert_eq!(layout.version, WINDOW_LAYOUT_VERSION);
+        assert!(
+            layout
+                .main_window
+                .hidden_project_ids
+                .contains("remote:local-daemon:p1")
+        );
+        assert_eq!(
+            layout.main_window.folder_filter.as_deref(),
+            Some("remote:local-daemon:f1"),
+        );
+        assert!(
+            layout.extra_windows[0]
+                .hidden_project_ids
+                .contains("remote:local-daemon:p2")
+        );
+
+        // A current-version layout is likewise left untouched.
+        let mut keep = WindowState::default();
+        keep.hidden_project_ids
+            .insert("remote:local-daemon:p3".to_string());
+        let mut current = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            main_window: keep,
+            extra_windows: vec![],
+            ..Default::default()
+        };
+        migrate_window_layout(&mut current);
+        assert!(
+            current
+                .main_window
+                .hidden_project_ids
+                .contains("remote:local-daemon:p3")
+        );
+    }
+
+    #[test]
+    fn migrate_window_layout_prefixes_legacy_local_refs_for_daemon_mirror() {
+        let mut main = WindowState::default();
+        main.hidden_project_ids.insert("p1".to_string());
+        main.project_widths.insert("p2".to_string(), 0.4);
+        main.folder_filter = Some("f1".to_string());
+        main.folder_collapsed.insert("f2".to_string(), true);
+        main.hidden_project_ids
+            .insert("remote:server:p3".to_string());
+        let mut layout = ClientWindowLayout {
+            version: 1,
+            main_window: main,
+            extra_windows: Vec::new(),
+            project_layouts: HashMap::from([(
+                "p1".to_string(),
+                LayoutNode::Terminal {
+                    terminal_id: Some("t1".to_string()),
+                    minimized: true,
+                    detached: false,
+                    shell_type: Default::default(),
+                    zoom_level: 1.5,
+                },
+            )]),
+            service_panel_heights: HashMap::from([("p1".to_string(), 200.0)]),
+            hook_panel_heights: HashMap::from([("p1".to_string(), 160.0)]),
+        };
+
+        migrate_window_layout(&mut layout);
+
+        assert!(
+            layout
+                .main_window
+                .hidden_project_ids
+                .contains("remote:local-daemon:p1")
+        );
+        assert!(
+            layout
+                .main_window
+                .hidden_project_ids
+                .contains("remote:server:p3")
+        );
+        assert!(!layout.main_window.hidden_project_ids.contains("p1"));
+        assert_eq!(
+            layout
+                .main_window
+                .project_widths
+                .get("remote:local-daemon:p2")
+                .copied(),
+            Some(0.4),
+        );
+        assert_eq!(
+            layout.main_window.folder_filter.as_deref(),
+            Some("remote:local-daemon:f1"),
+        );
+        assert_eq!(
+            layout
+                .main_window
+                .folder_collapsed
+                .get("remote:local-daemon:f2")
+                .copied(),
+            Some(true),
+        );
+        let restored = layout
+            .project_layouts
+            .get("remote:local-daemon:p1")
+            .expect("prefixed project layout");
+        assert_eq!(
+            restored.collect_terminal_ids(),
+            vec!["remote:local-daemon:t1"]
+        );
+        assert_eq!(
+            layout.service_panel_heights.get("remote:local-daemon:p1"),
+            Some(&200.0)
+        );
+        assert_eq!(
+            layout.hook_panel_heights.get("remote:local-daemon:p1"),
+            Some(&160.0)
+        );
+    }
+
+    fn test_window_layout_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "okena-window-layout-test-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn valid_window_layout_with_no_extras_is_authoritative() {
+        let path = test_window_layout_path();
+        let layout = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&layout).unwrap()).unwrap();
+
+        let loaded = load_window_layout_at(&path, || {
+            panic!("legacy workspace must not be loaded when the client file exists")
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_file(path);
+        assert!(loaded.extra_windows.is_empty());
+    }
+
+    #[test]
+    fn valid_empty_window_visibility_is_authoritative() {
+        let path = test_window_layout_path();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        let layout = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            extra_windows: vec![extra],
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&layout).unwrap()).unwrap();
+
+        let loaded = load_window_layout_at(&path, || {
+            panic!("legacy workspace must not fill an explicit empty visibility set")
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_file(path);
+        assert_eq!(loaded.extra_windows.len(), 1);
+        assert_eq!(loaded.extra_windows[0].id, extra_id);
+        assert!(loaded.extra_windows[0].hidden_project_ids.is_empty());
+    }
+
+    #[test]
+    fn v2_migration_restores_project_presentation_without_overwriting_client_state() {
+        let path = test_window_layout_path();
+        let mut client_extra = WindowState::default();
+        client_extra
+            .hidden_project_ids
+            .insert("remote:local-daemon:client-hidden".to_string());
+        let extra_id = client_extra.id;
+        let client_project_layout = LayoutNode::Tabs {
+            children: vec![LayoutNode::new_terminal()],
+            active_tab: 0,
+        };
+        let client = ClientWindowLayout {
+            version: 2,
+            extra_windows: vec![client_extra],
+            project_layouts: HashMap::from([(
+                "remote:local-daemon:p1".to_string(),
+                client_project_layout.clone(),
+            )]),
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&client).unwrap()).unwrap();
+
+        let mut legacy_extra = WindowState {
+            id: extra_id,
+            ..Default::default()
+        };
+        legacy_extra
+            .hidden_project_ids
+            .insert("remote:local-daemon:workspace-hidden".to_string());
+        let legacy_project_layout = LayoutNode::new_terminal();
+        let legacy = ClientWindowLayout {
+            version: WINDOW_LAYOUT_VERSION,
+            extra_windows: vec![legacy_extra],
+            project_layouts: HashMap::from([
+                (
+                    "remote:local-daemon:p1".to_string(),
+                    legacy_project_layout.clone(),
+                ),
+                (
+                    "remote:local-daemon:p2".to_string(),
+                    legacy_project_layout.clone(),
+                ),
+            ]),
+            service_panel_heights: HashMap::from([("remote:local-daemon:p1".to_string(), 240.0)]),
+            hook_panel_heights: HashMap::from([("remote:local-daemon:p1".to_string(), 180.0)]),
+            ..Default::default()
+        };
+
+        let loaded = load_window_layout_at(&path, || Some(legacy)).unwrap();
+
+        let _ = std::fs::remove_file(path);
+        assert_eq!(loaded.extra_windows.len(), 1);
+        assert!(
+            loaded.extra_windows[0]
+                .hidden_project_ids
+                .contains("remote:local-daemon:client-hidden")
+        );
+        assert!(
+            !loaded.extra_windows[0]
+                .hidden_project_ids
+                .contains("remote:local-daemon:workspace-hidden")
+        );
+        assert_eq!(
+            loaded.project_layouts.get("remote:local-daemon:p1"),
+            Some(&client_project_layout)
+        );
+        assert_eq!(
+            loaded.project_layouts.get("remote:local-daemon:p2"),
+            Some(&legacy_project_layout)
+        );
+        assert_eq!(
+            loaded.service_panel_heights.get("remote:local-daemon:p1"),
+            Some(&240.0)
+        );
+        assert_eq!(
+            loaded.hook_panel_heights.get("remote:local-daemon:p1"),
+            Some(&180.0)
+        );
+    }
+
+    #[test]
+    fn missing_window_layout_uses_workspace_migration() {
+        let path = test_window_layout_path();
+        let mut legacy = ClientWindowLayout::default();
+        legacy
+            .main_window
+            .hidden_project_ids
+            .insert("remote:local-daemon:old".to_string());
+
+        let loaded = load_window_layout_at(&path, || Some(legacy)).unwrap();
+
+        assert!(
+            loaded
+                .main_window
+                .hidden_project_ids
+                .contains("remote:local-daemon:old")
+        );
+    }
+
+    #[test]
+    fn corrupt_window_layout_does_not_restore_stale_workspace_state() {
+        let path = test_window_layout_path();
+        std::fs::write(&path, "{").unwrap();
+
+        let loaded = load_window_layout_at(&path, || {
+            panic!("legacy workspace must not replace a corrupt client file")
+        });
+
+        let _ = std::fs::remove_file(path);
+        assert!(loaded.is_none());
+    }
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
@@ -681,10 +1590,16 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
-    fn make_workspace(projects: Vec<ProjectData>, order: Vec<&str>, folders: Vec<FolderData>) -> WorkspaceData {
+    fn make_workspace(
+        projects: Vec<ProjectData>,
+        order: Vec<&str>,
+        folders: Vec<FolderData>,
+    ) -> WorkspaceData {
         WorkspaceData {
             version: WORKSPACE_VERSION,
             projects,
@@ -734,7 +1649,11 @@ mod tests {
             vec![],
         );
         validate_workspace_data(&mut data, false, SessionBackend::None);
-        assert!(!data.project_order.contains(&"nonexistent_folder".to_string()));
+        assert!(
+            !data
+                .project_order
+                .contains(&"nonexistent_folder".to_string())
+        );
         assert!(data.project_order.contains(&"p1".to_string()));
     }
 
@@ -748,13 +1667,20 @@ mod tests {
             shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
         });
-        project.service_terminals.insert("web".to_string(), "svc-term-1".to_string());
+        project
+            .service_terminals
+            .insert("web".to_string(), "svc-term-1".to_string());
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
         validate_workspace_data(&mut data, true, SessionBackend::None);
 
         let layout = data.projects[0].layout.as_ref().unwrap();
         match layout {
-            LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
+            LayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                detached,
+                ..
+            } => {
                 assert!(terminal_id.is_none());
                 assert!(!minimized);
                 assert!(!detached);
@@ -789,13 +1715,16 @@ mod tests {
                 },
             ],
         });
-        project.hook_terminals.insert("hook-term".to_string(), HookTerminalEntry {
-            label: "on_project_open".to_string(),
-            status: HookTerminalStatus::Running,
-            hook_type: "on_project_open".to_string(),
-            command: "echo hello".to_string(),
-            cwd: "/tmp".to_string(),
-        });
+        project.hook_terminals.insert(
+            "hook-term".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hello".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
 
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
         validate_workspace_data(&mut data, true, SessionBackend::None);
@@ -805,11 +1734,18 @@ mod tests {
             LayoutNode::Split { children, .. } => {
                 // Regular terminal should have its ID cleared
                 if let LayoutNode::Terminal { terminal_id, .. } = &children[0] {
-                    assert!(terminal_id.is_none(), "regular terminal ID should be cleared");
+                    assert!(
+                        terminal_id.is_none(),
+                        "regular terminal ID should be cleared"
+                    );
                 }
                 // Hook terminal should keep its ID
                 if let LayoutNode::Terminal { terminal_id, .. } = &children[1] {
-                    assert_eq!(terminal_id.as_deref(), Some("hook-term"), "hook terminal ID should be preserved");
+                    assert_eq!(
+                        terminal_id.as_deref(),
+                        Some("hook-term"),
+                        "hook terminal ID should be preserved"
+                    );
                 }
             }
             _ => panic!("Expected split"),
@@ -833,7 +1769,10 @@ mod tests {
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
         validate_workspace_data(&mut data, false, SessionBackend::None);
 
-        assert!(matches!(data.projects[0].layout, Some(LayoutNode::Terminal { .. })));
+        assert!(matches!(
+            data.projects[0].layout,
+            Some(LayoutNode::Terminal { .. })
+        ));
     }
 
     #[test]
@@ -984,8 +1923,14 @@ mod tests {
         let data: WorkspaceData = serde_json::from_str(&migrated_json).unwrap();
         let migrated = migrate_workspace(data);
         assert_eq!(migrated.version, WORKSPACE_VERSION);
-        assert_eq!(migrated.main_window.project_widths.get("p1").copied(), Some(60.0));
-        assert_eq!(migrated.main_window.project_widths.get("p2").copied(), Some(40.0));
+        assert_eq!(
+            migrated.main_window.project_widths.get("p1").copied(),
+            Some(60.0)
+        );
+        assert_eq!(
+            migrated.main_window.project_widths.get("p2").copied(),
+            Some(40.0)
+        );
     }
 
     #[test]
@@ -1022,8 +1967,14 @@ mod tests {
 
         assert_eq!(migrated.version, WORKSPACE_VERSION);
         assert!(migrated.main_window.hidden_project_ids.contains("p1"));
-        assert_eq!(migrated.main_window.folder_collapsed.get("f1").copied(), Some(true));
-        assert_eq!(migrated.main_window.project_widths.get("p1").copied(), Some(60.0));
+        assert_eq!(
+            migrated.main_window.folder_collapsed.get("f1").copied(),
+            Some(true)
+        );
+        assert_eq!(
+            migrated.main_window.project_widths.get("p1").copied(),
+            Some(60.0)
+        );
     }
 
     #[test]
@@ -1080,7 +2031,8 @@ mod tests {
         }"#;
 
         let migrated_json = migrate_legacy_json(legacy_json).expect("legacy migration succeeds");
-        let raw: WorkspaceData = serde_json::from_str(&migrated_json).expect("typed parse succeeds");
+        let raw: WorkspaceData =
+            serde_json::from_str(&migrated_json).expect("typed parse succeeds");
         let mut data = migrate_workspace(raw);
         validate_workspace_data(&mut data, false, SessionBackend::None);
 
@@ -1088,19 +2040,36 @@ mod tests {
         assert_eq!(data.version, WORKSPACE_VERSION);
 
         // Both legacy hide flags fold into main_window.hidden_project_ids.
-        assert!(data.main_window.hidden_project_ids.contains("hidden_show_in_overview"));
-        assert!(data.main_window.hidden_project_ids.contains("hidden_is_visible"));
+        assert!(
+            data.main_window
+                .hidden_project_ids
+                .contains("hidden_show_in_overview")
+        );
+        assert!(
+            data.main_window
+                .hidden_project_ids
+                .contains("hidden_is_visible")
+        );
         assert!(!data.main_window.hidden_project_ids.contains("visible"));
 
         // FolderData.collapsed folds into main_window.folder_collapsed; only
         // the explicitly-collapsed folder appears (absence == expanded).
-        assert_eq!(data.main_window.folder_collapsed.get("folder1").copied(), Some(true));
+        assert_eq!(
+            data.main_window.folder_collapsed.get("folder1").copied(),
+            Some(true)
+        );
         assert!(!data.main_window.folder_collapsed.contains_key("folder2"));
 
         // Top-level project_widths folds into main_window.project_widths.
-        assert_eq!(data.main_window.project_widths.get("visible").copied(), Some(60.0));
         assert_eq!(
-            data.main_window.project_widths.get("hidden_show_in_overview").copied(),
+            data.main_window.project_widths.get("visible").copied(),
+            Some(60.0)
+        );
+        assert_eq!(
+            data.main_window
+                .project_widths
+                .get("hidden_show_in_overview")
+                .copied(),
             Some(40.0),
         );
 
@@ -1113,17 +2082,29 @@ mod tests {
         let saved = serde_json::to_string(&data).unwrap();
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
         let obj = value.as_object().unwrap();
-        assert!(!obj.contains_key("project_widths"), "no top-level project_widths after save");
+        assert!(
+            !obj.contains_key("project_widths"),
+            "no top-level project_widths after save"
+        );
         let projects = obj.get("projects").and_then(|v| v.as_array()).unwrap();
         for p in projects {
             let po = p.as_object().unwrap();
-            assert!(!po.contains_key("show_in_overview"), "no per-project show_in_overview after save");
-            assert!(!po.contains_key("is_visible"), "no per-project is_visible after save");
+            assert!(
+                !po.contains_key("show_in_overview"),
+                "no per-project show_in_overview after save"
+            );
+            assert!(
+                !po.contains_key("is_visible"),
+                "no per-project is_visible after save"
+            );
         }
         let folders = obj.get("folders").and_then(|v| v.as_array()).unwrap();
         for f in folders {
             let fo = f.as_object().unwrap();
-            assert!(!fo.contains_key("collapsed"), "no per-folder collapsed after save");
+            assert!(
+                !fo.contains_key("collapsed"),
+                "no per-folder collapsed after save"
+            );
         }
     }
 
@@ -1178,7 +2159,10 @@ mod tests {
             first.main_window.folder_collapsed,
             second.main_window.folder_collapsed
         );
-        assert_eq!(first.main_window.folder_filter, second.main_window.folder_filter);
+        assert_eq!(
+            first.main_window.folder_filter,
+            second.main_window.folder_filter
+        );
 
         // The underlying workspace shape (projects, folders, order) is preserved.
         let ids1: std::collections::HashSet<&str> =
@@ -1233,15 +2217,25 @@ mod tests {
                 folder_color: FolderColor::default(),
             }],
         );
-        data.main_window.folder_collapsed.insert("f1".to_string(), true);
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window
+            .folder_collapsed
+            .insert("f1".to_string(), true);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
 
         let json = serde_json::to_string(&data).unwrap();
         let deserialized: WorkspaceData = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.folders.len(), 1);
         assert_eq!(deserialized.folders[0].name, "My Folder");
-        assert_eq!(deserialized.main_window.folder_collapsed.get("f1"), Some(&true));
-        assert_eq!(deserialized.main_window.project_widths.get("p1"), Some(&60.0));
+        assert_eq!(
+            deserialized.main_window.folder_collapsed.get("f1"),
+            Some(&true)
+        );
+        assert_eq!(
+            deserialized.main_window.project_widths.get("p1"),
+            Some(&60.0)
+        );
     }
 
     #[test]
@@ -1255,9 +2249,15 @@ mod tests {
             zoom_level: 1.0,
         });
         // t1 is in layout, t2 and t3 are orphaned
-        project.terminal_names.insert("t1".to_string(), "Term 1".to_string());
-        project.terminal_names.insert("t2".to_string(), "Term 2".to_string());
-        project.terminal_names.insert("t3".to_string(), "Term 3".to_string());
+        project
+            .terminal_names
+            .insert("t1".to_string(), "Term 1".to_string());
+        project
+            .terminal_names
+            .insert("t2".to_string(), "Term 2".to_string());
+        project
+            .terminal_names
+            .insert("t3".to_string(), "Term 3".to_string());
         project.hidden_terminals.insert("t2".to_string(), true);
 
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
@@ -1273,8 +2273,12 @@ mod tests {
     fn validate_cleans_all_metadata_when_no_layout() {
         let mut project = make_project("p1");
         project.layout = None;
-        project.terminal_names.insert("t1".to_string(), "Term 1".to_string());
-        project.terminal_names.insert("t2".to_string(), "Term 2".to_string());
+        project
+            .terminal_names
+            .insert("t1".to_string(), "Term 1".to_string());
+        project
+            .terminal_names
+            .insert("t2".to_string(), "Term 2".to_string());
 
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
         validate_workspace_data(&mut data, false, SessionBackend::None);
@@ -1320,7 +2324,7 @@ mod tests {
         let mut p = make_project(id);
         p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
-                color_override: None,
+            color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
             branch_name: String::new(),
@@ -1336,7 +2340,7 @@ mod tests {
         wt_project.path = "/nonexistent/path/that/does/not/exist".to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
-                color_override: None,
+            color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -1362,7 +2366,7 @@ mod tests {
         wt_project.path = "/nonexistent/path".to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
-                color_override: None,
+            color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -1392,7 +2396,7 @@ mod tests {
         wt_project.path = tmp.to_string_lossy().to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
-                color_override: None,
+            color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -1411,13 +2415,294 @@ mod tests {
         assert!(data.project_order.contains(&"wt1".to_string()));
     }
 
+    #[test]
+    fn sync_worktrees_preserves_monorepo_worktree_when_project_subdir_is_missing() {
+        let checkout =
+            std::env::temp_dir().join(format!("okena-monorepo-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&checkout).expect("create checkout root");
+        let mut wt_project = make_project("wt1");
+        wt_project.path = checkout
+            .join("packages/missing")
+            .to_string_lossy()
+            .into_owned();
+        wt_project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: checkout.to_string_lossy().into_owned(),
+            branch_name: "some-branch".to_string(),
+        });
+        let mut data = make_workspace(
+            vec![make_project("p1"), wt_project],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        sync_worktrees(&mut data);
+
+        assert!(data.projects.iter().any(|project| project.id == "wt1"));
+        assert!(data.project_order.contains(&"wt1".to_string()));
+        std::fs::remove_dir(checkout).expect("remove checkout root");
+    }
+
+    #[test]
+    fn sync_worktrees_seeds_layout_for_mid_create_worktree() {
+        // Optimistic create registers a worktree with layout:None and the
+        // is_creating marker before the git checkout; a daemon kill could persist
+        // that. On reload, if the checkout dir now exists, seed a layout so it
+        // opens a shell instead of hanging on the "Setting up worktree…"
+        // placeholder — and clear the now-stale marker.
+        let mut wt = make_project("wt1");
+        wt.path = std::env::temp_dir().to_string_lossy().to_string();
+        wt.layout = None;
+        wt.is_creating = true;
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        });
+
+        let mut data = make_workspace(vec![make_project("p1"), wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let wt = data
+            .projects
+            .iter()
+            .find(|p| p.id == "wt1")
+            .expect("worktree kept");
+        assert!(
+            wt.layout.is_some(),
+            "mid-create worktree with an existing dir gets a seeded layout"
+        );
+        assert!(
+            !wt.is_creating,
+            "the mid-create marker is cleared once the layout is seeded"
+        );
+    }
+
+    #[test]
+    fn sync_worktrees_leaves_deliberate_bookmark_untouched() {
+        // A worktree the user deliberately emptied (closed its last terminal ->
+        // layout:None bookmark) has is_creating == false. The self-heal must NOT
+        // seed a terminal for it, or every restart would silently un-bookmark it
+        // and resurrect a shell. Only genuinely mid-create worktrees self-heal.
+        let mut wt = make_project("wt1");
+        wt.path = std::env::temp_dir().to_string_lossy().to_string();
+        wt.layout = None;
+        wt.is_creating = false;
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        });
+
+        let mut data = make_workspace(vec![make_project("p1"), wt], vec!["p1", "wt1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let wt = data
+            .projects
+            .iter()
+            .find(|p| p.id == "wt1")
+            .expect("bookmark kept");
+        assert!(
+            wt.layout.is_none(),
+            "a deliberate bookmark (is_creating false) keeps layout None"
+        );
+    }
+
+    #[test]
+    fn sync_worktrees_scrubs_parent_worktree_ids_on_stale_removal() {
+        let mut parent = make_project("p1");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_project("wt1");
+        wt.path = "/nonexistent/okena-stale/xyz".to_string(); // stale → removed
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
+            branch_name: "b".to_string(),
+        });
+        wt.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("stale-layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+        });
+        wt.service_terminals
+            .insert("service".to_string(), "stale-service".to_string());
+        wt.hook_terminals.insert(
+            "stale-hook".to_string(),
+            crate::state::HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+
+        let mut data = make_workspace(vec![parent, wt], vec!["p1", "wt1"], vec![]);
+        let stale_terminal_ids = sync_worktrees(&mut data);
+
+        let p1 = data.projects.iter().find(|p| p.id == "p1").unwrap();
+        assert!(
+            p1.worktree_ids.is_empty(),
+            "stale worktree id scrubbed from parent.worktree_ids"
+        );
+        assert!(
+            !data.projects.iter().any(|p| p.id == "wt1"),
+            "stale worktree removed"
+        );
+        assert_eq!(
+            stale_terminal_ids,
+            vec![
+                "stale-hook".to_string(),
+                "stale-layout".to_string(),
+                "stale-service".to_string(),
+            ],
+            "discarded ownership survives long enough for startup cleanup"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_session_descriptor_keeps_wsl_distro_and_resolved_backend() {
+        let route = teardown_route(
+            &ShellType::Wsl {
+                distro: Some("Ubuntu".to_string()),
+            },
+            None,
+            &ShellType::Default,
+            SessionBackend::None,
+        );
+
+        assert_eq!(
+            route,
+            TerminalTeardownRoute::Wsl {
+                distro: Some("Ubuntu".to_string()),
+                backend: okena_terminal::session_backend::ResolvedBackend::None,
+            }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_cleanup_routes_only_layout_terminals_through_wsl() {
+        let mut worktree = make_project("wt1");
+        worktree.path = format!("Z:\\missing-okena-worktree-{}", uuid::Uuid::new_v4());
+        worktree.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "C:\\repo".to_string(),
+            worktree_path: worktree.path.clone(),
+            branch_name: "feature".to_string(),
+        });
+        worktree.default_shell = Some(ShellType::Wsl {
+            distro: Some("Ubuntu".to_string()),
+        });
+        worktree.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
+        worktree
+            .service_terminals
+            .insert("web".to_string(), "service".to_string());
+        worktree.hook_terminals.insert(
+            "hook".to_string(),
+            crate::state::HookTerminalEntry {
+                label: "hook".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo hook".to_string(),
+                cwd: "C:\\repo".to_string(),
+            },
+        );
+        let mut data = make_workspace(
+            vec![make_project("p1"), worktree],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        let stale =
+            sync_worktrees_with_backend_and_shell(&mut data, SessionBackend::None, &ShellType::Cmd);
+        let route = |id: &str| {
+            stale
+                .iter()
+                .find(|session| session.terminal_id == id)
+                .map(|session| session.route.clone())
+                .expect("stale descriptor")
+        };
+
+        assert!(matches!(route("layout"), TerminalTeardownRoute::Wsl { .. }));
+        assert_eq!(route("service"), TerminalTeardownRoute::Host);
+        assert_eq!(route("hook"), TerminalTeardownRoute::Host);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_default_layout_uses_transient_global_wsl_route() {
+        let mut worktree = make_project("wt1");
+        worktree.path = format!("Z:\\missing-okena-worktree-{}", uuid::Uuid::new_v4());
+        worktree.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "C:\\repo".to_string(),
+            worktree_path: worktree.path.clone(),
+            branch_name: "feature".to_string(),
+        });
+        worktree.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("layout".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        });
+        let mut data = make_workspace(
+            vec![make_project("p1"), worktree],
+            vec!["p1", "wt1"],
+            vec![],
+        );
+
+        let stale = sync_worktrees_with_backend_and_shell(
+            &mut data,
+            SessionBackend::None,
+            &ShellType::Wsl {
+                distro: Some("Debian".to_string()),
+            },
+        );
+
+        assert!(matches!(
+            stale.as_slice(),
+            [TerminalSessionTeardown {
+                terminal_id,
+                route: TerminalTeardownRoute::Wsl {
+                    distro: Some(distro),
+                    ..
+                },
+            }] if terminal_id == "layout" && distro == "Debian"
+        ));
+    }
+
     // === validate_workspace_data worktree migration ===
 
     #[test]
     fn validate_populates_worktree_ids_from_worktree_info() {
         // Simulate old data: worktrees in project_order, parent has empty worktree_ids
         let mut data = make_workspace(
-            vec![make_project("parent"), make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")],
+            vec![
+                make_project("parent"),
+                make_worktree_project("wt1", "parent"),
+                make_worktree_project("wt2", "parent"),
+            ],
             vec!["parent", "wt1", "wt2"],
             vec![],
         );
@@ -1425,13 +2710,19 @@ mod tests {
 
         // Parent should now have worktree_ids populated
         let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
-        assert_eq!(parent.worktree_ids, vec!["wt1".to_string(), "wt2".to_string()]);
+        assert_eq!(
+            parent.worktree_ids,
+            vec!["wt1".to_string(), "wt2".to_string()]
+        );
     }
 
     #[test]
     fn validate_removes_worktrees_from_project_order() {
         let mut data = make_workspace(
-            vec![make_project("parent"), make_worktree_project("wt1", "parent")],
+            vec![
+                make_project("parent"),
+                make_worktree_project("wt1", "parent"),
+            ],
             vec!["parent", "wt1"],
             vec![],
         );
@@ -1445,7 +2736,10 @@ mod tests {
     #[test]
     fn validate_removes_worktrees_from_folder_project_ids() {
         let mut data = make_workspace(
-            vec![make_project("parent"), make_worktree_project("wt1", "parent")],
+            vec![
+                make_project("parent"),
+                make_worktree_project("wt1", "parent"),
+            ],
             vec!["f1"],
             vec![FolderData {
                 id: "f1".to_string(),
@@ -1466,7 +2760,11 @@ mod tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt2".to_string(), "wt1".to_string()]; // custom order
         let mut data = make_workspace(
-            vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")],
+            vec![
+                parent,
+                make_worktree_project("wt1", "parent"),
+                make_worktree_project("wt2", "parent"),
+            ],
             vec!["parent"],
             vec![],
         );
@@ -1474,6 +2772,9 @@ mod tests {
 
         let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
         // Should preserve existing order, not overwrite
-        assert_eq!(parent.worktree_ids, vec!["wt2".to_string(), "wt1".to_string()]);
+        assert_eq!(
+            parent.worktree_ids,
+            vec!["wt2".to_string(), "wt1".to_string()]
+        );
     }
 }

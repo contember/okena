@@ -323,9 +323,15 @@ pub fn render_search_bar<V: 'static>(
         )
         .child({
             let on_prev = cb.on_prev.clone();
-            icon_button_sized("in-page-search-prev-btn", "icons/chevron-up.svg", 24.0, 14.0, t)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _window, cx| (on_prev)(this, cx)))
+            icon_button_sized(
+                "in-page-search-prev-btn",
+                "icons/chevron-up.svg",
+                24.0,
+                14.0,
+                t,
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _window, cx| (on_prev)(this, cx)))
         })
         .child({
             let on_next = cb.on_next.clone();

@@ -18,15 +18,26 @@ pub struct BridgeMessage {
 pub enum RemoteCommand {
     /// All client-facing actions (workspace + I/O).
     Action(ActionRequest),
+    /// Client-facing action carrying the WebSocket connection that produced it.
+    ActionFromConnection {
+        action: ActionRequest,
+        connection_id: String,
+    },
+    /// Resize from a WebSocket client. Only the current owner may resize.
+    ResizeFromConnection {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        connection_id: String,
+    },
     /// Get the full workspace state snapshot.
     GetState,
     /// Render a terminal's visible content as ANSI bytes (for snapshots).
     RenderSnapshot { terminal_id: String },
     /// Get current grid sizes (cols, rows) for multiple terminals.
     GetTerminalSizes { terminal_ids: Vec<String> },
-    /// Bracketed-paste the path of a remote-pasted image (already written to a
-    /// temp file on this host) into the target terminal.
-    PasteImage { terminal_id: String, path: String },
+    /// Bracketed-paste server-local text into the target terminal.
+    PastePath { terminal_id: String, text: String },
 }
 
 /// Channel types for the bridge.

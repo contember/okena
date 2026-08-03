@@ -27,80 +27,198 @@ pub struct Tip {
 
 /// Tip triggered by a keybinding — its chip shows the live shortcut for `action`.
 const fn key(text: &'static str, action: &'static str) -> Tip {
-    Tip { text, action: Some(action), hint: None }
+    Tip {
+        text,
+        action: Some(action),
+        hint: None,
+    }
 }
 
 /// Tip triggered some other way — its chip shows the static `hint`.
 const fn hint(text: &'static str, hint: &'static str) -> Tip {
-    Tip { text, action: None, hint: Some(hint) }
+    Tip {
+        text,
+        action: None,
+        hint: Some(hint),
+    }
 }
 
 /// Tip with no chip (an ambient behavior, or keys are already in the text).
 const fn plain(text: &'static str) -> Tip {
-    Tip { text, action: None, hint: None }
+    Tip {
+        text,
+        action: None,
+        hint: None,
+    }
 }
 
 /// The curated tip pool.
 pub static TIPS: &[Tip] = &[
     // Windows, projects & layout
-    key("Open a second window onto the same workspace — each window keeps its own set of visible projects.", "NewWindow"),
-    key("Overlay numbers on every pane, then press the digit to jump straight to it.", "TogglePaneSwitcher"),
-    key("Zoom the focused terminal full-screen, then cycle the rest with ⌘] / ⌘[.", "ToggleFullscreen"),
-    key("Resize every column and pane to match in a single keystroke.", "EqualizeLayout"),
-    key("Switch your project grid between columns and rows — handy on a portrait or vertical monitor.", "ToggleProjectLayout"),
-    key("Minimize a busy terminal instead of closing it — it keeps running and comes back later.", "MinimizeTerminal"),
-    key("Zoom to just the project holding the active terminal; press ⌘0 to show them all again.", "FocusActiveProject"),
-    hint("Give each project one of 12 colors so its column is easy to spot.", "right-click a project"),
-    hint("Group projects into folders, drag to reorder, and \"Show Only This Folder\" to focus one group.", "drag / right-click"),
-    hint("Hide a project from a window without deleting it — it stays in your other windows.", "right-click"),
-
+    key(
+        "Open a second window onto the same workspace — each window keeps its own set of visible projects.",
+        "NewWindow",
+    ),
+    key(
+        "Overlay numbers on every pane, then press the digit to jump straight to it.",
+        "TogglePaneSwitcher",
+    ),
+    key(
+        "Zoom the focused terminal full-screen, then cycle the rest with ⌘] / ⌘[.",
+        "ToggleFullscreen",
+    ),
+    key(
+        "Resize every column and pane to match in a single keystroke.",
+        "EqualizeLayout",
+    ),
+    key(
+        "Switch your project grid between columns and rows — handy on a portrait or vertical monitor.",
+        "ToggleProjectLayout",
+    ),
+    key(
+        "Minimize a busy terminal instead of closing it — it keeps running and comes back later.",
+        "MinimizeTerminal",
+    ),
+    key(
+        "Zoom to just the project holding the active terminal; press ⌘0 to show them all again.",
+        "FocusActiveProject",
+    ),
+    hint(
+        "Give each project one of 12 colors so its column is easy to spot.",
+        "right-click a project",
+    ),
+    hint(
+        "Group projects into folders, drag to reorder, and \"Show Only This Folder\" to focus one group.",
+        "drag / right-click",
+    ),
+    hint(
+        "Hide a project from a window without deleting it — it stays in your other windows.",
+        "right-click",
+    ),
     // Splits, tabs & navigation
-    key("Split a terminal into side-by-side or stacked panes.", "SplitVertical"),
-    key("Add tabs inside a pane — double-click a tab to rename, middle-click to close.", "AddTab"),
+    key(
+        "Split a terminal into side-by-side or stacked panes.",
+        "SplitVertical",
+    ),
+    key(
+        "Add tabs inside a pane — double-click a tab to rename, middle-click to close.",
+        "AddTab",
+    ),
     plain("Move focus between panes by direction with ⌘⌥ (Ctrl+Alt) + the arrow keys."),
-
     // Find anything
-    key("Open the command palette to find any action — and see its shortcut.", "ShowCommandPalette"),
-    key("Jump between projects fast — Enter to focus, Space to show/hide in this window.", "ShowProjectSwitcher"),
+    key(
+        "Open the command palette to find any action — and see its shortcut.",
+        "ShowCommandPalette",
+    ),
+    key(
+        "Jump between projects fast — Enter to focus, Space to show/hide in this window.",
+        "ShowProjectSwitcher",
+    ),
     key("Fuzzy-find any file in the project.", "ShowFileSearch"),
-    key("Search file contents across the project with literal, regex, or fuzzy matching.", "ShowContentSearch"),
-
+    key(
+        "Search file contents across the project with literal, regex, or fuzzy matching.",
+        "ShowContentSearch",
+    ),
     // Terminal
-    key("Jump to the previous or next shell prompt instantly (needs OSC 133 shell integration).", "JumpToPreviousPrompt"),
-    hint("⌘/Ctrl-click a file path (file:line:col) or a URL in the terminal to open it in your editor or browser.", "⌘/Ctrl + click"),
-    key("Search the terminal scrollback with regex and a live match count.", "Search"),
-    hint("Press Shift+Enter to insert a newline for multi-line input without submitting.", "⇧Enter"),
-    key("Zoom the font size of just one terminal; press ⌘0 to reset it.", "ZoomIn"),
-
+    key(
+        "Jump to the previous or next shell prompt instantly (needs OSC 133 shell integration).",
+        "JumpToPreviousPrompt",
+    ),
+    hint(
+        "⌘/Ctrl-click a file path (file:line:col) or a URL in the terminal to open it in your editor or browser.",
+        "⌘/Ctrl + click",
+    ),
+    key(
+        "Search the terminal scrollback with regex and a live match count.",
+        "Search",
+    ),
+    hint(
+        "Press Shift+Enter to insert a newline for multi-line input without submitting.",
+        "⇧Enter",
+    ),
+    key(
+        "Zoom the font size of just one terminal; press ⌘0 to reset it.",
+        "ZoomIn",
+    ),
     // Git & worktrees
-    key("Filter branches or create a new one from HEAD, right inside the branch switcher.", "ShowBranchSwitcher"),
-    hint("Spin up a git worktree as its own column — even straight from a GitHub PR (needs gh).", "right-click a repo"),
+    key(
+        "Filter branches or create a new one from HEAD, right inside the branch switcher.",
+        "ShowBranchSwitcher",
+    ),
+    hint(
+        "Spin up a git worktree as its own column — even straight from a GitHub PR (needs gh).",
+        "right-click a repo",
+    ),
     plain("New worktrees appear automatically and stale ones are cleaned up in the background."),
-    plain("In the diff viewer: S toggles side-by-side, W ignores whitespace, Tab switches staged/unstaged."),
-
+    plain(
+        "In the diff viewer: S toggles side-by-side, W ignores whitespace, Tab switches staged/unstaged.",
+    ),
     // Services & ports
-    hint("Running services show port badges — click one to open it in your browser.", "click a port"),
-    hint("Define project services in okena.yaml; Docker Compose is auto-detected too.", "okena.yaml"),
-    hint("Services can auto-start on project open and auto-restart on crash, with automatic port detection.", "okena.yaml"),
-
+    hint(
+        "Running services show port badges — click one to open it in your browser.",
+        "click a port",
+    ),
+    hint(
+        "Define project services in okena.yaml; Docker Compose is auto-detected too.",
+        "okena.yaml",
+    ),
+    hint(
+        "Services can auto-start on project open and auto-restart on crash, with automatic port detection.",
+        "okena.yaml",
+    ),
     // Sessions & safety
-    plain("With dtach, tmux, or screen installed, your terminals keep running across app restarts."),
-    plain("Closed a busy terminal by accident? You get a few seconds to undo before the process is killed."),
-    key("Save, load, and export entire workspace layouts from the session manager.", "ShowSessionManager"),
-
+    plain(
+        "With dtach, tmux, or screen installed, your terminals keep running across app restarts.",
+    ),
+    plain(
+        "Closed a busy terminal by accident? You get a few seconds to undo before the process is killed.",
+    ),
+    key(
+        "Save, load, and export entire workspace layouts from the session manager.",
+        "ShowSessionManager",
+    ),
     // Remote, CLI & web
-    hint("Drive any terminal from the shell or an agent: okena run, okena key, okena read, okena ls.", "CLI"),
-    hint("Target a specific window from the CLI with --window <id> (or --window main).", "CLI"),
-    hint("Enable the remote server and open your terminal in a browser from any device via a pairing code.", "remote"),
-    hint("Run okena headless on a server: okena --headless --listen <addr> serves the API with no GUI.", "CLI"),
-
+    hint(
+        "Drive any terminal from the shell or an agent: okena run, okena key, okena read, okena ls.",
+        "CLI",
+    ),
+    hint(
+        "Target a specific window from the CLI with --window <id> (or --window main).",
+        "CLI",
+    ),
+    hint(
+        "Enable the remote server and open your terminal in a browser from any device via a pairing code.",
+        "remote",
+    ),
+    hint(
+        "Run okena headless on a server: okena --headless --listen <addr> serves the API with no GUI.",
+        "CLI",
+    ),
     // Customize
-    key("Switch themes live — Auto, Dark, Light, Pastel Dark, High Contrast, or your own JSON.", "ShowThemeSelector"),
-    hint("Run commands automatically on project, terminal, and worktree events; prefix with \"terminal:\" to open them in a pane.", "settings"),
-    hint("Set a {shell} wrapper to auto-enter a devcontainer or nix shell for every new terminal.", "settings"),
-    hint("Keep separate settings, keybindings, themes, and sessions per profile (work vs. personal).", "command palette"),
-    key("Every shortcut is editable — open the keybindings editor to record your own.", "ShowKeybindings"),
-    hint("Get notified on bell or OSC alerts from background terminals.", "settings"),
+    key(
+        "Switch themes live — Auto, Dark, Light, Pastel Dark, High Contrast, or your own JSON.",
+        "ShowThemeSelector",
+    ),
+    hint(
+        "Run commands automatically on project, terminal, and worktree events; prefix with \"terminal:\" to open them in a pane.",
+        "settings",
+    ),
+    hint(
+        "Set a {shell} wrapper to auto-enter a devcontainer or nix shell for every new terminal.",
+        "settings",
+    ),
+    hint(
+        "Keep separate settings, keybindings, themes, and sessions per profile (work vs. personal).",
+        "command palette",
+    ),
+    key(
+        "Every shortcut is editable — open the keybindings editor to record your own.",
+        "ShowKeybindings",
+    ),
+    hint(
+        "Get notified on bell or OSC alerts from background terminals.",
+        "settings",
+    ),
 ];
 
 /// Returns the tip at `index`, wrapping around the pool.

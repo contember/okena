@@ -12,12 +12,21 @@ pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
     repo.workdir().map(|p| p.to_path_buf())
 }
 
+/// Return the shared Git directory for a main or linked worktree.
+pub fn get_repo_common_dir(path: &Path) -> Option<PathBuf> {
+    let repo = crate::gix_helpers::open(path)?;
+    let common_dir = repo.common_dir();
+    Some(std::fs::canonicalize(common_dir).unwrap_or_else(|_| normalize_path(common_dir)))
+}
+
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::ParentDir => { result.pop(); }
+            Component::ParentDir => {
+                result.pop();
+            }
             Component::CurDir => {}
             other => result.push(other),
         }
@@ -32,11 +41,11 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 /// Both paths are normalized before `strip_prefix` to handle symlinks,
 /// trailing slashes, and `..` components.
 pub fn resolve_git_root_and_subdir(project_path: &Path) -> (PathBuf, PathBuf) {
-    let git_root = get_repo_root(project_path)
-        .unwrap_or_else(|| project_path.to_path_buf());
+    let git_root = get_repo_root(project_path).unwrap_or_else(|| project_path.to_path_buf());
     let norm_project = normalize_path(project_path);
     let norm_root = normalize_path(&git_root);
-    let subdir = norm_project.strip_prefix(&norm_root)
+    let subdir = norm_project
+        .strip_prefix(&norm_root)
         .unwrap_or(Path::new(""))
         .to_path_buf();
     (git_root, subdir)
@@ -63,7 +72,8 @@ pub fn compute_target_paths(
     template: &str,
     branch: &str,
 ) -> (String, String) {
-    let repo_name = git_root.file_name()
+    let repo_name = git_root
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
     let safe_branch = branch.replace('/', "-");
@@ -97,6 +107,7 @@ mod tests {
     fn get_repo_root_returns_none_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(get_repo_root(&path).is_none());
+        assert!(get_repo_common_dir(&path).is_none());
     }
 
     /// Compare computed paths as `Path` objects for cross-platform correctness
@@ -108,7 +119,8 @@ mod tests {
     fn target_path_simple_repo() {
         let git_root = PathBuf::from("/projects/myrepo");
         let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let (wt, proj) =
+            compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
         let expected = PathBuf::from("/projects").join("myrepo-wt").join("feature");
         assert_paths_eq(&wt, &expected);
         assert_paths_eq(&proj, &expected);
@@ -118,8 +130,11 @@ mod tests {
     fn target_path_monorepo() {
         let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("app-in-monorepo");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
-        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("feature");
+        let (wt, proj) =
+            compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let expected_wt = PathBuf::from("/projects")
+            .join("monorepo-wt")
+            .join("feature");
         assert_paths_eq(&wt, &expected_wt);
         assert_paths_eq(&proj, &expected_wt.join("app-in-monorepo"));
     }
@@ -128,8 +143,11 @@ mod tests {
     fn target_path_nested_monorepo_subdir() {
         let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("packages/app");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
-        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("fix-bug");
+        let (wt, proj) =
+            compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
+        let expected_wt = PathBuf::from("/projects")
+            .join("monorepo-wt")
+            .join("fix-bug");
         assert_paths_eq(&wt, &expected_wt);
         assert_paths_eq(&proj, &expected_wt.join("packages").join("app"));
     }
@@ -138,8 +156,12 @@ mod tests {
     fn target_path_absolute_template() {
         let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("app");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
-        let expected_wt = PathBuf::from("/tmp").join("worktrees").join("monorepo").join("main");
+        let (wt, proj) =
+            compute_target_paths(&git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
+        let expected_wt = PathBuf::from("/tmp")
+            .join("worktrees")
+            .join("monorepo")
+            .join("main");
         assert_paths_eq(&wt, &expected_wt);
         assert_paths_eq(&proj, &expected_wt.join("app"));
     }
@@ -148,8 +170,15 @@ mod tests {
     fn target_path_branch_with_slashes() {
         let git_root = PathBuf::from("/projects/repo");
         let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature/my-branch");
-        let expected = PathBuf::from("/projects").join("repo-wt").join("feature-my-branch");
+        let (wt, proj) = compute_target_paths(
+            &git_root,
+            subdir,
+            "../{repo}-wt/{branch}",
+            "feature/my-branch",
+        );
+        let expected = PathBuf::from("/projects")
+            .join("repo-wt")
+            .join("feature-my-branch");
         assert_paths_eq(&wt, &expected);
         assert_paths_eq(&proj, &expected);
     }
@@ -175,7 +204,13 @@ mod tests {
         let wt_path = wt_tmp.path().join("my-worktree");
         git_in(
             &repo,
-            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-branch"],
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ],
         );
 
         // Create a nested subdirectory inside the worktree (monorepo subproject)
@@ -185,6 +220,28 @@ mod tests {
         // get_repo_root from the nested subdir should return the worktree root,
         // NOT the main repo — this is the path `git worktree remove` needs.
         let root = get_repo_root(&nested).expect("should resolve worktree root");
-        assert_eq!(root.canonicalize().unwrap(), wt_path.canonicalize().unwrap());
+        assert_eq!(
+            root.canonicalize().unwrap(),
+            wt_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn linked_worktree_shares_common_dir_with_main_repository() {
+        let (_tmp, repo) = init_temp_repo();
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree = worktree_parent.path().join("linked");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "linked",
+            ],
+        );
+
+        assert_eq!(get_repo_common_dir(&repo), get_repo_common_dir(&worktree));
     }
 }

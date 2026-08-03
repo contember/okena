@@ -12,20 +12,40 @@
 mod files;
 mod git;
 mod project;
+mod session;
 mod tab;
 mod terminal;
+mod terminal_batch;
 
-use okena_core::api::{ActionRequest, CommandResult};
-use crate::settings::settings;
-use okena_terminal::backend::TerminalBackend;
-use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{LayoutNode, WindowId, Workspace};
-use gpui::*;
+use okena_core::api::{ActionRequest, CommandResult};
+use okena_terminal::TerminalsRegistry;
+use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_workspace::context::WorkspaceCx;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+pub use files::{
+    PreparedContentSearch, execute_prepared_content_search,
+    execute_prepared_content_search_with_cancellation, prepare_content_search,
+};
+pub use session::{
+    apply_imported_workspace, apply_loaded_session, begin_workspace_replacement,
+    cleanup_stale_workspace_replacement, ensure_workspace_replacement_allowed,
+    fail_workspace_replacement, finish_workspace_replacement, import_workspace_data,
+    load_session_data, load_session_data_for_shell, materialize_workspace_replacement,
+    prepare_workspace_replacement,
+};
+pub use terminal_batch::{
+    PreparedTerminalLaunch, PreparedTerminalLaunchOutcome, PublishedTerminalOwners,
+    cleanup_stale_prepared_terminal_launches, materialize_prepared_terminal_launches,
+    publish_prepared_terminal_launches,
+};
 
 /// Result of executing an action.
 pub enum ActionResult {
@@ -48,6 +68,10 @@ impl ActionResult {
 ///
 /// This is the single source of truth for all client-facing actions.
 /// Both desktop UI handlers and the remote API delegate here.
+// Takes the workspace, focus manager, backend, terminals registry, settings
+// and cx as distinct dependencies; bundling them into a context struct would
+// obscure more than it clarifies here (matching the sub-handler modules).
+#[allow(clippy::too_many_arguments)]
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
@@ -55,139 +79,347 @@ pub fn execute_action(
     focus_manager: &mut FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match action {
         // ── Terminal ops ─────────────────────────────────────────────
-        ActionRequest::CreateTerminal { project_id } => {
-            terminal::create(ws, focus_manager, project_id, backend, terminals, cx)
-        }
-        ActionRequest::SplitTerminal { project_id, path, direction } => {
-            terminal::split(ws, focus_manager, project_id, path, direction, backend, terminals, cx)
-        }
-        ActionRequest::CloseTerminal { project_id, terminal_id } => {
-            terminal::close(ws, focus_manager, project_id, terminal_id, backend, terminals, cx)
-        }
-        ActionRequest::CloseTerminals { project_id, terminal_ids } => {
-            terminal::close_many(ws, focus_manager, project_id, terminal_ids, backend, terminals, cx)
-        }
-        ActionRequest::FocusTerminal { project_id, terminal_id, window: _ } => {
+        ActionRequest::CreateTerminal { project_id } => terminal::create(
+            ws,
+            focus_manager,
+            project_id,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction,
+        } => terminal::split(
+            ws,
+            focus_manager,
+            project_id,
+            path,
+            direction,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::CloseTerminal {
+            project_id,
+            terminal_id,
+        } => terminal::close(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            backend,
+            terminals,
+            cx,
+        ),
+        ActionRequest::CloseTerminals {
+            project_id,
+            terminal_ids,
+        } => terminal::close_many(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_ids,
+            backend,
+            terminals,
+            cx,
+        ),
+        ActionRequest::FocusTerminal {
+            project_id,
+            terminal_id,
+            window: _,
+        } => {
             // `window` was already consumed at the bridge to resolve the target
             // `window_id` (passed in above); the per-window FocusManager handed
             // to `execute_action` is already the right one.
             terminal::focus(ws, focus_manager, project_id, terminal_id, cx)
         }
+        ActionRequest::RecordProjectActivity { project_id } => {
+            if ws.project(&project_id).is_none() {
+                ActionResult::Err(format!("project not found: {project_id}"))
+            } else {
+                ws.bump_activity(&project_id, cx);
+                ActionResult::Ok(None)
+            }
+        }
         ActionRequest::SendText { terminal_id, text } => {
-            terminal::send_text(ws, terminal_id, text, backend, terminals)
+            terminal::send_text(ws, terminal_id, text, backend, terminals, settings)
         }
-        ActionRequest::RunCommand { terminal_id, command } => {
-            terminal::run_command(ws, terminal_id, command, backend, terminals)
+        ActionRequest::SendBytes { terminal_id, data } => {
+            terminal::send_bytes(ws, terminal_id, data, backend, terminals, settings)
         }
+        ActionRequest::RunCommand {
+            terminal_id,
+            command,
+        } => terminal::run_command(ws, terminal_id, command, backend, terminals, settings),
         ActionRequest::SendSpecialKey { terminal_id, key } => {
-            terminal::send_special_key(ws, terminal_id, key, backend, terminals)
+            terminal::send_special_key(ws, terminal_id, key, backend, terminals, settings)
         }
-        ActionRequest::Resize { terminal_id, cols, rows } => {
-            terminal::resize(ws, terminal_id, cols, rows, backend, terminals)
-        }
-        ActionRequest::UpdateSplitSizes { project_id, path, sizes } => {
-            terminal::update_split_sizes(ws, project_id, path, sizes, cx)
-        }
-        ActionRequest::ToggleMinimized { project_id, terminal_id } => {
-            terminal::toggle_minimized(ws, project_id, terminal_id, cx)
-        }
-        ActionRequest::SetFullscreen { project_id, terminal_id, window: _ } => {
-            terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx)
-        }
-        ActionRequest::RenameTerminal { project_id, terminal_id, name } => {
-            terminal::rename(ws, project_id, terminal_id, name, cx)
-        }
+        ActionRequest::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => terminal::resize(ws, terminal_id, cols, rows, backend, terminals, settings),
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path,
+            sizes,
+        } => terminal::update_split_sizes(ws, project_id, path, sizes, cx),
+        ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id,
+        } => terminal::toggle_minimized(ws, project_id, terminal_id, cx),
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+            window: _,
+        } => terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx),
+        ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id,
+            name,
+        } => terminal::rename(ws, project_id, terminal_id, name, cx),
+        ActionRequest::SwitchTerminalShell {
+            project_id,
+            terminal_id,
+            shell,
+        } => terminal::switch_shell(
+            ws,
+            project_id,
+            terminal_id,
+            shell,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::AddDiscoveredWorktree {
+            parent_project_id,
+            worktree_path,
+            branch,
+        } => project::add_discovered_worktree(
+            ws,
+            window_id,
+            parent_project_id,
+            worktree_path,
+            branch,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::RerunHook {
+            project_id,
+            terminal_id,
+        } => project::rerun_hook(ws, project_id, terminal_id, backend, terminals, cx),
+        ActionRequest::DismissHook {
+            project_id,
+            terminal_id,
+        } => project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx),
         ActionRequest::ReadContent { terminal_id } => {
-            terminal::read_content(ws, terminal_id, backend, terminals)
+            terminal::read_content(ws, terminal_id, backend, terminals, settings)
+        }
+        ActionRequest::ExportBuffer { terminal_id } => {
+            terminal::export_buffer(terminal_id, backend)
         }
 
         // ── Tab / pane-move ops ──────────────────────────────────────
-        ActionRequest::AddTab { project_id, path, in_group } => {
-            tab::add_tab(ws, focus_manager, project_id, path, in_group, backend, terminals, cx)
-        }
-        ActionRequest::SetActiveTab { project_id, path, index } => {
-            tab::set_active_tab(ws, project_id, path, index, cx)
-        }
-        ActionRequest::MoveTab { project_id, path, from_index, to_index } => {
-            tab::move_tab(ws, project_id, path, from_index, to_index, cx)
-        }
-        ActionRequest::MoveTerminalToTabGroup { project_id, terminal_id, target_path, position, target_project_id } => {
-            tab::move_terminal_to_tab_group(ws, focus_manager, project_id, terminal_id, target_path, position, target_project_id, cx)
-        }
-        ActionRequest::MovePaneTo { project_id, terminal_id, target_project_id, target_terminal_id, zone } => {
-            tab::move_pane_to(ws, focus_manager, project_id, terminal_id, target_project_id, target_terminal_id, zone, cx)
-        }
+        ActionRequest::AddTab {
+            project_id,
+            path,
+            in_group,
+        } => tab::add_tab(
+            ws,
+            focus_manager,
+            project_id,
+            path,
+            in_group,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::SetActiveTab {
+            project_id,
+            path,
+            index,
+        } => tab::set_active_tab(ws, project_id, path, index, cx),
+        ActionRequest::MoveTab {
+            project_id,
+            path,
+            from_index,
+            to_index,
+        } => tab::move_tab(ws, project_id, path, from_index, to_index, cx),
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+            target_project_id,
+        } => tab::move_terminal_to_tab_group(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+            target_project_id,
+            cx,
+        ),
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => tab::move_pane_to(
+            ws,
+            focus_manager,
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+            cx,
+        ),
 
         // ── Git ops ──────────────────────────────────────────────────
         ActionRequest::GitStatus { project_id } => git::status(ws, project_id),
         ActionRequest::GitDiffSummary { project_id } => git::diff_summary(ws, project_id),
-        ActionRequest::GitDiff { project_id, mode, ignore_whitespace } => {
-            git::diff(ws, project_id, mode, ignore_whitespace)
-        }
+        ActionRequest::GitDiff {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => git::diff(ws, project_id, mode, ignore_whitespace),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
-        ActionRequest::GitFileContents { project_id, file_path, mode } => {
-            git::file_contents(ws, project_id, file_path, mode)
+        ActionRequest::GitListPullRequests { project_id, limit } => {
+            git::list_pull_requests(ws, project_id, limit)
         }
-        ActionRequest::GitCommitGraph { project_id, count, branch } => {
-            git::commit_graph(ws, project_id, count, branch)
-        }
+        ActionRequest::GitFileContents {
+            project_id,
+            file_path,
+            mode,
+        } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitCommitGraph {
+            project_id,
+            count,
+            branch,
+        } => git::commit_graph(ws, project_id, count, branch),
         ActionRequest::GitListBranches { project_id } => git::list_branches(ws, project_id),
-        ActionRequest::GitStageFile { project_id, file_path } => {
-            git::stage_file(ws, project_id, file_path)
+        ActionRequest::GitListWorktrees { project_id } => git::list_worktrees(ws, project_id),
+        ActionRequest::WorktreeCloseInfo { project_id } => git::worktree_close_info(ws, project_id),
+        ActionRequest::GenerateWorktreeBranchName { project_id } => {
+            git::generate_worktree_branch_name(ws, project_id)
         }
-        ActionRequest::GitUnstageFile { project_id, file_path } => {
-            git::unstage_file(ws, project_id, file_path)
+        ActionRequest::GitListBranchesClassified { project_id } => {
+            git::list_branches_classified(ws, project_id)
         }
-        ActionRequest::GitDiscardFile { project_id, file_path } => {
-            git::discard_file(ws, project_id, file_path)
+        ActionRequest::GitCheckoutLocalBranch { project_id, branch } => {
+            git::checkout_local_branch(ws, project_id, branch)
         }
-        ActionRequest::GitBlame { project_id, relative_path } => {
-            git::blame(ws, project_id, relative_path)
-        }
+        ActionRequest::GitCheckoutRemoteBranch {
+            project_id,
+            remote_branch,
+        } => git::checkout_remote_branch(ws, project_id, remote_branch),
+        ActionRequest::GitCreateAndCheckoutBranch {
+            project_id,
+            new_name,
+            start_point,
+        } => git::create_and_checkout_branch(ws, project_id, new_name, start_point),
+        ActionRequest::GitStageFile {
+            project_id,
+            file_path,
+        } => git::stage_file(ws, project_id, file_path),
+        ActionRequest::GitUnstageFile {
+            project_id,
+            file_path,
+        } => git::unstage_file(ws, project_id, file_path),
+        ActionRequest::GitDiscardFile {
+            project_id,
+            file_path,
+        } => git::discard_file(ws, project_id, file_path),
+        ActionRequest::GitBlame {
+            project_id,
+            relative_path,
+        } => git::blame(ws, project_id, relative_path),
 
         // ── Filesystem ops ───────────────────────────────────────────
-        ActionRequest::ListFiles { project_id, show_ignored } => {
-            files::list_files(ws, project_id, show_ignored)
-        }
-        ActionRequest::ListDirectory { project_id, relative_path, show_ignored } => {
-            files::list_directory(ws, project_id, relative_path, show_ignored)
-        }
-        ActionRequest::ReadFile { project_id, relative_path } => {
-            files::read_file(ws, project_id, relative_path)
-        }
-        ActionRequest::ReadFileBytes { project_id, relative_path } => {
-            files::read_file_bytes(ws, project_id, relative_path)
-        }
-        ActionRequest::FileSize { project_id, relative_path } => {
-            files::file_size(ws, project_id, relative_path)
-        }
-        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
-            files::search_content(ws, project_id, query, case_sensitive, mode, max_results, file_glob, context_lines)
-        }
-        ActionRequest::RenameFile { project_id, relative_path, new_name } => {
-            files::rename_file(ws, project_id, relative_path, new_name)
-        }
-        ActionRequest::DeleteFile { project_id, relative_path } => {
-            files::delete_file(ws, project_id, relative_path)
-        }
-        ActionRequest::CreateFile { project_id, relative_path } => {
-            files::create_file(ws, project_id, relative_path)
-        }
-        ActionRequest::CreateDirectory { project_id, relative_path } => {
-            files::create_directory(ws, project_id, relative_path)
-        }
+        ActionRequest::ListFiles {
+            project_id,
+            show_ignored,
+        } => files::list_files(ws, project_id, show_ignored),
+        ActionRequest::ListDirectory {
+            project_id,
+            relative_path,
+            show_ignored,
+        } => files::list_directory(ws, project_id, relative_path, show_ignored),
+        ActionRequest::ReadFile {
+            project_id,
+            relative_path,
+        } => files::read_file(ws, project_id, relative_path),
+        ActionRequest::ReadFileBytes {
+            project_id,
+            relative_path,
+        } => files::read_file_bytes(ws, project_id, relative_path),
+        ActionRequest::FileSize {
+            project_id,
+            relative_path,
+        } => files::file_size(ws, project_id, relative_path),
+        ActionRequest::SearchContent {
+            project_id,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        } => files::search_content(
+            ws,
+            project_id,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        ),
+        ActionRequest::RenameFile {
+            project_id,
+            relative_path,
+            new_name,
+        } => files::rename_file(ws, project_id, relative_path, new_name),
+        ActionRequest::DeleteFile {
+            project_id,
+            relative_path,
+        } => files::delete_file(ws, project_id, relative_path),
+        ActionRequest::CreateFile {
+            project_id,
+            relative_path,
+        } => files::create_file(ws, project_id, relative_path),
+        ActionRequest::CreateDirectory {
+            project_id,
+            relative_path,
+        } => files::create_directory(ws, project_id, relative_path),
 
         // ── Project / folder / worktree ops ──────────────────────────
         ActionRequest::AddProject { name, path } => {
-            project::add_project(ws, window_id, name, path, backend, terminals, cx)
+            project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
         }
-        ActionRequest::ReorderProjectInFolder { folder_id, project_id, new_index } => {
-            project::reorder_in_folder(ws, folder_id, project_id, new_index, cx)
-        }
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index,
+        } => project::reorder_in_folder(ws, folder_id, project_id, new_index, cx),
         ActionRequest::SetProjectColor { project_id, color } => {
             project::set_project_color(ws, project_id, color, cx)
         }
@@ -197,31 +429,118 @@ pub fn execute_action(
         ActionRequest::RenameProject { project_id, name } => {
             project::rename_project(ws, project_id, name, cx)
         }
-        ActionRequest::RenameProjectDirectory { project_id, new_name } => {
-            project::rename_project_directory(ws, project_id, new_name, cx)
+        ActionRequest::UpdateProjectHooks { project_id, hooks } => {
+            project::update_project_hooks(ws, project_id, *hooks, cx)
         }
+        ActionRequest::RenameProjectDirectory {
+            project_id,
+            new_name,
+        } => project::rename_project_directory(ws, project_id, new_name, cx),
         ActionRequest::DeleteProject { project_id } => {
-            project::delete_project(ws, focus_manager, project_id, cx)
+            project::delete_project(ws, focus_manager, project_id, settings, cx)
         }
-        ActionRequest::SetProjectShowInOverview { project_id, show, window: _ } => {
-            project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx)
-        }
+        ActionRequest::SetProjectShowInOverview {
+            project_id,
+            show,
+            window: _,
+        } => project::set_show_in_overview(ws, focus_manager, window_id, project_id, show, cx),
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
-            project::remove_worktree_project(ws, focus_manager, project_id, force, cx)
+            project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
         }
+        ActionRequest::CloseWorktree {
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+        } => project::close_worktree(
+            ws,
+            focus_manager,
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+            settings,
+            cx,
+        ),
         ActionRequest::CreateFolder { name } => project::create_folder(ws, name, cx),
         ActionRequest::DeleteFolder { folder_id } => project::delete_folder(ws, folder_id, cx),
         ActionRequest::RenameFolder { folder_id, name } => {
             project::rename_folder(ws, folder_id, name, cx)
         }
-        ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => {
-            project::move_to_folder(ws, project_id, folder_id, position, cx)
+        ActionRequest::MoveProjectToFolder {
+            project_id,
+            folder_id,
+            position,
+        } => project::move_to_folder(ws, project_id, folder_id, position, cx),
+        ActionRequest::MoveProjectOutOfFolder {
+            project_id,
+            top_level_index,
+        } => project::move_out_of_folder(ws, project_id, top_level_index, cx),
+        ActionRequest::MoveProject {
+            project_id,
+            new_index,
+        } => project::move_project(ws, project_id, new_index, cx),
+        ActionRequest::MoveItemInOrder { item_id, new_index } => {
+            project::move_item_in_order(ws, item_id, new_index, cx)
         }
-        ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => {
-            project::move_out_of_folder(ws, project_id, top_level_index, cx)
+        ActionRequest::ToggleProjectPinned { project_id } => {
+            project::toggle_project_pinned(ws, project_id, cx)
         }
-        ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
-            project::create_worktree(ws, window_id, project_id, branch, create_branch, backend, terminals, cx)
+        ActionRequest::ReorderWorktree {
+            parent_id,
+            worktree_id,
+            new_index,
+        } => project::reorder_worktree(ws, parent_id, worktree_id, new_index, cx),
+        ActionRequest::SetWorktreeColorOverride { project_id, color } => {
+            project::set_worktree_color_override(ws, project_id, color, cx)
+        }
+        ActionRequest::CreateWorktree {
+            project_id,
+            branch,
+            create_branch,
+        } => project::create_worktree(
+            ws,
+            window_id,
+            project_id,
+            branch,
+            create_branch,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+
+        // ── Sessions (whole-workspace; daemon owns session files + state) ──
+        ActionRequest::ListSessions => session::list_sessions_action(),
+        ActionRequest::LoadSession { name } => {
+            session::load_session_action(ws, focus_manager, name, backend, terminals, settings, cx)
+        }
+        ActionRequest::SaveSession { name } => session::save_session_action(ws, name),
+        ActionRequest::RenameSession { old_name, new_name } => {
+            session::rename_session_action(old_name, new_name)
+        }
+        ActionRequest::DeleteSession { name } => session::delete_session_action(name),
+        ActionRequest::ImportWorkspace { path } => session::import_workspace_action(
+            ws,
+            focus_manager,
+            path,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::ExportWorkspace { path } => session::export_workspace_action(ws, path),
+
+        // Soft-close undo / finalize are handled by the daemon command loop
+        // directly (it owns the grace deadlines + kept-alive PTYs).
+        ActionRequest::UndoSoftClose { .. } | ActionRequest::CloseTerminalNow { .. } => {
+            ActionResult::Err(
+                "soft-close undo/finalize must be handled by the daemon command loop".to_string(),
+            )
         }
 
         // Service actions are handled by the remote command loop directly
@@ -258,25 +577,33 @@ pub fn ensure_terminal(
     terminals: &TerminalsRegistry,
     backend: &dyn TerminalBackend,
     ws: &Workspace,
+    settings: &AppSettings,
 ) -> Option<Arc<Terminal>> {
     // Fast path: already in registry
     if let Some(term) = terminals.lock().get(terminal_id).cloned() {
         return Some(term);
     }
 
-    // Find which project owns this terminal_id and get its path
-    let mut cwd = None;
+    // Find which project owns this terminal_id and preserve its configured shell.
+    // This is required for WSL reconnects: passing `None` routes the persistent
+    // attach through the Windows host backend instead of the WSL distro backend.
+    let mut reconnect = None;
     for project in &ws.data().projects {
         if let Some(layout) = &project.layout
-            && layout.find_terminal_path(terminal_id).is_some() {
-                cwd = Some(project.path.clone());
-                break;
-            }
+            && let Some(path) = layout.find_terminal_path(terminal_id)
+            && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
+        {
+            let shell = shell_type
+                .clone()
+                .resolve_default(project.default_shell.as_ref(), &settings.default_shell);
+            reconnect = Some((project.path.clone(), TerminalLaunchPlan::for_shell(shell)));
+            break;
+        }
     }
-    let cwd = cwd?;
+    let (cwd, plan) = reconnect?;
 
     // Spawn PTY via backend
-    match backend.reconnect_terminal(terminal_id, &cwd, None) {
+    match backend.reconnect_terminal_with_plan(terminal_id, &cwd, &plan) {
         Ok(_id) => {
             let terminal = Arc::new(Terminal::new(
                 terminal_id.to_string(),
@@ -297,16 +624,166 @@ pub fn ensure_terminal(
     }
 }
 
+fn effective_terminal_launch(
+    shell_type: ShellType,
+    project_default_shell: Option<&ShellType>,
+    global_default_shell: &ShellType,
+    shell_wrapper: Option<&str>,
+    on_create: Option<&str>,
+    env: &HashMap<String, String>,
+) -> TerminalLaunchPlan {
+    let shell = shell_type.resolve_default(project_default_shell, global_default_shell);
+    hooks::terminal_launch_plan(shell, shell_wrapper, on_create, env)
+}
+
+/// Reserve IDs and launch plans for runtime-recovery slots without touching the backend.
+pub fn reserve_uninitialized_terminal_launches(
+    ws: &mut Workspace,
+    project_ids: &[String],
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> Result<Vec<PreparedTerminalLaunch>, String> {
+    let mut launches = Vec::new();
+    for project_id in project_ids {
+        let project = ws
+            .project(project_id)
+            .ok_or_else(|| format!("project not found: {project_id}"))?;
+        if project.is_remote {
+            return Err(format!(
+                "remote project terminals cannot be materialized locally: {project_id}"
+            ));
+        }
+        let project_path = project.path.clone();
+        let project_name = project.name.clone();
+        let project_hooks = project.hooks.clone();
+        let is_worktree = project.worktree_info.is_some();
+        let parent_hooks = project
+            .worktree_info
+            .as_ref()
+            .and_then(|worktree| ws.project(&worktree.parent_project_id))
+            .map(|parent| parent.hooks.clone());
+        let project_default_shell = project.default_shell.clone();
+        let mut uninitialized = Vec::new();
+        if let Some(layout) = &project.layout {
+            collect_uninitialized_terminals_with_shell(layout, Vec::new(), &mut uninitialized);
+        }
+        let shell_wrapper =
+            hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &settings.hooks);
+        let on_create = hooks::resolve_terminal_on_create_simple(
+            &project_hooks,
+            parent_hooks.as_ref(),
+            &settings.hooks,
+        );
+        let folder = ws.folder_for_project_or_parent(project_id);
+        let env = hooks::terminal_hook_env(
+            project_id,
+            &project_name,
+            &project_path,
+            is_worktree,
+            folder.map(|folder| folder.id.as_str()),
+            folder.map(|folder| folder.name.as_str()),
+        );
+        for (path, shell_type) in uninitialized {
+            launches.push(PreparedTerminalLaunch::new(
+                project_id.clone(),
+                path,
+                uuid::Uuid::new_v4().to_string(),
+                project_path.clone(),
+                effective_terminal_launch(
+                    shell_type,
+                    project_default_shell.as_ref(),
+                    &settings.default_shell,
+                    shell_wrapper.as_deref(),
+                    on_create.as_deref(),
+                    &env,
+                ),
+            ));
+        }
+    }
+
+    for launch in &launches {
+        ws.set_terminal_id(
+            launch.project_id(),
+            launch.layout_path(),
+            launch.terminal_id().to_string(),
+            cx,
+        );
+    }
+    Ok(launches)
+}
+
+/// Clear failed reservations without disturbing a terminal that replaced their ID.
+pub fn clear_failed_terminal_launch_reservations(
+    ws: &mut Workspace,
+    launches: &[PreparedTerminalLaunch],
+    failed_terminal_ids: &[String],
+    cx: &mut impl WorkspaceCx,
+) {
+    let failed: std::collections::HashSet<&str> =
+        failed_terminal_ids.iter().map(String::as_str).collect();
+    for launch in launches {
+        if !failed.contains(launch.terminal_id()) {
+            continue;
+        }
+        ws.with_layout_node(
+            launch.project_id(),
+            launch.layout_path(),
+            cx,
+            |node| match node {
+                LayoutNode::Terminal { terminal_id, .. }
+                    if terminal_id.as_deref() == Some(launch.terminal_id()) =>
+                {
+                    *terminal_id = None;
+                    true
+                }
+                _ => false,
+            },
+        );
+    }
+}
+
 /// Spawn PTYs for any uninitialized terminals (`terminal_id: None`) in a project's layout.
 ///
 /// Used after `CreateTerminal` / `SplitTerminal` to eagerly create PTYs for
 /// remote clients that don't have a rendering layer to trigger lazy spawning.
+/// The cwd a *new* terminal should inherit when it's created next to an
+/// existing one (split / add-tab): the live working directory of the terminal
+/// the user acted on — the node at `path`, or the visible terminal under it
+/// when `path` is a group. Resolved from the action's `path` (client-independent,
+/// so it holds in the daemon model). Uses `Terminal::current_cwd` (the OSC 7
+/// shell cwd), so it follows wherever the source shell has `cd`-ed. `None` when
+/// there's no live source terminal — callers then fall back to the project path.
+pub(super) fn inherited_cwd(
+    ws: &Workspace,
+    terminals: &TerminalsRegistry,
+    project_id: &str,
+    path: &[usize],
+) -> Option<String> {
+    let layout = ws.project(project_id)?.layout.as_ref()?;
+    let node = layout.get_at_path(path)?;
+    let rel = node.find_visible_terminal_path();
+    let LayoutNode::Terminal {
+        terminal_id: Some(terminal_id),
+        ..
+    } = node.get_at_path(&rel)?
+    else {
+        return None;
+    };
+    let cwd = terminals.lock().get(terminal_id)?.current_cwd();
+    (!cwd.is_empty()).then_some(cwd)
+}
+
 pub fn spawn_uninitialized_terminals(
     ws: &mut Workspace,
     project_id: &str,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
+    settings: &AppSettings,
+    // When a new terminal is created next to an existing one (split / add-tab),
+    // the caller passes the source terminal's live cwd so the new one opens
+    // "here". `None` → the project path (fresh projects, worktrees, sessions).
+    inherit_cwd: Option<String>,
+    cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
     if ws.is_creating_project(project_id) {
@@ -319,10 +796,15 @@ pub fn spawn_uninitialized_terminals(
     };
 
     let project_path = project.path.clone();
+    // The directory new PTYs actually spawn in: the inherited (source-terminal)
+    // cwd when provided, else the project path.
+    let spawn_cwd = inherit_cwd.unwrap_or_else(|| project_path.clone());
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
     let is_worktree = project.worktree_info.is_some();
-    let parent_hooks = project.worktree_info.as_ref()
+    let parent_hooks = project
+        .worktree_info
+        .as_ref()
         .and_then(|wt| ws.project(&wt.parent_project_id))
         .map(|p| p.hooks.clone());
     let project_default_shell = project.default_shell.clone();
@@ -330,58 +812,61 @@ pub fn spawn_uninitialized_terminals(
     if let Some(layout) = &project.layout {
         collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
-    log::info!("spawn_uninitialized_terminals: project={}, uninitialized_count={}", project_id, uninitialized.len());
+    log::info!(
+        "spawn_uninitialized_terminals: project={}, uninitialized_count={}",
+        project_id,
+        uninitialized.len()
+    );
 
-    let app_settings = settings(cx);
-    let global_default = app_settings.default_shell.clone();
-    let global_hooks = app_settings.hooks;
+    let global_default = settings.default_shell.clone();
+    let global_hooks = settings.hooks.clone();
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
-    let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &global_hooks, cx);
+    let shell_wrapper =
+        hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
+    let on_create_cmd = hooks::resolve_terminal_on_create_simple(
+        &project_hooks,
+        parent_hooks.as_ref(),
+        &global_hooks,
+    );
     let folder = ws.folder_for_project_or_parent(project_id);
     let folder_id = folder.map(|f| f.id.as_str());
     let folder_name = folder.map(|f| f.name.as_str());
-    let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree, folder_id, folder_name);
+    let env = hooks::terminal_hook_env(
+        project_id,
+        &project_name,
+        &project_path,
+        is_worktree,
+        folder_id,
+        folder_name,
+    );
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
-        let mut shell = match shell_type {
-            ShellType::Default => project_default_shell
-                .clone()
-                .unwrap_or_else(|| global_default.clone()),
-            other => other,
-        };
+        let plan = effective_terminal_launch(
+            shell_type,
+            project_default_shell.as_ref(),
+            &global_default,
+            shell_wrapper.as_deref(),
+            on_create_cmd.as_deref(),
+            &env,
+        );
 
-        // Apply shell_wrapper if configured
-        if let Some(ref wrapper) = shell_wrapper {
-            shell = hooks::apply_shell_wrapper(&shell, wrapper, &env);
-        }
-
-        // Apply on_create: wrap shell to run command first, then exec into shell
-        if let Some(ref cmd) = on_create_cmd {
-            shell = hooks::apply_on_create(&shell, cmd, &env);
-        }
-
-        match backend.create_terminal(&project_path, Some(&shell)) {
+        match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 let terminal = Arc::new(Terminal::new(
                     terminal_id.clone(),
                     TerminalSize::default(),
                     backend.transport(),
-                    project_path.clone(),
+                    spawn_cwd.clone(),
                 ));
 
                 terminals.lock().insert(terminal_id.clone(), terminal);
                 spawned_ids.push(terminal_id);
             }
             Err(e) => {
-                log::error!(
-                    "Failed to spawn terminal for project {}: {}",
-                    project_id,
-                    e
-                );
+                log::error!("Failed to spawn terminal for project {}: {}", project_id, e);
                 return ActionResult::Err(format!("failed to spawn terminal: {}", e));
             }
         }
@@ -415,7 +900,10 @@ pub fn find_terminal_path(
 
 /// Canonicalize a relative path within a project directory and verify it doesn't
 /// escape the project root (path traversal protection).
-fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_project_file(
+    project_path: &str,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
     let full_path = std::path::Path::new(project_path).join(relative_path);
     let canonical = full_path
         .canonicalize()
@@ -432,7 +920,10 @@ fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::
 /// Resolve a new (possibly non-existent) target path inside a project. The parent
 /// must exist and canonicalize inside the project root. The leaf filename is then
 /// joined back on — so the target itself does not need to exist yet.
-fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_new_project_file(
+    project_path: &str,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
     if relative_path.is_empty() {
         return Err("relative_path must not be empty".to_string());
     }
@@ -563,5 +1054,314 @@ mod path_guard_tests {
         assert!(validate_leaf_name("..").is_err());
         assert!(validate_leaf_name("a/b").is_err());
         assert!(validate_leaf_name("a\\b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reconnect_shell_tests {
+    #[cfg(windows)]
+    use super::spawn_uninitialized_terminals;
+    use super::{
+        AppSettings, clear_failed_terminal_launch_reservations, ensure_terminal,
+        reserve_uninitialized_terminal_launches,
+    };
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
+    use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use okena_workspace::context::WorkspaceCx;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    struct StubTransport;
+
+    impl TerminalTransport for StubTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        created_shells: Mutex<Vec<Option<ShellType>>>,
+        reconnected_shells: Mutex<Vec<Option<ShellType>>>,
+        plans: Mutex<Vec<TerminalLaunchPlan>>,
+    }
+
+    impl TerminalBackend for RecordingBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+
+        fn create_terminal(&self, _cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
+            self.created_shells
+                .lock()
+                .expect("created shell lock")
+                .push(shell.cloned());
+            Ok("terminal".to_string())
+        }
+
+        fn create_terminal_with_plan(
+            &self,
+            _cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            self.plans.lock().expect("plan lock").push(plan.clone());
+            let shell = plan.initial_command.as_ref().map_or_else(
+                || plan.route.clone(),
+                |command| ShellType::Custom {
+                    path: command.program.clone(),
+                    args: command.args.clone(),
+                },
+            );
+            self.created_shells
+                .lock()
+                .expect("created shell lock")
+                .push(Some(shell));
+            Ok("terminal".to_string())
+        }
+
+        fn reconnect_terminal(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            self.reconnected_shells
+                .lock()
+                .expect("reconnected shell lock")
+                .push(shell.cloned());
+            Ok(terminal_id.to_string())
+        }
+
+        fn reconnect_terminal_with_plan(
+            &self,
+            terminal_id: &str,
+            _cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            self.plans.lock().expect("plan lock").push(plan.clone());
+            self.reconnected_shells
+                .lock()
+                .expect("reconnected shell lock")
+                .push(Some(plan.route.clone()));
+            Ok(terminal_id.to_string())
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    struct TestCx;
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<crate::workspace::hooks::HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<crate::workspace::hook_monitor::HookMonitor> {
+            None
+        }
+    }
+
+    fn workspace_with_terminal(
+        shell_type: ShellType,
+        default_shell: Option<ShellType>,
+        terminal_id: Option<&str>,
+    ) -> Workspace {
+        let project = ProjectData {
+            id: "project".into(),
+            name: "Project".into(),
+            path: "/project".into(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: terminal_id.map(str::to_string),
+                shell_type,
+                minimized: false,
+                detached: false,
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        };
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project".into()],
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
+        workspace_with_terminal(shell_type, default_shell, Some("terminal"))
+    }
+
+    #[test]
+    fn reconnect_passes_explicit_terminal_shell() {
+        let explicit = ShellType::Custom {
+            path: "/bin/explicit".into(),
+            args: vec!["--login".into()],
+        };
+        let ws = workspace(explicit.clone(), None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
+            &[Some(explicit)]
+        );
+    }
+
+    #[test]
+    fn reconnect_resolves_terminal_default_from_project() {
+        let project_default = ShellType::Custom {
+            path: "/bin/project-default".into(),
+            args: Vec::new(),
+        };
+        let ws = workspace(ShellType::Default, Some(project_default.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
+            &[Some(project_default)]
+        );
+    }
+
+    #[test]
+    fn reconnect_passes_system_default_instead_of_none() {
+        let ws = workspace(ShellType::Default, None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend
+                .reconnected_shells
+                .lock()
+                .expect("shell lock")
+                .as_slice(),
+            &[Some(ShellType::Default)]
+        );
+    }
+
+    #[test]
+    fn failed_reservation_does_not_clear_a_replacement_terminal_id() {
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None);
+        let mut cx = TestCx;
+        let launches = reserve_uninitialized_terminal_launches(
+            &mut ws,
+            &["project".to_string()],
+            &AppSettings::default(),
+            &mut cx,
+        )
+        .expect("reserve terminal launch");
+        assert_eq!(launches.len(), 1);
+        let reserved_id = launches[0].terminal_id().to_string();
+
+        ws.set_terminal_id("project", &[], "replacement".to_string(), &mut cx);
+        clear_failed_terminal_launch_reservations(&mut ws, &launches, &[reserved_id], &mut cx);
+
+        let LayoutNode::Terminal { terminal_id, .. } = ws
+            .project("project")
+            .and_then(|project| project.layout.as_ref())
+            .expect("project terminal layout")
+        else {
+            panic!("expected terminal layout");
+        };
+        assert_eq!(terminal_id.as_deref(), Some("replacement"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reconnect_keeps_base_wsl_route_and_does_not_replay_create_hook() {
+        let wsl = ShellType::Wsl {
+            distro: Some("Ubuntu".into()),
+        };
+        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None);
+        let create_terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        let mut settings = AppSettings::default();
+        settings.default_shell = wsl.clone();
+        settings.hooks.terminal.on_create = Some("echo ready".to_string());
+        let mut cx = TestCx;
+
+        let _ = spawn_uninitialized_terminals(
+            &mut create_ws,
+            "project",
+            &backend,
+            &create_terminals,
+            &settings,
+            None,
+            &mut cx,
+        );
+
+        let reconnect_ws = workspace(ShellType::Default, None);
+        let reconnect_terminals: TerminalsRegistry = Arc::new(Default::default());
+        assert!(
+            ensure_terminal(
+                "terminal",
+                &reconnect_terminals,
+                &backend,
+                &reconnect_ws,
+                &settings,
+            )
+            .is_some()
+        );
+
+        let plans = backend.plans.lock().expect("plan lock");
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].route, wsl);
+        assert!(plans[0].initial_command.is_some());
+        assert_eq!(plans[1].route, wsl);
+        assert!(plans[1].initial_command.is_none());
     }
 }

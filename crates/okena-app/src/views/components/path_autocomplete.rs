@@ -1,6 +1,6 @@
 use crate::theme::theme;
-use crate::views::components::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use crate::ui::tokens::ui_text_md;
+use crate::views::components::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use gpui::prelude::*;
 use gpui::*;
 use std::path::PathBuf;
@@ -29,22 +29,25 @@ pub struct PathAutoCompleteState {
     suggestions_scroll: ScrollHandle,
     /// When true, suppress the next InputChangedEvent from triggering suggestions
     suppress_suggestions: bool,
+    /// Local completion is valid only when the selected daemon shares this disk.
+    local_completion_enabled: bool,
 }
 
 impl PathAutoCompleteState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Enter path...")
-        });
+        let input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter path..."));
 
         let focus_handle = cx.focus_handle();
 
         // Subscribe to input changes to update suggestions
         let input_for_subscription = input.clone();
-        cx.subscribe(&input_for_subscription, |this, _, _event: &InputChangedEvent, cx| {
-            this.on_input_changed(cx);
-        }).detach();
+        cx.subscribe(
+            &input_for_subscription,
+            |this, _, _event: &InputChangedEvent, cx| {
+                this.on_input_changed(cx);
+            },
+        )
+        .detach();
 
         Self {
             input,
@@ -54,6 +57,19 @@ impl PathAutoCompleteState {
             focus_handle,
             suggestions_scroll: ScrollHandle::new(),
             suppress_suggestions: false,
+            local_completion_enabled: true,
+        }
+    }
+
+    pub fn set_local_completion_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.local_completion_enabled == enabled {
+            return;
+        }
+        self.local_completion_enabled = enabled;
+        if enabled {
+            self.update_suggestions(cx);
+        } else {
+            self.hide_suggestions(cx);
         }
     }
 
@@ -119,10 +135,11 @@ impl PathAutoCompleteState {
     /// Expand ~ to home directory
     fn expand_path(path: &str) -> String {
         if path.starts_with('~')
-            && let Some(home) = dirs::home_dir() {
-                let rest = path.strip_prefix('~').unwrap_or("");
-                return format!("{}{}", home.display(), rest);
-            }
+            && let Some(home) = dirs::home_dir()
+        {
+            let rest = path.strip_prefix('~').unwrap_or("");
+            return format!("{}{}", home.display(), rest);
+        }
         path.to_string()
     }
 
@@ -139,7 +156,10 @@ impl PathAutoCompleteState {
             (path_buf, String::new())
         } else {
             // Get parent directory and use filename as prefix filter
-            let parent = path_buf.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+            let parent = path_buf
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
             let prefix = path_buf
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -158,6 +178,10 @@ impl PathAutoCompleteState {
     }
 
     fn update_suggestions(&mut self, cx: &mut Context<Self>) {
+        if !self.local_completion_enabled {
+            self.hide_suggestions(cx);
+            return;
+        }
         let current_value = self.input.read(cx).value().to_string();
 
         // Don't show suggestions for empty input
@@ -186,6 +210,9 @@ impl PathAutoCompleteState {
                 if this.input.read(cx).value() != current_value {
                     return;
                 }
+                if !this.local_completion_enabled {
+                    return;
+                }
                 this.suggestions = new_suggestions;
                 this.show_suggestions = !this.suggestions.is_empty();
                 this.selected_index = 0;
@@ -197,7 +224,11 @@ impl PathAutoCompleteState {
 
     /// Build the suggestion list for `current_value`. Performs blocking filesystem
     /// IO (`read_dir`, `is_dir`), so this must run off the GPUI main thread.
-    fn compute_suggestions(dir_path: PathBuf, prefix: String, current_value: String) -> Vec<PathSuggestion> {
+    fn compute_suggestions(
+        dir_path: PathBuf,
+        prefix: String,
+        current_value: String,
+    ) -> Vec<PathSuggestion> {
         let mut new_suggestions = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&dir_path) {
@@ -244,12 +275,13 @@ impl PathAutoCompleteState {
         }
 
         // Sort: directories first, then alphabetically
-        new_suggestions.sort_by(|a, b| {
-            match (a.is_directory, b.is_directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()),
-            }
+        new_suggestions.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a
+                .display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase()),
         });
 
         // Limit suggestions
@@ -259,12 +291,15 @@ impl PathAutoCompleteState {
         let expanded = Self::expand_path(&current_value);
         let expanded_path = PathBuf::from(&expanded);
         if expanded_path.is_dir() && !new_suggestions.is_empty() {
-            new_suggestions.insert(0, PathSuggestion {
-                display_name: "Select this folder".to_string(),
-                full_path: current_value.clone(),
-                is_directory: true,
-                is_select_current: true,
-            });
+            new_suggestions.insert(
+                0,
+                PathSuggestion {
+                    display_name: "Select this folder".to_string(),
+                    full_path: current_value.clone(),
+                    is_directory: true,
+                    is_select_current: true,
+                },
+            );
         }
 
         new_suggestions
@@ -272,7 +307,9 @@ impl PathAutoCompleteState {
 
     fn complete_selected(&mut self, cx: &mut Context<Self>) {
         // Clone suggestion data before borrowing self mutably
-        let suggestion_data = self.suggestions.get(self.selected_index)
+        let suggestion_data = self
+            .suggestions
+            .get(self.selected_index)
             .map(|s| (s.full_path.clone(), s.is_directory, s.is_select_current));
 
         if let Some((full_path, is_directory, is_select_current)) = suggestion_data {
@@ -338,11 +375,13 @@ impl PathAutoCompleteState {
         // Scroll down if selected item is at or below visible area
         if selected_bottom > scroll_bottom {
             let new_scroll = selected_bottom - visible_height;
-            self.suggestions_scroll.set_offset(point(zero, zero - new_scroll));
+            self.suggestions_scroll
+                .set_offset(point(zero, zero - new_scroll));
         }
         // Scroll up if selected item is above visible area
         else if selected_top < scroll_top {
-            self.suggestions_scroll.set_offset(point(zero, zero - selected_top));
+            self.suggestions_scroll
+                .set_offset(point(zero, zero - selected_top));
         }
     }
 
@@ -357,31 +396,26 @@ impl PathAutoCompleteState {
         let key = event.keystroke.key.as_str();
 
         match key {
-            "tab"
-                if self.show_suggestions && !self.suggestions.is_empty() => {
-                    self.complete_selected(cx);
-                    return true;
-                }
-            "up"
-                if self.show_suggestions => {
-                    self.select_previous(cx);
-                    return true;
-                }
-            "down"
-                if self.show_suggestions => {
-                    self.select_next(cx);
-                    return true;
-                }
-            "escape"
-                if self.show_suggestions => {
-                    self.hide_suggestions(cx);
-                    return true;
-                }
-            "enter"
-                if self.show_suggestions && !self.suggestions.is_empty() => {
-                    self.complete_selected(cx);
-                    return true;
-                }
+            "tab" if self.show_suggestions && !self.suggestions.is_empty() => {
+                self.complete_selected(cx);
+                return true;
+            }
+            "up" if self.show_suggestions => {
+                self.select_previous(cx);
+                return true;
+            }
+            "down" if self.show_suggestions => {
+                self.select_next(cx);
+                return true;
+            }
+            "escape" if self.show_suggestions => {
+                self.hide_suggestions(cx);
+                return true;
+            }
+            "enter" if self.show_suggestions && !self.suggestions.is_empty() => {
+                self.complete_selected(cx);
+                return true;
+            }
             _ => {}
         }
 
@@ -409,10 +443,7 @@ impl Render for PathAutoCompleteState {
                     .border_1()
                     .border_color(rgb(t.border))
                     .rounded(px(4.0))
-                    .child(
-                        SimpleInput::new(&self.input)
-                            .text_size(ui_text_md(cx))
-                    )
+                    .child(SimpleInput::new(&self.input).text_size(ui_text_md(cx))),
             )
     }
 }

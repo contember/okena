@@ -1,10 +1,11 @@
-use okena_transport::client::RemoteConnectionConfig;
-use okena_terminal::session_backend::SessionBackend;
-use okena_terminal::shell_config::ShellType;
 use okena_core::theme::ThemeMode;
 pub use okena_core::types::DiffViewMode;
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_transport::client::RemoteConnectionConfig;
 
 use anyhow::Result;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -131,7 +132,11 @@ pub struct NotificationSettings {
 
 impl Default for NotificationSettings {
     fn default() -> Self {
-        Self { enabled: false, osc: true, bell: true }
+        Self {
+            enabled: false,
+            osc: true,
+            bell: true,
+        }
     }
 }
 
@@ -306,9 +311,9 @@ pub struct AppSettings {
 
     /// Serve the remote control server over TLS (https/wss) using a persisted
     /// self-signed certificate. Clients pin the cert fingerprint on pairing.
-    /// Default ON (incl. for existing configs missing the key): the server is
-    /// dual-stack, so enabling TLS does not break already-paired plain-http
-    /// clients — they keep working while new/auto clients negotiate TLS.
+    /// Default ON (including existing configs missing the key). TLS is only
+    /// activated when the daemon exposes a non-loopback listener; loopback-only
+    /// daemons continue serving plain HTTP.
     #[serde(default = "default_true")]
     pub remote_tls_enabled: bool,
 
@@ -522,7 +527,10 @@ pub fn load_settings() -> AppSettings {
     log::info!("[settings] loading from {}", path.display());
 
     if !path.exists() {
-        log::warn!("[settings] file not found at {}, using defaults", path.display());
+        log::warn!(
+            "[settings] file not found at {}, using defaults",
+            path.display()
+        );
         return AppSettings::default();
     }
 
@@ -540,7 +548,11 @@ pub fn load_settings() -> AppSettings {
             let old_version = settings.version;
             settings = migrate_settings(settings);
             if settings.version != old_version {
-                log::info!("Settings migrated from v{} to v{}", old_version, settings.version);
+                log::info!(
+                    "Settings migrated from v{} to v{}",
+                    old_version,
+                    settings.version
+                );
                 if let Err(e) = save_settings(&settings) {
                     log::warn!("Failed to save migrated settings: {}", e);
                 }
@@ -548,7 +560,10 @@ pub fn load_settings() -> AppSettings {
             return settings;
         }
         Err(e) => {
-            log::warn!("Failed to parse settings directly: {}, attempting partial recovery", e);
+            log::warn!(
+                "Failed to parse settings directly: {}, attempting partial recovery",
+                e
+            );
         }
     }
 
@@ -660,7 +675,9 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
     if settings.version == 2 {
         log::info!("Migrating settings from v2 to v3 (extension system)");
         if settings.claude_code_integration {
-            settings.enabled_extensions.insert("claude-code".to_string());
+            settings
+                .enabled_extensions
+                .insert("claude-code".to_string());
         }
         if settings.codex_integration {
             settings.enabled_extensions.insert("codex".to_string());
@@ -698,10 +715,26 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
     let _slow = okena_core::timing::SlowGuard::new("save_settings");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = acquire_settings_file_lock()?;
     save_settings_locked(settings)
 }
 
-/// Inner save — caller MUST already hold `SETTINGS_LOCK`.
+fn acquire_settings_file_lock() -> Result<std::fs::File> {
+    let lock_path = get_settings_path().with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+/// Inner save — caller holds both process and file locks.
 fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
@@ -712,11 +745,18 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     // by update_remote_connections and not kept in SettingsState's in-memory copy).
     let mut to_save = settings.clone();
     if let Ok(content) = std::fs::read_to_string(&path)
-        && let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content) {
-            to_save.remote_connections = on_disk.remote_connections;
-        }
+        && let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content)
+    {
+        to_save.remote_connections = on_disk.remote_connections;
+    }
 
-    let content = serde_json::to_string_pretty(&to_save)?;
+    write_settings_locked(&to_save)
+}
+
+/// Write a complete settings value. Caller holds both settings locks.
+fn write_settings_locked(settings: &AppSettings) -> Result<()> {
+    let path = get_settings_path();
+    let content = serde_json::to_string_pretty(settings)?;
 
     // Atomic write: tmp + fsync + rename ensures the file is never partial.
     let tmp_path = path.with_extension("json.tmp");
@@ -737,87 +777,26 @@ fn save_settings_locked(settings: &AppSettings) -> Result<()> {
 
 /// Atomically load, update, and save the `remote_connections` field in settings.
 ///
-/// Uses a process-level mutex to prevent concurrent read-modify-write races.
-/// On Unix, also uses file locking (flock) for cross-process safety.
+/// Uses the same process and cross-process locks as [`save_settings`].
 pub fn update_remote_connections<F>(updater: F) -> Result<()>
 where
     F: FnOnce(&mut Vec<RemoteConnectionConfig>),
 {
     let _slow = okena_core::timing::SlowGuard::new("update_remote_connections");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = acquire_settings_file_lock()?;
 
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    #[cfg(unix)]
-    {
-        use std::io::{Read, Write, Seek};
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        // Acquire exclusive file lock for cross-process safety. Retry on EINTR;
-        // if locking genuinely fails (e.g. a filesystem without advisory locking,
-        // such as some network mounts) log it and proceed — the process-level
-        // SETTINGS_LOCK still serializes writers within this process.
-        // SAFETY: the fd is owned by the live `file` binding for the whole call.
-        loop {
-            let rc = unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
-            if rc == 0 {
-                break;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            log::warn!("flock on settings.json failed, proceeding without cross-process lock: {err}");
-            break;
-        }
-
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-
-        let mut settings: AppSettings = if content.is_empty() {
-            AppSettings::default()
-        } else {
-            serde_json::from_str(&content).unwrap_or_default()
-        };
-
-        updater(&mut settings.remote_connections);
-
-        let new_content = serde_json::to_string_pretty(&settings)?;
-        file.seek(std::io::SeekFrom::Start(0))?;
-        file.set_len(0)?;
-        file.write_all(new_content.as_bytes())?;
-
-        // Set restrictive permissions
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-
-        // Lock is released automatically when `file` is dropped
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let path = get_settings_path();
-        let mut settings: AppSettings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default();
-        updater(&mut settings.remote_connections);
-
-        let content = serde_json::to_string_pretty(&settings)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &content)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
-    }
+    let mut settings: AppSettings = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default();
+    updater(&mut settings.remote_connections);
+    write_settings_locked(&settings)
 }
 
 #[cfg(test)]
@@ -850,7 +829,10 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: HooksConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.project.on_open, Some("echo open".into()));
-        assert_eq!(deserialized.terminal.shell_wrapper, Some("devcontainer exec -- {shell}".into()));
+        assert_eq!(
+            deserialized.terminal.shell_wrapper,
+            Some("devcontainer exec -- {shell}".into())
+        );
         assert_eq!(deserialized.worktree.pre_merge, Some("lint".into()));
         assert_eq!(deserialized.worktree.after_remove, Some("log".into()));
     }
@@ -908,13 +890,12 @@ mod tests {
             AppSettings::default().remote_tls_enabled,
             "fresh installs should default to TLS on"
         );
-        // Existing settings.json predates the key → defaults to ON too. Safe
-        // because the server is dual-stack (still accepts plain http), so
-        // already-paired clients don't break.
+        // Existing settings.json predates the key and defaults to ON too. TLS
+        // only takes effect when a non-loopback listener is configured.
         let existing: AppSettings = serde_json::from_str(r#"{"version": 2}"#).unwrap();
         assert!(
             existing.remote_tls_enabled,
-            "existing configs without the key default to TLS on (dual-stack server)"
+            "existing configs without the key default to TLS on"
         );
         // An explicit opt-out is still respected.
         let explicit: AppSettings =
@@ -1045,7 +1026,9 @@ mod tests {
     #[test]
     fn enabled_extensions_not_serialized_with_legacy_fields() {
         let mut settings = AppSettings::default();
-        settings.enabled_extensions.insert("claude-code".to_string());
+        settings
+            .enabled_extensions
+            .insert("claude-code".to_string());
         let json = serde_json::to_string_pretty(&settings).unwrap();
         // Legacy bool fields should not appear in serialized output
         assert!(!json.contains("claude_code_integration"));

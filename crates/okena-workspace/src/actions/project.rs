@@ -2,13 +2,106 @@
 //!
 //! Actions for creating, modifying, and deleting projects.
 
-use okena_core::theme::FolderColor;
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
-use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
-use gpui::*;
-use std::collections::HashMap;
+use crate::state::{LayoutNode, ProjectData, WindowId, Workspace};
+use okena_core::theme::FolderColor;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone)]
+pub struct ProjectDirectoryRenamePlan {
+    project_id: String,
+    old_path: std::path::PathBuf,
+    new_name: String,
+    translated_paths: Vec<ProjectPathTranslation>,
+    move_kind: ProjectDirectoryMove,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPathTranslation {
+    project_id: String,
+    old_path: String,
+    new_path: String,
+    translated_hook_terminal_ids: Vec<String>,
+}
+
+impl ProjectPathTranslation {
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn old_path(&self) -> &str {
+        &self.old_path
+    }
+
+    pub fn new_path(&self) -> &str {
+        &self.new_path
+    }
+}
+
+#[derive(Clone)]
+enum ProjectDirectoryMove {
+    Directory {
+        old_path: std::path::PathBuf,
+        new_path: std::path::PathBuf,
+    },
+    Worktree {
+        verified: okena_git::VerifiedWorktree,
+        new_path: std::path::PathBuf,
+    },
+}
+
+pub struct ProjectDirectoryRenameResult {
+    moved_worktree_root: Option<String>,
+}
+
+impl ProjectDirectoryRenamePlan {
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn old_path(&self) -> &std::path::Path {
+        &self.old_path
+    }
+
+    pub fn new_path(&self) -> &std::path::Path {
+        match &self.move_kind {
+            ProjectDirectoryMove::Directory { new_path, .. }
+            | ProjectDirectoryMove::Worktree { new_path, .. } => new_path,
+        }
+    }
+
+    pub fn affected_translations(&self) -> &[ProjectPathTranslation] {
+        &self.translated_paths
+    }
+
+    pub fn affected_project_ids(&self) -> impl Iterator<Item = &str> {
+        self.translated_paths
+            .iter()
+            .map(|translation| translation.project_id.as_str())
+    }
+
+    pub fn execute(&self) -> Result<ProjectDirectoryRenameResult, String> {
+        match &self.move_kind {
+            ProjectDirectoryMove::Directory { old_path, new_path } => {
+                std::fs::rename(old_path, new_path)
+                    .map_err(|error| format!("Failed to rename: {error}"))?;
+                Ok(ProjectDirectoryRenameResult {
+                    moved_worktree_root: None,
+                })
+            }
+            ProjectDirectoryMove::Worktree { verified, new_path } => {
+                let moved = okena_git::move_worktree(verified, new_path)
+                    .map_err(|error| error.to_string())?;
+                Ok(ProjectDirectoryRenameResult {
+                    moved_worktree_root: Some(moved.checkout_path().to_string_lossy().into_owned()),
+                })
+            }
+        }
+    }
+}
 
 /// Pick a replacement focus target after hiding `hidden_id`.
 ///
@@ -41,10 +134,11 @@ fn pick_focus_replacement(
 /// Does not expand `~user/...` syntax (other user's home directories).
 fn expand_tilde(path: &str) -> String {
     if (path == "~" || path.starts_with("~/"))
-        && let Some(home) = dirs::home_dir() {
-            let rest = &path[1..]; // "" or "/..."
-            return format!("{}{}", home.display(), rest);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        let rest = &path[1..]; // "" or "/..."
+        return format!("{}{}", home.display(), rest);
+    }
     path.to_string()
 }
 
@@ -83,7 +177,7 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         window_id: WindowId,
         project_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if self.project(project_id).is_none() {
             return;
@@ -167,14 +261,25 @@ impl Workspace {
     /// `Okena::focus_manager_for_active_window` (slice 05 cri 13). When
     /// only main exists (zero extras), the rule degenerates to a no-op
     /// for the hide-elsewhere step, matching pre-multi-window behavior.
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, window_id: WindowId, cx: &mut Context<Self>) -> String {
+    pub fn add_project(
+        &mut self,
+        name: String,
+        path: String,
+        with_terminal: bool,
+        global_hooks: &HooksConfig,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<String, String> {
         let path = expand_tilde(&path);
+        self.ensure_project_path_claim_allowed(std::path::Path::new(&path))?;
 
         // Auto-detect WSL UNC paths and set default shell accordingly
         #[cfg(windows)]
-        let default_shell = okena_terminal::shell_config::parse_wsl_unc_path(&path)
-            .map(|(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
-                distro: Some(distro),
+        let default_shell =
+            okena_terminal::shell_config::parse_wsl_unc_path(&path).map(|(distro, _)| {
+                okena_terminal::shell_config::ShellType::Wsl {
+                    distro: Some(distro),
+                }
             });
         #[cfg(not(windows))]
         let default_shell: Option<okena_terminal::shell_config::ShellType> = None;
@@ -184,7 +289,11 @@ impl Workspace {
             id: id.clone(),
             name: name.clone(),
             path: path.clone(),
-            layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
+            layout: if with_terminal {
+                Some(LayoutNode::new_terminal())
+            } else {
+                None
+            },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -198,6 +307,8 @@ impl Workspace {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -208,13 +319,105 @@ impl Workspace {
         let folder = self.folder_for_project_or_parent(&id);
         let folder_id = folder.map(|f| f.id.as_str());
         let folder_name = folder.map(|f| f.name.as_str());
-        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, cx);
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
+        let hook_results = hooks::fire_on_project_open(
+            &project_hooks,
+            &id,
+            &name,
+            &path,
+            folder_id,
+            folder_name,
+            global_hooks,
+            runner.as_ref(),
+            monitor.as_ref(),
+        );
         self.register_hook_results(hook_results, cx);
-        id
+        Ok(id)
+    }
+
+    /// Remove hook terminal state restored without a matching live PTY.
+    ///
+    /// Returns the stale terminal ids so the caller can also tear down a
+    /// persistent session backend before the ids become unreachable.
+    pub fn clear_stale_hook_terminals(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Vec<String> {
+        let Some(project) = self.project_mut(project_id) else {
+            return Vec::new();
+        };
+        let stale: Vec<String> = project.hook_terminals.keys().cloned().collect();
+        if stale.is_empty() {
+            return stale;
+        }
+
+        let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
+        LayoutNode::remove_terminal_ids(&mut project.layout, &stale_set);
+        project.hook_terminals.clear();
+        project
+            .terminal_names
+            .retain(|terminal_id, _| !stale_set.contains(terminal_id.as_str()));
+        self.notify_data(cx);
+        stale
+    }
+
+    /// Re-open an ALREADY-EXISTING project (e.g. one restored from
+    /// `workspace.json` at daemon boot): drop its stale hook terminals and fire
+    /// its `on_project_open` hook, reading the project's stored hooks/name/path.
+    ///
+    /// `add_project` runs the fire+register step for NEW projects, but restored
+    /// projects enter the workspace via `Workspace::new` (never `add_project`),
+    /// so without this their `project.on_open` hook — global or per-project —
+    /// would never run on restart. The stale-clear matters because
+    /// `hook_terminals` is persisted: the entries reloaded from disk point at
+    /// PTYs that died with the previous process, so they must be dropped both to
+    /// avoid phantom rows (whose rerun/dismiss fail with "hook terminal not
+    /// found") and to stop entries accumulating on every restart. No-ops the
+    /// fire when no `on_open` hook resolves.
+    pub fn fire_project_open_hooks(
+        &mut self,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(project) = self.project(project_id) else {
+            return;
+        };
+        let project_hooks = project.hooks.clone();
+        let name = project.name.clone();
+        let path = project.path.clone();
+        self.clear_stale_hook_terminals(project_id, cx);
+        // Immutable `project` borrow ends here (values cloned); the folder
+        // borrow below ends at the fire call, freeing `&mut self` for the
+        // mutations that follow.
+        let folder = self.folder_for_project_or_parent(project_id);
+        let folder_id = folder.map(|f| f.id.as_str());
+        let folder_name = folder.map(|f| f.name.as_str());
+        let runner = cx.hook_runner();
+        let monitor = cx.hook_monitor();
+        let hook_results = hooks::fire_on_project_open(
+            &project_hooks,
+            project_id,
+            &name,
+            &path,
+            folder_id,
+            folder_name,
+            global_hooks,
+            runner.as_ref(),
+            monitor.as_ref(),
+        );
+        self.register_hook_results(hook_results, cx);
     }
 
     /// Add a new terminal to a project by splitting the root layout
-    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut Context<Self>) {
+    pub fn add_terminal(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
@@ -231,7 +434,8 @@ impl Workspace {
         }
 
         // Focus the newly created terminal (terminal_id: None)
-        let new_path = self.project(project_id)
+        let new_path = self
+            .project(project_id)
             .and_then(|p| p.layout.as_ref())
             .and_then(|l| l.find_uninitialized_terminal_path());
         if let Some(path) = new_path {
@@ -245,7 +449,7 @@ impl Workspace {
         project_id: &str,
         command: &str,
         env_vars: &HashMap<String, String>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if let Some(project) = self.project_mut(project_id) {
             let new_node = LayoutNode::new_terminal_with_command(command, env_vars);
@@ -264,7 +468,12 @@ impl Workspace {
     }
 
     /// Rename a project
-    pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut Context<Self>) {
+    pub fn rename_project(
+        &mut self,
+        project_id: &str,
+        new_name: String,
+        cx: &mut impl WorkspaceCx,
+    ) {
         self.with_project(project_id, cx, |project| {
             project.name = new_name;
             true
@@ -272,17 +481,300 @@ impl Workspace {
     }
 
     /// Rename a project's directory path and update the project name to match
-    pub fn rename_project_directory(&mut self, project_id: &str, new_path: String, new_name: String, cx: &mut Context<Self>) {
-        self.with_project(project_id, cx, |project| {
-            project.path = new_path;
-            project.name = new_name;
-            true
+    pub fn rename_project_directory(
+        &mut self,
+        project_id: &str,
+        new_path: String,
+        new_name: String,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        let plan = self.prepare_project_directory_rename(project_id, new_path, new_name)?;
+        let result = plan.execute()?;
+        self.finish_project_directory_rename(&plan, result, cx)
+    }
+
+    /// Validate and snapshot a directory rename without changing the filesystem.
+    pub fn prepare_project_directory_rename(
+        &self,
+        project_id: &str,
+        new_path: String,
+        new_name: String,
+    ) -> Result<ProjectDirectoryRenamePlan, String> {
+        if new_name.is_empty() {
+            return Err("name must not be empty".to_string());
+        }
+        if new_name.contains('/') || new_name.contains('\\') || new_name == "." || new_name == ".."
+        {
+            return Err("name must not contain path separators".to_string());
+        }
+        let new_path_buf = std::path::PathBuf::from(&new_path);
+        self.ensure_project_path_mutation_allowed(project_id, &new_path_buf)?;
+        if new_path_buf.exists() {
+            return Err(format!("'{}' already exists", new_name));
+        }
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        let old_path = std::path::PathBuf::from(&project.path);
+        let worktree = project.worktree_info.as_ref().map(|metadata| {
+            (
+                metadata.parent_project_id.clone(),
+                metadata.worktree_path.clone(),
+            )
         });
+
+        let Some((parent_project_id, recorded_root)) = worktree else {
+            self.ensure_directory_tree_git_topology_safe(&old_path, None)?;
+            let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
+            return Ok(ProjectDirectoryRenamePlan {
+                project_id: project_id.to_string(),
+                old_path: old_path.clone(),
+                new_name,
+                translated_paths,
+                move_kind: ProjectDirectoryMove::Directory {
+                    old_path,
+                    new_path: new_path_buf,
+                },
+            });
+        };
+
+        let parent_path = self
+            .project(&parent_project_id)
+            .filter(|parent| !parent.is_remote)
+            .map(|parent| parent.path.clone())
+            .ok_or_else(|| "Worktree parent project is not local".to_string())?;
+        let checkout_query = if recorded_root.is_empty() {
+            old_path.clone()
+        } else {
+            std::path::PathBuf::from(&recorded_root)
+        };
+        let verified = okena_git::verify_linked_worktree_fresh(
+            std::path::Path::new(&parent_path),
+            &checkout_query,
+        )
+        .map_err(|error| error.to_string())?;
+        let root_identity = Self::physical_path_identity(verified.checkout_path());
+        let old_identity = Self::physical_path_identity(&old_path);
+        if !old_identity.starts_with(&root_identity) {
+            return Err("project path is outside its linked worktree root".to_string());
+        }
+
+        if old_identity != root_identity {
+            if !Self::physical_path_identity(&new_path_buf).starts_with(&root_identity) {
+                return Err("renamed project path must stay inside its linked worktree".to_string());
+            }
+            self.ensure_directory_tree_git_topology_safe(&old_path, None)?;
+            let translated_paths = self.translate_local_project_paths(&old_path, &new_path_buf)?;
+            return Ok(ProjectDirectoryRenamePlan {
+                project_id: project_id.to_string(),
+                old_path: old_path.clone(),
+                new_name,
+                translated_paths,
+                move_kind: ProjectDirectoryMove::Directory {
+                    old_path,
+                    new_path: new_path_buf,
+                },
+            });
+        }
+
+        self.ensure_directory_tree_git_topology_safe(
+            verified.checkout_path(),
+            Some(verified.checkout_path()),
+        )?;
+        let translated_paths =
+            self.translate_local_project_paths(verified.checkout_path(), &new_path_buf)?;
+        Ok(ProjectDirectoryRenamePlan {
+            project_id: project_id.to_string(),
+            old_path,
+            new_name,
+            translated_paths,
+            move_kind: ProjectDirectoryMove::Worktree {
+                verified,
+                new_path: new_path_buf,
+            },
+        })
+    }
+
+    /// Publish the state translation after the off-reactor move succeeds.
+    pub fn finish_project_directory_rename(
+        &mut self,
+        plan: &ProjectDirectoryRenamePlan,
+        result: ProjectDirectoryRenameResult,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        if self
+            .project(&plan.project_id)
+            .is_none_or(|project| std::path::Path::new(&project.path) != plan.old_path)
+        {
+            return Err(format!(
+                "project changed while its directory was being renamed: {}",
+                plan.project_id
+            ));
+        }
+        self.apply_translated_project_paths(plan.translated_paths.clone());
+        if let Some(project) = self
+            .data
+            .projects
+            .iter_mut()
+            .find(|project| project.id == plan.project_id)
+        {
+            project.name = plan.new_name.clone();
+            if let Some(moved_root) = result.moved_worktree_root {
+                project.path = moved_root.clone();
+                if let Some(metadata) = &mut project.worktree_info {
+                    metadata.worktree_path = moved_root;
+                }
+            }
+        }
+        self.notify_data(cx);
+        Ok(())
+    }
+
+    fn translate_local_project_paths(
+        &self,
+        old_root: &std::path::Path,
+        new_root: &std::path::Path,
+    ) -> Result<Vec<ProjectPathTranslation>, String> {
+        let old_identity = Self::physical_path_identity(old_root);
+        let canonical_root = std::fs::canonicalize(old_root)
+            .map_err(|error| format!("Failed to resolve project directory: {error}"))?;
+        let mut translated_paths = Vec::new();
+        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
+            let descendant_path = std::path::Path::new(&descendant.path);
+            if !Self::physical_path_identity(descendant_path).starts_with(&old_identity) {
+                continue;
+            }
+            let canonical_descendant = std::fs::canonicalize(descendant_path).map_err(|error| {
+                format!(
+                    "Failed to resolve descendant project '{}': {error}",
+                    descendant.name
+                )
+            })?;
+            let suffix = canonical_descendant
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "Failed to translate descendant project '{}' into moved directory",
+                        descendant.name
+                    )
+                })?;
+            let translated_path = if suffix.as_os_str().is_empty() {
+                new_root.to_path_buf()
+            } else {
+                new_root.join(suffix)
+            };
+            let translated_hook_terminal_ids = descendant
+                .hook_terminals
+                .iter()
+                .filter(|(_, entry)| {
+                    Self::physical_path_identity(std::path::Path::new(&entry.cwd))
+                        == Self::physical_path_identity(descendant_path)
+                })
+                .map(|(terminal_id, _)| terminal_id.clone())
+                .collect();
+            translated_paths.push(ProjectPathTranslation {
+                project_id: descendant.id.clone(),
+                old_path: descendant.path.clone(),
+                new_path: translated_path.to_string_lossy().into_owned(),
+                translated_hook_terminal_ids,
+            });
+        }
+        Ok(translated_paths)
+    }
+
+    fn apply_translated_project_paths(&mut self, translated_paths: Vec<ProjectPathTranslation>) {
+        for translation in translated_paths {
+            if let Some(descendant) = self
+                .data
+                .projects
+                .iter_mut()
+                .find(|project| project.id == translation.project_id)
+            {
+                descendant.path = translation.new_path.clone();
+                for terminal_id in &translation.translated_hook_terminal_ids {
+                    if let Some(entry) = descendant.hook_terminals.get_mut(terminal_id) {
+                        entry.cwd = translation.new_path.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reject directory moves that would invalidate Git's absolute worktree links.
+    fn ensure_directory_tree_git_topology_safe(
+        &self,
+        old_root: &std::path::Path,
+        allowed_worktree_root: Option<&std::path::Path>,
+    ) -> Result<(), String> {
+        let old_identity = Self::physical_path_identity(old_root);
+        let allowed_identity = allowed_worktree_root.map(Self::physical_path_identity);
+        let mut repo_roots: Vec<std::path::PathBuf> = Vec::new();
+
+        for project in self.projects().iter().filter(|project| !project.is_remote) {
+            let project_path = std::path::Path::new(&project.path);
+            let project_identity = Self::physical_path_identity(project_path);
+            if project_identity.starts_with(&old_identity)
+                && let Some(repo_root) = okena_git::get_repo_root(project_path)
+            {
+                let repo_identity = Self::physical_path_identity(&repo_root);
+                if repo_identity.starts_with(&old_identity) {
+                    if !repo_roots
+                        .iter()
+                        .any(|known| Self::physical_path_identity(known) == repo_identity)
+                    {
+                        repo_roots.push(repo_root);
+                    }
+                    if project.worktree_info.is_some()
+                        && allowed_identity.as_ref() != Some(&repo_identity)
+                    {
+                        return Err(format!(
+                            "Cannot rename a directory containing linked worktree project '{}'",
+                            project.name
+                        ));
+                    }
+                }
+            }
+
+            if let Some(metadata) = &project.worktree_info
+                && !metadata.worktree_path.is_empty()
+            {
+                let recorded_identity =
+                    Self::physical_path_identity(std::path::Path::new(&metadata.worktree_path));
+                if recorded_identity.starts_with(&old_identity)
+                    && allowed_identity.as_ref() != Some(&recorded_identity)
+                {
+                    return Err(format!(
+                        "Cannot rename a directory containing recorded worktree root for '{}'",
+                        project.name
+                    ));
+                }
+            }
+        }
+
+        for repo_root in repo_roots {
+            let repo_identity = Self::physical_path_identity(&repo_root);
+            if allowed_identity.as_ref() == Some(&repo_identity) {
+                continue;
+            }
+            if !okena_git::list_linked_worktree_paths(&repo_root).is_empty() {
+                return Err(
+                    "Cannot rename a Git repository while it has linked worktrees; remove them first"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Set the folder color for a project (also propagates to worktree children without overrides)
-    pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
-        let is_worktree = self.project(project_id)
+    pub fn set_folder_color(
+        &mut self,
+        project_id: &str,
+        color: FolderColor,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let is_worktree = self
+            .project(project_id)
             .and_then(|p| p.worktree_info.as_ref())
             .is_some();
 
@@ -290,7 +782,8 @@ impl Workspace {
             self.set_worktree_color_override(project_id, Some(color), cx);
         } else {
             // Collect child IDs from the parent's worktree_ids to avoid a full scan
-            let child_ids: Vec<String> = self.project(project_id)
+            let child_ids: Vec<String> = self
+                .project(project_id)
                 .map(|p| p.worktree_ids.clone())
                 .unwrap_or_default();
 
@@ -302,7 +795,9 @@ impl Workspace {
             }
             for child_id in &child_ids {
                 if let Some(child) = self.project_mut(child_id) {
-                    let has_override = child.worktree_info.as_ref()
+                    let has_override = child
+                        .worktree_info
+                        .as_ref()
                         .and_then(|wt| wt.color_override)
                         .is_some();
                     if !has_override {
@@ -317,15 +812,48 @@ impl Workspace {
     }
 
     /// Delete a project
-    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn delete_project(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.delete_project_inner(focus_manager, project_id, Some(global_hooks), cx);
+    }
+
+    /// Delete a worktree whose project-close hook already completed before its
+    /// checkout was removed.
+    pub(crate) fn delete_project_without_project_close(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.delete_project_inner(focus_manager, project_id, None, cx);
+    }
+
+    fn delete_project_inner(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        global_hooks: Option<&HooksConfig>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
+            let hook_terminal_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
+            if let Some(monitor) = cx.hook_monitor() {
+                for terminal_id in &hook_terminal_ids {
+                    monitor.cancel_by_terminal_id(terminal_id);
+                }
+            }
             let mut kill_ids: Vec<String> = Vec::new();
             if let Some(layout) = &project.layout {
                 kill_ids.extend(layout.collect_terminal_ids());
             }
-            kill_ids.extend(project.hook_terminals.keys().cloned());
+            kill_ids.extend(hook_terminal_ids);
             kill_ids.extend(project.service_terminals.values().cloned());
             self.queue_terminal_kills(kill_ids);
         }
@@ -343,11 +871,17 @@ impl Workspace {
         let hook_folder_id = folder.map(|f| f.id.clone());
         let hook_folder_name = folder.map(|f| f.name.clone());
         let hook_info = self.project(project_id).map(|p| {
-            (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
+            (
+                p.hooks.clone(),
+                p.id.clone(),
+                p.name.clone(),
+                p.path.clone(),
+            )
         });
 
         // Collect orphaned worktree children (if deleting a parent)
-        let orphaned_worktrees: Vec<String> = self.project(project_id)
+        let orphaned_worktrees: Vec<String> = self
+            .project(project_id)
             .map(|p| p.worktree_ids.clone())
             .unwrap_or_default();
 
@@ -367,7 +901,9 @@ impl Workspace {
 
         // Re-home orphaned worktrees to project_order
         for wt_id in orphaned_worktrees {
-            if self.data.projects.iter().any(|p| p.id == wt_id) && !self.data.project_order.contains(&wt_id) {
+            if self.data.projects.iter().any(|p| p.id == wt_id)
+                && !self.data.project_order.contains(&wt_id)
+            {
                 self.data.project_order.push(wt_id);
             }
         }
@@ -391,15 +927,27 @@ impl Workspace {
         }
         self.notify_data(cx);
 
-        if let Some((project_hooks, id, name, path)) = hook_info {
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
+        if let (Some((project_hooks, id, name, path)), Some(global_hooks)) =
+            (hook_info, global_hooks)
+        {
+            let monitor = cx.hook_monitor();
+            hooks::fire_on_project_close(
+                &project_hooks,
+                &id,
+                &name,
+                &path,
+                hook_folder_id.as_deref(),
+                hook_folder_name.as_deref(),
+                global_hooks,
+                monitor.as_ref(),
+            );
         }
     }
 
     /// Move a project to a new position in the top-level order.
     /// Also removes the project from any folder it may be in.
     /// Worktree children are moved along with their parent.
-    pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
+    pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut impl WorkspaceCx) {
         // Remove from any folder first
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -446,29 +994,22 @@ impl Workspace {
 
     /// Update project column widths on the targeted window.
     ///
-    /// Wholesale-replaces the targeted window's `project_widths` map with the
-    /// supplied map. The leading clear is routed through the `window_mut`
-    /// lookup pair so an unknown extra id (e.g. caller raced a close) is a
-    /// silent no-op for the clear; the per-entry `set_project_width` calls
-    /// then also no-op via the same lookup contract. `notify_data` still
-    /// bumps `data_version` so the auto-save observer's cadence is unchanged
-    /// in the close-race path -- consistent with the silent-no-op contract
-    /// the data-layer setters absorb.
+    /// Merges the supplied widths into the targeted window's `project_widths`
+    /// map. Omitted entries may belong to hidden projects and are preserved.
     ///
     /// Each entry is written via `data.set_project_width(window_id, ...)` so
-    /// a future migration off the wholesale shape inherits the per-entry
-    /// pair-shaped contract automatically. The runtime shape of a column-resize
-    /// is per-column; the wholesale shape on this entrypoint is a relic of the
-    /// prior data layout where `project_widths` was a top-level field.
+    /// future changes inherit the per-entry pair-shaped contract automatically.
     ///
     /// Bumps `data_version` exactly once per call (not per entry) -- the data
     /// layer setter does not notify, so the single trailing `notify_data` keeps
     /// the auto-save observer's debounce cadence identical to the pre-migration
     /// body.
-    pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
-        if let Some(w) = self.data.window_mut(window_id) {
-            w.project_widths.clear();
-        }
+    pub fn update_project_widths(
+        &mut self,
+        window_id: WindowId,
+        widths: HashMap<String, f32>,
+        cx: &mut impl WorkspaceCx,
+    ) {
         for (id, w) in widths {
             self.data.set_project_width(window_id, &id, w);
         }
@@ -476,14 +1017,28 @@ impl Workspace {
     }
 
     /// Update service panel height for a project
-    pub fn update_service_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
-        self.data.service_panel_heights.insert(project_id.to_string(), height);
+    pub fn update_service_panel_height(
+        &mut self,
+        project_id: &str,
+        height: f32,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.data
+            .service_panel_heights
+            .insert(project_id.to_string(), height);
         self.notify_data(cx);
     }
 
     /// Update hook panel height for a project
-    pub fn update_hook_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
-        self.data.hook_panel_heights.insert(project_id.to_string(), height);
+    pub fn update_hook_panel_height(
+        &mut self,
+        project_id: &str,
+        height: f32,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.data
+            .hook_panel_heights
+            .insert(project_id.to_string(), height);
         self.notify_data(cx);
     }
 
@@ -496,22 +1051,41 @@ impl Workspace {
     /// default, matching the "missing entry == default" contract on the lookup
     /// side. Default is `100.0 / visible_count` so a render path that asks for
     /// every visible column gets a balanced grid when no widths are set yet.
-    pub fn get_project_width(&self, window_id: WindowId, project_id: &str, visible_count: usize) -> f32 {
+    pub fn get_project_width(
+        &self,
+        window_id: WindowId,
+        project_id: &str,
+        visible_count: usize,
+    ) -> f32 {
         self.data
             .window(window_id)
             .and_then(|w| w.project_widths.get(project_id).copied())
             .unwrap_or_else(|| 100.0 / visible_count as f32)
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::{expand_tilde, pick_focus_replacement};
-    use crate::state::*;
+    use crate::context::WorkspaceCx;
     use crate::settings::HooksConfig;
+    use crate::state::*;
     use okena_core::theme::FolderColor;
+    use okena_hooks::{HookMonitor, HookRunner};
     use std::collections::HashMap;
+
+    struct TestCx;
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<HookMonitor> {
+            None
+        }
+    }
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
@@ -532,6 +1106,8 @@ mod tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -584,7 +1160,9 @@ mod tests {
     #[test]
     fn test_get_project_width_custom() {
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 60.0);
     }
@@ -594,7 +1172,9 @@ mod tests {
         // Per-window viewport model: WindowId::Main routes through
         // data.window(...) and reads main_window.project_widths.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 75.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 75.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 75.0);
     }
@@ -614,7 +1194,10 @@ mod tests {
         data.extra_windows.push(extra);
         let ws = Workspace::new(data);
 
-        assert_eq!(ws.get_project_width(WindowId::Extra(extra_id), "p1", 2), 80.0);
+        assert_eq!(
+            ws.get_project_width(WindowId::Extra(extra_id), "p1", 2),
+            80.0
+        );
         // Main has no entry for p1 -> equal-distribution default of 50.0 (2 visible).
         assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 50.0);
     }
@@ -629,12 +1212,17 @@ mod tests {
         let mut data = make_workspace_data();
         // Pre-populate main with a value to ensure the unknown-extra path
         // does NOT silently read from main as a fallback.
-        data.main_window.project_widths.insert("p1".to_string(), 90.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 90.0);
         let ws = Workspace::new(data);
 
         let unknown = uuid::Uuid::new_v4();
         // Default for visible_count = 4 -> 25.0, NOT 90.0 (main's value).
-        assert_eq!(ws.get_project_width(WindowId::Extra(unknown), "p1", 4), 25.0);
+        assert_eq!(
+            ws.get_project_width(WindowId::Extra(unknown), "p1", 4),
+            25.0
+        );
     }
 
     #[test]
@@ -677,14 +1265,20 @@ mod tests {
     fn pick_focus_replacement_prefers_next() {
         let before = s(&["a", "b", "c", "d"]);
         let after = s(&["a", "b", "d"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "c").as_deref(), Some("d"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "c").as_deref(),
+            Some("d")
+        );
     }
 
     #[test]
     fn pick_focus_replacement_falls_back_to_previous() {
         let before = s(&["a", "b", "c"]);
         let after = s(&["a", "b"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "c").as_deref(), Some("b"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "c").as_deref(),
+            Some("b")
+        );
     }
 
     #[test]
@@ -692,7 +1286,10 @@ mod tests {
         // Hiding "b" while "c" is also no longer visible should jump to "d".
         let before = s(&["a", "b", "c", "d"]);
         let after = s(&["a", "d"]);
-        assert_eq!(pick_focus_replacement(&before, &after, "b").as_deref(), Some("d"));
+        assert_eq!(
+            pick_focus_replacement(&before, &after, "b").as_deref(),
+            Some("d")
+        );
     }
 
     #[test]
@@ -708,16 +1305,103 @@ mod tests {
         let after = s(&["a", "b"]);
         assert_eq!(pick_focus_replacement(&before, &after, "missing"), None);
     }
+
+    #[test]
+    fn clear_stale_hook_terminals_clears_metadata_and_legacy_layout_id() {
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("layout-terminal".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: Default::default(),
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("stale-hook".to_string()),
+                    minimized: true,
+                    detached: true,
+                    shell_type: Default::default(),
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        project.hook_terminals.insert(
+            "stale-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+        project
+            .terminal_names
+            .insert("stale-hook".to_string(), "Old hook".to_string());
+
+        let mut data = make_workspace_data();
+        data.projects.push(project);
+        data.project_order.push("p1".to_string());
+        let mut workspace = Workspace::new(data);
+        let stale = workspace.clear_stale_hook_terminals("p1", &mut TestCx);
+
+        assert_eq!(stale, vec!["stale-hook".to_string()]);
+        let project = workspace.project("p1").unwrap();
+        assert!(project.hook_terminals.is_empty());
+        assert!(!project.terminal_names.contains_key("stale-hook"));
+        let layout = project.layout.as_ref().unwrap();
+        assert!(layout.find_terminal_path("stale-hook").is_none());
+        assert!(layout.find_terminal_path("layout-terminal").is_some());
+        assert_eq!(layout.collect_terminal_ids(), vec!["layout-terminal"]);
+        assert!(matches!(layout, LayoutNode::Terminal { .. }));
+    }
+
+    #[test]
+    fn clear_stale_hook_terminals_removes_a_legacy_root_leaf() {
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("stale-hook".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+        });
+        project.hook_terminals.insert(
+            "stale-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_project_open".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_project_open".to_string(),
+                command: "echo old".to_string(),
+                cwd: "/tmp".to_string(),
+            },
+        );
+
+        let mut data = make_workspace_data();
+        data.projects.push(project);
+        data.project_order.push("p1".to_string());
+        let mut workspace = Workspace::new(data);
+
+        workspace.clear_stale_hook_terminals("p1", &mut TestCx);
+
+        assert!(workspace.project("p1").unwrap().layout.is_none());
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
-    use gpui::AppContext as _;
     use crate::focus::FocusManager;
-    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
+    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
 
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
@@ -751,6 +1435,8 @@ mod gpui_tests {
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -771,7 +1457,15 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Main, cx)
+            ws.add_project(
+                "p1".to_string(),
+                "/tmp/p1".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            )
+            .expect("add project")
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -799,7 +1493,15 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         let new_id = workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("p1".to_string(), "/tmp/p1".to_string(), false, &HooksConfig::default(), WindowId::Extra(extra_a_id), cx)
+            ws.add_project(
+                "p1".to_string(),
+                "/tmp/p1".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Extra(extra_a_id),
+                cx,
+            )
+            .expect("add project")
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -816,7 +1518,15 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, &HooksConfig::default(), WindowId::Main, cx);
+            ws.add_project(
+                "Test".to_string(),
+                "/tmp/test".to_string(),
+                true,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            )
+            .expect("add project");
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -834,7 +1544,15 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, &HooksConfig::default(), WindowId::Main, cx);
+            ws.add_project(
+                "Bookmark".to_string(),
+                "/tmp/bm".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            )
+            .expect("add project");
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -890,7 +1608,12 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden. main_window inserts the id.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "p1",
+                cx,
+            );
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -898,7 +1621,12 @@ mod gpui_tests {
 
         // Second toggle: hidden -> visible. main_window removes the entry.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "p1",
+                cx,
+            );
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -947,13 +1675,20 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert!(
+                ws.data()
+                    .main_window
+                    .hidden_project_ids
+                    .contains("unknown_id")
+            );
             assert_eq!(ws.data_version(), 1);
         });
     }
 
     #[gpui::test]
-    fn toggle_worktree_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+    fn toggle_worktree_visibility_extra_writes_only_to_targeted_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
         // only that extra's hidden_project_ids -- main and any sibling extras
         // stay untouched. Defends against a regression that ignores window_id
@@ -1046,17 +1781,29 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "unknown_id", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                "unknown_id",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(!ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert!(
+                !ws.data()
+                    .main_window
+                    .hidden_project_ids
+                    .contains("unknown_id")
+            );
             assert_eq!(ws.data_version(), 0);
         });
     }
 
     #[gpui::test]
-    fn toggle_project_overview_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+    fn toggle_project_overview_visibility_extra_writes_only_to_targeted_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
         // only that extra's hidden_project_ids -- main and any sibling extras
         // stay untouched. Defends against a regression that ignores window_id
@@ -1077,7 +1824,12 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden in extra_a.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(extra_a_id),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1097,7 +1849,12 @@ mod gpui_tests {
         // semantic so a regression that hard-codes insert-only or remove-only
         // would surface here.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(extra_a_id),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1106,7 +1863,9 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_overview_visibility_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+    fn toggle_project_overview_visibility_unknown_extra_is_silent_noop(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // Close-race contract: a fresh uuid that does not match any extra
         // produces no panic; main_window stays untouched. Pre-populate main
         // with hidden state for p1 to ensure the unknown-extra path does NOT
@@ -1124,7 +1883,12 @@ mod gpui_tests {
         let unknown = uuid::Uuid::new_v4();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(unknown), "p1", cx);
+            ws.toggle_project_overview_visibility(
+                &mut FocusManager::new(),
+                WindowId::Extra(unknown),
+                "p1",
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1155,14 +1919,13 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn update_project_widths_wholesale_replaces_existing_entries(cx: &mut gpui::TestAppContext) {
-        // Wholesale-replace contract: keys absent from the supplied map are
-        // removed from main_window.project_widths. Pins the semantic so a
-        // future refactor that drops the leading clear() (e.g. switching to a
-        // merge body) silently breaks here. Pre-populate p1, then call with a
-        // map containing only p2 -- p1 must be gone.
+    fn update_project_widths_preserves_unmentioned_entries(cx: &mut gpui::TestAppContext) {
+        // Hidden projects are absent from a resize update but must retain their
+        // width for when they become visible again.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 0.50);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 0.50);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -1172,8 +1935,14 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(!ws.data().main_window.project_widths.contains_key("p1"));
-            assert_eq!(ws.data().main_window.project_widths.get("p2").copied(), Some(0.40));
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p1").copied(),
+                Some(0.50)
+            );
+            assert_eq!(
+                ws.data().main_window.project_widths.get("p2").copied(),
+                Some(0.40)
+            );
         });
     }
 
@@ -1212,7 +1981,9 @@ mod gpui_tests {
         let mut extra_b = WindowState::default();
         let extra_b_id = extra_b.id;
         // Pre-populate sibling state on main + extra_b to verify isolation.
-        data.main_window.project_widths.insert("p1".to_string(), 100.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 100.0);
         extra_b.project_widths.insert("p1".to_string(), 200.0);
         // extra_a starts empty.
         let _ = extra_a_id;
@@ -1234,7 +2005,10 @@ mod gpui_tests {
             // Main's p1 width is untouched.
             assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&100.0));
             // Sibling extra's p1 width is untouched.
-            assert_eq!(ws.data().extra_windows[1].project_widths.get("p1"), Some(&200.0));
+            assert_eq!(
+                ws.data().extra_windows[1].project_widths.get("p1"),
+                Some(&200.0)
+            );
             // Sibling extra has no p2 from the targeted write.
             assert!(!ws.data().extra_windows[1].project_widths.contains_key("p2"));
             // Main has no p2 from the targeted write.
@@ -1251,7 +2025,9 @@ mod gpui_tests {
         // main as a default. data_version still bumps via notify_data,
         // matching the silent-no-op contract on the data-layer setters.
         let mut data = make_workspace_data();
-        data.main_window.project_widths.insert("p1".to_string(), 50.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 50.0);
         let workspace = cx.new(|_cx| Workspace::new(data));
         let unknown = uuid::Uuid::new_v4();
 
@@ -1275,8 +2051,12 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
-        data.main_window.project_widths.insert("p2".to_string(), 40.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p2".to_string(), 40.0);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
@@ -1306,7 +2086,9 @@ mod gpui_tests {
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
-        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window
+            .project_widths
+            .insert("p1".to_string(), 60.0);
         data.main_window.hidden_project_ids.insert("p1".to_string());
         let mut extra1 = WindowState::default();
         extra1.project_widths.insert("p1".to_string(), 30.0);
@@ -1351,8 +2133,12 @@ mod gpui_tests {
         let wt = make_worktree_project("wt1", "parent");
         data.projects = vec![parent, wt];
         data.project_order = vec!["parent".to_string()];
-        data.main_window.project_widths.insert("wt1".to_string(), 35.0);
-        data.main_window.hidden_project_ids.insert("wt1".to_string());
+        data.main_window
+            .project_widths
+            .insert("wt1".to_string(), 35.0);
+        data.main_window
+            .hidden_project_ids
+            .insert("wt1".to_string());
         let mut extra = WindowState::default();
         extra.project_widths.insert("wt1".to_string(), 20.0);
         extra.hidden_project_ids.insert("wt1".to_string());
@@ -1366,8 +2152,16 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.project_widths.contains_key("wt1"));
             assert!(!ws.data().main_window.hidden_project_ids.contains("wt1"));
-            assert!(!ws.data().extra_windows[0].project_widths.contains_key("wt1"));
-            assert!(!ws.data().extra_windows[0].hidden_project_ids.contains("wt1"));
+            assert!(
+                !ws.data().extra_windows[0]
+                    .project_widths
+                    .contains_key("wt1")
+            );
+            assert!(
+                !ws.data().extra_windows[0]
+                    .hidden_project_ids
+                    .contains("wt1")
+            );
         });
     }
 
@@ -1399,12 +2193,383 @@ mod gpui_tests {
         p
     }
 
+    fn git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().expect("test path is utf-8")
+    }
+
+    #[gpui::test]
+    fn removal_rejects_sibling_project_inside_physical_worktree_root(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-owner-test-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/a")).unwrap();
+        std::fs::create_dir_all(main_repo.join("packages/b")).unwrap();
+        std::fs::write(main_repo.join("packages/a/tracked.txt"), "a\n").unwrap();
+        std::fs::write(main_repo.join("packages/b/tracked.txt"), "b\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let sentinel = worktree.join("packages/b/uncommitted.txt");
+        std::fs::write(&sentinel, "must survive\n").unwrap();
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_worktree_project("wt1", "parent");
+        wt.path = worktree.join("packages/a").to_string_lossy().into_owned();
+        let metadata = wt.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+        let mut claimant = make_project("claimant");
+        claimant.name = "Sibling".to_string();
+        claimant.path = worktree.join("packages/b").to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, wt, claimant];
+        data.project_order = vec!["parent".to_string(), "claimant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws, cx| {
+            ws.remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                true,
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+
+        assert!(
+            result.is_err_and(|error| error.contains("Sibling")),
+            "removal must identify the sibling claimant"
+        );
+        assert!(sentinel.exists(), "uncommitted sibling data must survive");
+        assert!(worktree.exists(), "the shared checkout must survive");
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn close_rejects_stale_root_pointing_into_independent_repository(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-stale-root-test-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let registered_worktree = fixture.join("registered-worktree");
+        let independent_repo = fixture.join("independent");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&registered_worktree),
+        ]);
+
+        git(&["init", "-b", "main", path_str(&independent_repo)]);
+        std::fs::create_dir_all(independent_repo.join("packages/app")).unwrap();
+        let sentinel = independent_repo.join("must-survive.txt");
+        std::fs::write(&sentinel, "independent data\n").unwrap();
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut stale = make_worktree_project("wt1", "parent");
+        stale.path = independent_repo
+            .join("packages/app")
+            .to_string_lossy()
+            .into_owned();
+        let metadata = stale.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = registered_worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, stale];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, cx| {
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false,
+                false,
+                false,
+                false,
+                false,
+                &HooksConfig::default(),
+                cx,
+            )
+            .unwrap_err()
+        });
+
+        assert!(error.contains("does not match its recorded checkout root"));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "independent data\n"
+        );
+        assert!(independent_repo.exists());
+        assert!(workspace.read_with(cx, |ws, _| ws.project("wt1").is_some()));
+
+        let legacy_error = workspace.update(cx, |ws, cx| {
+            ws.with_project("wt1", cx, |project| {
+                project
+                    .worktree_info
+                    .as_mut()
+                    .unwrap()
+                    .worktree_path
+                    .clear();
+                true
+            });
+            match ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx) {
+                Ok(_) => panic!("unregistered legacy worktree must be rejected"),
+                Err(error) => error,
+            }
+        });
+        assert!(legacy_error.contains("does not belong to the parent repository"));
+        assert!(
+            sentinel.exists(),
+            "legacy metadata cannot bypass registration"
+        );
+
+        let legacy_plan = workspace.update(cx, |ws, cx| {
+            ws.with_project("wt1", cx, |project| {
+                project.path = registered_worktree.to_string_lossy().into_owned();
+                true
+            });
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+                .expect("registered legacy worktree is accepted")
+        });
+        assert_eq!(
+            Workspace::physical_path_identity(&legacy_plan.worktree_path),
+            Workspace::physical_path_identity(&registered_worktree)
+        );
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&registered_worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn active_root_lease_rejects_project_and_worktree_registration(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-lease-test-{}", uuid::Uuid::new_v4()));
+        let root = fixture.join("checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut parent = make_project("parent");
+        parent.path = fixture.join("main").to_string_lossy().into_owned();
+        let mut container = make_project("container");
+        container.path = fixture.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, container];
+        data.project_order = vec!["parent".to_string(), "container".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let (add_error, register_error, discovered_error, rename_error, released_claim) = workspace
+            .update(cx, |ws, cx| {
+                let active = ws
+                    .register_worktree_project_deferred_hooks(
+                        "parent",
+                        "active",
+                        &fixture.join("main"),
+                        path_str(&root),
+                        path_str(&root.join("packages/a")),
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .expect("register active worktree");
+                let metadata = ws.project(&active).unwrap().worktree_info.as_ref().unwrap();
+                assert_eq!(metadata.worktree_path, path_str(&root));
+                ws.mark_creating_project(&active);
+                let add_error = ws
+                    .add_project(
+                        "claim".to_string(),
+                        root.join("packages/b").to_string_lossy().into_owned(),
+                        false,
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .unwrap_err();
+                let register_error = ws
+                    .register_worktree_project_deferred_hooks(
+                        "parent",
+                        "other",
+                        &fixture.join("main"),
+                        path_str(&root.join("nested")),
+                        path_str(&root.join("nested/project")),
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .unwrap_err();
+                let discovered_error = ws
+                    .add_discovered_worktree(
+                        path_str(&root.join("discovered")),
+                        "discovered",
+                        "parent",
+                        WindowId::Main,
+                    )
+                    .unwrap_err();
+                let rename_error = ws
+                    .ensure_project_path_mutation_allowed(
+                        "container",
+                        &fixture.with_extension("moved"),
+                    )
+                    .unwrap_err();
+                ws.finish_creating_project(&active);
+                let released_claim = ws
+                    .add_project(
+                        "released claim".to_string(),
+                        root.join("packages/b").to_string_lossy().into_owned(),
+                        false,
+                        &HooksConfig::default(),
+                        WindowId::Main,
+                        cx,
+                    )
+                    .expect("claim succeeds after lease release");
+                (
+                    add_error,
+                    register_error,
+                    discovered_error,
+                    rename_error,
+                    released_claim,
+                )
+            });
+
+        assert!(add_error.contains("active worktree operation"));
+        assert!(register_error.contains("overlaps active operation"));
+        assert!(discovered_error.contains("overlaps active operation"));
+        assert!(rename_error.contains("overlaps active worktree operation"));
+        workspace.read_with(cx, |ws, _| {
+            assert!(ws.project(&released_claim).is_some());
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn physical_path_identity_normalizes_relative_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            Workspace::physical_path_identity(Path::new("identity-a/../identity-b")),
+            Workspace::physical_path_identity(&cwd.join("identity-b"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_path_identity_folds_windows_case_aliases() {
+        let path = std::env::temp_dir().join(format!(
+            "okena-case-identity-test-{}/Missing",
+            uuid::Uuid::new_v4()
+        ));
+        let upper = std::path::PathBuf::from(path.to_string_lossy().to_uppercase());
+        assert_eq!(
+            Workspace::physical_path_identity(&path),
+            Workspace::physical_path_identity(&upper)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn physical_path_identity_follows_dangling_symlink_before_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let fixture =
+            std::env::temp_dir().join(format!("okena-path-identity-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let target = fixture.join("not-created/checkout");
+        let alias = fixture.join("alias");
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(
+            Workspace::physical_path_identity(&alias.join("child/../project")),
+            Workspace::physical_path_identity(&target.join("project"))
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
     #[gpui::test]
     fn test_delete_worktree_removes_from_parent_worktree_ids(cx: &mut gpui::TestAppContext) {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -1424,12 +2589,21 @@ mod gpui_tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project(&mut FocusManager::new(), "parent", &HooksConfig::default(), cx);
+            ws.delete_project(
+                &mut FocusManager::new(),
+                "parent",
+                &HooksConfig::default(),
+                cx,
+            );
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1445,7 +2619,12 @@ mod gpui_tests {
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string(), "wt3".to_string()];
         let mut data = make_workspace_data();
-        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent"), make_worktree_project("wt3", "parent")];
+        data.projects = vec![
+            parent,
+            make_worktree_project("wt1", "parent"),
+            make_worktree_project("wt2", "parent"),
+            make_worktree_project("wt3", "parent"),
+        ];
         data.project_order = vec!["parent".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -1516,7 +2695,10 @@ mod gpui_tests {
         });
 
         // Modal context survives the hide — the switcher keeps keyboard focus.
-        assert!(fm.is_modal(), "switcher must keep keyboard focus after hiding");
+        assert!(
+            fm.is_modal(),
+            "switcher must keep keyboard focus after hiding"
+        );
 
         // Closing the switcher restores focus to the neighbor (p3), not the
         // now-hidden p2, and leaves the modal context.
@@ -1580,7 +2762,10 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_some(), "closing project should not be removed");
+        assert!(
+            ws.project("wt1").is_some(),
+            "closing project should not be removed"
+        );
     }
 
     #[test]
@@ -1594,7 +2779,10 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_some(), "creating project should not be removed");
+        assert!(
+            ws.project("wt1").is_some(),
+            "creating project should not be removed"
+        );
     }
 
     #[test]
@@ -1607,6 +2795,649 @@ mod gpui_tests {
 
         ws.remove_stale_worktree("wt1");
 
-        assert!(ws.project("wt1").is_none(), "unmanaged stale worktree should be removed");
+        assert!(
+            ws.project("wt1").is_none(),
+            "unmanaged stale worktree should be removed"
+        );
+    }
+
+    #[gpui::test]
+    fn begin_worktree_removal_rejected_while_creating(cx: &mut gpui::TestAppContext) {
+        // Optimistic worktree create registers the row and returns before its
+        // background `git worktree add` finishes; a removal landing in that
+        // window must be rejected so it can't race the in-flight checkout and
+        // strand an orphaned, git-registered worktree with no workspace row.
+        // The row and its creating flag must survive the rejected call intact.
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.begin_worktree_removal("wt1", &HooksConfig::default(), cx)
+                .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is still being created"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                ws.project("wt1").is_some(),
+                "row survives the rejected removal"
+            );
+            assert!(ws.is_creating_project("wt1"), "creating flag untouched");
+        });
+    }
+
+    #[gpui::test]
+    fn close_worktree_rejected_while_creating(cx: &mut gpui::TestAppContext) {
+        // The close-entry guard must reject BEFORE close_worktree fires a
+        // before_remove hook or registers a pending close. Without the entry
+        // guard the flow would still be rejected — by the begin_worktree_removal
+        // backstop, with the identical error — but only AFTER the headless
+        // before_remove hook ran. So the sharp assertion is the marker file: the
+        // project carries a before_remove hook that writes one, and it must not
+        // exist after the rejected call. (The project path must be a real dir —
+        // the headless hook spawns with cwd = OKENA_PROJECT_PATH.)
+        let marker =
+            std::env::temp_dir().join(format!("okena_close_guard_marker_{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_worktree_project("wt1", "parent");
+        wt.path = std::env::temp_dir().to_string_lossy().into_owned();
+        wt.hooks.worktree.before_remove = Some(format!("echo x > \"{}\"", marker.display()));
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, wt];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false, // merge
+                false, // stash
+                false, // fetch
+                false, // push
+                false, // delete_branch
+                &HooksConfig::default(),
+                cx,
+            )
+            .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is still being created"));
+        assert!(
+            !marker.exists(),
+            "before_remove hook must not fire on a rejected mid-create close",
+        );
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                ws.project("wt1").is_some(),
+                "row survives the rejected close"
+            );
+            assert!(ws.is_creating_project("wt1"), "creating flag untouched");
+            assert!(
+                !ws.is_project_closing("wt1"),
+                "no pending close registered (tracker)"
+            );
+            assert!(
+                !ws.project("wt1").unwrap().is_closing,
+                "no pending close registered (wire-facing closing flag stays clear)",
+            );
+        });
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[gpui::test]
+    fn close_worktree_rejected_while_already_closing(cx: &mut gpui::TestAppContext) {
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_closing_project_authoritative("wt1");
+            ws.close_worktree(
+                &mut FocusManager::new(),
+                "wt1",
+                false,
+                false,
+                false,
+                false,
+                false,
+                &HooksConfig::default(),
+                cx,
+            )
+            .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("worktree is already closing"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("wt1").is_some());
+            assert!(ws.is_project_closing("wt1"));
+            assert!(ws.project("wt1").unwrap().is_closing);
+        });
+    }
+
+    #[gpui::test]
+    fn rename_worktree_root_moves_git_registration_and_descendant_projects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-root-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        let renamed = fixture.join("renamed-worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/child")).unwrap();
+        std::fs::write(main_repo.join("packages/child/file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut child = make_worktree_project("wt1", "parent");
+        child.path = worktree.to_string_lossy().into_owned();
+        let metadata = child.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = worktree
+            .join("packages/child")
+            .to_string_lossy()
+            .into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, child, descendant];
+        data.project_order = vec!["parent".to_string(), "descendant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "wt1",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-worktree".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            let moved = ws.project("wt1").unwrap();
+            assert_eq!(Path::new(&moved.path), renamed);
+            assert_eq!(
+                Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
+                renamed
+            );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                renamed.join("packages/child")
+            );
+        });
+        assert!(!worktree.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &renamed).is_ok());
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&renamed),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_monorepo_subdirectory_preserves_worktree_root(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-subdir-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::create_dir_all(main_repo.join("packages/app/nested")).unwrap();
+        std::fs::write(main_repo.join("packages/app/file.txt"), "tracked\n").unwrap();
+        std::fs::write(main_repo.join("packages/app/nested/file.txt"), "nested\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "packages"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        let old_project_path = worktree.join("packages/app");
+        let new_project_path = worktree.join("packages/renamed-app");
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut child = make_worktree_project("wt1", "parent");
+        child.path = old_project_path.to_string_lossy().into_owned();
+        let metadata = child.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = old_project_path
+            .join("nested")
+            .to_string_lossy()
+            .into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, child, descendant];
+        data.project_order = vec!["parent".to_string(), "descendant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "wt1",
+                new_project_path.to_string_lossy().into_owned(),
+                "renamed-app".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            let moved = ws.project("wt1").unwrap();
+            assert_eq!(Path::new(&moved.path), new_project_path);
+            assert_eq!(
+                Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
+                worktree
+            );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                new_project_path.join("nested")
+            );
+        });
+        assert!(worktree.exists());
+        assert!(!old_project_path.exists());
+        assert!(new_project_path.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).is_ok());
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_project_directory_translates_descendant_projects(cx: &mut gpui::TestAppContext) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-project-rename-{}", uuid::Uuid::new_v4()));
+        let project_path = fixture.join("project");
+        let renamed_path = fixture.join("renamed-project");
+        let descendant_path = project_path.join("packages/nested");
+        std::fs::create_dir_all(&descendant_path).unwrap();
+
+        let mut project = make_project("project");
+        project.path = project_path.to_string_lossy().into_owned();
+        let mut descendant = make_project("descendant");
+        descendant.path = descendant_path.to_string_lossy().into_owned();
+        descendant.hook_terminals.insert(
+            "completed-descendant-hook".to_string(),
+            okena_state::HookTerminalEntry {
+                label: "completed".to_string(),
+                status: okena_state::HookTerminalStatus::Succeeded,
+                hook_type: "project.on_open".to_string(),
+                command: "echo done".to_string(),
+                cwd: descendant_path.to_string_lossy().into_owned(),
+            },
+        );
+        let mut data = make_workspace_data();
+        data.projects = vec![project, descendant];
+        data.project_order = vec!["project".to_string(), "descendant".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        workspace.update(cx, |ws, cx| {
+            let plan = ws
+                .prepare_project_directory_rename(
+                    "project",
+                    renamed_path.to_string_lossy().into_owned(),
+                    "renamed-project".to_string(),
+                )
+                .unwrap();
+            assert_eq!(
+                plan.affected_project_ids().collect::<Vec<_>>(),
+                vec!["project", "descendant"]
+            );
+            assert_eq!(plan.old_path(), project_path);
+            assert_eq!(plan.new_path(), renamed_path);
+            ws.rename_project_directory(
+                "project",
+                renamed_path.to_string_lossy().into_owned(),
+                "renamed-project".to_string(),
+                cx,
+            )
+            .unwrap();
+        });
+
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                Path::new(&ws.project("project").unwrap().path),
+                renamed_path
+            );
+            assert_eq!(
+                Path::new(&ws.project("descendant").unwrap().path),
+                renamed_path.join("packages/nested")
+            );
+            assert_eq!(
+                Path::new(
+                    &ws.project("descendant").unwrap().hook_terminals["completed-descendant-hook"]
+                        .cwd
+                ),
+                renamed_path.join("packages/nested")
+            );
+        });
+        assert!(!project_path.exists());
+        assert!(renamed_path.join("packages/nested").exists());
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_main_repository_requires_linked_worktrees_to_be_removed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-main-repo-rename-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let linked_worktree = fixture.join("external-worktree");
+        let renamed_repo = fixture.join("renamed-main");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            path_str(&linked_worktree),
+        ]);
+
+        let mut project = make_project("project");
+        project.path = main_repo.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![project];
+        data.project_order = vec!["project".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "project",
+                renamed_repo.to_string_lossy().into_owned(),
+                "renamed-main".to_string(),
+                cx,
+            )
+            .expect_err("linked worktree must block repository rename")
+        });
+
+        assert!(error.contains("has linked worktrees"));
+        assert!(main_repo.exists());
+        assert!(!renamed_repo.exists());
+        assert!(okena_git::verify_linked_worktree_fresh(&main_repo, &linked_worktree).is_ok());
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            path_str(&linked_worktree),
+        ]);
+        workspace.update(cx, |ws, cx| {
+            ws.rename_project_directory(
+                "project",
+                renamed_repo.to_string_lossy().into_owned(),
+                "renamed-main".to_string(),
+                cx,
+            )
+            .expect("repository without linked worktrees can be renamed");
+        });
+
+        assert!(!main_repo.exists());
+        assert!(renamed_repo.join(".git").exists());
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                Path::new(&ws.project("project").unwrap().path),
+                renamed_repo
+            );
+        });
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_ancestor_rejects_descendant_repository_with_external_worktree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-ancestor-repo-rename-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ancestor = fixture.join("workspace");
+        let main_repo = ancestor.join("packages/repo");
+        let linked_worktree = fixture.join("external-worktree");
+        let renamed = fixture.join("renamed-workspace");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            path_str(&linked_worktree),
+        ]);
+
+        let mut parent = make_project("ancestor");
+        parent.path = ancestor.to_string_lossy().into_owned();
+        let mut descendant = make_project("repo");
+        descendant.path = main_repo.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, descendant];
+        data.project_order = vec!["ancestor".to_string(), "repo".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, _| {
+            ws.prepare_project_directory_rename(
+                "ancestor",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-workspace".to_string(),
+            )
+            .err()
+            .expect("descendant repository registration must block ancestor move")
+        });
+        assert!(error.contains("has linked worktrees"));
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&linked_worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn rename_ancestor_rejects_descendant_worktree_metadata_root(cx: &mut gpui::TestAppContext) {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-ancestor-worktree-rename-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let main_repo = fixture.join("main");
+        let ancestor = fixture.join("workspace");
+        let worktree = ancestor.join("linked-checkout");
+        let renamed = fixture.join("renamed-workspace");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+
+        let mut main = make_project("main");
+        main.path = main_repo.to_string_lossy().into_owned();
+        let mut outer = make_project("ancestor");
+        outer.path = ancestor.to_string_lossy().into_owned();
+        let mut child = make_worktree_project("worktree", "main");
+        child.path = worktree.to_string_lossy().into_owned();
+        child.worktree_info.as_mut().unwrap().worktree_path =
+            worktree.to_string_lossy().into_owned();
+        let mut data = make_workspace_data();
+        data.projects = vec![main, outer, child];
+        data.project_order = vec!["main".to_string(), "ancestor".to_string()];
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let error = workspace.update(cx, |ws, _| {
+            ws.prepare_project_directory_rename(
+                "ancestor",
+                renamed.to_string_lossy().into_owned(),
+                "renamed-workspace".to_string(),
+            )
+            .err()
+            .expect("registered descendant checkout must block plain directory move")
+        });
+        assert!(error.contains("linked worktree project"));
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[gpui::test]
+    fn root_claim_succeeds_after_create_finishes(cx: &mut gpui::TestAppContext) {
+        // Once finalize clears the create lease, paths below the checkout can
+        // be claimed again rather than remaining wedged forever.
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.mark_creating_project("wt1");
+            ws.finish_creating_project("wt1");
+            ws.ensure_project_path_claim_allowed(Path::new("/tmp/worktrees/wt1/packages/app"))
+        });
+
+        assert!(
+            result.is_ok(),
+            "guard should release once create finishes, got {:?}",
+            result.err(),
+        );
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.is_creating_project("wt1"), "creating flag cleared");
+        });
     }
 }

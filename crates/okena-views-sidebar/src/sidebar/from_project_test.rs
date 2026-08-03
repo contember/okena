@@ -7,7 +7,9 @@
 use super::SidebarProjectInfo;
 use okena_core::theme::FolderColor;
 use okena_workspace::settings::HooksConfig;
-use okena_workspace::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
+use okena_workspace::state::{
+    LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData,
+};
 use std::collections::HashMap;
 
 fn make_project(id: &str) -> ProjectData {
@@ -29,6 +31,8 @@ fn make_project(id: &str) -> ProjectData {
         hook_terminals: HashMap::new(),
         pinned: false,
         last_activity_at: None,
+        is_creating: false,
+        is_closing: false,
     }
 }
 

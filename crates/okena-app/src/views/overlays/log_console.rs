@@ -70,9 +70,7 @@ impl LogConsole {
         cx.spawn(async move |this: WeakEntity<LogConsole>, cx| {
             loop {
                 smol::Timer::after(POLL_INTERVAL).await;
-                let alive = this
-                    .update(cx, |this, cx| this.pull_new(cx))
-                    .is_ok();
+                let alive = this.update(cx, |this, cx| this.pull_new(cx)).is_ok();
                 if !alive {
                     break;
                 }
@@ -243,8 +241,7 @@ impl Render for LogConsole {
         let shown = visible.len();
 
         if self.pending_scroll && shown > 0 {
-            self.scroll
-                .scroll_to_item(shown - 1, ScrollStrategy::Top);
+            self.scroll.scroll_to_item(shown - 1, ScrollStrategy::Top);
             self.pending_scroll = false;
         }
 
@@ -252,9 +249,9 @@ impl Render for LogConsole {
             .track_focus(&focus_handle)
             .key_context("LogConsole")
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.on_key(event, cx)
-            }))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key(event, cx)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| this.close(cx)),
@@ -324,9 +321,8 @@ impl LogConsole {
                         cx,
                     ))
                     .child(
-                        h_flex()
-                            .gap(px(4.0))
-                            .children([
+                        h_flex().gap(px(4.0)).children(
+                            [
                                 log::Level::Error,
                                 log::Level::Warn,
                                 log::Level::Info,
@@ -336,7 +332,8 @@ impl LogConsole {
                             .into_iter()
                             .map(|lvl| {
                                 level_chip(lvl, self.min_level == lvl, t, cx).into_any_element()
-                            })),
+                            }),
+                        ),
                     )
                     .child(toggle_chip(
                         "autoscroll",
@@ -409,15 +406,11 @@ impl LogConsole {
         }
 
         let count = visible.len();
-        uniform_list(
-            "log-console-list",
-            count,
-            move |range, _window, cx| {
-                range
-                    .map(|i| render_row(&visible[i], &t, cx).into_any_element())
-                    .collect::<Vec<_>>()
-            },
-        )
+        uniform_list("log-console-list", count, move |range, _window, cx| {
+            range
+                .map(|i| render_row(&visible[i], &t, cx).into_any_element())
+                .collect::<Vec<_>>()
+        })
         .track_scroll(&self.scroll)
         .flex_1()
         .into_any_element()
@@ -512,7 +505,9 @@ fn level_chip(
 ) -> impl IntoElement {
     let color = level_color(level, t);
     div()
-        .id(ElementId::Name(format!("lvl-{}", level_label(level)).into()))
+        .id(ElementId::Name(
+            format!("lvl-{}", level_label(level)).into(),
+        ))
         .px(px(6.0))
         .py(px(2.0))
         .rounded(px(4.0))

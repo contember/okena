@@ -87,7 +87,7 @@ impl Okena {
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
             while let Ok(jump) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
-                    this.jump_to_terminal(&jump.project_id, &jump.terminal_id, cx);
+                    this.jump_to_terminal(&jump.project_id, &jump.terminal_id, None, cx);
                 });
             }
         })
@@ -124,11 +124,11 @@ impl Okena {
             return;
         }
 
-        // A bell or OSC alert is "activity" for the owning project regardless
-        // of the notification settings below — stamp it before any settings
-        // bail so the activity-sorted sidebar surfaces the project even when
-        // desktop notifications are disabled.
-        self.bump_activity_for_terminals(drained.iter().map(|(tid, _, _)| tid.as_str()), cx);
+        // Activity stamping for bell/OSC alerts now happens on the DAEMON
+        // (`pty_loop::process_activity_edges`), which owns the authoritative
+        // `last_activity_at` and persists it. Bumping the client mirror here would
+        // only be overwritten on the next state sync, so we don't — we keep
+        // draining the edges above purely to fire OS notification bubbles below.
 
         // Read the (small) notification settings; bail if the feature is off.
         // Draining above already cleared the queues, so nothing accumulates
@@ -201,32 +201,31 @@ impl Okena {
         }
     }
 
-    /// Drain the one-shot command-finished (OSC 133 ;D) edge for each dirty
-    /// terminal and stamp activity on the owning project. Called from the PTY
-    /// event loop alongside notification draining so a finished command floats
-    /// its project up in the activity-sorted sidebar — even with no bell.
-    pub(super) fn process_command_finished_activity(
+    /// Apply OSC 52 clipboard *writes* queued by terminals that produced output.
+    ///
+    /// This side effect is intentionally drained from the immediate activity
+    /// handler rather than relying on `TerminalContent::render`: background-only
+    /// panes may remain inactive indefinitely, while clipboard semantics must not.
+    /// The render path keeps a fallback drain for non-remote terminal producers.
+    pub(super) fn process_clipboard_writes(
         &mut self,
         dirty_terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
-        // Drain edges first (cheap atomic swap); collect the terminals that
-        // actually saw a command finish. Almost every batch drains nothing.
-        let finished: Vec<String> = {
+        let writes = {
             let reg = self.terminals.lock();
-            dirty_terminal_ids
-                .iter()
-                .filter(|tid| {
-                    reg.get(*tid)
-                        .is_some_and(|t| t.take_pending_command_finished())
-                })
-                .cloned()
-                .collect()
+            let mut writes = Vec::new();
+            for terminal_id in dirty_terminal_ids {
+                if let Some(terminal) = reg.get(terminal_id) {
+                    writes.extend(terminal.take_pending_clipboard_writes());
+                }
+            }
+            writes
         };
-        if finished.is_empty() {
-            return;
+
+        for text in writes {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
-        self.bump_activity_for_terminals(finished.iter().map(|s| s.as_str()), cx);
     }
 
     /// Answer (or silently deny) OSC 52 clipboard *read* requests
@@ -251,7 +250,10 @@ impl Okena {
             let reg = self.terminals.lock();
             dirty_terminal_ids
                 .iter()
-                .filter(|tid| reg.get(*tid).is_some_and(|t| t.has_pending_clipboard_reads()))
+                .filter(|tid| {
+                    reg.get(*tid)
+                        .is_some_and(|t| t.has_pending_clipboard_reads())
+                })
                 .cloned()
                 .collect()
         };
@@ -290,30 +292,6 @@ impl Okena {
         }
     }
 
-    /// Resolve each terminal id to its owning project and bump that project's
-    /// activity timestamp once. Deduplicates projects so a batch touching
-    /// several terminals of the same project only notifies/persists once.
-    fn bump_activity_for_terminals<'a>(
-        &mut self,
-        terminal_ids: impl Iterator<Item = &'a str>,
-        cx: &mut Context<Self>,
-    ) {
-        let project_ids: std::collections::HashSet<String> = {
-            let ws = self.workspace.read(cx);
-            terminal_ids
-                .filter_map(|tid| ws.find_project_for_terminal(tid).map(|p| p.id.clone()))
-                .collect()
-        };
-        if project_ids.is_empty() {
-            return;
-        }
-        self.workspace.update(cx, |ws, cx| {
-            for pid in project_ids {
-                ws.bump_activity(&pid, cx);
-            }
-        });
-    }
-
     /// True when `(project_id, path)` is the focused pane in a window that
     /// currently holds OS focus. Background tabs, inactive detached windows,
     /// and "no Okena window focused" all return false, so they notify.
@@ -349,48 +327,37 @@ impl Okena {
         false
     }
 
-    /// Focus the specific terminal that raised a notification, raising the
-    /// window it lives in. Mirrors `jump_to_project_terminal` but targets an
-    /// exact terminal id (activating its tab) rather than the first visible one.
-    ///
-    /// Two tiers: if the project is currently visible in some window, focus it
-    /// there without disturbing the view. If it's visible *nowhere* — hidden
-    /// column, folder filter, or a window zoomed into another project — fall
-    /// back to zooming into it in the active (or main) window, which pierces
-    /// all three so the click always lands on the terminal.
-    fn jump_to_terminal(&mut self, project_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
-        // Tier 1: a window where the project is actually visible right now.
-        let mut order = vec![WindowId::Main];
-        order.extend(self.extra_window_handles.keys().copied());
-        let mut visible_in: Option<WindowId> = None;
-        for wid in order {
-            if let Some((view, _)) = self.window_view_and_handle(wid)
-                && self.project_visible_in(wid, &view, project_id, cx)
-            {
-                visible_in = Some(wid);
-                break;
-            }
-        }
-
-        // Tier 2: visible nowhere → reveal (zoom) in the active or main window.
-        let (target, reveal) = match visible_in {
-            Some(wid) => (wid, false),
-            None => {
-                let active = cx.active_window();
-                let mut handles = vec![(WindowId::Main, self.main_window_handle)];
-                handles.extend(self.extra_window_handles.iter().map(|(id, h)| (*id, *h)));
-                let wid = handles
-                    .into_iter()
-                    .find(|(_, h)| Some(*h) == active)
-                    .map(|(id, _)| id)
-                    .unwrap_or(WindowId::Main);
-                (wid, true)
+    /// Focus an exact terminal in the requested window, or the active window.
+    pub(super) fn jump_to_terminal(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        requested_window: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let requested_window = match requested_window {
+            None => None,
+            Some("main") => Some(WindowId::Main),
+            Some(id) => {
+                let Ok(id) = uuid::Uuid::parse_str(id) else {
+                    return;
+                };
+                Some(WindowId::Extra(id))
             }
         };
+        let target = requested_window.unwrap_or_else(|| {
+            let active = cx.active_window();
+            self.extra_window_handles
+                .iter()
+                .find(|(_, handle)| Some(**handle) == active)
+                .map(|(id, _)| *id)
+                .unwrap_or(WindowId::Main)
+        });
 
         let Some((view, handle)) = self.window_view_and_handle(target) else {
             return;
         };
+        let reveal = !self.project_visible_in(target, &view, project_id, cx);
 
         let workspace = self.workspace.clone();
         let focus_manager = view.read(cx).focus_manager();
@@ -426,7 +393,10 @@ impl Okena {
     ) -> Option<(Entity<WindowView>, AnyWindowHandle)> {
         match window_id {
             WindowId::Main => Some((self.main_window.clone(), self.main_window_handle)),
-            id => match (self.extra_windows.get(&id), self.extra_window_handles.get(&id)) {
+            id => match (
+                self.extra_windows.get(&id),
+                self.extra_window_handles.get(&id),
+            ) {
                 (Some(v), Some(h)) => Some((v.clone(), *h)),
                 _ => None,
             },

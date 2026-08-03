@@ -60,9 +60,8 @@ impl WorkspaceData {
     ///
     /// Inserts the (project_id, width) pair into the targeted window's
     /// `project_widths` map, overwriting any prior value for the same id. The
-    /// pair-shaped API matches the runtime shape of a column-resize event
-    /// (one column moves at a time), in contrast to the legacy entity method
-    /// `update_project_widths` that takes a wholesale `HashMap<String, f32>`.
+    /// pair-shaped API matches a single-column update, while the entity-level
+    /// `update_project_widths` method batches multiple pairs in one notification.
     /// Unknown extra ids are a silent no-op, matching the `window_mut` lookup
     /// contract.
     pub fn set_project_width(&mut self, id: WindowId, project_id: &str, width: f32) {
@@ -132,9 +131,15 @@ impl WorkspaceData {
     /// Mirrors the inverse helper `delete_project_scrub_all_windows`,
     /// which removes the id from every window's per-project storage on
     /// project-delete so no orphan entries survive.
-    pub fn add_project_hide_in_other_windows(&mut self, project_id: &str, spawning_window: WindowId) {
+    pub fn add_project_hide_in_other_windows(
+        &mut self,
+        project_id: &str,
+        spawning_window: WindowId,
+    ) {
         if spawning_window != WindowId::Main {
-            self.main_window.hidden_project_ids.insert(project_id.to_string());
+            self.main_window
+                .hidden_project_ids
+                .insert(project_id.to_string());
         }
         for extra in &mut self.extra_windows {
             if spawning_window != WindowId::Extra(extra.id) {
@@ -150,20 +155,20 @@ impl WorkspaceData {
     /// window that should see the project by default; every open viewport must
     /// start hidden.
     pub fn hide_project_in_all_windows(&mut self, project_id: &str) {
-        self.main_window.hidden_project_ids.insert(project_id.to_string());
+        self.main_window
+            .hidden_project_ids
+            .insert(project_id.to_string());
         for extra in &mut self.extra_windows {
             extra.hidden_project_ids.insert(project_id.to_string());
         }
     }
 
-    /// Remove a project's id from every window's per-project storage.
+    /// Remove a project's id from every client-owned presentation store.
     ///
     /// Walks `main_window` plus every entry in `extra_windows`, and removes
-    /// `project_id` from each window's `hidden_project_ids` set and
-    /// `project_widths` map. Idempotent: a project absent from a given window
-    /// is a no-op for that window. Other per-window fields (`folder_filter`,
-    /// `folder_collapsed`, `os_bounds`) are not per-project storage and are
-    /// left untouched.
+    /// `project_id` is removed from each window's `hidden_project_ids` and
+    /// `project_widths`, plus the shared service/hook panel-height caches.
+    /// Other per-window fields are left untouched.
     ///
     /// Called from the project-delete path so no orphan per-project entries
     /// survive the delete on any window.
@@ -174,6 +179,8 @@ impl WorkspaceData {
             extra.hidden_project_ids.remove(project_id);
             extra.project_widths.remove(project_id);
         }
+        self.service_panel_heights.remove(project_id);
+        self.hook_panel_heights.remove(project_id);
     }
 
     /// Remove a folder id from every window's per-folder storage.
@@ -294,9 +301,7 @@ impl WorkspaceData {
         let valid_folders: std::collections::HashSet<String> =
             self.folders.iter().map(|f| f.id.clone()).collect();
 
-        for window in
-            std::iter::once(&mut self.main_window).chain(self.extra_windows.iter_mut())
-        {
+        for window in std::iter::once(&mut self.main_window).chain(self.extra_windows.iter_mut()) {
             window
                 .hidden_project_ids
                 .retain(|id| valid_projects.contains(id));

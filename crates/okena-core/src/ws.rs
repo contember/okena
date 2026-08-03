@@ -1,4 +1,4 @@
-use crate::api::ApiGitStatus;
+use crate::api::{ApiGitStatus, ApiSystemStats, ApiTerminalFocusRequest, ApiToast};
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,10 @@ pub enum WsInbound {
     SendText {
         terminal_id: String,
         text: String,
+    },
+    SendBytes {
+        terminal_id: String,
+        data: Vec<u8>,
     },
     SendSpecialKey {
         terminal_id: String,
@@ -59,6 +63,17 @@ pub enum WsOutbound {
     GitStatusChanged {
         projects: std::collections::HashMap<String, ApiGitStatus>,
     },
+    SystemStatsChanged {
+        stats: ApiSystemStats,
+    },
+    /// A daemon-originated toast to display on the client. Fire-and-forget event
+    /// (mirrors `GitStatusChanged`): the daemon has no surface of its own, so
+    /// notifications it produces (e.g. hook failures) are pushed here and the
+    /// client's `ToastManager` renders them.
+    Toast(ApiToast),
+    /// One-shot request for a connected desktop client to focus and raise an
+    /// exact terminal after an external API action succeeds.
+    TerminalFocusRequested(ApiTerminalFocusRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -136,6 +151,10 @@ mod tests {
                 terminal_id: "t1".into(),
                 text: "hello".into(),
             },
+            WsInbound::SendBytes {
+                terminal_id: "t1".into(),
+                data: vec![0x1b, 0xff],
+            },
             WsInbound::SendSpecialKey {
                 terminal_id: "t1".into(),
                 key: SpecialKey::Enter,
@@ -183,6 +202,26 @@ mod tests {
                 .into_iter()
                 .collect(),
             },
+            WsOutbound::SystemStatsChanged {
+                stats: ApiSystemStats {
+                    cpu_usage: 42.5,
+                    memory_used_bytes: 4_294_967_296,
+                    memory_total_bytes: 17_179_869_184,
+                },
+            },
+            WsOutbound::Toast(ApiToast {
+                id: "toast-1".into(),
+                level: "error".into(),
+                message: "Hook `pre_merge` failed".into(),
+                detail: Some("exit code 1".into()),
+                ttl_ms: 5000,
+                actions: Vec::new(),
+            }),
+            WsOutbound::TerminalFocusRequested(ApiTerminalFocusRequest {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                window: Some("main".into()),
+            }),
             WsOutbound::TerminalResized {
                 terminal_id: "t1".into(),
                 cols: 120,
@@ -203,7 +242,12 @@ mod tests {
         let json = r#"{"type":"terminal_resized","terminal_id":"t1","cols":80,"rows":24}"#;
         let parsed: WsOutbound = serde_json::from_str(json).unwrap();
         match parsed {
-            WsOutbound::TerminalResized { server_owns, cols, rows, .. } => {
+            WsOutbound::TerminalResized {
+                server_owns,
+                cols,
+                rows,
+                ..
+            } => {
                 assert!(!server_owns);
                 assert_eq!((cols, rows), (80, 24));
             }

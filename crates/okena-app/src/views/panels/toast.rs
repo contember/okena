@@ -2,7 +2,9 @@
 pub use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastLevel, ToastManager};
 
 use crate::theme::theme;
-use crate::ui::tokens::{RADIUS_MD, RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms, ui_text_xs};
+use crate::ui::tokens::{
+    ICON_SM, RADIUS_STD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, ui_text_ms, ui_text_xs,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::time::Duration;
@@ -24,21 +26,21 @@ const FADE_IN_DURATION: Duration = Duration::from_millis(150);
 /// Toast width
 const TOAST_WIDTH: f32 = 320.0;
 
-/// Accent stripe width
-const ACCENT_WIDTH: f32 = 3.0;
-
 trait ToastLevelExt {
     fn icon_char(self) -> &'static str;
     fn accent_color(self, t: &crate::theme::ThemeColors) -> u32;
 }
 
 impl ToastLevelExt for ToastLevel {
+    /// The glyph shown inside the level badge. Warning rides its own triangle
+    /// glyph (text-presentation via U+FE0E so it takes the accent color, not
+    /// emoji); the others are drawn inside a bordered circle by the renderer.
     fn icon_char(self) -> &'static str {
         match self {
             ToastLevel::Success => "✓",
-            ToastLevel::Error => "✗",
-            ToastLevel::Warning => "⚠",
-            ToastLevel::Info => "ℹ",
+            ToastLevel::Error => "✕",
+            ToastLevel::Warning => "⚠\u{fe0e}",
+            ToastLevel::Info => "i",
         }
     }
 
@@ -77,7 +79,9 @@ impl ToastOverlay {
 
                 let result = this.update(cx, |this, cx| {
                     // Drain pending toasts from HookMonitor into ToastManager
-                    if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                    if let Some(monitor) =
+                        cx.try_global::<crate::workspace::hook_monitor::HookMonitor>()
+                    {
                         let hook_toasts = monitor.drain_pending_toasts();
                         ToastManager::post_batch(hook_toasts, cx);
                     }
@@ -111,7 +115,6 @@ impl ToastOverlay {
     }
 }
 
-
 impl EventEmitter<ToastActionEvent> for ToastOverlay {}
 
 impl Render for ToastOverlay {
@@ -143,92 +146,101 @@ impl Render for ToastOverlay {
                 let has_countdown = !toast.actions.is_empty();
                 let remaining = toast.remaining_fraction();
 
+                // Level badge: warning rides its own triangle glyph; the rest
+                // sit inside a bordered circle. Colored by the level accent.
+                let icon_el = if toast.level == ToastLevel::Warning {
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(accent_color))
+                        .text_size(text_size)
+                        .child(icon_char)
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_shrink_0()
+                        .size(px(16.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(accent_color))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(accent_color))
+                                .child(icon_char),
+                        )
+                        .into_any_element()
+                };
+
                 div()
                     .id(SharedString::from(format!("toast-{}", toast.id)))
                     .opacity(opacity)
                     .bg(rgb(t.bg_secondary))
                     .border_1()
                     .border_color(rgb(t.border))
-                    .rounded(RADIUS_STD)
+                    .rounded(px(10.0))
                     .shadow_xl()
+                    .relative()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    // Main row: accent stripe + content column
+                    // Grace countdown: a plain bottom line, not a background wash.
+                    .when(has_countdown, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .h(px(2.0))
+                                .w(relative(remaining))
+                                .bg(rgb(accent_color))
+                        )
+                    })
+                    // Content: level icon + column (title row / subtitle / actions).
+                    // No left accent stripe — the level color rides the icon.
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_row()
-                            // Accent stripe
+                            .items_start()
+                            .gap(SPACE_MD)
+                            .px(SPACE_LG)
+                            .py(SPACE_LG)
+                            // Level badge (circle / warning triangle)
+                            .child(icon_el)
+                            // Content column
                             .child(
                                 div()
-                                    .w(px(ACCENT_WIDTH))
-                                    .h_full()
-                                    .bg(rgb(accent_color))
-                                    .flex_shrink_0(),
-                            )
-                            // Content column (message row + optional actions row)
-                            .child(
-                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
                                     .flex()
                                     .flex_col()
-                                    .flex_1()
-                                    .overflow_x_hidden()
-                                    .gap(SPACE_XS)
-                                    .px(SPACE_MD)
-                                    .py(SPACE_SM)
-                                    // Message row
+                                    .gap(px(3.0))
+                                    // Title row: bold title + close (top-right)
                                     .child(
                                         div()
                                             .flex()
                                             .flex_row()
                                             .items_start()
                                             .gap(SPACE_SM)
-                                            // Icon
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(accent_color))
-                                                    .text_size(text_size)
-                                                    .flex_shrink_0()
-                                                    .mt(px(1.0))
-                                                    .child(icon_char),
-                                            )
-                                            // Message + optional detail line
                                             .child(
                                                 div()
                                                     .flex_1()
                                                     .min_w(px(0.))
-                                                    .overflow_x_hidden()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(1.0))
-                                                    .child(
-                                                        div()
-                                                            .whitespace_normal()
-                                                            .text_size(text_size)
-                                                            .text_color(rgb(t.text_primary))
-                                                            .child(toast.message.clone()),
-                                                    )
-                                                    .when_some(
-                                                        toast.detail.clone(),
-                                                        |el, detail| {
-                                                            el.child(
-                                                                div()
-                                                                    .whitespace_normal()
-                                                                    .text_size(detail_size)
-                                                                    .text_color(rgb(t.text_muted))
-                                                                    .child(detail),
-                                                            )
-                                                        },
-                                                    ),
+                                                    .whitespace_normal()
+                                                    .text_size(text_size)
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child(toast.message.clone()),
                                             )
-                                            // Close (dismiss) button — only for
-                                            // plain toasts. Action toasts (undo /
-                                            // close-now) are resolved via their
-                                            // buttons or the countdown, so a third
-                                            // "dismiss" affordance would be
-                                            // ambiguous (it would hide the undo but
-                                            // still let the close go through).
+                                            // Close (dismiss) — plain toasts only.
+                                            // Action toasts (undo / close-now) are
+                                            // resolved via their buttons or the
+                                            // countdown, so a third "dismiss" would
+                                            // be ambiguous.
                                             .when(!has_countdown, |el| {
                                                 el.child(
                                                     div()
@@ -253,14 +265,28 @@ impl Render for ToastOverlay {
                                                 )
                                             }),
                                     )
-                                    // Actions row (Undo / Close now / …)
+                                    // Subtitle / detail
+                                    .when_some(toast.detail.clone(), |el, detail| {
+                                        el.child(
+                                            div()
+                                                .whitespace_normal()
+                                                .text_size(detail_size)
+                                                .text_color(rgb(t.text_secondary))
+                                                .child(detail),
+                                        )
+                                    })
+                                    // Actions row (left-aligned text links)
                                     .when(has_countdown, |el| {
                                         el.child(
                                             div()
                                                 .flex()
                                                 .flex_row()
-                                                .justify_end()
                                                 .gap(SPACE_XS)
+                                                .mt(SPACE_SM)
+                                                // Pull left so the first action's
+                                                // text (past its hover-pill padding)
+                                                // aligns flush with the title above.
+                                                .ml(px(-6.0))
                                                 .children(toast.actions.iter().map(|action| {
                                                     let toast_id = toast.id.clone();
                                                     let action_id = action.id.clone();
@@ -280,21 +306,6 @@ impl Render for ToastOverlay {
                                     }),
                             ),
                     )
-                    // Countdown progress bar (only for toasts with actions)
-                    .when(has_countdown, |el| {
-                        el.child(
-                            div()
-                                .w_full()
-                                .h(px(2.0))
-                                .bg(rgb(t.border))
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(remaining))
-                                        .bg(rgb(accent_color)),
-                                ),
-                        )
-                    })
             }))
             .into_any_element()
     }
@@ -310,19 +321,25 @@ fn action_button(
     text_size: Pixels,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    // Plain text-link actions (bottom-left), matching the notification style:
+    // white primary, error-tinted danger, muted default — with a hover pill.
     let label_color = match action.style {
-        ToastActionStyle::Primary => t.term_blue,
+        ToastActionStyle::Primary => t.text_primary,
         ToastActionStyle::Danger => t.error,
         ToastActionStyle::Default => t.text_secondary,
     };
 
     div()
-        .id(SharedString::from(format!("toast-action-{}-{}", toast_id, action.id)))
+        .id(SharedString::from(format!(
+            "toast-action-{}-{}",
+            toast_id, action.id
+        )))
         .cursor_pointer()
         .px(SPACE_SM)
         .py(px(2.0))
-        .rounded(RADIUS_MD)
+        .rounded(RADIUS_STD)
         .text_size(text_size)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(label_color))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(action.label.clone())

@@ -3,7 +3,7 @@
 //! The server uses a **persisted self-signed certificate**. There is no CA in
 //! the picture — clients establish trust by pinning the certificate's SHA-256
 //! fingerprint on first connect (TOFU) and verifying it out-of-band against the
-//! fingerprint shown here on the host. See `okena-core::client::tls` for the
+//! fingerprint shown here on the host. See `okena_transport::tls` for the
 //! client-side pinned verifier.
 //!
 //! The cert is generated once and reused across restarts so the pinned
@@ -105,11 +105,10 @@ fn atomic_write(path: &Path, bytes: &[u8], _mode: u32) -> std::io::Result<()> {
 /// Build a rustls `ServerConfig` from the persisted self-signed cert + key,
 /// using the ring provider (matches the client side).
 pub fn server_config(material: &TlsMaterial) -> Result<Arc<rustls::ServerConfig>> {
-    let certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_file_iter(&material.cert_path)
-            .with_context(|| format!("reading certificate {:?}", material.cert_path))?
-            .collect::<std::result::Result<_, _>>()
-            .context("parsing certificate chain")?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&material.cert_path)
+        .with_context(|| format!("reading certificate {:?}", material.cert_path))?
+        .collect::<std::result::Result<_, _>>()
+        .context("parsing certificate chain")?;
     let key = PrivateKeyDer::from_pem_file(&material.key_path)
         .with_context(|| format!("reading private key {:?}", material.key_path))?;
 
@@ -142,7 +141,10 @@ mod tests {
     fn fingerprint_is_64_hex_chars() {
         let fp = fingerprint_hex(&[0u8; 4]);
         assert_eq!(fp.len(), 64);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            fp.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 
     #[test]
@@ -174,7 +176,7 @@ mod tests {
 mod handshake_tests {
     use super::*;
     use axum::Router;
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
     /// Start the real dual-stack server (both http + TLS on one port).
     async fn spawn_dual_stack(material: &TlsMaterial) -> std::net::SocketAddr {
@@ -183,19 +185,34 @@ mod handshake_tests {
         let tls = super::server_config(material).unwrap();
         let app = Router::new().route("/health", get(|| async { "ok" }));
         tokio::spawn(async move {
-            let _ = crate::serve::serve_dual_stack(
-                listener,
-                app,
-                tls,
-                std::future::pending::<()>(),
-            )
-            .await;
+            let _ =
+                crate::serve::serve_dual_stack(listener, app, tls, std::future::pending::<()>())
+                    .await;
+        });
+        addr
+    }
+
+    async fn spawn_tls_only(material: &TlsMaterial) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tls = super::server_config(material).unwrap();
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .route(
+                "/v1/actions",
+                post(|| async { axum::Json(serde_json::json!({ "actions": [] })) }),
+            );
+        tokio::spawn(async move {
+            let _ = crate::serve::serve_tls(listener, app, tls, std::future::pending::<()>()).await;
         });
         addr
     }
 
     /// GET with a short readiness retry while the server task spins up.
-    async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+    async fn get_with_retry(
+        client: &reqwest::Client,
+        url: &str,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut last_err = None;
         for _ in 0..20 {
             match client.get(url).send().await {
@@ -235,8 +252,12 @@ mod handshake_tests {
         // 1) TOFU (no pin): handshake succeeds and the client captures exactly
         //    the server's cert fingerprint.
         let observed = okena_transport::client::tls::new_observed();
-        let client = okena_transport::client::tls::build_reqwest_client(true, None, observed.clone());
-        let resp = get_with_retry(&client, &url).await.expect("TOFU connect should succeed");
+        let client =
+            okena_transport::client::tls::build_reqwest_client(true, None, observed.clone())
+                .unwrap();
+        let resp = get_with_retry(&client, &url)
+            .await
+            .expect("TOFU connect should succeed");
         assert!(resp.status().is_success());
         assert_eq!(
             observed.lock().unwrap().as_deref(),
@@ -249,7 +270,8 @@ mod handshake_tests {
             true,
             Some(material.fingerprint.clone()),
             okena_transport::client::tls::new_observed(),
-        );
+        )
+        .unwrap();
         assert!(
             get_with_retry(&client_ok, &url).await.is_ok(),
             "matching pin must connect"
@@ -260,10 +282,82 @@ mod handshake_tests {
             true,
             Some("00".repeat(32)),
             okena_transport::client::tls::new_observed(),
-        );
+        )
+        .unwrap();
         assert!(
             client_bad.get(&url).send().await.is_err(),
             "mismatched pin must be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn tls_only_listener_rejects_plain_http() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = load_or_generate(dir.path()).unwrap();
+        let addr = spawn_tls_only(&material).await;
+        let https_client = okena_transport::client::tls::build_reqwest_client(
+            true,
+            Some(material.fingerprint.clone()),
+            okena_transport::client::tls::new_observed(),
+        )
+        .unwrap();
+        let https_url = format!("https://{addr}/health");
+        assert!(
+            get_with_retry(&https_client, &https_url)
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+        );
+
+        let http_url = format!("http://{addr}/health");
+        assert!(
+            reqwest::Client::new().get(http_url).send().await.is_err(),
+            "TLS-only listeners must close plaintext HTTP connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_actions_use_pinned_tls_in_async_and_blocking_clients() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = load_or_generate(dir.path()).unwrap();
+        let addr = spawn_tls_only(&material).await;
+        let config = okena_transport::RemoteConnectionConfig {
+            id: "tls-test".to_string(),
+            name: "TLS test".to_string(),
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            saved_token: Some("test-token".to_string()),
+            token_obtained_at: None,
+            tls: true,
+            pinned_cert_sha256: Some(material.fingerprint.clone()),
+            local_endpoint: None,
+        };
+
+        let async_result = okena_transport::remote_action::post_action_async(
+            &config,
+            "test-token",
+            okena_core::api::ActionRequest::ListActions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(async_result, Some(serde_json::json!({ "actions": [] })));
+
+        let client = okena_transport::remote_action::RemoteActionClient::new(
+            config,
+            "test-token".to_string(),
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            client.post_action(okena_core::api::ActionRequest::ListActions)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result, Some(serde_json::json!({ "actions": [] })));
     }
 }

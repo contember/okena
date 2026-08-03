@@ -1,11 +1,11 @@
 //! Context expansion and text selection ops for the diff viewer.
 
-use super::types::{self, DisplayItem, SideBySideSide};
 use super::DiffViewer;
+use super::types::{self, DisplayItem, SideBySideSide};
 
 use okena_core::types::DiffViewMode;
 use okena_files::code_view::extract_selected_text;
-use okena_files::selection::{copy_to_clipboard, Selection2DNonEmpty};
+use okena_files::selection::{Selection2DNonEmpty, copy_to_clipboard};
 
 use gpui::*;
 
@@ -52,11 +52,13 @@ impl DiffViewer {
         self.selection.clear();
         self.selection_side = None;
 
-        let old_lines: Vec<&str> = self.current_file_old_content
+        let old_lines: Vec<&str> = self
+            .current_file_old_content
             .as_deref()
             .map(|c| c.lines().collect())
             .unwrap_or_default();
-        let new_lines: Vec<&str> = self.current_file_new_content
+        let new_lines: Vec<&str> = self
+            .current_file_new_content
             .as_deref()
             .map(|c| c.lines().collect())
             .unwrap_or_default();
@@ -68,20 +70,31 @@ impl DiffViewer {
             let new_ln = new_start + i;
             let old_ln = old_start + i;
 
-            let spans = file.new_highlighted.get(&new_ln)
+            let spans = file
+                .new_highlighted
+                .get(&new_ln)
                 .or_else(|| file.old_highlighted.get(&old_ln))
                 .cloned()
                 .unwrap_or_default();
 
-            let plain_text = new_lines.get(new_ln - 1)
+            let plain_text = new_lines
+                .get(new_ln - 1)
                 .or_else(|| old_lines.get(old_ln - 1))
                 .unwrap_or(&"")
                 .replace('\t', "    ");
 
             new_items.push(DisplayItem::Line(types::DisplayLine {
                 line_type: okena_git::DiffLineType::Context,
-                old_line_num: if old_ln >= 1 && old_ln <= file.old_line_count { Some(old_ln) } else { None },
-                new_line_num: if new_ln >= 1 && new_ln <= file.new_line_count { Some(new_ln) } else { None },
+                old_line_num: if old_ln >= 1 && old_ln <= file.old_line_count {
+                    Some(old_ln)
+                } else {
+                    None
+                },
+                new_line_num: if new_ln >= 1 && new_ln <= file.new_line_count {
+                    Some(new_ln)
+                } else {
+                    None
+                },
                 spans,
                 plain_text,
             }));
@@ -109,7 +122,10 @@ impl DiffViewer {
                     SideBySideSide::Left => &sbs_line.left,
                     SideBySideSide::Right => &sbs_line.right,
                 };
-                content.as_ref().map(|c| c.plain_text.as_str()).unwrap_or("")
+                content
+                    .as_ref()
+                    .map(|c| c.plain_text.as_str())
+                    .unwrap_or("")
             })
         } else {
             let file = self.current_file.as_ref()?;
@@ -129,7 +145,9 @@ impl DiffViewer {
     /// Build a single-block code payload from the current file's selection.
     /// Returns None for empty/header-only selections, or when the current file
     /// is binary or pure-deletion.
-    pub(super) fn selection_to_send_payload(&self) -> Option<okena_core::send_payload::SendPayload> {
+    pub(super) fn selection_to_send_payload(
+        &self,
+    ) -> Option<okena_core::send_payload::SendPayload> {
         use okena_core::send_payload::{CodeBlock, SendPayload};
         use std::path::PathBuf;
 
@@ -174,7 +192,9 @@ impl DiffViewer {
             let mut last_num: usize = 0;
             let mut texts: Vec<String> = Vec::new();
             for i in start..=end {
-                let DisplayItem::Line(line) = file.items.get(i)? else { continue };
+                let DisplayItem::Line(line) = file.items.get(i)? else {
+                    continue;
+                };
                 let line_num = line.new_line_num.or(line.old_line_num)?;
                 if first_num.is_none() {
                     first_num = Some(line_num);

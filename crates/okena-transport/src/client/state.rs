@@ -20,23 +20,15 @@ pub fn diff_states(old: &StateResponse, new: &StateResponse) -> StateDiff {
     let old_terminals = collect_all_terminal_ids(old);
     let new_terminals = collect_all_terminal_ids(new);
 
-    let added_terminals: Vec<String> = new_terminals
-        .difference(&old_terminals)
-        .cloned()
-        .collect();
+    let added_terminals: Vec<String> = new_terminals.difference(&old_terminals).cloned().collect();
 
-    let removed_terminals: Vec<String> = old_terminals
-        .difference(&new_terminals)
-        .cloned()
-        .collect();
+    let removed_terminals: Vec<String> =
+        old_terminals.difference(&new_terminals).cloned().collect();
 
     // Detect projects with layout changes by comparing serialized layouts
     let mut changed_projects = Vec::new();
-    let old_projects: std::collections::HashMap<&str, _> = old
-        .projects
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let old_projects: std::collections::HashMap<&str, _> =
+        old.projects.iter().map(|p| (p.id.as_str(), p)).collect();
 
     for new_proj in &new.projects {
         let changed = match old_projects.get(new_proj.id.as_str()) {
@@ -65,7 +57,14 @@ pub fn collect_all_terminal_ids(state: &StateResponse) -> HashSet<String> {
     let mut ids = HashSet::new();
     for project in &state.projects {
         if let Some(ref layout) = project.layout {
-            collect_layout_terminal_ids(layout, &mut ids);
+            ids.extend(collect_layout_terminal_ids(layout));
+        }
+        // Hook terminals live outside the layout tree (they render in the hook
+        // panel, not the pane grid), but they are real daemon PTYs — the client
+        // must subscribe to them too or their output never streams and the pane
+        // shows a live-but-empty terminal.
+        for hook in &project.hook_terminals {
+            ids.insert(hook.terminal_id.clone());
         }
     }
     ids
@@ -76,28 +75,24 @@ pub fn collect_state_terminal_ids(state: &StateResponse) -> Vec<String> {
     let mut ids = Vec::new();
     for project in &state.projects {
         if let Some(ref layout) = project.layout {
-            collect_layout_ids_vec(layout, &mut ids);
+            collect_layout_terminal_ids_into(layout, &mut ids);
+        }
+        // See `collect_all_terminal_ids`: hook-terminal PTYs must be subscribed.
+        for hook in &project.hook_terminals {
+            ids.push(hook.terminal_id.clone());
         }
     }
     ids
 }
 
-fn collect_layout_terminal_ids(node: &ApiLayoutNode, ids: &mut HashSet<String>) {
-    match node {
-        ApiLayoutNode::Terminal { terminal_id, .. } => {
-            if let Some(id) = terminal_id {
-                ids.insert(id.clone());
-            }
-        }
-        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
-            for child in children {
-                collect_layout_terminal_ids(child, ids);
-            }
-        }
-    }
+/// Collect terminal IDs from a single layout tree in render order.
+pub fn collect_layout_terminal_ids(node: &ApiLayoutNode) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_layout_terminal_ids_into(node, &mut ids);
+    ids
 }
 
-fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
+fn collect_layout_terminal_ids_into(node: &ApiLayoutNode, ids: &mut Vec<String>) {
     match node {
         ApiLayoutNode::Terminal { terminal_id, .. } => {
             if let Some(id) = terminal_id {
@@ -106,7 +101,7 @@ fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
         }
         ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
             for child in children {
-                collect_layout_ids_vec(child, ids);
+                collect_layout_terminal_ids_into(child, ids);
             }
         }
     }
@@ -116,7 +111,9 @@ fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
 ///
 /// Returns a map of terminal_id → (cols, rows) for terminals that have
 /// size information in the layout tree.
-pub fn collect_terminal_sizes(state: &StateResponse) -> std::collections::HashMap<String, (u16, u16)> {
+pub fn collect_terminal_sizes(
+    state: &StateResponse,
+) -> std::collections::HashMap<String, (u16, u16)> {
     let mut sizes = std::collections::HashMap::new();
     for project in &state.projects {
         if let Some(ref layout) = project.layout {
@@ -165,6 +162,7 @@ mod tests {
             project_order: vec![],
             folders: vec![],
             windows: vec![],
+            hooks: Vec::new(),
         }
     }
 
@@ -176,6 +174,7 @@ mod tests {
                 terminal_id: Some(terminal_ids[0].to_string()),
                 minimized: false,
                 detached: false,
+                shell_type: Default::default(),
                 cols: None,
                 rows: None,
             })
@@ -189,6 +188,7 @@ mod tests {
                         terminal_id: Some(tid.to_string()),
                         minimized: false,
                         detached: false,
+                        shell_type: Default::default(),
                         cols: None,
                         rows: None,
                     })
@@ -207,6 +207,13 @@ mod tests {
             services: vec![],
             worktree_info: None,
             worktree_ids: vec![],
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -228,6 +235,42 @@ mod tests {
         assert_eq!(diff.removed_terminals, vec!["t2"]);
     }
 
+    /// Hook terminals live outside the layout tree; the client must still
+    /// subscribe to them or their PTY output never streams (the pane renders a
+    /// live-but-empty terminal — e.g. an on_worktree_create hook).
+    #[test]
+    fn collectors_include_hook_terminal_ids() {
+        use okena_core::api::{ApiHookTerminalEntry, ApiHookTerminalStatus};
+        let mut proj = make_project("p1", vec!["t1"]);
+        proj.hook_terminals.push(ApiHookTerminalEntry {
+            terminal_id: "hook-1".to_string(),
+            label: "on_worktree_create".to_string(),
+            status: ApiHookTerminalStatus::Running,
+            hook_type: "on_worktree_create".to_string(),
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+        });
+        let state = make_state(vec![proj]);
+
+        assert!(
+            collect_state_terminal_ids(&state).contains(&"hook-1".to_string()),
+            "initial-subscribe seed must include hook terminal ids"
+        );
+        assert!(
+            collect_all_terminal_ids(&state).contains("hook-1"),
+            "diff base must include hook terminal ids"
+        );
+
+        // A newly-appearing hook terminal must show up in diff.added_terminals so
+        // the client sends a Subscribe for it.
+        let before = make_state(vec![make_project("p1", vec!["t1"])]);
+        let diff = diff_states(&before, &state);
+        assert!(
+            diff.added_terminals.contains(&"hook-1".to_string()),
+            "a new hook terminal must be diffed as added so it gets subscribed"
+        );
+    }
+
     #[test]
     fn diff_states_detects_changed_projects() {
         let old = make_state(vec![make_project("p1", vec!["t1"])]);
@@ -247,6 +290,55 @@ mod tests {
     }
 
     #[test]
+    fn collect_layout_terminal_ids_preserves_layout_order_and_skips_empty_ids() {
+        let layout = ApiLayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![
+                ApiLayoutNode::Terminal {
+                    terminal_id: Some("t1".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: Default::default(),
+                    cols: None,
+                    rows: None,
+                },
+                ApiLayoutNode::Terminal {
+                    terminal_id: None,
+                    minimized: false,
+                    detached: false,
+                    shell_type: Default::default(),
+                    cols: None,
+                    rows: None,
+                },
+                ApiLayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![
+                        ApiLayoutNode::Terminal {
+                            terminal_id: Some("t2".to_string()),
+                            minimized: false,
+                            detached: false,
+                            shell_type: Default::default(),
+                            cols: None,
+                            rows: None,
+                        },
+                        ApiLayoutNode::Terminal {
+                            terminal_id: Some("t3".to_string()),
+                            minimized: false,
+                            detached: false,
+                            shell_type: Default::default(),
+                            cols: None,
+                            rows: None,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        assert_eq!(collect_layout_terminal_ids(&layout), vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
     fn collect_terminal_sizes_extracts_from_layout() {
         let state = make_state(vec![ApiProject {
             id: "p1".into(),
@@ -261,6 +353,7 @@ mod tests {
                         terminal_id: Some("t1".into()),
                         minimized: false,
                         detached: false,
+                        shell_type: Default::default(),
                         cols: Some(120),
                         rows: Some(40),
                     },
@@ -268,6 +361,7 @@ mod tests {
                         terminal_id: Some("t2".into()),
                         minimized: false,
                         detached: false,
+                        shell_type: Default::default(),
                         cols: None,
                         rows: None,
                     },
@@ -279,6 +373,13 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: Vec::new(),
+            hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

@@ -3,13 +3,13 @@
 //! Shows a color swatch grid for project or folder color selection.
 //! Rendered at WindowView level via OverlayManager, like context menus.
 
+use gpui::prelude::*;
+use gpui::*;
 use okena_core::theme::FolderColor;
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
 use okena_workspace::state::Workspace;
-use gpui::*;
-use gpui::prelude::*;
 
 use crate::Cancel;
 
@@ -24,11 +24,25 @@ pub enum ColorPickerTarget {
 pub enum ColorPickerPopoverEvent {
     Close,
     /// Color was set on a project — sidebar should handle remote sync.
-    ProjectColorChanged { project_id: String, color: FolderColor },
+    ProjectColorChanged {
+        project_id: String,
+        color: FolderColor,
+    },
+    /// A worktree project's color override was reset to its parent.
+    WorktreeColorReset {
+        project_id: String,
+    },
+    /// Color was set on a folder.
+    FolderColorChanged {
+        folder_id: String,
+        color: FolderColor,
+    },
 }
 
 impl CloseEvent for ColorPickerPopoverEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<ColorPickerPopoverEvent> for ColorPickerPopover {}
@@ -49,7 +63,12 @@ impl ColorPickerPopover {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        Self { workspace, target, position, focus_handle }
+        Self {
+            workspace,
+            target,
+            position,
+            focus_handle,
+        }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -63,7 +82,12 @@ fn color_swatch_grid(
     current_color: FolderColor,
     t: &okena_core::theme::ThemeColors,
     cx: &mut Context<ColorPickerPopover>,
-    on_select: impl Fn(&mut ColorPickerPopover, FolderColor, &mut Window, &mut Context<ColorPickerPopover>) + 'static,
+    on_select: impl Fn(
+        &mut ColorPickerPopover,
+        FolderColor,
+        &mut Window,
+        &mut Context<ColorPickerPopover>,
+    ) + 'static,
 ) -> Div {
     let colors: Vec<(FolderColor, u32)> = FolderColor::all()
         .iter()
@@ -91,9 +115,7 @@ fn color_swatch_grid(
                 .when(is_selected, |d| {
                     d.border_2().border_color(rgb(t.text_primary))
                 })
-                .when(!is_selected, |d| {
-                    d.border_1().border_color(rgb(t.border))
-                })
+                .when(!is_selected, |d| d.border_1().border_color(rgb(t.border)))
                 .hover(|s| s.opacity(0.8))
                 .on_mouse_down(MouseButton::Left, {
                     let on_select = on_select.clone();
@@ -115,10 +137,13 @@ impl Render for ColorPickerPopover {
         let panel = match &self.target {
             ColorPickerTarget::Project { project_id } => {
                 let ws = self.workspace.read(cx);
-                let (current_color, has_color_override) = ws.project(project_id)
+                let (current_color, has_color_override) = ws
+                    .project(project_id)
                     .map(|p| {
                         let color = ws.effective_folder_color(p);
-                        let has_override = p.worktree_info.as_ref()
+                        let has_override = p
+                            .worktree_info
+                            .as_ref()
                             .and_then(|wt| wt.color_override)
                             .is_some();
                         (color, has_override)
@@ -130,16 +155,19 @@ impl Render for ColorPickerPopover {
                 okena_ui::popover::popover_panel("color-picker-panel", &t)
                     .child({
                         let pid = project_id_owned.clone();
-                        color_swatch_grid("color", current_color, &t, cx, move |this, color, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_folder_color(&pid, color, cx);
-                            });
-                            cx.emit(ColorPickerPopoverEvent::ProjectColorChanged {
-                                project_id: pid.clone(),
-                                color,
-                            });
-                            this.close(cx);
-                        })
+                        color_swatch_grid(
+                            "color",
+                            current_color,
+                            &t,
+                            cx,
+                            move |this, color, _window, cx| {
+                                cx.emit(ColorPickerPopoverEvent::ProjectColorChanged {
+                                    project_id: pid.clone(),
+                                    color,
+                                });
+                                this.close(cx);
+                            },
+                        )
                     })
                     .when(has_color_override, |panel| {
                         let project_id_clone = project_id_owned.clone();
@@ -161,21 +189,30 @@ impl Render for ColorPickerPopover {
                                         .cursor_pointer()
                                         .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_secondary))
-                                        .hover(|s| s.text_color(rgb(t.text_primary)).bg(rgb(t.bg_hover)))
+                                        .hover(|s| {
+                                            s.text_color(rgb(t.text_primary)).bg(rgb(t.bg_hover))
+                                        })
                                         .child("Reset to parent")
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
-                                            this.workspace.update(cx, |ws, cx| {
-                                                ws.set_worktree_color_override(&project_id_clone, None, cx);
-                                            });
-                                            this.close(cx);
-                                        }))
-                                )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _window, cx| {
+                                                cx.emit(
+                                                    ColorPickerPopoverEvent::WorktreeColorReset {
+                                                        project_id: project_id_clone.clone(),
+                                                    },
+                                                );
+                                                this.close(cx);
+                                            }),
+                                        ),
+                                ),
                         )
                     })
                     .into_any_element()
             }
             ColorPickerTarget::Folder { folder_id } => {
-                let current_color = self.workspace.read(cx)
+                let current_color = self
+                    .workspace
+                    .read(cx)
                     .folder(folder_id)
                     .map(|f| f.folder_color)
                     .unwrap_or_default();
@@ -185,12 +222,19 @@ impl Render for ColorPickerPopover {
                 okena_ui::popover::popover_panel("folder-color-picker-panel", &t)
                     .child({
                         let fid = folder_id_owned.clone();
-                        color_swatch_grid("folder-color", current_color, &t, cx, move |this, color, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_folder_item_color(&fid, color, cx);
-                            });
-                            this.close(cx);
-                        })
+                        color_swatch_grid(
+                            "folder-color",
+                            current_color,
+                            &t,
+                            cx,
+                            move |this, color, _window, cx| {
+                                cx.emit(ColorPickerPopoverEvent::FolderColorChanged {
+                                    folder_id: fid.clone(),
+                                    color,
+                                });
+                                this.close(cx);
+                            },
+                        )
                     })
                     .into_any_element()
             }
@@ -208,18 +252,23 @@ impl Render for ColorPickerPopover {
             .inset_0()
             .occlude()
             .id("color-picker-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_scroll_wheel(|_, _, cx| { cx.stop_propagation(); })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(panel)
+                anchored().position(position).snap_to_window().child(panel),
             ))
     }
 }

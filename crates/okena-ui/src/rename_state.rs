@@ -51,17 +51,18 @@ where
     let subscription = cx.on_blur(&focus_handle, window, on_blur);
     window.focus(&focus_handle, cx);
 
-    RenameState { target, input, _blur_subscription: Some(subscription) }
+    RenameState {
+        target,
+        input,
+        _blur_subscription: Some(subscription),
+    }
 }
 
 /// Finish a rename operation and get the result.
 ///
 /// Returns `Some((target, new_name))` if the rename was active and the name is not empty.
 /// Returns `None` if the state was `None` or the input was empty.
-pub fn finish_rename<Id>(
-    state: &mut Option<RenameState<Id>>,
-    cx: &App,
-) -> Option<(Id, String)> {
+pub fn finish_rename<Id>(state: &mut Option<RenameState<Id>>, cx: &App) -> Option<(Id, String)> {
     let rename_state = state.take()?;
     let new_name = rename_state.value(cx);
 

@@ -2,16 +2,17 @@ use std::collections::HashMap;
 
 use super::types::ActionDescription;
 use super::{
-    AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
-    CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
-    FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
-    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
-    MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, ScrollDown, ScrollUp,
-    Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer, ReviewChanges,
-    ShowContentSearch, ShowFileSearch, ShowHookLog, ShowLogConsole, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
-    ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
-    StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
-    ZoomIn, ZoomOut, EqualizeLayout, ToggleProjectLayout, ShowBranchSwitcher, ShowProfileManager,
+    AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy, CreateWorktree,
+    EqualizeLayout, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal,
+    FocusRight, FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
+    InstallUpdate, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
+    JumpToPreviousPrompt, MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit,
+    ResetZoom, RestartDaemon, ReviewChanges, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev,
+    SendEscape, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
+    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
+    ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
+    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -593,6 +594,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Open an additional window onto the workspace",
             category: "Window",
             factory: || Box::new(NewWindow),
+        },
+    );
+
+    map.insert(
+        "RestartDaemon",
+        ActionDescription {
+            name: "Restart Daemon",
+            description: "Restart the local daemon (ends all terminal sessions) and reconnect",
+            category: "Global",
+            factory: || Box::new(RestartDaemon),
         },
     );
 

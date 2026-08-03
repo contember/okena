@@ -94,14 +94,22 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
 
     // Compute the prefix from workdir to query_path. Empty when query_path
     // is the workdir itself.
-    let canonical_query = query_path.canonicalize().unwrap_or_else(|_| query_path.to_path_buf());
-    let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf());
+    let canonical_query = query_path
+        .canonicalize()
+        .unwrap_or_else(|_| query_path.to_path_buf());
+    let canonical_workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
     let prefix: String = canonical_query
         .strip_prefix(&canonical_workdir)
         .ok()
         .map(|p| {
             let s = p.to_string_lossy().to_string();
-            if s.is_empty() { String::new() } else { format!("{}/", s) }
+            if s.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", s)
+            }
         })
         .unwrap_or_default();
 
@@ -118,7 +126,10 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
     {
         Ok(i) => i,
         Err(e) => {
-            log::warn!("gix status iter init failed for {}: {e}", query_path.display());
+            log::warn!(
+                "gix status iter init failed for {}: {e}",
+                query_path.display()
+            );
             return None;
         }
     };
@@ -128,7 +139,10 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
         let item = match item_result {
             Ok(i) => i,
             Err(e) => {
-                log::warn!("gix status iteration failed for {}: {e}", query_path.display());
+                log::warn!(
+                    "gix status iteration failed for {}: {e}",
+                    query_path.display()
+                );
                 return None;
             }
         };

@@ -26,7 +26,10 @@ pub(crate) struct PromptTracker {
 
 impl PromptTracker {
     pub(super) fn new() -> Self {
-        Self { marks: VecDeque::with_capacity(64), capacity: 64 }
+        Self {
+            marks: VecDeque::with_capacity(64),
+            capacity: 64,
+        }
     }
 
     /// Record a new mark at the given grid point. Evicts the oldest mark
@@ -80,7 +83,11 @@ pub(super) fn parse_osc133_kind(kind: u8, rest: &[&[u8]]) -> Option<PromptMarkKi
                 .and_then(|p| std::str::from_utf8(p).ok())
                 .and_then(|s| {
                     let s = s.trim();
-                    if s.is_empty() { None } else { s.parse::<i32>().ok() }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        s.parse::<i32>().ok()
+                    }
                 });
             Some(PromptMarkKind::CommandFinished { exit_code })
         }
@@ -117,8 +124,12 @@ impl Perform for PromptSidecarPerform {
         if params.first().copied() != Some(b"133".as_ref()) {
             return;
         }
-        let Some(kind_param) = params.get(1) else { return };
-        let Some(&kind_byte) = kind_param.first() else { return };
+        let Some(kind_param) = params.get(1) else {
+            return;
+        };
+        let Some(&kind_byte) = kind_param.first() else {
+            return;
+        };
         if let Some(kind) = parse_osc133_kind(kind_byte, &params[2..]) {
             self.pending = Some(kind);
         }

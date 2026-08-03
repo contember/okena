@@ -22,8 +22,8 @@ pub enum ConnectionStatus {
 /// Messages sent from the UI thread to the WebSocket writer task.
 #[derive(Debug)]
 pub enum WsClientMessage {
-    /// Send text input to a remote terminal
-    SendText { terminal_id: String, text: String },
+    /// Send byte-exact input to a remote terminal.
+    SendInput { terminal_id: String, data: Vec<u8> },
     /// Resize a remote terminal
     Resize {
         terminal_id: String,
@@ -72,6 +72,11 @@ pub enum ConnectionEvent {
         connection_id: String,
         state: StateResponse,
     },
+    /// Daemon-authoritative settings snapshot changed.
+    SettingsChanged {
+        connection_id: String,
+        settings: serde_json::Value,
+    },
     /// Stream subscription mappings received
     SubscriptionMappings {
         connection_id: String,
@@ -86,6 +91,24 @@ pub enum ConnectionEvent {
     GitStatusChanged {
         connection_id: String,
         statuses: HashMap<String, okena_core::api::ApiGitStatus>,
+    },
+    /// System metrics changed on the remote host.
+    SystemStatsChanged {
+        connection_id: String,
+        stats: okena_core::api::ApiSystemStats,
+    },
+    /// A daemon-originated toast to display on this client (e.g. a remote
+    /// lifecycle-hook failure). The daemon has no surface, so it forwards these
+    /// over the WebSocket and the client renders them via its `ToastManager`.
+    Toast {
+        connection_id: String,
+        toast: okena_core::api::ApiToast,
+    },
+    /// One-shot request for the desktop client to focus and raise an exact
+    /// terminal. IDs are server-local and are prefixed by the manager.
+    TerminalFocusRequested {
+        connection_id: String,
+        request: okena_core::api::ApiTerminalFocusRequest,
     },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {
@@ -122,11 +145,11 @@ mod tests {
 
     #[test]
     fn ws_client_message_debug() {
-        let msg = WsClientMessage::SendText {
+        let msg = WsClientMessage::SendInput {
             terminal_id: "t1".to_string(),
-            text: "hello".to_string(),
+            data: b"hello".to_vec(),
         };
         let debug = format!("{:?}", msg);
-        assert!(debug.contains("SendText"));
+        assert!(debug.contains("SendInput"));
     }
 }

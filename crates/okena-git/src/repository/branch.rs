@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use okena_core::process::{command, safe_output};
 
 use super::{head_branch_short, path_str, require_success};
@@ -19,7 +21,8 @@ pub fn list_branches(path: &Path) -> Vec<String> {
 /// Get branches that don't have a worktree yet
 pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
     let all_branches = list_branches(path);
-    let used_branches: std::collections::HashSet<_> = super::get_worktree_branches(path).into_iter().collect();
+    let used_branches: std::collections::HashSet<_> =
+        super::get_worktree_branches(path).into_iter().collect();
 
     all_branches
         .into_iter()
@@ -29,24 +32,39 @@ pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
 
 /// Get the default branch of a repository (e.g. "main" or "master").
 /// Checks the `origin/HEAD` symref first, then falls back to checking for
-/// local `main` / `master` branches.
+/// remote/local `main` / `master` branches.
 pub fn get_default_branch(repo_path: &Path) -> Option<String> {
     let repo = crate::gix_helpers::open(repo_path)?;
 
     // Read refs/remotes/origin/HEAD; it is a symbolic ref whose target points
-    // at e.g. refs/remotes/origin/main.
+    // at e.g. refs/remotes/origin/main. Ignore stale/dangling targets left by
+    // renamed or deleted default branches.
     if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Some(target_name) = head_ref.target().try_name() {
-            let target = target_name.as_bstr().to_string();
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
-                && !branch.is_empty() {
-                    return Some(branch.to_string());
-                }
+        && let Some(target_name) = head_ref.target().try_name()
+    {
+        let target = target_name.as_bstr().to_string();
+        if let Some(branch) = target.strip_prefix("refs/remotes/origin/")
+            && !branch.is_empty()
+            && repo.find_reference(target.as_str()).is_ok()
+        {
+            return Some(branch.to_string());
         }
+    }
 
-    // Fallback: check if main or master branch exists locally.
+    // Fallback: check if main or master exists on origin, then locally.
     for candidate in ["main", "master"] {
-        if repo.find_reference(&format!("refs/heads/{}", candidate)).is_ok() {
+        if repo
+            .find_reference(&format!("refs/remotes/origin/{}", candidate))
+            .is_ok()
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    for candidate in ["main", "master"] {
+        if repo
+            .find_reference(&format!("refs/heads/{}", candidate))
+            .is_ok()
+        {
             return Some(candidate.to_string());
         }
     }
@@ -67,7 +85,8 @@ pub fn resolve_review_base(repo_path: &Path) -> Option<String> {
 
     // Don't offer reviewing the default branch against itself.
     if let Some(current) = super::status::get_current_branch(repo_path)
-        && current == default {
+        && current == default
+    {
         return None;
     }
 
@@ -126,8 +145,16 @@ pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> GitResult<()> {
 /// Stash uncommitted changes.
 pub fn stash_changes(path: &Path) -> GitResult<()> {
     let p = path_str(path)?;
-    let output = safe_output(command("git").args(["-C", p, "stash"]))?;
-    require_success(output)
+    let output =
+        safe_output(command("git").args(["-C", p, "stash", "push", "--include-untracked"]))?;
+    require_success(output)?;
+    if crate::repository::status::has_uncommitted_changes(path) {
+        return Err(GitError::UnsafeWorktree {
+            path: path.to_path_buf(),
+            reason: "checkout remains dirty after stash; refusing destructive removal".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Pop the most recent stash entry.
@@ -149,7 +176,8 @@ pub fn stage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
 /// Works for both modified and newly-added files.
 pub fn unstage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
     let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "restore", "--staged", "--", file_path]))?;
+    let output =
+        safe_output(command("git").args(["-C", p, "restore", "--staged", "--", file_path]))?;
     require_success(output)
 }
 
@@ -196,7 +224,8 @@ pub fn delete_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
+    let output =
+        safe_output(command("git").args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
     require_success(output)
 }
 
@@ -210,7 +239,7 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 
 /// Branch list classified into local and remote, with the current branch name
 /// (if HEAD points at a branch).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchList {
     /// Local branch names.
     pub local: Vec<String>,
@@ -258,9 +287,10 @@ pub fn list_branches_classified(path: &Path) -> BranchList {
             }
             // Skip remote refs that have a corresponding local branch
             if let Some(stripped) = name.strip_prefix("origin/")
-                && local_names.contains(stripped) {
-                    continue;
-                }
+                && local_names.contains(stripped)
+            {
+                continue;
+            }
             remote.push(name);
         }
     }
@@ -356,6 +386,70 @@ mod tests {
     }
 
     #[test]
+    fn stash_changes_preserves_untracked_file_from_linked_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let worktree_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let worktree = worktree_tmp.path().join("feature");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        );
+        std::fs::write(worktree.join("untracked.txt"), "preserve me\n").unwrap();
+
+        stash_changes(&worktree).expect("stash untracked file");
+
+        assert!(!worktree.join("untracked.txt").exists());
+        assert!(!crate::repository::status::has_uncommitted_changes(
+            &worktree
+        ));
+        git_in(&repo, &["worktree", "remove", worktree.to_str().unwrap()]);
+        git_in(&repo, &["stash", "apply"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("untracked.txt")).unwrap(),
+            "preserve me\n"
+        );
+    }
+
+    #[test]
+    fn stash_changes_rejects_dirty_submodule_checkout() {
+        let (_tmp, repo) = init_temp_repo();
+        let submodule_tmp = tempfile::tempdir().expect("create submodule tempdir");
+        let submodule = submodule_tmp.path();
+        git_in(submodule, &["init", "-b", "main"]);
+        std::fs::write(submodule.join("sub.txt"), "base\n").unwrap();
+        git_in(submodule, &["add", "sub.txt"]);
+        git_in(submodule, &["commit", "-m", "base"]);
+        git_in(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                submodule.to_str().unwrap(),
+                "submodule",
+            ],
+        );
+        git_in(&repo, &["commit", "-m", "add submodule"]);
+        std::fs::write(repo.join("submodule/sub.txt"), "dirty\n").unwrap();
+
+        let error = stash_changes(&repo).expect_err("dirty submodule must block removal");
+
+        assert!(error.to_string().contains("remains dirty after stash"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("submodule/sub.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert!(crate::repository::status::has_uncommitted_changes(&repo));
+    }
+
+    #[test]
     fn stash_pop_returns_err_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(stash_pop(&path).is_err());
@@ -417,8 +511,7 @@ mod tests {
     #[test]
     fn create_and_checkout_branch_switches_head() {
         let (_tmp, repo) = init_temp_repo();
-        create_and_checkout_branch(&repo, "feat/header-redesign", None)
-            .expect("create branch");
+        create_and_checkout_branch(&repo, "feat/header-redesign", None).expect("create branch");
         assert_eq!(
             get_current_branch(&repo).as_deref(),
             Some("feat/header-redesign")
@@ -453,6 +546,24 @@ mod tests {
     }
 
     #[test]
+    fn get_default_branch_ignores_stale_origin_head() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["branch", "backup/pre-cleanup"]);
+        git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/backup/pre-cleanup",
+            ],
+        );
+
+        assert_eq!(get_default_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(resolve_review_base(&repo), None);
+    }
+
+    #[test]
     fn resolve_review_base_is_none_on_default_branch() {
         let (_tmp, repo) = init_temp_repo();
         // HEAD is on "main" (the default branch) — nothing to review against.
@@ -481,11 +592,17 @@ mod tests {
 
         // Add an origin remote-tracking ref: now preferred over local.
         git_in(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("origin/main"));
+        assert_eq!(
+            resolve_base_ref(&repo, "main").as_deref(),
+            Some("origin/main")
+        );
 
         // Add an upstream remote-tracking ref: fork workflow — upstream wins.
         git_in(&repo, &["update-ref", "refs/remotes/upstream/main", "HEAD"]);
-        assert_eq!(resolve_base_ref(&repo, "main").as_deref(), Some("upstream/main"));
+        assert_eq!(
+            resolve_base_ref(&repo, "main").as_deref(),
+            Some("upstream/main")
+        );
     }
 
     #[test]

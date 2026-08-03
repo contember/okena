@@ -5,26 +5,30 @@ use crate::code_view::{
     selection_bg_ranges,
 };
 use crate::file_search::Cancel;
-use crate::file_tree::{expandable_file_row, expandable_folder_row};
+use crate::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
 use crate::syntax::HighlightedLine;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
-use std::path::PathBuf;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
-use okena_ui::modal::{detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer, window_min_max_controls};
-use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
+use okena_ui::modal::{
+    detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
+    window_min_max_controls,
+};
+use okena_ui::resizable_sidebar::resizable_sidebar;
+use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, FontData, PreviewBackground, SIDEBAR_WIDTH};
+use super::{DisplayMode, FileViewer, FontData, PreviewBackground};
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -198,76 +202,94 @@ impl FileViewer {
         let active_count = self.show_ignored as u8;
         let _is_open = self.filter_popover_open;
 
-        div()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
-            .border_r_1()
+        let header = div()
+            .px(px(12.0))
+            .py(px(10.0))
+            .border_b_1()
             .border_color(rgb(t.border))
-            .bg(rgb(t.bg_primary))
             .flex()
-            .flex_col()
+            .items_center()
+            .justify_between()
             .child(
                 div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_secondary))
-                            .line_height(px(11.0))
-                            .child("Files"),
-                    )
-                    .child({
-                        let entity = cx.entity().downgrade();
-                        let entity2 = entity.clone();
-                        crate::list_overlay::file_filter_button(
-                            "fv-filter-btn", active_count, t, cx,
-                            move |_, _, cx| {
-                                if let Some(e) = entity.upgrade() {
-                                    e.update(cx, |this, cx| {
-                                        this.filter_popover_open = !this.filter_popover_open;
-                                        cx.notify();
-                                    });
-                                }
-                            },
-                            move |bounds, _, cx| {
-                                if let Some(e) = entity2.upgrade() {
-                                    e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
-                                }
-                            },
-                        )
-                    }),
+                    .text_size(ui_text_ms(cx))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(t.text_secondary))
+                    .line_height(px(11.0))
+                    .child("Files"),
             )
-            .child(
-                div()
-                    .id("file-viewer-tree")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll_handle)
-                    .py(px(6.0))
-                    .children(tree_elements),
-            )
+            .child({
+                let entity = cx.entity().downgrade();
+                let entity2 = entity.clone();
+                crate::list_overlay::file_filter_button(
+                    "fv-filter-btn",
+                    active_count,
+                    t,
+                    cx,
+                    move |_, _, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.filter_popover_open = !this.filter_popover_open;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    move |bounds, _, cx| {
+                        if let Some(e) = entity2.upgrade() {
+                            e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                        }
+                    },
+                )
+            });
+
+        let tree = div()
+            .id("file-viewer-tree")
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll_handle)
+            .py(px(6.0))
+            .when_some(self.tree_error_message.clone(), |d, error| {
+                d.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.error))
+                        .child(error),
+                )
+            })
+            .children(tree_elements);
+
+        let entity = cx.entity().downgrade();
+        let entity_for_end = entity.clone();
+        resizable_sidebar(
+            self.sidebar_resize.width(),
+            t.bg_primary,
+            t.border,
+            t.border_active,
+            vec![header.into_any_element(), tree.into_any_element()],
+            move |mouse_pos, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, _| {
+                        this.sidebar_resize.start_resize(f32::from(mouse_pos.x));
+                    });
+                }
+            },
+            move |cx| {
+                if let Some(entity) = entity_for_end.upgrade() {
+                    entity.update(cx, |this, _| this.sidebar_resize.end_resize());
+                }
+            },
+        )
     }
 
-
-    /// Recursively render file tree nodes with expand/collapse, lazy-loading
-    /// directory listings via `loaded_dirs` as folders open.
-    pub(super) fn render_tree_node(
+    /// Render the canonical visible file-tree rows.
+    pub(super) fn render_file_tree(
         &self,
-        parent_relative: &str,
-        depth: usize,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut elements: Vec<AnyElement> = Vec::new();
-
-        // Active and open file paths drive highlighting in the tree.
         let active_relative = self.active_tab().relative_path.clone();
         let open_relatives: std::collections::HashSet<String> = self
             .tabs
@@ -276,48 +298,34 @@ impl FileViewer {
             .map(|t| t.relative_path.clone())
             .collect();
 
-        let entries = match self.loaded_dirs.get(parent_relative) {
-            Some(entries) => entries,
-            None => {
-                if self.loading_dirs.contains(parent_relative) {
+        for row in self.file_tree_rows(false) {
+            match row {
+                FileTreeRow::Folder {
+                    path, name, depth, ..
+                } => {
+                    self.render_folder_row(&mut elements, &name, &path, depth, t, cx);
+                }
+                FileTreeRow::File {
+                    item: file_relative,
+                    depth,
+                } => {
+                    let filename = file_relative.rsplit('/').next().unwrap_or(&file_relative);
+                    let is_active = active_relative == file_relative;
+                    let is_open = open_relatives.contains(&file_relative);
+                    self.render_file_row(
+                        &mut elements,
+                        filename,
+                        &file_relative,
+                        depth,
+                        is_active,
+                        is_open,
+                        t,
+                        cx,
+                    );
+                }
+                FileTreeRow::Loading { depth } => {
                     elements.push(loading_row(depth, t, cx).into_any_element());
                 }
-                return elements;
-            }
-        };
-
-        for entry in entries {
-            let child_relative = if parent_relative.is_empty() {
-                entry.name.clone()
-            } else {
-                format!("{}/{}", parent_relative, entry.name)
-            };
-
-            if entry.is_dir {
-                self.render_folder_row(
-                    &mut elements,
-                    entry,
-                    &child_relative,
-                    depth,
-                    t,
-                    cx,
-                );
-                if self.expanded_folders.contains(&child_relative) {
-                    elements.extend(self.render_tree_node(&child_relative, depth + 1, t, cx));
-                }
-            } else {
-                let is_active = active_relative == child_relative;
-                let is_open = open_relatives.contains(&child_relative);
-                self.render_file_row(
-                    &mut elements,
-                    entry,
-                    &child_relative,
-                    depth,
-                    is_active,
-                    is_open,
-                    t,
-                    cx,
-                );
             }
         }
 
@@ -327,7 +335,7 @@ impl FileViewer {
     fn render_folder_row(
         &self,
         elements: &mut Vec<AnyElement>,
-        entry: &crate::list_directory::DirEntry,
+        name: &str,
         folder_relative: &str,
         depth: usize,
         t: &ThemeColors,
@@ -383,14 +391,13 @@ impl FileViewer {
 
         let folder_for_click = folder_relative.to_string();
         let folder_for_ctx = folder_relative.to_string();
-        let abs_path_for_ctx = match self.project_fs.project_root() {
-            Some(root) => root.join(folder_relative),
-            None => PathBuf::from(folder_relative),
-        };
+        let abs_path_for_ctx = PathBuf::from(self.project_fs.project_id()).join(folder_relative);
 
         elements.push(
-            expandable_folder_row(&entry.name, depth, is_expanded, t, cx)
-                .id(ElementId::Name(format!("fv-folder-{}", folder_relative).into()))
+            expandable_folder_row(name, depth, is_expanded, t, cx)
+                .id(ElementId::Name(
+                    format!("fv-folder-{}", folder_relative).into(),
+                ))
                 .when(is_ctx_target, |d| d.bg(rgb(t.bg_selection)))
                 .on_click(cx.listener(move |this, _, _window, cx| {
                     this.toggle_folder(&folder_for_click, cx);
@@ -422,7 +429,7 @@ impl FileViewer {
     fn render_file_row(
         &self,
         elements: &mut Vec<AnyElement>,
-        entry: &crate::list_directory::DirEntry,
+        filename: &str,
         file_relative: &str,
         depth: usize,
         is_active: bool,
@@ -430,10 +437,7 @@ impl FileViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) {
-        let abs_path = match self.project_fs.project_root() {
-            Some(root) => root.join(file_relative),
-            None => PathBuf::from(file_relative),
-        };
+        let abs_path = PathBuf::from(self.project_fs.project_id()).join(file_relative);
         let is_renaming = self.is_renaming_file(&abs_path);
         let is_ctx_target = self.is_context_menu_target_file(&abs_path);
         let highlight = is_active || is_ctx_target;
@@ -441,7 +445,9 @@ impl FileViewer {
 
         if is_renaming {
             let mut row = div()
-                .id(ElementId::Name(format!("fv-file-{}-rename", file_relative).into()))
+                .id(ElementId::Name(
+                    format!("fv-file-{}-rename", file_relative).into(),
+                ))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -449,7 +455,7 @@ impl FileViewer {
                 .pl(px(indent + 8.0 + 18.0))
                 .pr(px(12.0))
                 .bg(rgb(t.bg_selection))
-                .child(file_icon(&entry.name, t, cx).mr(px(4.0)));
+                .child(file_icon(filename, t, cx).mr(px(4.0)));
             if let Some(input) = self.render_rename_input(t, cx) {
                 row = row.child(input);
             }
@@ -464,7 +470,7 @@ impl FileViewer {
 
         let file_relative_for_click = file_relative.to_string();
         elements.push(
-            expandable_file_row(&entry.name, depth, None, is_open || is_active, t, cx)
+            expandable_file_row(filename, depth, None, is_open || is_active, t, cx)
                 .id(ElementId::Name(format!("fv-file-{}", file_relative).into()))
                 .when(highlight, |d| d.bg(rgba(t.bg_selection, 0.5)))
                 .on_click(cx.listener(move |this, _, _window, cx| {
@@ -559,8 +565,7 @@ impl FileViewer {
                     .border_color(rgb(t.border))
                     .cursor_pointer()
                     .when(is_active, |d| {
-                        d.bg(rgb(t.bg_secondary))
-                            .text_color(rgb(t.text_primary))
+                        d.bg(rgb(t.bg_secondary)).text_color(rgb(t.text_primary))
                     })
                     .when(!is_active, |d| {
                         d.bg(rgb(t.bg_header))
@@ -579,11 +584,10 @@ impl FileViewer {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            this.tab_context_menu =
-                                Some(super::context_menu::TabContextMenu {
-                                    position: event.position,
-                                    tab_index: i,
-                                });
+                            this.tab_context_menu = Some(super::context_menu::TabContextMenu {
+                                position: event.position,
+                                tab_index: i,
+                            });
                             cx.notify();
                         }),
                     )
@@ -711,13 +715,7 @@ impl FileViewer {
             )
     }
 
-    fn render_hint(
-        &self,
-        key: &str,
-        action: &str,
-        t: &ThemeColors,
-        cx: &App,
-    ) -> impl IntoElement {
+    fn render_hint(&self, key: &str, action: &str, t: &ThemeColors, cx: &App) -> impl IntoElement {
         h_flex()
             .gap(px(4.0))
             .child(
@@ -757,8 +755,9 @@ impl FileViewer {
         };
 
         if needs_new {
+            // Unmeasured items are zero-height, making the scrollbar grow while scrolling.
             tab.markdown_list_state =
-                Some(ListState::new(count, ListAlignment::Top, px(400.0)));
+                Some(ListState::new(count, ListAlignment::Top, px(400.0)).measure_all());
             tab.markdown_list_nodes = count;
             tab.markdown_list_font = font;
         } else if tab.markdown_list_font != font {
@@ -819,17 +818,16 @@ impl FileViewer {
         };
 
         let fallback_muted = muted;
-        let img_element = img(image)
-            .with_fallback(move || {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(14.0))
-                    .text_color(rgb(fallback_muted))
-                    .child("Cannot decode image")
-                    .into_any_element()
-            });
+        let img_element = img(image).with_fallback(move || {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(14.0))
+                .text_color(rgb(fallback_muted))
+                .child("Cannot decode image")
+                .into_any_element()
+        });
 
         let img_styled: AnyElement = if auto_fit {
             img_element
@@ -1082,7 +1080,11 @@ fn image_background_toggle(
                 .when(is_active, |d| d.bg(rgb(t_active)))
                 .when(!is_active, |d| d.hover(|s| s.bg(rgb(t_hover))))
                 .text_size(px(12.0))
-                .text_color(rgb(if is_active { t_text_primary } else { t_text_muted }))
+                .text_color(rgb(if is_active {
+                    t_text_primary
+                } else {
+                    t_text_muted
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.image_set_background(bg, cx);
                 }))
@@ -1201,7 +1203,7 @@ impl Render for FileViewer {
 
         // Pre-render tree elements for sidebar
         let tree_elements = if sidebar_visible {
-            self.render_tree_node("", 0, &t, cx)
+            self.render_file_tree(&t, cx)
         } else {
             Vec::new()
         };
@@ -1209,12 +1211,12 @@ impl Render for FileViewer {
         // Markdown preview uses a virtualized list (built below) so only the
         // visible blocks are rendered per frame. Ensure the per-tab ListState
         // exists and matches the current document and font size.
-        let markdown_list_state: Option<ListState> =
-            if !has_error && is_preview_mode && is_markdown {
-                self.ensure_markdown_list_state(cx)
-            } else {
-                None
-            };
+        let markdown_list_state: Option<ListState> = if !has_error && is_preview_mode && is_markdown
+        {
+            self.ensure_markdown_list_state(cx)
+        } else {
+            None
+        };
 
         // Render tab bar
         let tab_bar: Option<AnyElement> = if show_tabs {
@@ -1224,22 +1226,23 @@ impl Render for FileViewer {
         };
 
         // Focus on first render, but not when inline rename or search input is active
-        if self.rename_state.is_none() && self.search_state.is_none() && !focus_handle.is_focused(window) {
+        if self.rename_state.is_none()
+            && self.search_state.is_none()
+            && !focus_handle.is_focused(window)
+        {
             window.focus(&focus_handle, cx);
         }
 
         let outer = if self.is_detached {
             fullscreen_panel("file-viewer", &t)
-                .when(
-                    cfg!(target_os = "macos") && !window.is_fullscreen(),
-                    |d| d.pt(px(28.0)),
-                )
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.pt(px(28.0))
+                })
         } else {
             fullscreen_overlay("file-viewer", &t)
-                .when(
-                    cfg!(target_os = "macos") && !window.is_fullscreen(),
-                    |d| d.top(px(28.0)),
-                )
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.top(px(28.0))
+                })
         };
         outer
             .track_focus(&focus_handle)
@@ -1290,6 +1293,9 @@ impl Render for FileViewer {
                 if this.search_state.as_ref().is_some_and(|s| {
                     s.input.read(cx).focus_handle(cx).is_focused(window)
                 }) {
+                    return;
+                }
+                if this.rename_state.is_some() {
                     return;
                 }
 
@@ -1366,6 +1372,8 @@ impl Render for FileViewer {
                     "r" if !modifiers.platform && !modifiers.control => {
                         this.refresh_file_tree_async(cx);
                     }
+                    "up" => this.previous_file_tree_item(cx),
+                    "down" => this.next_file_tree_item(cx),
                     "left" if modifiers.alt => {
                         this.go_back(cx);
                     }
@@ -1376,6 +1384,10 @@ impl Render for FileViewer {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let x = f32::from(event.position.x);
+                if this.sidebar_resize.update_resize(x) {
+                    cx.notify();
+                }
                 if this.active_tab().scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
@@ -2164,11 +2176,12 @@ impl FileViewer {
             )
             .child(okena_ui::menu::menu_separator(t))
             .child(
-                okena_ui::menu::menu_item("fv-sel-ctx-copy", "icons/copy.svg", "Copy", t)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                okena_ui::menu::menu_item("fv-sel-ctx-copy", "icons/copy.svg", "Copy", t).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.selection_context_menu = None;
                         this.copy_selection(cx);
-                    })),
+                    }),
+                ),
             );
 
         Some(
@@ -2243,10 +2256,20 @@ fn render_font_preview(
         ("Full name", data.full_name.clone()),
         ("Style", data.style.clone()),
         ("Weight class", data.weight_class.to_string()),
-        ("Italic", if data.is_italic { "yes" } else { "no" }.to_string()),
+        (
+            "Italic",
+            if data.is_italic { "yes" } else { "no" }.to_string(),
+        ),
         ("Glyphs", data.num_glyphs.to_string()),
         ("Units per em", data.units_per_em.to_string()),
-        ("Version", if data.version.is_empty() { "—".to_string() } else { data.version.clone() }),
+        (
+            "Version",
+            if data.version.is_empty() {
+                "—".to_string()
+            } else {
+                data.version.clone()
+            },
+        ),
     ];
 
     let metadata_block = v_flex()
@@ -2280,12 +2303,7 @@ fn render_font_preview(
                 .gap(px(32.0))
                 .p(px(32.0))
                 .child(sample_block)
-                .child(
-                    div()
-                        .h(px(1.0))
-                        .bg(rgb(t.border))
-                        .w_full(),
-                )
+                .child(div().h(px(1.0)).bg(rgb(t.border)).w_full())
                 .child(metadata_block),
         )
         .into_any_element()

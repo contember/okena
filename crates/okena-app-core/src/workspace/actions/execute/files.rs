@@ -4,6 +4,12 @@ use super::{
     ActionResult, Workspace, resolve_new_project_file, resolve_project_file, validate_leaf_name,
 };
 
+pub struct PreparedContentSearch {
+    project_path: std::path::PathBuf,
+    query: String,
+    config: okena_files::content_search::ContentSearchConfig,
+}
+
 pub(super) fn list_files(ws: &Workspace, project_id: String, show_ignored: bool) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
@@ -11,14 +17,21 @@ pub(super) fn list_files(ws: &Workspace, project_id: String, show_ignored: bool)
                 Ok(c) => c,
                 Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
             };
-            let files = okena_files::file_search::FileSearchDialog::scan_files(&path, show_ignored);
-            ActionResult::Ok(Some(serde_json::to_value(files).expect("BUG: FileEntry must serialize")))
+            let files = okena_files::file_scan::scan_files(&path, show_ignored);
+            ActionResult::Ok(Some(
+                serde_json::to_value(files).expect("BUG: FileEntry must serialize"),
+            ))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
     }
 }
 
-pub(super) fn list_directory(ws: &Workspace, project_id: String, relative_path: String, show_ignored: bool) -> ActionResult {
+pub(super) fn list_directory(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+    show_ignored: bool,
+) -> ActionResult {
     match ws.project(&project_id) {
         Some(p) => {
             let path = match std::path::Path::new(&p.path).canonicalize() {
@@ -59,7 +72,11 @@ pub(super) fn read_file(ws: &Workspace, project_id: String, relative_path: Strin
 /// resident multiple is roughly 3-4× the file size).
 const MAX_READ_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
-pub(super) fn read_file_bytes(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
+pub(super) fn read_file_bytes(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+) -> ActionResult {
     use base64::Engine as _;
     match ws.project(&project_id) {
         Some(p) => {
@@ -108,11 +125,91 @@ pub(super) fn file_size(ws: &Workspace, project_id: String, relative_path: Strin
                 Err(e) => return ActionResult::Err(e),
             };
             match std::fs::metadata(&canonical) {
-                Ok(m) => ActionResult::Ok(Some(serde_json::json!({ "size": m.len() }))),
+                Ok(m) => {
+                    let modified_at_millis = m
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+                    ActionResult::Ok(Some(serde_json::json!({
+                        "size": m.len(),
+                        "modified_at_millis": modified_at_millis,
+                    })))
+                }
                 Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
             }
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_content_search(
+    ws: &Workspace,
+    project_id: String,
+    query: String,
+    case_sensitive: bool,
+    mode: String,
+    max_results: usize,
+    file_glob: Option<String>,
+    context_lines: usize,
+    show_ignored: bool,
+) -> Result<PreparedContentSearch, String> {
+    if let Some(ref glob) = file_glob
+        && (glob.contains("..") || glob.starts_with('/'))
+    {
+        return Err("file_glob must not contain '..' or start with '/'".to_string());
+    }
+    match ws.project(&project_id) {
+        Some(p) => {
+            let project_path = std::path::Path::new(&p.path)
+                .canonicalize()
+                .map_err(|error| format!("Cannot resolve project path: {error}"))?;
+            let search_mode = match mode.as_str() {
+                "regex" => okena_files::content_search::SearchMode::Regex,
+                "fuzzy" => okena_files::content_search::SearchMode::Fuzzy,
+                _ => okena_files::content_search::SearchMode::Literal,
+            };
+            let config = okena_files::content_search::ContentSearchConfig {
+                case_sensitive,
+                mode: search_mode,
+                max_results,
+                file_glob,
+                context_lines,
+                show_ignored,
+            };
+            Ok(PreparedContentSearch {
+                project_path,
+                query,
+                config,
+            })
+        }
+        None => Err(format!("project not found: {project_id}")),
+    }
+}
+
+pub fn execute_prepared_content_search(search: PreparedContentSearch) -> ActionResult {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    execute_prepared_content_search_with_cancellation(search, &cancelled)
+}
+
+pub fn execute_prepared_content_search_with_cancellation(
+    search: PreparedContentSearch,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> ActionResult {
+    let mut results = Vec::new();
+    let search_result = okena_files::content_search::search_content(
+        &search.project_path,
+        &search.query,
+        &search.config,
+        cancelled,
+        &mut |result| results.push(result),
+    );
+    match search_result {
+        Ok(()) => ActionResult::Ok(Some(
+            serde_json::to_value(results).expect("BUG: FileSearchResult must serialize"),
+        )),
+        Err(error) => ActionResult::Err(error),
     }
 }
 
@@ -126,42 +223,30 @@ pub(super) fn search_content(
     max_results: usize,
     file_glob: Option<String>,
     context_lines: usize,
+    show_ignored: bool,
 ) -> ActionResult {
-    if let Some(ref glob) = file_glob
-        && (glob.contains("..") || glob.starts_with('/')) {
-            return ActionResult::Err("file_glob must not contain '..' or start with '/'".to_string());
-        }
-    match ws.project(&project_id) {
-        Some(p) => {
-            let path = match std::path::Path::new(&p.path).canonicalize() {
-                Ok(c) => c,
-                Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
-            };
-            let search_mode = match mode.as_str() {
-                "regex" => okena_files::content_search::SearchMode::Regex,
-                "fuzzy" => okena_files::content_search::SearchMode::Fuzzy,
-                _ => okena_files::content_search::SearchMode::Literal,
-            };
-            let config = okena_files::content_search::ContentSearchConfig {
-                case_sensitive,
-                mode: search_mode,
-                max_results,
-                file_glob,
-                context_lines,
-                show_ignored: false,
-            };
-            let cancelled = std::sync::atomic::AtomicBool::new(false);
-            let mut results = Vec::new();
-            okena_files::content_search::search_content(
-                &path, &query, &config, &cancelled, &mut |result| results.push(result),
-            );
-            ActionResult::Ok(Some(serde_json::to_value(results).expect("BUG: FileSearchResult must serialize")))
-        }
-        None => ActionResult::Err(format!("project not found: {}", project_id)),
+    match prepare_content_search(
+        ws,
+        project_id,
+        query,
+        case_sensitive,
+        mode,
+        max_results,
+        file_glob,
+        context_lines,
+        show_ignored,
+    ) {
+        Ok(search) => execute_prepared_content_search(search),
+        Err(error) => ActionResult::Err(error),
     }
 }
 
-pub(super) fn rename_file(ws: &Workspace, project_id: String, relative_path: String, new_name: String) -> ActionResult {
+pub(super) fn rename_file(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+    new_name: String,
+) -> ActionResult {
     if let Err(e) = validate_leaf_name(&new_name) {
         return ActionResult::Err(e);
     }
@@ -187,7 +272,11 @@ pub(super) fn rename_file(ws: &Workspace, project_id: String, relative_path: Str
     }
 }
 
-pub(super) fn delete_file(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
+pub(super) fn delete_file(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+) -> ActionResult {
     let project_path = match ws.project(&project_id) {
         Some(p) => p.path.clone(),
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
@@ -214,7 +303,11 @@ pub(super) fn delete_file(ws: &Workspace, project_id: String, relative_path: Str
     }
 }
 
-pub(super) fn create_file(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
+pub(super) fn create_file(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+) -> ActionResult {
     let project_path = match ws.project(&project_id) {
         Some(p) => p.path.clone(),
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
@@ -226,13 +319,21 @@ pub(super) fn create_file(ws: &Workspace, project_id: String, relative_path: Str
     if target.exists() {
         return ActionResult::Err("target already exists".to_string());
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
         Ok(_) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("Cannot create file: {}", e)),
     }
 }
 
-pub(super) fn create_directory(ws: &Workspace, project_id: String, relative_path: String) -> ActionResult {
+pub(super) fn create_directory(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+) -> ActionResult {
     let project_path = match ws.project(&project_id) {
         Some(p) => p.path.clone(),
         None => return ActionResult::Err(format!("project not found: {}", project_id)),

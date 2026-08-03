@@ -1,7 +1,7 @@
 use crate::resolve;
-use crate::{api_get, api_post, discover_server, ensure_token};
-use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
+use crate::{api_action, api_get, discover_server, ensure_token};
 use okena_core::api::{ApiProject, StateResponse};
+use okena_remote_server::auth::{generate_pairing_code, pair_code_path};
 
 /// The agent skill, embedded so `skill show`/`install` always match this build.
 const SKILL_MD: &str = include_str!("skill.md");
@@ -15,10 +15,11 @@ pub fn cli_pair() -> i32 {
     let path = pair_code_path();
 
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("Failed to create config directory: {e}");
-            return 1;
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("Failed to create config directory: {e}");
+        return 1;
+    }
 
     if let Err(e) = std::fs::write(&path, &code) {
         eprintln!("Failed to write pairing code: {e}");
@@ -45,14 +46,17 @@ pub fn cli_pair() -> i32 {
         eprintln!(
             "TLS certificate fingerprint (SHA-256) — verify it matches the connecting client:"
         );
-        eprintln!("  {}", okena_transport::client::tls::format_fingerprint(&fp));
+        eprintln!(
+            "  {}",
+            okena_transport::client::tls::format_fingerprint(&fp)
+        );
     }
     eprintln!("Expires in 60s — run `okena pair` again for a fresh code.");
     0
 }
 
 pub fn cli_health(json_mode: bool) -> i32 {
-    let (host, port) = match discover_server() {
+    let server = match discover_server() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -60,8 +64,14 @@ pub fn cli_health(json_mode: bool) -> i32 {
         }
     };
 
-    let url = format!("http://{}:{}/health", host, port);
-    let resp = match reqwest::blocking::Client::new()
+    let (client, url) = match server.client_and_url("/health") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let resp = match client
         .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -87,8 +97,12 @@ pub fn cli_health(json_mode: bool) -> i32 {
         // tab-separated: status version uptime
         println!(
             "{}\t{}\t{}",
-            v.get("status").and_then(|s| s.as_str()).unwrap_or("unknown"),
-            v.get("version").and_then(|s| s.as_str()).unwrap_or("unknown"),
+            v.get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown"),
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown"),
             v.get("uptime_secs").and_then(|s| s.as_u64()).unwrap_or(0),
         );
     } else {
@@ -133,7 +147,7 @@ pub fn cli_action(json: &str) -> i32 {
         }
     };
 
-    match api_post("/v1/actions", &token, json) {
+    match api_action(&token, json) {
         Ok(body) => {
             if !body.is_empty() {
                 println!("{body}");
@@ -288,7 +302,10 @@ pub fn cli_service(
     if let Some(project) = state.projects.iter().find(|p| p.id == project_id)
         && !project.services.iter().any(|s| s.name == service_name)
     {
-        eprintln!("No service named '{service_name}' in project '{}'.", project.name);
+        eprintln!(
+            "No service named '{service_name}' in project '{}'.",
+            project.name
+        );
         let available: Vec<&str> = project.services.iter().map(|s| s.name.as_str()).collect();
         if available.is_empty() {
             eprintln!("That project has no services.");
@@ -305,7 +322,7 @@ pub fn cli_service(
         "service_name": service_name,
     });
 
-    if let Err(e) = api_post("/v1/actions", &token, &body.to_string()) {
+    if let Err(e) = api_action(&token, &body.to_string()) {
         eprintln!("{e}");
         return 1;
     }
@@ -423,10 +440,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
         Ok(t) => t,
         Err(e) => {
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -467,10 +481,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
 
             // Terminal not found in any project
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -478,10 +489,7 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
         }
         Err(e) => {
             if json_mode {
-                println!(
-                    "{}",
-                    serde_json::json!({ "terminal_id": terminal_id })
-                );
+                println!("{}", serde_json::json!({ "terminal_id": terminal_id }));
             } else {
                 println!("{terminal_id}");
             }
@@ -592,7 +600,7 @@ where
 
 /// POST an action body and print any non-empty response on stdout.
 fn post_action(token: &str, body: &serde_json::Value) -> i32 {
-    match api_post("/v1/actions", token, &body.to_string()) {
+    match api_action(token, &body.to_string()) {
         Ok(resp) => {
             if !resp.trim().is_empty() {
                 println!("{}", resp.trim());
@@ -610,7 +618,7 @@ fn post_action(token: &str, body: &serde_json::Value) -> i32 {
 /// `id_fields` are response keys to print (each on its own line) — used for
 /// commands that return new ids (e.g. `project_id`, `terminal_ids`).
 fn post_action_print_ids(token: &str, body: &serde_json::Value, id_fields: &[&str]) -> i32 {
-    match api_post("/v1/actions", token, &body.to_string()) {
+    match api_action(token, &body.to_string()) {
         Ok(resp) => {
             print_response_ids(&resp, id_fields);
             0
@@ -1126,7 +1134,7 @@ pub fn cli_project_add(
         "name": project_name,
         "path": abs_str,
     });
-    let resp = match api_post("/v1/actions", &token, &body.to_string()) {
+    let resp = match api_action(&token, &body.to_string()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -1156,7 +1164,7 @@ pub fn cli_project_add(
             eprintln!("{e}");
             return 1;
         }
-        if let Err(e) = api_post("/v1/actions", &token, &hide_body.to_string()) {
+        if let Err(e) = api_action(&token, &hide_body.to_string()) {
             eprintln!("Warning: failed to hide project: {e}");
             return 1;
         }
@@ -1183,7 +1191,7 @@ pub fn cli_project_add(
             "project_id": project_id,
             "folder_id": folder_id,
         });
-        if let Err(e) = api_post("/v1/actions", &token, &move_body.to_string()) {
+        if let Err(e) = api_action(&token, &move_body.to_string()) {
             eprintln!("Warning: failed to move project into folder: {e}");
             return 1;
         }
@@ -1315,10 +1323,24 @@ pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
         "branch": branch,
         "create_branch": new_branch,
     });
-    match api_post("/v1/actions", &token, &body.to_string()) {
+    match api_action(&token, &body.to_string()) {
         Ok(resp) => {
-            // Returns {project_id, terminal_id, path} — print project_id and path.
+            // Returns {project_id, path, pending} — print project_id and path to
+            // stdout (scripting). The create is OPTIMISTIC: `pending: true` means
+            // the checkout is still running in the background, so `path` does not
+            // exist on disk yet — warn on stderr so a script does not `cd` into it
+            // immediately. On a later background failure the row is removed from
+            // state (observable via `okena ls` / `okena state`) plus a toast.
             print_response_ids(&resp, &["project_id", "path"]);
+            let pending = serde_json::from_str::<serde_json::Value>(&resp)
+                .ok()
+                .and_then(|v| v.get("pending").and_then(|p| p.as_bool()))
+                .unwrap_or(false);
+            if pending {
+                eprintln!(
+                    "worktree creation started in the background; the path will exist once the checkout completes"
+                );
+            }
             0
         }
         Err(e) => {
@@ -1639,7 +1661,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
         "terminal_id": terminal_id,
         "command": full,
     });
-    if let Err(e) = api_post("/v1/actions", &token, &body.to_string()) {
+    if let Err(e) = api_action(&token, &body.to_string()) {
         eprintln!("{e}");
         return 1;
     }
@@ -1674,11 +1696,10 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
 /// Post a `read_content` action and return the terminal's visible content.
 fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, String> {
     let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
-    let resp = api_post("/v1/actions", token, &body.to_string())?;
+    let resp = api_action(token, &body.to_string())?;
     let v: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("bad read response: {e}"))?;
-    Ok(v
-        .get("content")
+    Ok(v.get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string())
@@ -1739,14 +1760,17 @@ pub fn cli_skill_install(_user: bool, project: bool) -> i32 {
 /// Authenticate and POST an action body, returning the raw response.
 fn post_action_body(body: &serde_json::Value) -> Result<String, String> {
     let token = ensure_token()?;
-    api_post("/v1/actions", &token, &body.to_string())
+    api_action(&token, &body.to_string())
 }
 
 /// Pretty-print a JSON response (raw fallback on parse failure).
 fn print_json_pretty(raw: &str) {
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(v) => {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()))
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string())
+            )
         }
         Err(_) => println!("{}", raw.trim()),
     }
@@ -1809,7 +1833,10 @@ pub fn cli_settings_show(key: Option<&str>) -> i32 {
             };
             match navigate_json(&v, k) {
                 Some(found) => {
-                    println!("{}", serde_json::to_string_pretty(found).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(found).unwrap_or_default()
+                    );
                     0
                 }
                 None => {
@@ -1873,7 +1900,14 @@ pub fn cli_theme_list(json_mode: bool) -> i32 {
                 ""
             };
             // id \t name \t kind \t is_dark \t active
-            println!("{}\t{}\t{}\t{}\t{}", s("id"), s("name"), s("kind"), s("is_dark"), active);
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                s("id"),
+                s("name"),
+                s("kind"),
+                s("is_dark"),
+                active
+            );
         }
     }
     0
@@ -1938,6 +1972,16 @@ pub fn cli_command_list(json_mode: bool) -> i32 {
     }
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
     if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        if arr.is_empty() {
+            // The headless daemon (okena-daemon) has no GUI action registry, so
+            // it returns an empty list. Explain it on stderr (stdout stays empty
+            // for clean parsing) so an empty result isn't mistaken for an error
+            // or a parse failure — mirrors `command run`'s explicit rejection.
+            eprintln!(
+                "No actions available — the command palette requires a running GUI window and is unavailable when connected to a headless daemon."
+            );
+            return 0;
+        }
         for a in arr {
             let g = |k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or("");
             // category \t name \t description
@@ -2008,7 +2052,7 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
         }
     };
     let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
-    match api_post("/v1/actions", &token, &body.to_string()) {
+    match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             if json_mode {
                 println!("{}", resp.trim());
@@ -2041,7 +2085,10 @@ mod tests {
         assert_eq!(parse_done_marker(echo, tag), None);
         // The actual printf output carries digits — matches.
         assert_eq!(parse_done_marker("OKENADONE_42:0:END", tag), Some(0));
-        assert_eq!(parse_done_marker("noise\nOKENADONE_42:130:END\n$", tag), Some(130));
+        assert_eq!(
+            parse_done_marker("noise\nOKENADONE_42:130:END\n$", tag),
+            Some(130)
+        );
         // Echo line followed by the real result line: still resolves the result.
         let both = format!("{echo}\nOKENADONE_42:7:END\nokena $ ");
         assert_eq!(parse_done_marker(&both, tag), Some(7));

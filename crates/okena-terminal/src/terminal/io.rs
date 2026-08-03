@@ -1,14 +1,23 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermMode;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::Terminal;
 use super::prompt_marks::advance_with_prompt_marks;
+use super::{InputRepaintRequest, Terminal};
+
+const INPUT_REPAINT_REQUEST_TTL: Duration = Duration::from_secs(5);
 
 impl Terminal {
     /// Process output from PTY
     pub fn process_output(&self, data: &[u8]) {
+        self.process_output_with_sequence(data, 0);
+    }
+
+    /// Process PTY output and atomically associate it with its broadcast order.
+    pub fn process_output_with_sequence(&self, data: &[u8], sequence: u64) {
+        let output_epoch =
+            (!data.is_empty()).then(|| self.output_epoch.fetch_add(1, Ordering::AcqRel) + 1);
         let mut _slow = okena_core::timing::SlowGuard::with_detail(
             "Terminal::process_output",
             format!("{} bytes", data.len()),
@@ -55,6 +64,14 @@ impl Terminal {
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        if sequence != 0 {
+            self.processed_output_sequence
+                .store(sequence, Ordering::Release);
+        }
+        if let Some(output_epoch) = output_epoch {
+            self.processed_output_epoch
+                .fetch_max(output_epoch, Ordering::Release);
+        }
         *self.last_output_time.lock() = Instant::now();
     }
 
@@ -64,7 +81,14 @@ impl Terminal {
     /// `term.lock()`. The pending data is drained and parsed on the GPUI
     /// thread just before rendering (see `with_content`).
     pub fn enqueue_output(&self, data: &[u8]) {
-        self.pending_output.lock().extend_from_slice(data);
+        let mut pending = self.pending_output.lock();
+        pending.extend_from_slice(data);
+        if !data.is_empty() {
+            let output_epoch = self.output_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.pending_output_epoch
+                .store(output_epoch, Ordering::Release);
+        }
+        drop(pending);
         self.dirty.store(true, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
     }
@@ -77,10 +101,9 @@ impl Terminal {
     /// sidebar bell/idle indicators read `has_bell()` / `is_waiting_for_input()`
     /// *before* the `TerminalContent` child drains. For local terminals the
     /// equivalent state is set eagerly in `process_output`; remote terminals only
-    /// buffer via `enqueue_output`, so without an eager parse those indicators
-    /// render one frame stale and only appear once unrelated local input forces a
-    /// second repaint. The remote dirty loop calls this so the flags are current
-    /// when the frame is built. GPUI thread only.
+    /// buffer via `enqueue_output`. The remote manager's activity pump calls this
+    /// before emitting targeted pane/sidebar notifications, so derived state is
+    /// current when the frame is built without per-pane polling. GPUI thread only.
     pub fn process_pending_output(&self) {
         self.drain_pending_output();
     }
@@ -89,12 +112,13 @@ impl Terminal {
     ///
     /// Called automatically by `with_content` before rendering.
     pub(super) fn drain_pending_output(&self) {
-        let data = {
+        let (data, output_epoch) = {
             let mut pending = self.pending_output.lock();
             if pending.is_empty() {
                 return;
             }
-            std::mem::take(&mut *pending)
+            let output_epoch = self.pending_output_epoch.load(Ordering::Acquire);
+            (std::mem::take(&mut *pending), output_epoch)
         };
         let _slow = okena_core::timing::SlowGuard::with_detail(
             "Terminal::drain_pending_output",
@@ -125,6 +149,8 @@ impl Terminal {
             term.grid().topmost_line().0,
         );
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        self.processed_output_epoch
+            .fetch_max(output_epoch, Ordering::Release);
     }
 
     /// Check if terminal has pending changes (and clear the flag).
@@ -138,19 +164,73 @@ impl Terminal {
         self.content_generation.load(Ordering::Relaxed)
     }
 
+    fn mark_user_input(&self, has_payload: bool) {
+        self.had_user_input.store(true, Ordering::Relaxed);
+        if !has_payload {
+            return;
+        }
+
+        // Synchronize with remote enqueue so output already buffered before the
+        // input cannot consume this request. The next enqueue receives this epoch.
+        let after_output_epoch = {
+            let _pending = self.pending_output.lock();
+            self.output_epoch.load(Ordering::Acquire).saturating_add(1)
+        };
+        *self.input_repaint_request.lock() = Some(InputRepaintRequest {
+            after_output_epoch,
+            expires_at: Instant::now() + INPUT_REPAINT_REQUEST_TTL,
+        });
+    }
+
+    /// Consume the one-shot request once parsed output crosses the output epoch
+    /// captured immediately before user input reached the transport.
+    pub fn take_input_repaint_request(&self) -> bool {
+        self.take_input_repaint_request_at(Instant::now())
+    }
+
+    pub(crate) fn take_input_repaint_request_at(&self, now: Instant) -> bool {
+        let processed_output_epoch = self.processed_output_epoch.load(Ordering::Acquire);
+        let mut request = self.input_repaint_request.lock();
+        let Some(current) = *request else {
+            return false;
+        };
+        if now >= current.expires_at {
+            *request = None;
+            return false;
+        }
+        if processed_output_epoch < current.after_output_epoch {
+            return false;
+        }
+        *request = None;
+        true
+    }
+
     /// Send input to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
-        self.had_user_input.store(true, Ordering::Relaxed);
+        self.send_input_inner(input, None);
+    }
+
+    /// Send text input and associate latency samples with its originating viewer.
+    pub fn send_input_from_viewer(&self, input: &str, viewer: u64) {
+        self.send_input_inner(input, Some(viewer));
+    }
+
+    fn send_input_inner(&self, input: &str, viewer: Option<u64>) {
+        self.mark_user_input(!input.is_empty());
         self.scroll_to_bottom();
-        self.transport.send_input(&self.terminal_id, input.as_bytes());
+        if let Some(viewer) = viewer {
+            okena_core::latency_probe::client_start(&self.terminal_id, viewer, input.as_bytes());
+        }
+        self.transport
+            .send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send pasted text to the PTY, wrapping in bracketed paste sequences if the
     /// terminal application has enabled bracketed paste mode (DECSET 2004).
     /// This prevents shells from executing each line of a multi-line paste individually.
     pub fn send_paste(&self, text: &str) {
-        self.had_user_input.store(true, Ordering::Relaxed);
+        self.mark_user_input(!text.is_empty());
         self.scroll_to_bottom();
 
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
@@ -160,7 +240,8 @@ impl Terminal {
             // No bracketed paste mode: convert all newlines to CR so each line lands
             // as Enter for the shell. (Multi-line content will execute line-by-line.)
             let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
-            self.transport.send_input(&self.terminal_id, normalized.as_bytes());
+            self.transport
+                .send_input(&self.terminal_id, normalized.as_bytes());
         }
     }
 
@@ -174,7 +255,7 @@ impl Terminal {
     /// as literal text — annoying but recoverable, vs. multi-line content
     /// executing each line as a separate command.
     pub fn send_paste_force_bracketed(&self, text: &str) {
-        self.had_user_input.store(true, Ordering::Relaxed);
+        self.mark_user_input(!text.is_empty());
         self.scroll_to_bottom();
         self.write_bracketed_paste(text);
     }
@@ -188,9 +269,7 @@ impl Terminal {
         let normalized = text.replace("\r\n", "\n");
         // Strip any embedded paste markers so callers can't smuggle an early
         // `\x1b[201~` and break out into raw input.
-        let sanitized = normalized
-            .replace("\x1b[200~", "")
-            .replace("\x1b[201~", "");
+        let sanitized = normalized.replace("\x1b[200~", "").replace("\x1b[201~", "");
         let mut buf = Vec::with_capacity(sanitized.len() + 12);
         buf.extend_from_slice(b"\x1b[200~");
         buf.extend_from_slice(sanitized.as_bytes());
@@ -201,8 +280,20 @@ impl Terminal {
     /// Send raw bytes to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
-        self.had_user_input.store(true, Ordering::Relaxed);
+        self.send_bytes_inner(data, None);
+    }
+
+    /// Send raw input and associate latency samples with its originating viewer.
+    pub fn send_bytes_from_viewer(&self, data: &[u8], viewer: u64) {
+        self.send_bytes_inner(data, Some(viewer));
+    }
+
+    fn send_bytes_inner(&self, data: &[u8], viewer: Option<u64>) {
+        self.mark_user_input(!data.is_empty());
         self.scroll_to_bottom();
+        if let Some(viewer) = viewer {
+            okena_core::latency_probe::client_start(&self.terminal_id, viewer, data);
+        }
         self.transport.send_input(&self.terminal_id, data);
     }
 
@@ -219,7 +310,10 @@ impl Terminal {
         let event = crate::input::KeyEvent {
             key: key.to_string(),
             key_char: None,
-            modifiers: crate::input::KeyModifiers { shift, ..Default::default() },
+            modifiers: crate::input::KeyModifiers {
+                shift,
+                ..Default::default()
+            },
         };
         if let Some(bytes) = crate::input::key_to_bytes(
             &event,
@@ -250,7 +344,8 @@ impl Terminal {
         // Send ANSI escape sequence to clear screen and move cursor to home
         // \x1b[2J = clear entire screen
         // \x1b[H = move cursor to home position (0,0)
-        self.transport.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.transport
+            .send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
         self.scroll_to_bottom();
     }
 }

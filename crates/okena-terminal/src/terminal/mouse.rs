@@ -13,7 +13,8 @@ impl Terminal {
             return true;
         }
         let term = self.term.lock();
-        term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+        term.mode()
+            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
     }
 
     /// Forward a mouse button press or release to the PTY.
@@ -40,7 +41,11 @@ impl Terminal {
             format!("\x1b[<{};{};{}{}", cb, col + 1, row + 1, action).into_bytes()
         } else {
             // Legacy X10/normal format: release reports button=3, no SGR distinction.
-            let legacy_cb = if pressed { cb } else { 3 | (modifiers & 0b1_1100) };
+            let legacy_cb = if pressed {
+                cb
+            } else {
+                3 | (modifiers & 0b1_1100)
+            };
             vec![
                 0x1b,
                 b'[',
@@ -165,7 +170,11 @@ impl Terminal {
 
         let arrow_seq: &[u8] = if going_right {
             if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
-        } else if app_cursor { b"\x1bOD" } else { b"\x1b[D" };
+        } else if app_cursor {
+            b"\x1bOD"
+        } else {
+            b"\x1b[D"
+        };
 
         let mut buf = Vec::with_capacity(arrow_seq.len() * arrow_count);
         for _ in 0..arrow_count {

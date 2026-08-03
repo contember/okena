@@ -5,13 +5,12 @@
 //! `execute.rs` holds the async close pipeline; `view.rs` holds the
 //! `Render` impl.
 
-use okena_git as git;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::Workspace;
 
 use gpui::prelude::*;
 use gpui::*;
-use std::path::PathBuf;
+use serde::Deserialize;
 
 mod execute;
 mod view;
@@ -26,34 +25,46 @@ pub enum CloseWorktreeDialogEvent {
 impl EventEmitter<CloseWorktreeDialogEvent> for CloseWorktreeDialog {}
 
 impl okena_ui::overlay::CloseEvent for CloseWorktreeDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Closed) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
 }
 
-/// Processing state for async operations
+/// Processing state for the close operation.
+///
+/// The per-step pipeline (stash/fetch/rebase/merge/push/delete-branch) runs
+/// daemon-side inside `Workspace::close_worktree`, so the dialog only tracks
+/// whether the single `CloseWorktree` action is in flight — it has no
+/// per-step progress to surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ProcessingState {
     Idle,
-    Stashing,
-    Fetching,
-    Rebasing,
-    Merging,
-    Pushing,
-    DeletingBranch,
-    Removing,
+    Working,
+}
+
+#[derive(Deserialize)]
+struct CloseInfo {
+    is_dirty: bool,
+    branch: Option<String>,
+    default_branch: Option<String>,
+    unpushed_count: usize,
 }
 
 /// Confirmation dialog shown when closing a worktree.
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
+    pub(super) client: okena_transport::remote_action::RemoteActionClient,
+    pub(super) daemon_project_id: String,
+    /// Client-side (prefixed) project id + handle to the client workspace, used
+    /// to optimistically mark the project "closing" while the daemon runs the
+    /// before_remove hook and removal, so the sidebar row shows a busy state.
     pub(super) workspace: Entity<Workspace>,
-    pub(super) focus_manager: Entity<okena_workspace::focus::FocusManager>,
+    pub(super) client_project_id: String,
     pub(super) focus_handle: FocusHandle,
-    pub(super) project_id: String,
     pub(super) project_name: String,
     pub(super) project_path: String,
     pub(super) branch: Option<String>,
     pub(super) default_branch: Option<String>,
-    pub(super) main_repo_path: Option<String>,
     pub(super) is_dirty: bool,
     pub(super) merge_enabled: bool,
     pub(super) stash_enabled: bool,
@@ -61,18 +72,25 @@ pub struct CloseWorktreeDialog {
     pub(super) delete_branch_enabled: bool,
     pub(super) push_enabled: bool,
     pub(super) unpushed_count: usize,
+    pub(super) loading_info: bool,
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
-    pub(super) hooks_config: HooksConfig,
 }
 
 impl CloseWorktreeDialog {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        client: okena_transport::remote_action::RemoteActionClient,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
+        // The daemon owns worktree removal; the dialog no longer scrubs focus
+        // state itself, so this is unused (kept for call-site stability).
+        _focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
-        hooks_config: HooksConfig,
+        // Hooks now fire daemon-side inside `Workspace::close_worktree`; the
+        // dialog no longer reads them (kept for call-site stability).
+        _hooks_config: HooksConfig,
         cx: &mut Context<Self>,
     ) -> Self {
         let ws = workspace.read(cx);
@@ -80,37 +98,64 @@ impl CloseWorktreeDialog {
 
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        let main_repo_path = ws.worktree_parent_path(&project_id);
 
-        let path = PathBuf::from(&project_path);
-        let is_dirty = git::has_uncommitted_changes(&path);
-        let branch = git::get_current_branch(&path);
-        let default_branch = main_repo_path
-            .as_ref()
-            .and_then(|p| git::get_default_branch(&PathBuf::from(p)));
-        let unpushed_count = git::count_unpushed_commits(&path).unwrap_or(0);
-
-        Self {
-            workspace,
-            focus_manager,
+        let mut dialog = Self {
+            client,
+            daemon_project_id,
+            workspace: workspace.clone(),
+            client_project_id: project_id.clone(),
             focus_handle: cx.focus_handle(),
-            project_id,
             project_name,
             project_path,
-            branch,
-            default_branch,
-            main_repo_path,
-            is_dirty,
+            branch: None,
+            default_branch: None,
+            is_dirty: false,
             merge_enabled: worktree_config.default_merge,
             stash_enabled: worktree_config.default_stash,
             fetch_enabled: worktree_config.default_fetch,
             delete_branch_enabled: worktree_config.default_delete_branch,
             push_enabled: worktree_config.default_push,
-            unpushed_count,
+            unpushed_count: 0,
+            loading_info: true,
             error_message: None,
             processing: ProcessingState::Idle,
-            hooks_config,
-        }
+        };
+        dialog.load_close_info(cx);
+        dialog
+    }
+
+    fn load_close_info(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let project_id = self.daemon_project_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || Self::fetch_close_info(&client, project_id)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading_info = false;
+                match result {
+                    Ok(info) => {
+                        this.is_dirty = info.is_dirty;
+                        this.branch = info.branch;
+                        this.default_branch = info.default_branch;
+                        this.unpushed_count = info.unpushed_count;
+                    }
+                    Err(error) => this.error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn fetch_close_info(
+        client: &okena_transport::remote_action::RemoteActionClient,
+        project_id: String,
+    ) -> Result<CloseInfo, String> {
+        let action = okena_core::api::ActionRequest::WorktreeCloseInfo { project_id };
+        let value = client
+            .post_action(action)?
+            .ok_or_else(|| "Missing worktree close info response".to_string())?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("Invalid worktree close info response: {error}"))
     }
 
     pub(super) fn close(&mut self, cx: &mut Context<Self>) {

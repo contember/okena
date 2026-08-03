@@ -1,8 +1,11 @@
-use okena_core::process;
 use crate::manager::ServiceStatus;
+use okena_core::process;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Timeout for Docker CLI commands.  When the Docker daemon is not running the
@@ -33,7 +36,11 @@ pub fn is_docker_compose_available() -> bool {
     let cached = || {
         AVAILABLE_CACHE.lock().ok().and_then(|g| {
             g.and_then(|(ts, ok)| {
-                let ttl = if ok { AVAILABLE_TTL_OK } else { AVAILABLE_TTL_FAIL };
+                let ttl = if ok {
+                    AVAILABLE_TTL_OK
+                } else {
+                    AVAILABLE_TTL_FAIL
+                };
                 (ts.elapsed() < ttl).then_some(ok)
             })
         })
@@ -42,7 +49,9 @@ pub fn is_docker_compose_available() -> bool {
     if let Some(ok) = cached() {
         return ok;
     }
-    let _flight = AVAILABLE_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _flight = AVAILABLE_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ok) = cached() {
         return ok;
     }
@@ -147,8 +156,8 @@ pub fn list_services(project_path: &str, compose_file: &str) -> crate::ServiceRe
 fn parse_compose_config_services(json: &str) -> crate::ServiceResult<Vec<String>> {
     use crate::error::ServiceError;
 
-    let config: ComposeConfig = serde_json::from_str(json)
-        .map_err(|e| ServiceError::ParseError {
+    let config: ComposeConfig =
+        serde_json::from_str(json).map_err(|e| ServiceError::ParseError {
             context: "docker compose config JSON".to_string(),
             detail: e.to_string(),
         })?;
@@ -156,9 +165,7 @@ fn parse_compose_config_services(json: &str) -> crate::ServiceResult<Vec<String>
     Ok(config
         .services
         .into_iter()
-        .filter(|(_, svc)| {
-            !matches!(svc.deploy, Some(DeployConfig { replicas: Some(0) }))
-        })
+        .filter(|(_, svc)| !matches!(svc.deploy, Some(DeployConfig { replicas: Some(0) })))
         .map(|(name, _)| name)
         .collect())
 }
@@ -224,11 +231,20 @@ const PS_SNAPSHOT_TTL: Duration = Duration::from_secs(4);
 /// share this one snapshot, so the host is queried at most once per TTL
 /// regardless of how many projects are polling.
 static PS_SNAPSHOT: Mutex<Option<(Instant, Vec<ContainerSnapshot>)>> = Mutex::new(None);
+/// Prevents an in-flight pre-mutation refresh from repopulating stale state.
+static PS_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Single-flight gate for refreshing [`PS_SNAPSHOT`]. Without it, all per-project
 /// pollers waking on the same ~5s tick find the cache stale at once and each
 /// spawn their own `docker ps` before any stores a result (thundering herd).
 static PS_REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn invalidate_status_snapshot() {
+    PS_SNAPSHOT_GENERATION.fetch_add(1, Ordering::AcqRel);
+    *PS_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
 
 /// One compose container distilled from `docker ps -a --format json`.
 #[derive(Clone)]
@@ -247,6 +263,10 @@ struct ContainerSnapshot {
 /// Raw JSON shape from `docker ps -a --format json` (NDJSON).
 #[derive(Deserialize)]
 struct DockerPsAEntry {
+    #[serde(rename = "ID")]
+    id: Option<String>,
+    #[serde(rename = "Names")]
+    name: Option<String>,
     #[serde(rename = "Labels")]
     labels: Option<String>,
     #[serde(rename = "State")]
@@ -257,12 +277,212 @@ struct DockerPsAEntry {
     ports: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposeContainerBlocker {
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    pub working_dir: PathBuf,
+    pub service: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug)]
+pub enum ComposeContainerSafetyError {
+    Inspection(crate::ServiceError),
+    ContainersPresent {
+        blockers: Vec<ComposeContainerBlocker>,
+    },
+}
+
+impl ComposeContainerSafetyError {
+    pub fn blockers(&self) -> &[ComposeContainerBlocker] {
+        match self {
+            Self::Inspection(_) => &[],
+            Self::ContainersPresent { blockers } => blockers,
+        }
+    }
+}
+
+impl fmt::Display for ComposeContainerSafetyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inspection(error) => {
+                write!(formatter, "failed to inspect Docker containers: {error}")
+            }
+            Self::ContainersPresent { blockers } => {
+                write!(
+                    formatter,
+                    "{} Docker Compose container(s) still reference the target: ",
+                    blockers.len()
+                )?;
+                for (index, blocker) in blockers.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    let container = blocker
+                        .container_name
+                        .as_deref()
+                        .or(blocker.container_id.as_deref())
+                        .unwrap_or("unknown container");
+                    write!(
+                        formatter,
+                        "{container} [{}] at {}",
+                        blocker.state,
+                        blocker.working_dir.display()
+                    )?;
+                }
+                formatter.write_str("; stop or remove them before continuing")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ComposeContainerSafetyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inspection(error) => Some(error),
+            Self::ContainersPresent { .. } => None,
+        }
+    }
+}
+
+struct DockerPsCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+trait DockerPsRunner {
+    fn inspect(&self) -> std::io::Result<DockerPsCommandOutput>;
+}
+
+struct CommandDockerPsRunner;
+
+impl DockerPsRunner for CommandDockerPsRunner {
+    fn inspect(&self) -> std::io::Result<DockerPsCommandOutput> {
+        let mut command = process::command("docker");
+        command.args(["ps", "-a", "--format", "json", "--no-trunc"]);
+        process::safe_output_with_timeout(&mut command, DOCKER_TIMEOUT).map(|output| {
+            DockerPsCommandOutput {
+                success: output.status.success(),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }
+        })
+    }
+}
+
+/// Fail when any Docker Compose container still points inside `roots`.
+///
+/// This deliberately performs a fresh `docker ps -a` inspection instead of
+/// using the status-poller cache. A missing Docker executable is treated as no
+/// local Docker integration; all other inspection failures are fail-closed.
+pub fn ensure_no_compose_containers_under(
+    roots: &[PathBuf],
+) -> Result<(), ComposeContainerSafetyError> {
+    ensure_no_compose_containers_under_with(roots, &CommandDockerPsRunner)
+}
+
+fn ensure_no_compose_containers_under_with(
+    roots: &[PathBuf],
+    runner: &dyn DockerPsRunner,
+) -> Result<(), ComposeContainerSafetyError> {
+    let output = match runner.inspect() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ComposeContainerSafetyError::Inspection(
+                crate::ServiceError::CommandFailed(error),
+            ));
+        }
+    };
+    if !output.success {
+        return Err(ComposeContainerSafetyError::Inspection(
+            crate::ServiceError::CommandExitError {
+                context: "docker ps".to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            },
+        ));
+    }
+
+    let roots: Vec<PathBuf> = roots.iter().map(|root| physical_path(root)).collect();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut blockers = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let entry = serde_json::from_str::<DockerPsAEntry>(line).map_err(|error| {
+            ComposeContainerSafetyError::Inspection(crate::ServiceError::ParseError {
+                context: "docker ps line".to_string(),
+                detail: error.to_string(),
+            })
+        })?;
+        let labels = entry.labels.unwrap_or_default();
+        let Some(working_dir) = label_value(&labels, "com.docker.compose.project.working_dir")
+        else {
+            continue;
+        };
+        let working_dir = physical_path(Path::new(working_dir));
+        if !roots.iter().any(|root| working_dir.starts_with(root)) {
+            continue;
+        }
+        blockers.push(ComposeContainerBlocker {
+            container_id: entry.id,
+            container_name: entry.name,
+            working_dir,
+            service: label_value(&labels, "com.docker.compose.service").map(str::to_string),
+            state: entry.state.unwrap_or_else(|| "unknown".to_string()),
+        });
+    }
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        blockers.sort_by(|left, right| {
+            left.working_dir
+                .cmp(&right.working_dir)
+                .then_with(|| left.container_name.cmp(&right.container_name))
+                .then_with(|| left.container_id.cmp(&right.container_id))
+        });
+        Err(ComposeContainerSafetyError::ContainersPresent { blockers })
+    }
+}
+
+pub(crate) fn physical_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    if let Ok(canonical) = absolute.canonicalize() {
+        return canonical;
+    }
+
+    let mut cursor = absolute.as_path();
+    let mut suffix = Vec::new();
+    while let Some(name) = cursor.file_name() {
+        suffix.push(name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
+        if let Ok(mut canonical) = cursor.canonicalize() {
+            for component in suffix.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+    }
+    absolute
+}
+
 /// Value of `key` in docker's flattened `k=v,k=v` label string. Robust to
 /// commas inside *other* values (those fragments simply lack `=` for `key`).
 fn label_value<'a>(labels: &'a str, key: &str) -> Option<&'a str> {
-    labels
-        .split(',')
-        .find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
+    labels.split(',').find_map(|kv| {
+        kv.split_once('=')
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    })
 }
 
 /// Parse the exit code out of a `docker ps` Status like "Exited (137) 2h ago".
@@ -326,7 +546,11 @@ fn refresh_ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
             service: service.to_string(),
             state,
             exit_code,
-            ports: entry.ports.as_deref().map(parse_published_ports).unwrap_or_default(),
+            ports: entry
+                .ports
+                .as_deref()
+                .map(parse_published_ports)
+                .unwrap_or_default(),
         });
     }
     Ok(containers)
@@ -356,8 +580,12 @@ fn ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
         return Ok(snap);
     }
 
+    let generation = PS_SNAPSHOT_GENERATION.load(Ordering::Acquire);
     let fresh = refresh_ps_snapshot()?;
-    if let Ok(mut guard) = PS_SNAPSHOT.lock() {
+    let mut guard = PS_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if PS_SNAPSHOT_GENERATION.load(Ordering::Acquire) == generation {
         *guard = Some((Instant::now(), fresh.clone()));
     }
     Ok(fresh)
@@ -368,7 +596,10 @@ fn ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
 /// Reads from the shared `docker ps -a` snapshot and filters to the containers
 /// whose compose project working-dir matches `project_path` — so no per-project
 /// `docker compose ps` spawn.
-pub fn poll_status(project_path: &str, _compose_file: &str) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
+pub fn poll_status(
+    project_path: &str,
+    _compose_file: &str,
+) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
     let project_canon = std::path::Path::new(project_path)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(project_path));
@@ -403,43 +634,44 @@ pub fn parse_docker_ps_output(output: &str) -> crate::ServiceResult<Vec<DockerSe
 
     let entries: Vec<DockerPsEntry> = if trimmed.starts_with('[') {
         // JSON array format
-        serde_json::from_str(trimmed)
-            .map_err(|e| ServiceError::ParseError {
-                context: "docker ps JSON array".to_string(),
-                detail: e.to_string(),
-            })?
+        serde_json::from_str(trimmed).map_err(|e| ServiceError::ParseError {
+            context: "docker ps JSON array".to_string(),
+            detail: e.to_string(),
+        })?
     } else {
         // NDJSON format (one JSON object per line)
         trimmed
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
-                serde_json::from_str::<DockerPsEntry>(line)
-                    .map_err(|e| ServiceError::ParseError {
-                        context: "docker ps line".to_string(),
-                        detail: e.to_string(),
-                    })
+                serde_json::from_str::<DockerPsEntry>(line).map_err(|e| ServiceError::ParseError {
+                    context: "docker ps line".to_string(),
+                    detail: e.to_string(),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    Ok(entries.into_iter().map(|e| {
-        let ports = extract_ports(&e.publishers);
-        let name = e.service_name
-            .or(e.container_name)
-            .unwrap_or_default();
-        DockerServiceStatus {
-            name,
-            state: e.state.unwrap_or_else(|| "unknown".to_string()),
-            exit_code: e.exit_code,
-            ports,
-        }
-    }).collect())
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let ports = extract_ports(&e.publishers);
+            let name = e.service_name.or(e.container_name).unwrap_or_default();
+            DockerServiceStatus {
+                name,
+                state: e.state.unwrap_or_else(|| "unknown".to_string()),
+                exit_code: e.exit_code,
+                ports,
+            }
+        })
+        .collect())
 }
 
 /// Extract published host ports from the Publishers array.
 fn extract_ports(publishers: &Option<Vec<Publisher>>) -> Vec<u16> {
-    let Some(pubs) = publishers else { return Vec::new() };
+    let Some(pubs) = publishers else {
+        return Vec::new();
+    };
     let mut ports: Vec<u16> = pubs
         .iter()
         .filter_map(|p| p.published_port)
@@ -472,6 +704,41 @@ pub fn map_docker_state(state: &str, exit_code: Option<u32>) -> ServiceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeDockerPsRunner {
+        calls: AtomicUsize,
+        output: String,
+        success: bool,
+        stderr: String,
+        error_kind: Option<std::io::ErrorKind>,
+    }
+
+    impl FakeDockerPsRunner {
+        fn output(output: String) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                output,
+                success: true,
+                stderr: String::new(),
+                error_kind: None,
+            }
+        }
+    }
+
+    impl DockerPsRunner for FakeDockerPsRunner {
+        fn inspect(&self) -> std::io::Result<DockerPsCommandOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(kind) = self.error_kind {
+                return Err(std::io::Error::new(kind, "simulated Docker error"));
+            }
+            Ok(DockerPsCommandOutput {
+                success: self.success,
+                stdout: self.output.as_bytes().to_vec(),
+                stderr: self.stderr.as_bytes().to_vec(),
+            })
+        }
+    }
 
     #[test]
     fn test_parse_docker_ps_json_ndjson() {
@@ -515,7 +782,10 @@ mod tests {
     fn test_map_docker_state() {
         assert_eq!(map_docker_state("running", None), ServiceStatus::Running);
         assert_eq!(map_docker_state("Running", None), ServiceStatus::Running);
-        assert_eq!(map_docker_state("restarting", None), ServiceStatus::Restarting);
+        assert_eq!(
+            map_docker_state("restarting", None),
+            ServiceStatus::Restarting
+        );
         assert_eq!(map_docker_state("paused", None), ServiceStatus::Running);
         assert_eq!(map_docker_state("created", None), ServiceStatus::Stopped);
         assert_eq!(map_docker_state("exited", Some(0)), ServiceStatus::Stopped);
@@ -529,19 +799,34 @@ mod tests {
         );
         assert_eq!(
             map_docker_state("dead", Some(137)),
-            ServiceStatus::Crashed { exit_code: Some(137) }
+            ServiceStatus::Crashed {
+                exit_code: Some(137)
+            }
         );
-        assert_eq!(map_docker_state("unknown_state", None), ServiceStatus::Stopped);
+        assert_eq!(
+            map_docker_state("unknown_state", None),
+            ServiceStatus::Stopped
+        );
     }
 
     #[test]
     fn test_parse_publishers_ports() {
         let pubs = vec![
-            Publisher { published_port: Some(8080) },
-            Publisher { published_port: Some(0) },
-            Publisher { published_port: None },
-            Publisher { published_port: Some(3000) },
-            Publisher { published_port: Some(8080) }, // duplicate
+            Publisher {
+                published_port: Some(8080),
+            },
+            Publisher {
+                published_port: Some(0),
+            },
+            Publisher {
+                published_port: None,
+            },
+            Publisher {
+                published_port: Some(3000),
+            },
+            Publisher {
+                published_port: Some(8080),
+            }, // duplicate
         ];
         let ports = extract_ports(&Some(pubs));
         assert_eq!(ports, vec![3000, 8080]);
@@ -575,9 +860,119 @@ mod tests {
         result.sort();
         assert_eq!(result, vec!["db", "redis", "web"]);
     }
+
+    #[test]
+    fn compose_safety_query_finds_every_container_state_without_cache() {
+        let root =
+            std::env::temp_dir().join(format!("okena-compose-safety-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("nested")).expect("create safety fixture");
+        let working_dir = root.join("nested");
+        let labels = |service: &str, path: &Path| {
+            format!(
+                "com.docker.compose.service={service},com.docker.compose.project.working_dir={}",
+                path.display()
+            )
+        };
+        let output = ["running", "created", "exited", "dead"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| {
+                serde_json::json!({
+                    "ID": format!("container-{index}"),
+                    "Names": format!("fixture-{state}"),
+                    "Labels": labels(state, &working_dir),
+                    "State": state,
+                    "Status": "",
+                    "Ports": "",
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let runner = FakeDockerPsRunner::output(output);
+
+        for _ in 0..2 {
+            let error =
+                ensure_no_compose_containers_under_with(std::slice::from_ref(&root), &runner)
+                    .expect_err("all Compose states must block removal");
+            assert_eq!(
+                error
+                    .blockers()
+                    .iter()
+                    .map(|blocker| blocker.state.as_str())
+                    .collect::<std::collections::HashSet<_>>(),
+                std::collections::HashSet::from(["running", "created", "exited", "dead"])
+            );
+            assert!(error.to_string().contains("stop or remove"));
+        }
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(root).expect("remove safety fixture");
+    }
+
+    #[test]
+    fn compose_safety_query_ignores_unrelated_roots() {
+        let target =
+            std::env::temp_dir().join(format!("okena-compose-target-{}", std::process::id()));
+        let unrelated =
+            std::env::temp_dir().join(format!("okena-compose-unrelated-{}", std::process::id()));
+        std::fs::create_dir_all(&target).expect("create target fixture");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated fixture");
+        let output = serde_json::json!({
+            "ID": "unrelated",
+            "Names": "unrelated-web",
+            "Labels": format!(
+                "com.docker.compose.service=web,com.docker.compose.project.working_dir={}",
+                unrelated.display()
+            ),
+            "State": "running",
+            "Status": "Up",
+            "Ports": "",
+        })
+        .to_string();
+        let runner = FakeDockerPsRunner::output(output);
+
+        ensure_no_compose_containers_under_with(std::slice::from_ref(&target), &runner)
+            .expect("unrelated Compose project must not block");
+        std::fs::remove_dir_all(target).expect("remove target fixture");
+        std::fs::remove_dir_all(unrelated).expect("remove unrelated fixture");
+    }
+
+    #[test]
+    fn compose_safety_query_fails_closed_on_inspection_errors() {
+        let command_error = FakeDockerPsRunner {
+            calls: AtomicUsize::new(0),
+            output: String::new(),
+            success: false,
+            stderr: "daemon unavailable".to_string(),
+            error_kind: None,
+        };
+        let malformed = FakeDockerPsRunner::output("not json".to_string());
+        let io_error = FakeDockerPsRunner {
+            calls: AtomicUsize::new(0),
+            output: String::new(),
+            success: true,
+            stderr: String::new(),
+            error_kind: Some(std::io::ErrorKind::TimedOut),
+        };
+
+        for runner in [&command_error, &malformed, &io_error] {
+            let error = ensure_no_compose_containers_under_with(&[], runner)
+                .expect_err("inspection errors must block");
+            assert!(matches!(error, ComposeContainerSafetyError::Inspection(_)));
+        }
+    }
+
+    #[test]
+    fn compose_safety_query_allows_missing_docker_executable() {
+        let runner = FakeDockerPsRunner {
+            calls: AtomicUsize::new(0),
+            output: String::new(),
+            success: true,
+            stderr: String::new(),
+            error_kind: Some(std::io::ErrorKind::NotFound),
+        };
+
+        ensure_no_compose_containers_under_with(&[], &runner)
+            .expect("missing Docker means there is no local integration");
+    }
 }
-
-
-
-
-

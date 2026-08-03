@@ -18,12 +18,11 @@ mod smoke_tests;
 use okena_app::{settings, workspace};
 
 use gpui::*;
-use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
 #[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
+use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
 #[cfg(target_os = "linux")]
 use okena_app::simple_root::SimpleRoot as Root;
-use std::sync::Arc;
 
 use std::net::IpAddr;
 
@@ -90,32 +89,42 @@ impl std::io::Write for TeeWriter {
     }
 }
 
-use okena_app::app::Okena;
-use okena_app::app::headless::HeadlessApp;
+/// Rotate one log without relying on platform-specific replacement semantics.
+/// Windows does not let `rename` overwrite an existing destination, so remove
+/// the old rotation target first and fail rather than truncating the active log.
+fn rotate_log_file(active: &std::path::Path, previous: &std::path::Path) -> std::io::Result<()> {
+    if !active.exists() {
+        return Ok(());
+    }
+    match std::fs::remove_file(previous) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(active, previous)
+}
+
 use crate::assets::{Assets, embedded_fonts};
+use okena_app::app::Okena;
 use okena_app::keybindings;
-use okena_app::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
+use okena_app::keybindings::{
+    About, NewWindow, Quit, ShowCommandPalette, ShowKeybindings, ShowProfileManager, ShowSettings,
+    ShowThemeSelector,
+};
 use okena_app::logging;
-use okena_app::settings::GlobalSettings;
-use okena_app::terminal::pty_manager::PtyManager;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
-use okena_app::views::panels::toast::{Toast, ToastManager};
+use okena_app::views::panels::toast::ToastManager;
 use okena_app::workspace::persistence;
-use okena_app::workspace::state::GlobalWorkspace;
 use okena_core::profiles;
 
-/// Quit action handler - flushes pending saves before exiting
+/// Quit action handler.
 fn quit(_: &Quit, cx: &mut App) {
-    // Flush pending settings save
-    if let Some(gs) = cx.try_global::<GlobalSettings>() {
-        gs.0.read(cx).flush_pending_save();
-    }
-
-    // Flush pending workspace save
-    if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-        && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-            log::error!("Failed to flush workspace on quit: {}", e);
-        }
+    // NOTE: do NOT save workspace.json here. The GUI is a daemon client and its
+    // Workspace is a read-only MIRROR (project/folder ids are prefixed
+    // `remote:local-daemon:…`). The daemon is the single writer (§5) and owns
+    // workspace.json; writing the mirror here clobbered it with prefixed-id /
+    // empty-extra_windows garbage (corrupting projects + wiping multi-window
+    // state on the next launch).
 
     cx.quit();
 }
@@ -143,10 +152,20 @@ fn about(_: &About, _cx: &mut App) {
         fn msg_id(obj: *mut c_void, sel: *mut c_void, a: *mut c_void) -> *mut c_void;
 
         #[link_name = "objc_msgSend"]
-        fn msg_id2(obj: *mut c_void, sel: *mut c_void, a: *mut c_void, b: *mut c_void) -> *mut c_void;
+        fn msg_id2(
+            obj: *mut c_void,
+            sel: *mut c_void,
+            a: *mut c_void,
+            b: *mut c_void,
+        ) -> *mut c_void;
 
         #[link_name = "objc_msgSend"]
-        fn msg_bytes_len(obj: *mut c_void, sel: *mut c_void, bytes: *const u8, len: usize) -> *mut c_void;
+        fn msg_bytes_len(
+            obj: *mut c_void,
+            sel: *mut c_void,
+            bytes: *const u8,
+            len: usize,
+        ) -> *mut c_void;
     }
 
     unsafe {
@@ -155,9 +174,8 @@ fn about(_: &About, _cx: &mut App) {
         let ns_string = objc_getClass(b"NSString\0".as_ptr());
 
         // Helper: create NSString from null-terminated bytes
-        let nsstring = |s: &[u8]| -> *mut c_void {
-            msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr())
-        };
+        let nsstring =
+            |s: &[u8]| -> *mut c_void { msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr()) };
 
         // Build options dictionary with version
         let dict = msg(
@@ -262,7 +280,11 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::os_action("Cut", okena_app::keybindings::Copy, OsAction::Cut),
                 MenuItem::os_action("Copy", okena_app::keybindings::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", okena_app::keybindings::Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", okena_app::keybindings::Copy, OsAction::SelectAll),
+                MenuItem::os_action(
+                    "Select All",
+                    okena_app::keybindings::Copy,
+                    OsAction::SelectAll,
+                ),
             ],
         },
         Menu {
@@ -278,57 +300,52 @@ fn set_app_menus(cx: &mut App) {
         Menu {
             name: "Window".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action("New Window", NewWindow),
-            ],
+            items: vec![MenuItem::action("New Window", NewWindow)],
         },
     ]);
 }
 
-/// `okena pair` — generate a pairing code and write it to a file for the running server to validate.
-/// Global handle keeping the headless app entity alive for the process lifetime.
-struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
-impl Global for GlobalHeadless {}
-
 /// Run the application in headless mode (no GUI, remote server only).
-fn run_headless(listen_addr: IpAddr) {
+fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     println!("Starting Okena in headless mode...");
-
-    Application::with_platform(gpui_platform::current_platform(true)).run(move |cx: &mut App| {
-        cx.set_quit_mode(QuitMode::Explicit);
-
-        // Initialize global settings (must be before workspace load)
-        let settings_entity = settings::init_settings(cx);
-        let app_settings = settings_entity.read(cx).get().clone();
-
-        // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
-            persistence::default_workspace()
-        });
-
-        // Create PTY manager
-        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
-        let pty_manager = Arc::new(pty_manager);
-
-        // Create the headless app entity (starts PTY loop, command loop, and remote server)
-        // Must be stored in a global to keep the entity alive — dropping the handle
-        // would release the entity and cancel all spawned tasks + drop RemoteServer.
-        let headless = cx.new(|cx| {
-            HeadlessApp::new(
-                workspace_data,
-                pty_manager,
-                pty_events,
-                listen_addr,
-                app_settings.remote_tls_enabled,
-                cx,
-            )
-        });
-        cx.set_global(GlobalHeadless(headless));
+    let app_settings = okena_workspace::settings::load_settings();
+    let session_backend = app_settings.session_backend;
+    let loaded_workspace = persistence::load_workspace_with_cleanup_for_shell(
+        session_backend,
+        &app_settings.default_shell,
+    )
+    .unwrap_or_else(|error| {
+        log::error!(
+            "Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.",
+            error,
+            persistence::get_workspace_path().with_extension("json.bak")
+        );
+        persistence::LoadedWorkspace {
+            data: persistence::default_workspace(),
+            stale_terminal_ids: Vec::new(),
+        }
     });
+    let listen_addrs =
+        okena_remote_server::local::resolve_daemon_listen_addrs(listen_addr, &app_settings);
+    let tls_enabled =
+        listen_addrs.iter().any(|addr| !addr.is_loopback()) && app_settings.remote_tls_enabled;
+    let params = okena_daemon_core::DaemonParams {
+        workspace_data: loaded_workspace.data,
+        stale_terminal_ids: loaded_workspace.stale_terminal_ids,
+        settings: app_settings,
+        session_backend,
+        listen_addrs,
+        tls_enabled,
+        ui_owned: std::env::args().any(|arg| arg == "--ui-owned"),
+    };
+    okena_daemon_core::DaemonCore::new(params)?.run()
 }
 
 fn main() {
+    if let Err(error) = okena_remote_server::local::remember_current_executable() {
+        eprintln!("Warning: failed to remember executable path: {error}");
+    }
+
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
         println!("okena {}", env!("CARGO_PKG_VERSION"));
@@ -404,14 +421,71 @@ fn main() {
     };
     // SAFETY: called before any threads are spawned; no concurrent reads of the environment.
     unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
-    let profile_log = profile_paths.log_path();
-    let profile_log_prev = profile_paths.root.join("okena.log.1");
+    // Pick the log filename BEFORE rotating/creating it. A single-binary daemon
+    // (`okena --headless [--ui-owned]`) reuses this same `src/main.rs` logging
+    // init as the GUI, so if both wrote `okena.log` they would rotate+clobber
+    // each other's history (and the standalone `okena-daemon.log` tee — which
+    // only exists in the separate `okena-daemon` binary — is never produced in
+    // ui-owned mode). Give the headless process its own `okena-headless.log`
+    // (with its own `.1` rotation) so the GUI's `okena.log` stays legible. This
+    // mirrors the headless detection performed in full further down (explicit
+    // `--headless`, or Linux `--listen`/`--remote` with no display); it is
+    // recomputed here only because logging is initialized before that block.
+    let log_is_headless = {
+        let explicit_headless = args.iter().any(|a| a == "--headless");
+        let wants_listen = args.iter().any(|a| a == "--listen" || a == "--remote");
+        let has_display =
+            std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+        explicit_headless || (cfg!(target_os = "linux") && wants_listen && !has_display)
+    };
+    let (profile_log, profile_log_prev) = if log_is_headless {
+        (
+            profile_paths.root.join("okena-headless.log"),
+            profile_paths.root.join("okena-headless.log.1"),
+        )
+    } else {
+        (
+            profile_paths.log_path(),
+            profile_paths.root.join("okena.log.1"),
+        )
+    };
     profiles::init_profile(profile_paths);
 
     // Migrate legacy flat-layout state into profiles/default/ if needed.
     // Runs before logging so messages go to stderr directly.
     if let Err(e) = profiles::migrate_legacy_layout_if_needed(profiles::current()) {
         eprintln!("Warning: profile migration failed: {e}");
+    }
+
+    // Snapshot the existing config BEFORE anything loads/migrates it, so an
+    // upgrade can be reverted to an old-format config the previous binary reads.
+    // Must run before load_settings()/load_workspace().
+    {
+        use okena_workspace::persistence::{
+            SETTINGS_VERSION, WINDOW_LAYOUT_VERSION, WORKSPACE_VERSION,
+        };
+        let schema_versions = [
+            profiles::SchemaVersion {
+                file: "workspace.json",
+                current: WORKSPACE_VERSION,
+            },
+            profiles::SchemaVersion {
+                file: "settings.json",
+                current: SETTINGS_VERSION,
+            },
+            profiles::SchemaVersion {
+                file: "window-layout.json",
+                current: WINDOW_LAYOUT_VERSION,
+            },
+        ];
+        if let Err(e) = profiles::snapshot_configs_before_upgrade(
+            profiles::current(),
+            env!("CARGO_PKG_VERSION"),
+            &schema_versions,
+        ) {
+            eprintln!("Warning: config snapshot failed: {e}");
+        }
+        profiles::record_app_version(profiles::current(), env!("CARGO_PKG_VERSION"));
     }
 
     // Handle CLI subcommands after profile is initialized so that helpers like
@@ -423,11 +497,31 @@ fn main() {
     // Set up file logging: rotate previous log, write to both stderr and file
     let log_target = (|| -> Option<env_logger::fmt::Target> {
         let root = &profiles::current().root;
-        std::fs::create_dir_all(root).ok()?;
-        if profile_log.exists() {
-            let _ = std::fs::rename(&profile_log, &profile_log_prev);
+        if let Err(error) = std::fs::create_dir_all(root) {
+            eprintln!(
+                "Warning: could not create log directory '{}': {error}",
+                root.display()
+            );
+            return None;
         }
-        let file = std::fs::File::create(&profile_log).ok()?;
+        if let Err(error) = rotate_log_file(&profile_log, &profile_log_prev) {
+            eprintln!(
+                "Warning: could not rotate log '{}' to '{}'; leaving the active log intact: {error}",
+                profile_log.display(),
+                profile_log_prev.display()
+            );
+            return None;
+        }
+        let file = match std::fs::File::create(&profile_log) {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not create log '{}': {error}",
+                    profile_log.display()
+                );
+                return None;
+            }
+        };
         Some(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
             stderr: std::io::stderr(),
             file,
@@ -490,30 +584,34 @@ fn main() {
     // 2. Auto-detect on Linux: --listen provided but no DISPLAY/WAYLAND_DISPLAY
     let explicit_headless = args.iter().any(|a| a == "--headless");
     let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
-    let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
-
-    // Acquire instance lock to prevent multiple Okena processes from
-    // clobbering each other's workspace.json.
-    let _instance_lock = match persistence::acquire_instance_lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    let headless =
+        explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
     if headless {
-        let Some(addr) = listen_addr else {
-            eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
+        // Self-restart handoff (single-binary `okena --headless` daemon): a
+        // daemon restarting itself spawns this process with `--await-pid <old>`
+        // (see okena_remote_server::routes::restart). Wait for the outgoing
+        // daemon to exit before acquiring the lock (fail-fast against a live PID)
+        // and binding a port. Bounded; on timeout we proceed and let the lock
+        // surface the real error.
+        if let Some(old_pid) = okena_remote_server::local::parse_await_pid(std::env::args()) {
+            log::info!("restart: waiting for outgoing daemon (pid {old_pid}) to exit");
+            let _ = okena_remote_server::local::wait_for_pid_exit(
+                old_pid,
+                std::time::Duration::from_secs(10),
+            );
+        }
+
+        if let Err(error) = run_headless(listen_addr) {
+            eprintln!("Failed to start headless daemon: {error:#}");
             std::process::exit(1);
-        };
-        run_headless(addr);
+        }
         return;
     }
 
     if !has_display && cfg!(target_os = "linux") {
         eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
-        eprintln!("Use --headless --listen <addr> to run without a GUI.");
+        eprintln!("Use --headless [--listen <addr>] to run without a GUI.");
         std::process::exit(1);
     }
 
@@ -646,22 +744,26 @@ fn main() {
         let app_settings = settings_entity.read(cx).get().clone();
 
 
-        // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
-            let backup_path = persistence::get_workspace_path().with_extension("json.bak");
-            ToastManager::post(
-                Toast::error(format!(
-                    "Workspace file was corrupted. A backup was saved to {}. \
-                     Starting with default workspace. Auto-save is disabled to protect your data — \
-                     restart the app after fixing the file.",
-                    backup_path.display()
-                ))
-                    .with_ttl(std::time::Duration::from_secs(30)),
-                cx,
-            );
-            persistence::default_workspace()
-        });
+        // The daemon owns the real workspace (it holds the instance lock +
+        // workspace.json); the GUI is always a thin client and starts empty —
+        // projects arrive via the mirror snapshot (apply_remote_snapshot) from
+        // the loopback daemon connection registered in Okena::new.
+        let mut workspace_data = workspace::state::WorkspaceData::empty();
+        // Restore CLIENT-OWNED window layout (which windows are open + their OS
+        // bounds + per-window viewport). This is presentation the GUI owns
+        // locally — separate from the daemon's workspace.json. Populating it
+        // before the main window opens restores main bounds (read below) and
+        // lets the startup extras-observer in `Okena::new` reopen every extra
+        // window the user had. Snapshots don't clobber it (apply_remote_snapshot
+        // never overwrites main_window/extra_windows).
+        let mut client_project_layouts = std::collections::HashMap::new();
+        if let Some(layout) = persistence::load_window_layout() {
+            workspace_data.main_window = layout.main_window;
+            workspace_data.extra_windows = layout.extra_windows;
+            workspace_data.service_panel_heights = layout.service_panel_heights;
+            workspace_data.hook_panel_heights = layout.hook_panel_heights;
+            client_project_layouts = layout.project_layouts;
+        }
 
         // Create theme entity from settings, restoring custom theme if applicable
         let theme_entity = cx.new(|_cx| {
@@ -698,9 +800,26 @@ fn main() {
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 
-        // Create PTY manager with session backend from settings
-        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
-        let pty_manager = Arc::new(pty_manager);
+        // Discover-or-spawn the local headless daemon and mint a loopback token.
+        // The desktop is always a thin client of this daemon, so a failure here
+        // is fatal. Blocking (up to ~30s on a cold spawn). `Okena::new` registers
+        // the loopback connection and (if we spawned it) owns the daemon's
+        // lifecycle.
+        let local_daemon = match okena_remote_server::local::ensure_local_daemon() {
+            Ok(ensured) => ensured,
+            Err(e) => {
+                eprintln!("Failed to start local daemon: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Some(local_build) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            local_build.update(cx, |state, cx| {
+                state.set_daemon_ui_owned(local_daemon.daemon.ui_owned, cx);
+            });
+        }
 
         // Create the main window
         #[allow(
@@ -785,22 +904,14 @@ fn main() {
                     })
                     .detach();
 
-                // Main owns the Okena coordinator. If it closes while extras
-                // are still open, LastWindowClosed would otherwise leave
-                // orphaned WindowViews running without the app root.
-                window.on_window_should_close(cx, |_window, cx| {
-                    cx.quit();
-                    true
-                });
-
-                // Wire up content pane registration so PTY events can notify terminal views
+                // Wire up content pane registration so remote activity events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
                     let mut registry = okena_app::views::window::content_pane_registry().lock();
                     let panes = registry.entry(terminal_id).or_default();
                     // Re-layouts (e.g. workspace switch) re-register the same
                     // terminal, minting fresh panes. Drop dead weaks and skip an
                     // entity already present so the vec stays bounded by live
-                    // viewers and a live pane isn't notified twice per PTY event.
+                    // viewers and a live pane isn't notified twice per activity event.
                     let new_id = weak_content.entity_id();
                     panes.retain(|w| w.upgrade().is_some());
                     if !panes.iter().any(|w| w.entity_id() == new_id) {
@@ -810,8 +921,28 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
+                    Okena::new(
+                        workspace_data,
+                        client_project_layouts,
+                        local_daemon,
+                        window,
+                        cx,
+                    )
                 });
+
+                // Main owns the Okena coordinator. If it closes while extras
+                // are still open, LastWindowClosed would otherwise leave
+                // orphaned WindowViews running without the app root. Flag the
+                // quit BEFORE cx.quit(): compositor quit-alls deliver a close
+                // to every window, and pending extra-window forgets must not
+                // commit during teardown or the final layout save loses them.
+                let okena_for_close = okena.clone();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    okena_for_close.read(cx).note_quitting();
+                    cx.quit();
+                    true
+                });
+
                 cx.new(|cx| Root::new(okena, window, cx))
             },
         )
@@ -821,21 +952,36 @@ fn main() {
             cx.activate(true);
         }
 
-        // Flush pending saves on ALL quit paths (including window X button).
-        // The Quit action handler only runs for Ctrl+Q / menu quit, not for
-        // QuitMode::LastWindowClosed. on_app_quit fires for every exit path.
-        let _quit_sub = cx.on_app_quit(|cx| {
-            // Flush pending settings save
-            if let Some(gs) = cx.try_global::<GlobalSettings>() {
-                gs.0.read(cx).flush_pending_save();
-            }
-
-            // Flush pending workspace save
-            if let Some(gw) = cx.try_global::<GlobalWorkspace>()
-                && let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
-                    log::error!("Failed to flush workspace on quit: {}", e);
-                }
-            async {}
-        });
     });
+}
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::rotate_log_file;
+
+    #[test]
+    fn rotation_replaces_existing_previous_file_without_truncating_active() {
+        let directory = std::env::temp_dir().join(format!(
+            "okena-log-rotation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create log directory");
+        let active = directory.join("okena-headless.log");
+        let previous = directory.join("okena-headless.log.1");
+        std::fs::write(&active, "active log").expect("write active log");
+        std::fs::write(&previous, "old rotation").expect("write old rotation");
+
+        rotate_log_file(&active, &previous).expect("rotate log");
+
+        assert!(!active.exists());
+        assert_eq!(
+            std::fs::read_to_string(&previous).expect("read rotation"),
+            "active log"
+        );
+        std::fs::remove_dir_all(directory).expect("remove log directory");
+    }
 }

@@ -1,6 +1,6 @@
-use okena_core::theme::ThemeColors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
+use okena_core::theme::ThemeColors;
 
 /// A batched text run that combines multiple adjacent cells with the same style (like Zed)
 #[derive(Debug)]
@@ -74,14 +74,7 @@ impl BatchedTextRun {
                 &[run_style],
                 Some(cell_width),
             )
-            .paint(
-                pos,
-                line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            .paint(pos, line_height, TextAlign::Left, None, window, cx);
     }
 }
 
@@ -108,7 +101,13 @@ impl LayoutRect {
         self.num_cells += 1;
     }
 
-    pub fn paint(&self, origin: Point<Pixels>, cell_width: Pixels, line_height: Pixels, window: &mut Window) {
+    pub fn paint(
+        &self,
+        origin: Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+        window: &mut Window,
+    ) {
         let position = point(
             px((f32::from(origin.x) + self.start_col as f32 * f32::from(cell_width)).floor()),
             origin.y + line_height * self.line as f32,

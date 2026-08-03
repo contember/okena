@@ -1,7 +1,7 @@
 //! Scrollbar handling for the diff viewer.
 
-use super::types::ScrollbarDrag;
 use super::DiffViewer;
+use super::types::ScrollbarDrag;
 use gpui::*;
 
 impl DiffViewer {
@@ -48,7 +48,8 @@ impl DiffViewer {
         let Some(drag) = self.scrollbar_drag else {
             return;
         };
-        let Some((viewport_height, content_height, _, thumb_height)) = self.get_scrollbar_geometry()
+        let Some((viewport_height, content_height, _, thumb_height)) =
+            self.get_scrollbar_geometry()
         else {
             return;
         };
@@ -65,7 +66,9 @@ impl DiffViewer {
         let new_scroll = (drag.start_scroll_y + delta_scroll).clamp(0.0, scrollable_content);
 
         let state = self.scroll_handle.0.borrow_mut();
-        state.base_handle.set_offset(point(px(0.0), px(-new_scroll)));
+        state
+            .base_handle
+            .set_offset(point(px(0.0), px(-new_scroll)));
         drop(state);
 
         cx.notify();
@@ -140,11 +143,7 @@ impl DiffViewer {
     /// On Linux, Shift+scroll sends horizontal delta (delta.x) while delta.y
     /// is zero. We also handle the case where delta.y carries the scroll amount
     /// with shift held (some platforms/backends).
-    pub(super) fn handle_scroll_x(
-        &mut self,
-        event: &ScrollWheelEvent,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn handle_scroll_x(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(17.0));
         // Shift+scroll: use whichever axis has the delta
         let delta_x = if event.modifiers.shift && f32::from(delta.x).abs() < 0.5 {

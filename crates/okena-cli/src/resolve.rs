@@ -107,7 +107,10 @@ fn collect_terminals(node: &ApiLayoutNode, project: &ApiProject, out: &mut Vec<T
 /// Resolve the first terminal id in a project's layout (DFS order). Used by
 /// `project focus`, which needs a concrete terminal to hand to `focus_terminal`.
 pub fn first_terminal_id(project: &ApiProject) -> Option<String> {
-    project_terminals(project).into_iter().next().map(|t| t.terminal_id)
+    project_terminals(project)
+        .into_iter()
+        .next()
+        .map(|t| t.terminal_id)
 }
 
 /// Resolve a terminal address into `(project_id, terminal_id)`.
@@ -118,10 +121,7 @@ pub fn first_terminal_id(project: &ApiProject) -> Option<String> {
 ///   `terminal_names` value equals `<name>` (case-insensitive);
 /// - `"<project>:<index>"` — the Nth terminal (0-based) in that project's
 ///   layout, in DFS order.
-pub fn resolve_terminal(
-    state: &StateResponse,
-    filter: &str,
-) -> Result<(String, String), String> {
+pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, String), String> {
     // Form: <project>:<index>
     if let Some((proj_part, idx_part)) = filter.rsplit_once(':')
         && let Ok(index) = idx_part.parse::<usize>()
@@ -174,7 +174,11 @@ pub fn resolve_terminal(
 }
 
 fn terminal_names_list(project: &ApiProject) -> String {
-    let mut names: Vec<&str> = project.terminal_names.values().map(|s| s.as_str()).collect();
+    let mut names: Vec<&str> = project
+        .terminal_names
+        .values()
+        .map(|s| s.as_str())
+        .collect();
     names.sort_unstable();
     if names.is_empty() {
         "(none)".to_string()
@@ -284,6 +288,7 @@ mod tests {
             terminal_id: Some(id.into()),
             minimized: false,
             detached: false,
+            shell_type: Default::default(),
             cols: None,
             rows: None,
         }
@@ -306,6 +311,13 @@ mod tests {
             services: vec![],
             worktree_info: None,
             worktree_ids: vec![],
+            pinned: false,
+            last_activity_at: None,
+            default_shell: None,
+            hook_terminals: vec![],
+            hooks: Default::default(),
+            is_creating: false,
+            is_closing: false,
         }
     }
 
@@ -347,13 +359,18 @@ mod tests {
             project_order: vec![],
             folders: vec![],
             windows,
+            hooks: Vec::new(),
         }
     }
 
     fn window(id: &str, active: bool) -> ApiWindow {
         ApiWindow {
             id: id.into(),
-            kind: if id == "main" { "main".into() } else { "extra".into() },
+            kind: if id == "main" {
+                "main".into()
+            } else {
+                "extra".into()
+            },
             active,
             focused_project_id: None,
             focused_terminal_id: None,
@@ -464,7 +481,10 @@ mod tests {
         // Unique prefix.
         assert_eq!(resolve_window(&state, "def").unwrap(), "def00000-cccc");
         // Full id.
-        assert_eq!(resolve_window(&state, "abc12345-aaaa").unwrap(), "abc12345-aaaa");
+        assert_eq!(
+            resolve_window(&state, "abc12345-aaaa").unwrap(),
+            "abc12345-aaaa"
+        );
         // Ambiguous prefix.
         assert!(resolve_window(&state, "abc").is_err());
         // Unknown.

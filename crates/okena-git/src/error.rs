@@ -27,6 +27,10 @@ pub enum GitError {
         source: std::io::Error,
     },
 
+    /// A destructive worktree operation failed its ownership check.
+    #[error("unsafe worktree operation for '{path}': {reason}")]
+    UnsafeWorktree { path: PathBuf, reason: String },
+
     /// A git ref (branch name, commit hash) looks like a CLI flag.
     #[error("invalid git ref: {0}")]
     InvalidRef(String),

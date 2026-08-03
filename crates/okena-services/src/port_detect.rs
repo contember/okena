@@ -97,9 +97,10 @@ fn build_process_tree_linux() -> HashMap<u32, Vec<u32>> {
             let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
             // fields[0] = state, fields[1] = ppid
             if let Some(ppid_str) = fields.get(1)
-                && let Ok(ppid) = ppid_str.parse::<u32>() {
-                    tree.entry(ppid).or_default().push(pid);
-                }
+                && let Ok(ppid) = ppid_str.parse::<u32>()
+            {
+                tree.entry(ppid).or_default().push(pid);
+            }
         }
     }
 
@@ -245,7 +246,9 @@ fn extract_pids_from_ss_line(line: &str) -> Vec<u32> {
     let mut search = line;
     while let Some(pos) = search.find("pid=") {
         let after = &search[pos + 4..];
-        let num_end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        let num_end = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
         if let Ok(pid) = after[..num_end].parse::<u32>() {
             pids.push(pid);
         }
@@ -266,7 +269,10 @@ fn extract_port_from_ss_line(line: &str) -> Option<u16> {
 }
 
 /// Parse `lsof -iTCP -sTCP:LISTEN -P -n` output into (pid, port) pairs.
-#[cfg(any(target_os = "macos", test))]
+///
+/// macOS now scans listening sockets via libproc (`get_listening_port_pairs_macos`)
+/// rather than spawning `lsof`, so this parser is retained only for its tests.
+#[cfg(test)]
 pub(crate) fn parse_lsof_output(stdout: &str) -> Vec<(u32, u16)> {
     let mut pairs = Vec::new();
     for line in stdout.lines().skip(1) {
@@ -281,9 +287,10 @@ pub(crate) fn parse_lsof_output(stdout: &str) -> Vec<(u32, u16)> {
         // NAME field like "*:5173" or "127.0.0.1:3000"
         let name = fields[8];
         if let Some(port_str) = name.rsplit(':').next()
-            && let Ok(port) = port_str.parse::<u16>() {
-                pairs.push((pid, port));
-            }
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            pairs.push((pid, port));
+        }
     }
     pairs
 }
@@ -307,9 +314,10 @@ pub(crate) fn parse_netstat_output(stdout: &str) -> Vec<(u32, u16)> {
         };
         let local_addr = fields[1];
         if let Some(port_str) = local_addr.rsplit(':').next()
-            && let Ok(port) = port_str.parse::<u16>() {
-                pairs.push((pid, port));
-            }
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            pairs.push((pid, port));
+        }
     }
     pairs
 }
@@ -402,13 +410,7 @@ Active Connections
 
     #[test]
     fn filtering_removes_debug_and_ephemeral_ports() {
-        let pairs = vec![
-            (1, 5173),
-            (1, 9229),
-            (1, 36435),
-            (1, 37903),
-            (1, 3000),
-        ];
+        let pairs = vec![(1, 5173), (1, 9229), (1, 36435), (1, 37903), (1, 3000)];
         let pids: HashSet<u32> = [1].into_iter().collect();
         let ports = ports_for_pids(&pairs, &pids);
         assert_eq!(ports, vec![3000, 5173]);
@@ -428,11 +430,7 @@ LISTEN 0      128    127.0.0.1:3000      0.0.0.0:*         users:((\"cargo\",pid
     #[test]
     fn ports_for_pids_shared_port_list() {
         // Two services sharing the same port scan results
-        let pairs = vec![
-            (100, 5173),
-            (200, 3000),
-            (300, 8080),
-        ];
+        let pairs = vec![(100, 5173), (200, 3000), (300, 8080)];
         let pids_a: HashSet<u32> = [100].into_iter().collect();
         let pids_b: HashSet<u32> = [200, 300].into_iter().collect();
         assert_eq!(ports_for_pids(&pairs, &pids_a), vec![5173]);

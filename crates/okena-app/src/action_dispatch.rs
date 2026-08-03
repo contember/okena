@@ -1,70 +1,120 @@
-//! Unified action dispatch — routes terminal actions to local or remote execution.
+//! Unified action dispatch — routes terminal actions to the local daemon.
 //!
-//! The `ActionDispatcher` enum encapsulates the local-vs-remote routing decision.
-//! Callers simply call `dispatcher.dispatch(action, cx)` without any conditionals.
+//! Every project is a remote project of the local daemon, so `ActionDispatcher`
+//! carries a single `Remote` variant. Callers simply call
+//! `dispatcher.dispatch(action, cx)` without any conditionals.
 
 use crate::remote_client::manager::RemoteConnectionManager;
-use crate::services::manager::ServiceManager;
-use crate::terminal::backend::TerminalBackend;
-use crate::views::window::TerminalsRegistry;
-use crate::workspace::actions::execute::execute_action;
 use crate::workspace::focus::FocusManager;
-use crate::workspace::state::{WindowId, Workspace};
+use crate::workspace::state::{ProjectLayoutMode, WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
 use okena_transport::client::strip_prefix;
 
 use gpui::{AppContext, Entity};
-use std::sync::Arc;
+
+fn canonicalize_layout_action(action: ActionRequest, mode: ProjectLayoutMode) -> ActionRequest {
+    if !mode.is_rows() {
+        return action;
+    }
+
+    match action {
+        ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction,
+        } => ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction: direction.flipped(),
+        },
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone: match zone.as_str() {
+                "top" => "left".to_string(),
+                "bottom" => "right".to_string(),
+                "left" => "top".to_string(),
+                "right" => "bottom".to_string(),
+                _ => zone,
+            },
+        },
+        other => other,
+    }
+}
+
+fn discovered_worktree_project_name(worktree_path: &str, branch: &str) -> String {
+    let directory_name = std::path::Path::new(worktree_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("worktree");
+    format!("{directory_name} ({branch})")
+}
 
 /// Build an ActionDispatcher for the given project.
 ///
-/// Returns `Remote` variant for remote projects, `Local` for local ones.
-/// Returns `None` if required dependencies (backend, remote manager) are unavailable.
+/// Every project is a remote project of the local daemon, so this always
+/// returns the `Remote` variant. Returns `None` if the project is unknown or
+/// the connection/remote manager required to reach it is unavailable.
 ///
 /// `window_id` carries the originating `WindowView`'s window id so per-window
-/// state mutations triggered by local UI actions (e.g. hide/show via the
-/// sidebar context menu routed through `SetProjectShowInOverview`) land on
-/// the right window's slot. Remote projects also carry `window_id` so a UI
-/// action issued in W2 against a remote project mutates W2's per-window
-/// state on the local mirror, not main's.
-// Threads the workspace, focus manager, terminals, service/remote managers and
-// cx as distinct dependencies; a context struct would obscure more than help.
-#[allow(clippy::too_many_arguments)]
+/// state mutations triggered by UI actions (e.g. hide/show via the sidebar
+/// context menu routed through `SetProjectShowInOverview`) land on the right
+/// window's slot. A UI action issued in W2 against a project mutates W2's
+/// per-window state on the local mirror, not main's.
 pub fn dispatcher_for_project(
     project_id: &str,
     window_id: WindowId,
     workspace: &Entity<Workspace>,
     focus_manager: &Entity<FocusManager>,
-    backend: &Option<Arc<dyn TerminalBackend>>,
-    terminals: &TerminalsRegistry,
-    service_manager: &Option<Entity<ServiceManager>>,
     remote_manager: &Option<Entity<RemoteConnectionManager>>,
     cx: &gpui::App,
 ) -> Option<ActionDispatcher> {
     let ws = workspace.read(cx);
     let project = ws.project(project_id)?;
-    if project.is_remote {
-        let connection_id = project.connection_id.as_ref()?;
-        let manager = remote_manager.as_ref()?;
-        Some(ActionDispatcher::Remote {
-            connection_id: connection_id.clone(),
-            manager: manager.clone(),
-            workspace: workspace.clone(),
-            focus_manager: focus_manager.clone(),
-            window_id,
-        })
-    } else {
-        let backend = backend.as_ref()?;
-        Some(ActionDispatcher::Local {
-            workspace: workspace.clone(),
-            focus_manager: focus_manager.clone(),
-            backend: backend.clone(),
-            terminals: terminals.clone(),
-            service_manager: service_manager.clone(),
-            window_id,
-        })
-    }
+    let connection_id = project.connection_id.as_ref()?;
+    let manager = remote_manager.as_ref()?;
+    Some(ActionDispatcher::Remote {
+        connection_id: connection_id.clone(),
+        manager: manager.clone(),
+        workspace: workspace.clone(),
+        focus_manager: focus_manager.clone(),
+        window_id,
+    })
+}
+
+/// Build an ActionDispatcher targeting a specific connection by id.
+///
+/// Unlike [`dispatcher_for_project`], this needs no project — it's for
+/// folder-scoped and workspace-global actions, which carry no project to
+/// resolve a connection from. The caller supplies the connection id (e.g.
+/// extracted from a `remote:<conn>:<id>` folder id, or
+/// `LOCAL_DAEMON_CONNECTION_ID` for a brand-new folder). The returned
+/// dispatcher's `dispatch` still runs id-stripping against this connection id.
+/// Returns `None` if the remote manager is unavailable.
+pub fn dispatcher_for_connection(
+    connection_id: &str,
+    window_id: WindowId,
+    workspace: &Entity<Workspace>,
+    focus_manager: &Entity<FocusManager>,
+    remote_manager: &Option<Entity<RemoteConnectionManager>>,
+) -> Option<ActionDispatcher> {
+    let manager = remote_manager.as_ref()?;
+    Some(ActionDispatcher::Remote {
+        connection_id: connection_id.to_string(),
+        manager: manager.clone(),
+        workspace: workspace.clone(),
+        focus_manager: focus_manager.clone(),
+        window_id,
+    })
 }
 
 /// Routes terminal and service actions to either local execution or remote HTTP.
@@ -74,18 +124,6 @@ pub fn dispatcher_for_project(
 /// local or remote.
 #[derive(Clone)]
 pub enum ActionDispatcher {
-    /// Local project — execute actions directly in the workspace.
-    Local {
-        workspace: Entity<Workspace>,
-        focus_manager: Entity<FocusManager>,
-        backend: Arc<dyn TerminalBackend>,
-        terminals: TerminalsRegistry,
-        service_manager: Option<Entity<ServiceManager>>,
-        /// Originating window's id (PRD cri 13). Per-window state mutations
-        /// inside `execute_action` (e.g. `SetProjectShowInOverview`) target
-        /// this slot.
-        window_id: WindowId,
-    },
     /// Remote project — send actions via HTTP to the remote server.
     /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
     /// are executed locally on the client workspace to avoid server round-trips
@@ -101,243 +139,217 @@ pub enum ActionDispatcher {
 }
 
 impl ActionDispatcher {
-    #[allow(dead_code)]
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Self::Remote { .. })
+    pub fn shares_local_filesystem(&self) -> bool {
+        let Self::Remote { connection_id, .. } = self;
+        connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
+    }
+
+    fn queue_focus_for_next_remote_terminal(
+        workspace: &Entity<Workspace>,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut impl AppContext,
+    ) {
+        let pid = project_id.to_string();
+        workspace.update(cx, |ws, _cx| {
+            let old_terminal_ids = ws
+                .project(&pid)
+                .and_then(|p| p.layout.as_ref())
+                .map(|layout| layout.collect_terminal_ids())
+                .unwrap_or_default();
+            ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
+        });
     }
 
     /// Dispatch a standard action (split, close, create terminal, service action, etc.).
     pub fn dispatch(&self, action: ActionRequest, cx: &mut impl AppContext) {
-        match self {
-            Self::Local {
-                workspace,
-                focus_manager,
-                backend,
-                terminals,
-                service_manager,
-                window_id,
-            } => {
-                // Intercept service actions — these need ServiceManager, not execute_action
-                if let Some(sm) = service_manager {
-                    match &action {
-                        ActionRequest::StartService { project_id, service_name } => {
-                            sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(project_id).cloned() {
-                                    sm.start_service(project_id, service_name, &path, cx);
-                                }
-                            });
-                            return;
-                        }
-                        ActionRequest::StopService { project_id, service_name } => {
-                            sm.update(cx, |sm, cx| sm.stop_service(project_id, service_name, cx));
-                            return;
-                        }
-                        ActionRequest::RestartService { project_id, service_name } => {
-                            sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(project_id).cloned() {
-                                    sm.restart_service(project_id, service_name, &path, cx);
-                                }
-                            });
-                            return;
-                        }
-                        ActionRequest::StartAllServices { project_id } => {
-                            sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(project_id).cloned() {
-                                    sm.start_all(project_id, &path, cx);
-                                }
-                            });
-                            return;
-                        }
-                        ActionRequest::StopAllServices { project_id } => {
-                            sm.update(cx, |sm, cx| sm.stop_all(project_id, cx));
-                            return;
-                        }
-                        ActionRequest::ReloadServices { project_id } => {
-                            sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(project_id).cloned() {
-                                    sm.reload_project_services(project_id, &path, cx);
-                                }
-                            });
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
+        let Self::Remote {
+            connection_id,
+            manager,
+            workspace,
+            focus_manager,
+            window_id,
+        } = self;
+        let mode = workspace.read_with(cx, |ws, _cx| ws.project_layout_mode(*window_id));
+        let action = canonicalize_layout_action(action, mode);
 
-                let backend = backend.clone();
-                let terminals = terminals.clone();
+        // Visual/presentation actions are executed locally on the client
+        // workspace. They never reach the server, so each client has
+        // independent visual state that survives state syncs.
+        match &action {
+            ActionRequest::UpdateSplitSizes {
+                project_id,
+                path,
+                sizes,
+            } => {
+                let pid = project_id.clone();
+                let p = path.clone();
+                let s = sizes.clone();
+                // Use UI-only notify during drag to avoid auto-save spam;
+                // final sizes are persisted on mouse-up.
+                workspace.update(cx, |ws, cx| {
+                    ws.update_split_sizes_ui_only(&pid, &p, s, cx);
+                });
+                return;
+            }
+            ActionRequest::ToggleMinimized {
+                project_id,
+                terminal_id,
+            } => {
+                let pid = project_id.clone();
+                let tid = terminal_id.clone();
+                workspace.update(cx, |ws, cx| {
+                    ws.toggle_terminal_minimized_by_id(&pid, &tid, cx);
+                });
+                return;
+            }
+            ActionRequest::SetFullscreen {
+                project_id,
+                terminal_id,
+                ..
+            } => {
+                let pid = project_id.clone();
+                let tid = terminal_id.clone();
                 let focus_manager = focus_manager.clone();
-                let window_id = *window_id;
                 focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        // Interactive closes go through the optimistic soft
-                        // close: the pane is ejected immediately and the PTY's
-                        // fate (kill now vs. keep for undo) is decided off the
-                        // GPUI thread. Both the single and multi-terminal close
-                        // actions are gated; whatever isn't handled there
-                        // (feature off / terminal not in layout) falls through
-                        // to the immediate close.
-                        match &action {
-                            ActionRequest::CloseTerminal { project_id, terminal_id }
-                                if crate::soft_close::begin(
-                                    ws, fm, &backend, &terminals, project_id, terminal_id, cx,
-                                ) => {
-                                    return;
-                                }
-                            ActionRequest::CloseTerminals { project_id, terminal_ids } => {
-                                // Optimistically close each terminal (eject now,
-                                // decide kill-vs-undo off-thread); whatever isn't
-                                // handled here (feature off / not in layout)
-                                // hard-closes in a single batched action.
-                                let mut remaining = Vec::new();
-                                for terminal_id in terminal_ids {
-                                    if !crate::soft_close::begin(
-                                        ws, fm, &backend, &terminals, project_id, terminal_id, cx,
-                                    ) {
-                                        remaining.push(terminal_id.clone());
-                                    }
-                                }
-                                if remaining.is_empty() {
-                                    return;
-                                }
-                                execute_action(
-                                    ActionRequest::CloseTerminals {
-                                        project_id: project_id.clone(),
-                                        terminal_ids: remaining,
-                                    },
-                                    ws, window_id, fm, &*backend, &terminals, cx,
-                                );
-                                return;
-                            }
-                            _ => {}
-                        }
-                        execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
+                    workspace.update(cx, |ws, cx| match tid {
+                        Some(tid) => ws.set_fullscreen_terminal(fm, pid, tid, cx),
+                        None => ws.exit_fullscreen(fm, cx),
                     });
                     cx.notify();
                 });
+                return;
             }
-            Self::Remote {
-                connection_id,
-                manager,
-                workspace,
-                focus_manager,
-                window_id,
+            ActionRequest::SetActiveTab {
+                project_id,
+                path,
+                index,
             } => {
-                // Visual/presentation actions are executed locally on the client
-                // workspace. They never reach the server, so each client has
-                // independent visual state that survives state syncs.
-                match &action {
-                    ActionRequest::UpdateSplitSizes { project_id, path, sizes } => {
-                        let pid = project_id.clone();
-                        let p = path.clone();
-                        let s = sizes.clone();
-                        // Use UI-only notify during drag to avoid auto-save spam;
-                        // final sizes are persisted on mouse-up.
-                        workspace.update(cx, |ws, cx| {
-                            ws.update_split_sizes_ui_only(&pid, &p, s, cx);
-                        });
-                        return;
-                    }
-                    ActionRequest::ToggleMinimized { project_id, terminal_id } => {
-                        let pid = project_id.clone();
-                        let tid = terminal_id.clone();
-                        workspace.update(cx, |ws, cx| {
-                            ws.toggle_terminal_minimized_by_id(&pid, &tid, cx);
-                        });
-                        return;
-                    }
-                    ActionRequest::SetFullscreen { project_id, terminal_id, .. } => {
-                        let pid = project_id.clone();
-                        let tid = terminal_id.clone();
-                        let focus_manager = focus_manager.clone();
-                        focus_manager.update(cx, |fm, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                match tid {
-                                    Some(tid) => ws.set_fullscreen_terminal(fm, pid, tid, cx),
-                                    None => ws.exit_fullscreen(fm, cx),
-                                }
-                            });
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    ActionRequest::SetActiveTab { project_id, path, index } => {
-                        let pid = project_id.clone();
-                        let p = path.clone();
-                        let idx = *index;
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_active_tab(&pid, &p, idx, cx);
-                        });
-                        return;
-                    }
-                    ActionRequest::FocusTerminal { project_id, terminal_id, .. } => {
-                        let pid = project_id.clone();
-                        let tid = terminal_id.clone();
-                        let focus_manager = focus_manager.clone();
-                        focus_manager.update(cx, |fm, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                if let Some(project) = ws.project(&pid)
-                                    && let Some(ref layout) = project.layout
-                                    && let Some(path) = layout.find_terminal_path(&tid) {
-                                        ws.set_focused_terminal(fm, pid, path, cx);
-                                    }
-                            });
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    ActionRequest::CreateTerminal { project_id } => {
-                        // Record pending focus — the actual focus will happen when
-                        // the next state sync brings the new terminal into the
-                        // client's layout (see sync_remote_projects_into_workspace).
-                        let pid = project_id.clone();
-                        let window_id = *window_id;
-                        workspace.update(cx, |ws, _cx| {
-                            let old_terminal_ids = ws
-                                .project(&pid)
-                                .and_then(|p| p.layout.as_ref())
-                                .map(|layout| layout.collect_terminal_ids())
-                                .unwrap_or_default();
-                            ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
-                        });
-                        // Don't return — action proceeds to be sent to server below
-                    }
-                    ActionRequest::CreateWorktree { branch, .. } => {
-                        // Record pending project visibility — the server assigns
-                        // the new worktree project ID, so the next state sync
-                        // applies the spawning-window rule when the branch-named
-                        // project first appears.
-                        let window_id = *window_id;
-                        let cid = connection_id.clone();
-                        let branch = branch.clone();
-                        workspace.update(cx, |ws, _cx| {
-                            ws.queue_pending_remote_project_visibility(
-                                window_id,
-                                &cid,
-                                &branch,
-                                None,
-                            );
-                        });
-                        // Don't return — action proceeds to be sent to server below
-                    }
-                    _ => {}
-                }
-
-                let action = strip_remote_ids(action, connection_id);
+                let pid = project_id.clone();
+                let p = path.clone();
+                let idx = *index;
+                workspace.update(cx, |ws, cx| {
+                    ws.set_active_tab(&pid, &p, idx, cx);
+                });
+                return;
+            }
+            ActionRequest::FocusTerminal {
+                project_id,
+                terminal_id,
+                ..
+            } => {
+                let pid = project_id.clone();
+                let activity_pid = pid.clone();
+                let tid = terminal_id.clone();
+                let focus_manager = focus_manager.clone();
+                focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        if let Some(project) = ws.project(&pid)
+                            && let Some(ref layout) = project.layout
+                            && let Some(path) = layout.find_terminal_path(&tid)
+                        {
+                            ws.set_focused_terminal(fm, pid, path, cx);
+                        }
+                    });
+                    cx.notify();
+                });
+                let action = strip_remote_ids(
+                    ActionRequest::RecordProjectActivity {
+                        project_id: activity_pid,
+                    },
+                    connection_id,
+                );
                 let cid = connection_id.clone();
                 manager.update(cx, |rm, cx| {
                     rm.send_action(&cid, action, cx);
                 });
+                return;
             }
+            ActionRequest::CreateTerminal { project_id } => {
+                // Record pending focus — the actual focus will happen when
+                // the next state sync brings the new terminal into the
+                // client's layout (see sync_remote_projects_into_workspace).
+                Self::queue_focus_for_next_remote_terminal(workspace, *window_id, project_id, cx);
+                // Don't return — action proceeds to be sent to server below
+            }
+            ActionRequest::SplitTerminal { project_id, .. }
+            | ActionRequest::AddTab { project_id, .. } => {
+                // Split/tab creation also happens on the daemon now. Defer
+                // terminal focus until the synced layout contains the new PTY.
+                Self::queue_focus_for_next_remote_terminal(workspace, *window_id, project_id, cx);
+                // Don't return — action proceeds to be sent to server below
+            }
+            ActionRequest::CreateWorktree { branch, .. } => {
+                // Record pending project visibility — the server assigns
+                // the new worktree project ID, so the next state sync
+                // applies the spawning-window rule when the branch-named
+                // project first appears.
+                let window_id = *window_id;
+                let cid = connection_id.clone();
+                let branch = branch.clone();
+                workspace.update(cx, |ws, _cx| {
+                    ws.queue_pending_remote_project_visibility(window_id, &cid, &branch, None);
+                });
+                // Don't return — action proceeds to be sent to server below
+            }
+            ActionRequest::AddDiscoveredWorktree {
+                worktree_path,
+                branch,
+                ..
+            } => {
+                let window_id = *window_id;
+                let cid = connection_id.clone();
+                let name = discovered_worktree_project_name(worktree_path, branch);
+                workspace.update(cx, |ws, _cx| {
+                    ws.queue_pending_remote_project_visibility(window_id, &cid, &name, None);
+                });
+                // Don't return — action proceeds to be sent to server below
+            }
+            _ => {}
         }
+
+        let action = strip_remote_ids(action, connection_id);
+        let cid = connection_id.clone();
+        manager.update(cx, |rm, cx| {
+            rm.send_action(&cid, action, cx);
+        });
     }
 
-    /// Split a terminal (local: workspace layout operation; remote: via server).
+    /// Persist the final split sizes to the daemon after an interactive drag.
     ///
-    /// For local projects this only modifies the layout — the UI will lazily
-    /// spawn the PTY with the correct shell.  Going through `execute_action`
-    /// would eagerly call `spawn_uninitialized_terminals` with `None` shell,
-    /// ignoring the project / global default shell (e.g. WSL).
+    /// During a drag, `dispatch(UpdateSplitSizes)` only updates the local mirror
+    /// (`update_split_sizes_ui_only`) to avoid per-frame server round-trips. On
+    /// mouse-up this sends the final ratios to the daemon so they're persisted to
+    /// `workspace.json` and survive reconnect / restart and reach other clients.
+    /// The mirror already holds these sizes; the daemon's state sync preserves
+    /// them on this client via `LayoutNode::merge_visual_state`.
+    pub fn commit_split_sizes(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        sizes: Vec<f32>,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
+        let action = strip_remote_ids(
+            ActionRequest::UpdateSplitSizes {
+                project_id: project_id.to_string(),
+                path: layout_path.to_vec(),
+                sizes,
+            },
+            connection_id,
+        );
+        let cid = connection_id.clone();
+        manager.update(cx, |rm, cx| {
+            rm.send_action(&cid, action, cx);
+        });
+    }
+
+    /// Split a terminal via the server.
     pub fn split_terminal(
         &self,
         project_id: &str,
@@ -345,32 +357,17 @@ impl ActionDispatcher {
         direction: crate::workspace::state::SplitDirection,
         cx: &mut impl AppContext,
     ) {
-        match self {
-            Self::Local { workspace, focus_manager, .. } => {
-                let pid = project_id.to_string();
-                let lp = layout_path.to_vec();
-                let focus_manager = focus_manager.clone();
-                focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.split_terminal(fm, &pid, &lp, direction, cx);
-                    });
-                    cx.notify();
-                });
-            }
-            Self::Remote { .. } => {
-                self.dispatch(
-                    ActionRequest::SplitTerminal {
-                        project_id: project_id.to_string(),
-                        path: layout_path.to_vec(),
-                        direction,
-                    },
-                    cx,
-                );
-            }
-        }
+        self.dispatch(
+            ActionRequest::SplitTerminal {
+                project_id: project_id.to_string(),
+                path: layout_path.to_vec(),
+                direction,
+            },
+            cx,
+        );
     }
 
-    /// Add a tab (local: workspace layout operation; remote: create terminal).
+    /// Add a tab via the server.
     pub fn add_tab(
         &self,
         project_id: &str,
@@ -378,38 +375,19 @@ impl ActionDispatcher {
         in_group: bool,
         cx: &mut impl AppContext,
     ) {
-        match self {
-            Self::Local { workspace, focus_manager, .. } => {
-                let pid = project_id.to_string();
-                let lp = layout_path.to_vec();
-                let focus_manager = focus_manager.clone();
-                focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        if in_group {
-                            ws.add_tab_to_group(fm, &pid, &lp, cx);
-                        } else {
-                            ws.add_tab(fm, &pid, &lp, cx);
-                        }
-                    });
-                    cx.notify();
-                });
-            }
-            Self::Remote { .. } => {
-                self.dispatch(
-                    ActionRequest::AddTab {
-                        project_id: project_id.to_string(),
-                        path: layout_path.to_vec(),
-                        in_group,
-                    },
-                    cx,
-                );
-            }
-        }
+        self.dispatch(
+            ActionRequest::AddTab {
+                project_id: project_id.to_string(),
+                path: layout_path.to_vec(),
+                in_group,
+            },
+            cx,
+        );
     }
 }
 
 impl ActionDispatcher {
-    /// Upload a pasted clipboard image to the remote server (no-op for local).
+    /// Upload a pasted clipboard image to the remote server.
     ///
     /// The server writes the bytes to a temp file on its own filesystem and
     /// bracketed-pastes that path into the terminal, so a server-side TUI like
@@ -422,14 +400,38 @@ impl ActionDispatcher {
         bytes: Vec<u8>,
         cx: &mut impl AppContext,
     ) {
-        let Self::Remote { connection_id, manager, .. } = self else {
-            return;
-        };
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
         let remote_terminal_id = strip_prefix(terminal_id, connection_id);
         let cid = connection_id.clone();
         let mime = mime.to_string();
         manager.update(cx, |rm, cx| {
             rm.upload_paste_image(&cid, &remote_terminal_id, &mime, bytes, cx);
+        });
+    }
+
+    pub fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<okena_views_terminal::RemotePasteFile>,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
+        let remote_terminal_id = strip_prefix(terminal_id, connection_id);
+        let cid = connection_id.clone();
+        let files = files
+            .into_iter()
+            .map(|file| (file.extension, file.bytes))
+            .collect();
+        manager.update(cx, |rm, cx| {
+            rm.upload_paste_files(&cid, &remote_terminal_id, files, cx);
         });
     }
 }
@@ -439,8 +441,8 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         self.dispatch(action, cx);
     }
 
-    fn is_remote(&self) -> bool {
-        self.is_remote()
+    fn shares_local_filesystem(&self) -> bool {
+        self.shares_local_filesystem()
     }
 
     fn split_terminal(
@@ -453,13 +455,7 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         self.split_terminal(project_id, layout_path, direction, cx);
     }
 
-    fn add_tab(
-        &self,
-        project_id: &str,
-        layout_path: &[usize],
-        in_group: bool,
-        cx: &mut gpui::App,
-    ) {
+    fn add_tab(&self, project_id: &str, layout_path: &[usize], in_group: bool, cx: &mut gpui::App) {
         self.add_tab(project_id, layout_path, in_group, cx);
     }
 
@@ -472,6 +468,47 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
     ) {
         self.upload_remote_paste_image(terminal_id, mime, bytes, cx);
     }
+
+    fn upload_remote_paste_files(
+        &self,
+        terminal_id: &str,
+        files: Vec<okena_views_terminal::RemotePasteFile>,
+        cx: &mut gpui::App,
+    ) {
+        self.upload_remote_paste_files(terminal_id, files, cx);
+    }
+
+    fn export_buffer(&self, terminal_id: &str, cx: &mut gpui::App) -> Option<std::path::PathBuf> {
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
+        let remote_terminal_id = strip_prefix(terminal_id, connection_id);
+        // Resolve the connection's HTTP params, then drop the borrow before the
+        // blocking request.
+        let (config, token) = {
+            let rm = manager.read(cx);
+            let (config, _, _) = rm
+                .connections()
+                .into_iter()
+                .find(|(c, _, _)| &c.id == connection_id)?;
+            (config.clone(), config.effective_auth_token()?)
+        };
+        let action = okena_core::api::ActionRequest::ExportBuffer {
+            terminal_id: remote_terminal_id,
+        };
+        let value = okena_transport::remote_action::RemoteActionClient::new(config, token)
+            .post_action(action)
+            .ok()??;
+        let content = value.get("content").and_then(|v| v.as_str())?;
+        // Write the client-side copy (same naming as the in-process capture).
+        let short: String = terminal_id.chars().take(8).collect();
+        let mut path = std::env::temp_dir();
+        path.push(format!("terminal-{}.txt", short));
+        std::fs::write(&path, content).ok()?;
+        Some(path)
+    }
 }
 
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
@@ -481,6 +518,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::SendText { terminal_id, text } => ActionRequest::SendText {
             terminal_id: s(&terminal_id),
             text,
+        },
+        ActionRequest::SendBytes { terminal_id, data } => ActionRequest::SendBytes {
+            terminal_id: s(&terminal_id),
+            data,
         },
         ActionRequest::RunCommand {
             terminal_id,
@@ -525,7 +566,21 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             window,
         },
+        ActionRequest::RecordProjectActivity { project_id } => {
+            ActionRequest::RecordProjectActivity {
+                project_id: s(&project_id),
+            }
+        }
         ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::UndoSoftClose { terminal_id } => ActionRequest::UndoSoftClose {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::CloseTerminalNow { terminal_id } => ActionRequest::CloseTerminalNow {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::ExportBuffer { terminal_id } => ActionRequest::ExportBuffer {
             terminal_id: s(&terminal_id),
         },
         ActionRequest::Resize {
@@ -573,6 +628,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             terminal_id: s(&terminal_id),
             name,
+        },
+        ActionRequest::SwitchTerminalShell {
+            project_id,
+            terminal_id,
+            shell,
+        } => ActionRequest::SwitchTerminalShell {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            shell,
         },
         ActionRequest::AddTab {
             project_id,
@@ -647,6 +711,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
             project_id: s(&project_id),
         },
+        ActionRequest::GitListPullRequests { project_id, limit } => {
+            ActionRequest::GitListPullRequests {
+                project_id: s(&project_id),
+                limit,
+            }
+        }
         ActionRequest::GitFileContents {
             project_id,
             file_path,
@@ -666,18 +736,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             new_index,
         },
-        ActionRequest::SetProjectColor { project_id, color } => {
-            ActionRequest::SetProjectColor {
-                project_id: s(&project_id),
-                color,
-            }
-        }
-        ActionRequest::SetFolderColor { folder_id, color } => {
-            ActionRequest::SetFolderColor {
-                folder_id: s(&folder_id),
-                color,
-            }
-        }
+        ActionRequest::SetProjectColor { project_id, color } => ActionRequest::SetProjectColor {
+            project_id: s(&project_id),
+            color,
+        },
+        ActionRequest::SetFolderColor { folder_id, color } => ActionRequest::SetFolderColor {
+            folder_id: s(&folder_id),
+            color,
+        },
         ActionRequest::StartService {
             project_id,
             service_name,
@@ -717,7 +783,34 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branch,
             create_branch,
         },
-        ActionRequest::GitCommitGraph { project_id, count, branch } => ActionRequest::GitCommitGraph {
+        ActionRequest::AddDiscoveredWorktree {
+            parent_project_id,
+            worktree_path,
+            branch,
+        } => ActionRequest::AddDiscoveredWorktree {
+            parent_project_id: s(&parent_project_id),
+            worktree_path,
+            branch,
+        },
+        ActionRequest::RerunHook {
+            project_id,
+            terminal_id,
+        } => ActionRequest::RerunHook {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::DismissHook {
+            project_id,
+            terminal_id,
+        } => ActionRequest::DismissHook {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::GitCommitGraph {
+            project_id,
+            count,
+            branch,
+        } => ActionRequest::GitCommitGraph {
             project_id: s(&project_id),
             count,
             branch,
@@ -725,70 +818,155 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitListBranches { project_id } => ActionRequest::GitListBranches {
             project_id: s(&project_id),
         },
-        ActionRequest::GitStageFile { project_id, file_path } => ActionRequest::GitStageFile {
+        ActionRequest::GitListWorktrees { project_id } => ActionRequest::GitListWorktrees {
+            project_id: s(&project_id),
+        },
+        ActionRequest::WorktreeCloseInfo { project_id } => ActionRequest::WorktreeCloseInfo {
+            project_id: s(&project_id),
+        },
+        ActionRequest::GenerateWorktreeBranchName { project_id } => {
+            ActionRequest::GenerateWorktreeBranchName {
+                project_id: s(&project_id),
+            }
+        }
+        ActionRequest::GitListBranchesClassified { project_id } => {
+            ActionRequest::GitListBranchesClassified {
+                project_id: s(&project_id),
+            }
+        }
+        ActionRequest::GitCheckoutLocalBranch { project_id, branch } => {
+            ActionRequest::GitCheckoutLocalBranch {
+                project_id: s(&project_id),
+                branch,
+            }
+        }
+        ActionRequest::GitCheckoutRemoteBranch {
+            project_id,
+            remote_branch,
+        } => ActionRequest::GitCheckoutRemoteBranch {
+            project_id: s(&project_id),
+            remote_branch,
+        },
+        ActionRequest::GitCreateAndCheckoutBranch {
+            project_id,
+            new_name,
+            start_point,
+        } => ActionRequest::GitCreateAndCheckoutBranch {
+            project_id: s(&project_id),
+            new_name,
+            start_point,
+        },
+        ActionRequest::GitStageFile {
+            project_id,
+            file_path,
+        } => ActionRequest::GitStageFile {
             project_id: s(&project_id),
             file_path,
         },
-        ActionRequest::GitUnstageFile { project_id, file_path } => ActionRequest::GitUnstageFile {
+        ActionRequest::GitUnstageFile {
+            project_id,
+            file_path,
+        } => ActionRequest::GitUnstageFile {
             project_id: s(&project_id),
             file_path,
         },
-        ActionRequest::GitDiscardFile { project_id, file_path } => ActionRequest::GitDiscardFile {
+        ActionRequest::GitDiscardFile {
+            project_id,
+            file_path,
+        } => ActionRequest::GitDiscardFile {
             project_id: s(&project_id),
             file_path,
         },
-        ActionRequest::GitBlame { project_id, relative_path } => ActionRequest::GitBlame {
+        ActionRequest::GitBlame {
+            project_id,
+            relative_path,
+        } => ActionRequest::GitBlame {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::ListFiles { project_id, show_ignored } => ActionRequest::ListFiles {
+        ActionRequest::ListFiles {
+            project_id,
+            show_ignored,
+        } => ActionRequest::ListFiles {
             project_id: s(&project_id),
             show_ignored,
         },
-        ActionRequest::ListDirectory { project_id, relative_path, show_ignored } => {
-            ActionRequest::ListDirectory {
-                project_id: s(&project_id),
-                relative_path,
-                show_ignored,
-            }
-        }
-        ActionRequest::ReadFile { project_id, relative_path } => ActionRequest::ReadFile {
+        ActionRequest::ListDirectory {
+            project_id,
+            relative_path,
+            show_ignored,
+        } => ActionRequest::ListDirectory {
+            project_id: s(&project_id),
+            relative_path,
+            show_ignored,
+        },
+        ActionRequest::ReadFile {
+            project_id,
+            relative_path,
+        } => ActionRequest::ReadFile {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::ReadFileBytes { project_id, relative_path } => ActionRequest::ReadFileBytes {
+        ActionRequest::ReadFileBytes {
+            project_id,
+            relative_path,
+        } => ActionRequest::ReadFileBytes {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::FileSize { project_id, relative_path } => ActionRequest::FileSize {
+        ActionRequest::FileSize {
+            project_id,
+            relative_path,
+        } => ActionRequest::FileSize {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
-            ActionRequest::SearchContent {
-                project_id: s(&project_id),
-                query,
-                case_sensitive,
-                mode,
-                max_results,
-                file_glob,
-                context_lines,
-            }
-        }
-        ActionRequest::RenameFile { project_id, relative_path, new_name } => ActionRequest::RenameFile {
+        ActionRequest::SearchContent {
+            project_id,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        } => ActionRequest::SearchContent {
+            project_id: s(&project_id),
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        },
+        ActionRequest::RenameFile {
+            project_id,
+            relative_path,
+            new_name,
+        } => ActionRequest::RenameFile {
             project_id: s(&project_id),
             relative_path,
             new_name,
         },
-        ActionRequest::DeleteFile { project_id, relative_path } => ActionRequest::DeleteFile {
+        ActionRequest::DeleteFile {
+            project_id,
+            relative_path,
+        } => ActionRequest::DeleteFile {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::CreateFile { project_id, relative_path } => ActionRequest::CreateFile {
+        ActionRequest::CreateFile {
+            project_id,
+            relative_path,
+        } => ActionRequest::CreateFile {
             project_id: s(&project_id),
             relative_path,
         },
-        ActionRequest::CreateDirectory { project_id, relative_path } => ActionRequest::CreateDirectory {
+        ActionRequest::CreateDirectory {
+            project_id,
+            relative_path,
+        } => ActionRequest::CreateDirectory {
             project_id: s(&project_id),
             relative_path,
         },
@@ -796,36 +974,116 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             name,
         },
-        ActionRequest::RenameProjectDirectory { project_id, new_name } => ActionRequest::RenameProjectDirectory {
+        ActionRequest::UpdateProjectHooks { project_id, hooks } => {
+            ActionRequest::UpdateProjectHooks {
+                project_id: s(&project_id),
+                hooks,
+            }
+        }
+        ActionRequest::RenameProjectDirectory {
+            project_id,
+            new_name,
+        } => ActionRequest::RenameProjectDirectory {
             project_id: s(&project_id),
             new_name,
         },
         ActionRequest::DeleteProject { project_id } => ActionRequest::DeleteProject {
             project_id: s(&project_id),
         },
-        ActionRequest::SetProjectShowInOverview { project_id, show, window } => ActionRequest::SetProjectShowInOverview {
+        ActionRequest::SetProjectShowInOverview {
+            project_id,
+            show,
+            window,
+        } => ActionRequest::SetProjectShowInOverview {
             project_id: s(&project_id),
             show,
             window,
         },
-        ActionRequest::RemoveWorktreeProject { project_id, force } => ActionRequest::RemoveWorktreeProject {
+        ActionRequest::RemoveWorktreeProject { project_id, force } => {
+            ActionRequest::RemoveWorktreeProject {
+                project_id: s(&project_id),
+                force,
+            }
+        }
+        ActionRequest::CloseWorktree {
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+        } => ActionRequest::CloseWorktree {
             project_id: s(&project_id),
-            force,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
         },
         ActionRequest::CreateFolder { name } => ActionRequest::CreateFolder { name },
-        ActionRequest::DeleteFolder { folder_id } => ActionRequest::DeleteFolder { folder_id },
-        ActionRequest::RenameFolder { folder_id, name } => ActionRequest::RenameFolder { folder_id, name },
-        ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => ActionRequest::MoveProjectToFolder {
-            project_id: s(&project_id),
+        ActionRequest::DeleteFolder { folder_id } => ActionRequest::DeleteFolder {
+            folder_id: s(&folder_id),
+        },
+        ActionRequest::RenameFolder { folder_id, name } => ActionRequest::RenameFolder {
+            folder_id: s(&folder_id),
+            name,
+        },
+        ActionRequest::MoveProjectToFolder {
+            project_id,
             folder_id,
             position,
+        } => ActionRequest::MoveProjectToFolder {
+            project_id: s(&project_id),
+            folder_id: s(&folder_id),
+            position,
         },
-        ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => ActionRequest::MoveProjectOutOfFolder {
+        ActionRequest::MoveProjectOutOfFolder {
+            project_id,
+            top_level_index,
+        } => ActionRequest::MoveProjectOutOfFolder {
             project_id: s(&project_id),
             top_level_index,
         },
-        // App-scoped actions carry no project/terminal ids to remap.
-        a @ (ActionRequest::GetSettings
+        ActionRequest::MoveProject {
+            project_id,
+            new_index,
+        } => ActionRequest::MoveProject {
+            project_id: s(&project_id),
+            new_index,
+        },
+        ActionRequest::MoveItemInOrder { item_id, new_index } => ActionRequest::MoveItemInOrder {
+            // `item_id` is a folder or top-level project id; strip_prefix is a
+            // no-op on an already-local id.
+            item_id: s(&item_id),
+            new_index,
+        },
+        ActionRequest::ToggleProjectPinned { project_id } => ActionRequest::ToggleProjectPinned {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ReorderWorktree {
+            parent_id,
+            worktree_id,
+            new_index,
+        } => ActionRequest::ReorderWorktree {
+            parent_id: s(&parent_id),
+            worktree_id: s(&worktree_id),
+            new_index,
+        },
+        ActionRequest::SetWorktreeColorOverride { project_id, color } => {
+            ActionRequest::SetWorktreeColorOverride {
+                project_id: s(&project_id),
+                color,
+            }
+        }
+        // Session + app-scoped actions carry no project/terminal ids to remap.
+        a @ (ActionRequest::ListSessions
+        | ActionRequest::LoadSession { .. }
+        | ActionRequest::SaveSession { .. }
+        | ActionRequest::RenameSession { .. }
+        | ActionRequest::DeleteSession { .. }
+        | ActionRequest::ImportWorkspace { .. }
+        | ActionRequest::ExportWorkspace { .. }
+        | ActionRequest::GetSettings
         | ActionRequest::GetSettingsSchema
         | ActionRequest::SetSettings { .. }
         | ActionRequest::GetThemes
@@ -834,5 +1092,62 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. }) => a,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::state::SplitDirection;
+
+    #[test]
+    fn rows_map_visual_split_axis_back_to_canonical_axis() {
+        let action = canonicalize_layout_action(
+            ActionRequest::SplitTerminal {
+                project_id: "project".to_string(),
+                path: vec![0],
+                direction: SplitDirection::Horizontal,
+            },
+            ProjectLayoutMode::Rows,
+        );
+
+        assert!(matches!(
+            action,
+            ActionRequest::SplitTerminal {
+                direction: SplitDirection::Vertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rows_map_visual_drop_zone_back_to_canonical_edge() {
+        let action = canonicalize_layout_action(
+            ActionRequest::MovePaneTo {
+                project_id: "source".to_string(),
+                terminal_id: "one".to_string(),
+                target_project_id: "target".to_string(),
+                target_terminal_id: "two".to_string(),
+                zone: "left".to_string(),
+            },
+            ProjectLayoutMode::Rows,
+        );
+
+        assert!(matches!(
+            action,
+            ActionRequest::MovePaneTo { zone, .. } if zone == "top"
+        ));
+    }
+
+    #[test]
+    fn discovered_worktree_visibility_name_matches_daemon_project_name() {
+        assert_eq!(
+            discovered_worktree_project_name("/repo/worktrees/payments", "feature/payments"),
+            "payments (feature/payments)"
+        );
+        assert_eq!(
+            discovered_worktree_project_name("/", "feature/fallback"),
+            "worktree (feature/fallback)"
+        );
     }
 }

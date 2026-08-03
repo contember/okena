@@ -1,15 +1,19 @@
 use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
-use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md, ui_text_ms, ui_text_xl};
-use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use crate::views::components::{SimpleInput, modal_backdrop, modal_content, modal_header};
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use gpui::prelude::*;
 
 use super::ProfileManager;
 
 impl ProfileManager {
-    pub(super) fn render_profile_row(&self, entry: &okena_core::profiles::ProfileEntry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_profile_row(
+        &self,
+        entry: &okena_core::profiles::ProfileEntry,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let id = entry.id.clone();
         let display_name = entry.display_name.clone();
@@ -54,7 +58,9 @@ impl ProfileManager {
                                 .gap(px(8.0))
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!("profile-delete-confirm-{id}")))
+                                        .id(SharedString::from(format!(
+                                            "profile-delete-confirm-{id}"
+                                        )))
                                         .cursor_pointer()
                                         .px(px(10.0))
                                         .py(px(4.0))
@@ -72,7 +78,9 @@ impl ProfileManager {
                                 )
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!("profile-delete-cancel-{id}")))
+                                        .id(SharedString::from(format!(
+                                            "profile-delete-cancel-{id}"
+                                        )))
                                         .cursor_pointer()
                                         .px(px(10.0))
                                         .py(px(4.0))
@@ -138,7 +146,13 @@ impl ProfileManager {
                                 .py(px(4.0))
                                 .rounded(px(4.0))
                                 .bg(rgb(t.button_primary_bg))
-                                .hover(|s| if !is_active { s.bg(rgb(t.button_primary_hover)) } else { s })
+                                .hover(|s| {
+                                    if !is_active {
+                                        s.bg(rgb(t.button_primary_hover))
+                                    } else {
+                                        s
+                                    }
+                                })
                                 .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.button_primary_fg))
                                 .child("Switch")
@@ -243,21 +257,15 @@ impl Render for ProfileManager {
                             .flex_1()
                             .overflow_y_scroll()
                             .when(profiles.is_empty(), |d| {
-                                d.flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .p(px(32.0))
-                                    .child(
-                                        div()
-                                            .text_size(ui_text_xl(cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("No profiles found"),
-                                    )
+                                d.flex().items_center().justify_center().p(px(32.0)).child(
+                                    div()
+                                        .text_size(ui_text_xl(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child("No profiles found"),
+                                )
                             })
                             .when(!profiles.is_empty(), |d| {
-                                d.children(
-                                    profiles.iter().map(|p| self.render_profile_row(p, cx)),
-                                )
+                                d.children(profiles.iter().map(|p| self.render_profile_row(p, cx)))
                             }),
                     )
                     .child(
@@ -278,16 +286,21 @@ impl Render for ProfileManager {
                                             .rounded(px(4.0))
                                             .border_1()
                                             .border_color(rgb(t.border))
-                                            .child(SimpleInput::new(&new_profile_input).text_size(ui_text(13.0, cx)))
+                                            .child(
+                                                SimpleInput::new(&new_profile_input)
+                                                    .text_size(ui_text(13.0, cx)),
+                                            )
                                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                 cx.stop_propagation();
                                             })
-                                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                                cx.stop_propagation();
-                                                if event.keystroke.key.as_str() == "enter" {
-                                                    this.create_profile(cx);
-                                                }
-                                            })),
+                                            .on_key_down(cx.listener(
+                                                |this, event: &KeyDownEvent, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    if event.keystroke.key.as_str() == "enter" {
+                                                        this.create_profile(cx);
+                                                    }
+                                                },
+                                            )),
                                     )
                                     .child(
                                         div()

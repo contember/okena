@@ -5,8 +5,8 @@ use gpui_component::{h_flex, v_flex};
 use okena_extensions::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Refresh interval for GitHub status
@@ -308,44 +308,37 @@ impl GitHubStatus {
                                                 .child(incident.name.clone()),
                                         ),
                                 )
-                                .child(
-                                    v_flex()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .gap(px(8.0))
-                                        .children(incident.updates.iter().map(|update| {
-                                            v_flex()
-                                                .gap(px(2.0))
-                                                .child(
-                                                    h_flex()
-                                                        .gap(px(4.0))
-                                                        .child(
-                                                            div()
-                                                                .text_size(ui_text_ms(cx))
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(rgb(t.text_primary))
-                                                                .child(capitalize_first(
-                                                                    &update.status,
-                                                                )),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_size(ui_text_ms(cx))
-                                                                .text_color(rgb(t.text_secondary))
-                                                                .child(format!(
-                                                                    "- {}",
-                                                                    update.body
-                                                                )),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(ui_text_sm(cx))
-                                                        .text_color(rgb(t.text_muted))
-                                                        .child(update.created_at.clone()),
-                                                )
-                                        })),
-                                )
+                                .child(v_flex().px(px(10.0)).py(px(4.0)).gap(px(8.0)).children(
+                                    incident.updates.iter().map(|update| {
+                                        v_flex()
+                                            .gap(px(2.0))
+                                            .child(
+                                                h_flex()
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(ui_text_ms(cx))
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(rgb(t.text_primary))
+                                                            .child(capitalize_first(
+                                                                &update.status,
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(ui_text_ms(cx))
+                                                            .text_color(rgb(t.text_secondary))
+                                                            .child(format!("- {}", update.body)),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(ui_text_sm(cx))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .child(update.created_at.clone()),
+                                            )
+                                    }),
+                                ))
                         })),
                 ),
         )

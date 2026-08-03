@@ -2,8 +2,8 @@
 //! input, list of branches or PRs, footer buttons.
 
 use super::WorktreeDialog;
-use crate::simple_input::SimpleInput;
 use crate::Cancel;
+use crate::simple_input::SimpleInput;
 
 use okena_core::theme::ThemeColors;
 use okena_files::theme::theme;
@@ -54,55 +54,53 @@ impl WorktreeDialog {
             .flex_col()
             .max_h(px(200.0))
             .overflow_y_scroll()
-            .children(
-                self.pr_list.iter().enumerate().map(|(idx, pr)| {
-                    let is_selected = self.selected_pr_branch.as_deref() == Some(&pr.branch);
-                    let branch = pr.branch.clone();
+            .children(self.pr_list.iter().enumerate().map(|(idx, pr)| {
+                let is_selected = self.selected_pr_branch.as_deref() == Some(&pr.branch);
+                let branch = pr.branch.clone();
 
-                    div()
-                        .id(ElementId::Name(format!("pr-{}", idx).into()))
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .cursor_pointer()
-                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.selected_pr_branch = Some(branch.clone());
-                            this.selected_branch_index = None;
-                            cx.notify();
-                        }))
-                        .child(
-                            h_flex()
-                                .gap(px(6.0))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format!("#{}", pr.number))
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.text_primary))
-                                        .flex_1()
-                                        .overflow_x_hidden()
-                                        .whitespace_nowrap()
-                                        .child(pr.title.clone())
-                                )
-                        )
-                        .child(
-                            div()
-                                .pl(px(28.0))
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(pr.branch.clone())
-                        )
-                })
-            )
+                div()
+                    .id(ElementId::Name(format!("pr-{}", idx).into()))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .cursor_pointer()
+                    .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.selected_pr_branch = Some(branch.clone());
+                        this.selected_branch_index = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(format!("#{}", pr.number)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(ui_text_md(cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .flex_1()
+                                    .overflow_x_hidden()
+                                    .whitespace_nowrap()
+                                    .child(pr.title.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl(px(28.0))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(pr.branch.clone()),
+                    )
+            }))
             .into_any_element()
     }
 
@@ -111,6 +109,15 @@ impl WorktreeDialog {
         t: ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.loading_branches {
+            return div()
+                .p(px(12.0))
+                .text_size(ui_text_md(cx))
+                .text_color(rgb(t.text_muted))
+                .child("Loading branches...")
+                .into_any_element();
+        }
+
         let search_empty = self.branch_search_input.read(cx).value().is_empty();
 
         if self.filtered_branches.is_empty() {
@@ -132,8 +139,8 @@ impl WorktreeDialog {
             .flex_col()
             .max_h(px(200.0))
             .overflow_y_scroll()
-            .children(
-                self.filtered_branches.iter().enumerate().map(|(filtered_idx, &branch_idx)| {
+            .children(self.filtered_branches.iter().enumerate().map(
+                |(filtered_idx, &branch_idx)| {
                     let is_selected = self.selected_branch_index == Some(filtered_idx);
                     let branch_name = self.branches[branch_idx].clone();
 
@@ -153,15 +160,15 @@ impl WorktreeDialog {
                             svg()
                                 .path("icons/git-branch.svg")
                                 .size(px(14.0))
-                                .text_color(rgb(t.text_secondary))
+                                .text_color(rgb(t.text_secondary)),
                         )
                         .child(branch_name)
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.selected_branch_index = Some(filtered_idx);
                             cx.notify();
                         }))
-                })
-            )
+                },
+            ))
             .into_any_element()
     }
 }
@@ -190,7 +197,11 @@ impl Render for WorktreeDialog {
         self.filter_branches(cx);
 
         let branch_search_input = self.branch_search_input.clone();
-        let search_input_focused = self.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+        let search_input_focused = self
+            .branch_search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
         let pr_mode = self.pr_mode;
 
         div()
@@ -201,30 +212,34 @@ impl Render for WorktreeDialog {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let search_focused = this.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+                let search_focused = this
+                    .branch_search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
 
                 match event.keystroke.key.as_str() {
                     "up" => {
                         if search_focused
                             && let Some(idx) = this.selected_branch_index
-                                && idx > 0 {
-                                    this.selected_branch_index = Some(idx - 1);
-                                    cx.notify();
-                                }
+                            && idx > 0
+                        {
+                            this.selected_branch_index = Some(idx - 1);
+                            cx.notify();
+                        }
                     }
-                    "down"
-                        if search_focused => {
-                            let max = this.filtered_branches.len().saturating_sub(1);
-                            if let Some(idx) = this.selected_branch_index {
-                                if idx < max {
-                                    this.selected_branch_index = Some(idx + 1);
-                                    cx.notify();
-                                }
-                            } else if !this.filtered_branches.is_empty() {
-                                this.selected_branch_index = Some(0);
+                    "down" if search_focused => {
+                        let max = this.filtered_branches.len().saturating_sub(1);
+                        if let Some(idx) = this.selected_branch_index {
+                            if idx < max {
+                                this.selected_branch_index = Some(idx + 1);
                                 cx.notify();
                             }
+                        } else if !this.filtered_branches.is_empty() {
+                            this.selected_branch_index = Some(0);
+                            cx.notify();
                         }
+                    }
                     "enter" => {
                         this.create_worktree(cx);
                     }
@@ -237,9 +252,12 @@ impl Render for WorktreeDialog {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000080))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(
                 div()
                     .id("worktree-dialog")
@@ -272,15 +290,15 @@ impl Render for WorktreeDialog {
                                         svg()
                                             .path("icons/git-branch.svg")
                                             .size(px(16.0))
-                                            .text_color(rgb(t.border_active))
+                                            .text_color(rgb(t.border_active)),
                                     )
                                     .child(
                                         div()
                                             .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
-                                            .child("Create Worktree")
-                                    )
+                                            .child("Create Worktree"),
+                                    ),
                             )
                             .child(
                                 div()
@@ -297,111 +315,103 @@ impl Render for WorktreeDialog {
                                         svg()
                                             .path("icons/close.svg")
                                             .size(px(14.0))
-                                            .text_color(rgb(t.text_secondary))
+                                            .text_color(rgb(t.text_secondary)),
                                     )
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.close(cx);
-                                    }))
-                            )
+                                    })),
+                            ),
                     )
                     // Content
                     .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .px(px(16.0))
-                                    .py(px(12.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    // Mode toggle tabs
-                                    .child(
-                                        h_flex()
-                                            .gap(px(0.0))
-                                            .border_1()
-                                            .border_color(rgb(t.border))
-                                            .rounded(px(4.0))
-                                            .overflow_hidden()
-                                            .child(
-                                                div()
-                                                    .id("tab-branches")
-                                                    .flex_1()
-                                                    .px(px(12.0))
-                                                    .py(px(6.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .text_size(ui_text_md(cx))
-                                                    .cursor_pointer()
-                                                    .when(!pr_mode, |d| {
-                                                        d.bg(rgb(t.bg_selection))
-                                                            .text_color(rgb(t.text_primary))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                    })
-                                                    .when(pr_mode, |d| {
-                                                        d.text_color(rgb(t.text_muted))
-                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    })
-                                                    .child("Branches")
-                                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                                        this.pr_mode = false;
-                                                        this.selected_pr_branch = None;
-                                                        cx.notify();
-                                                    }))
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(1.0))
-                                                    .h_full()
-                                                    .bg(rgb(t.border))
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("tab-from-pr")
-                                                    .flex_1()
-                                                    .px(px(12.0))
-                                                    .py(px(6.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .text_size(ui_text_md(cx))
-                                                    .cursor_pointer()
-                                                    .when(pr_mode, |d| {
-                                                        d.bg(rgb(t.bg_selection))
-                                                            .text_color(rgb(t.text_primary))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                    })
-                                                    .when(!pr_mode, |d| {
-                                                        d.text_color(rgb(t.text_muted))
-                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    })
-                                                    .child("From PR")
-                                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                                        this.pr_mode = true;
-                                                        this.selected_branch_index = None;
-                                                        if !this.prs_loaded_once {
-                                                            this.prs_loaded_once = true;
-                                                            this.load_prs(cx);
-                                                        }
-                                                        cx.notify();
-                                                    }))
-                                            )
-                                    )
-                                    // Search input (only in branch mode)
-                                    .when(!pr_mode, |d| {
-                                        d.child(
-                                            input_container(&t, Some(search_input_focused))
-                                                .child(SimpleInput::new(&branch_search_input).text_size(ui_text_md(cx))),
+                        div().flex_1().overflow_hidden().flex().flex_col().child(
+                            div()
+                                .px(px(16.0))
+                                .py(px(12.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.0))
+                                // Mode toggle tabs
+                                .child(
+                                    h_flex()
+                                        .gap(px(0.0))
+                                        .border_1()
+                                        .border_color(rgb(t.border))
+                                        .rounded(px(4.0))
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .id("tab-branches")
+                                                .flex_1()
+                                                .px(px(12.0))
+                                                .py(px(6.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(ui_text_md(cx))
+                                                .cursor_pointer()
+                                                .when(!pr_mode, |d| {
+                                                    d.bg(rgb(t.bg_selection))
+                                                        .text_color(rgb(t.text_primary))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                })
+                                                .when(pr_mode, |d| {
+                                                    d.text_color(rgb(t.text_muted))
+                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                })
+                                                .child("Branches")
+                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                    this.pr_mode = false;
+                                                    this.selected_pr_branch = None;
+                                                    cx.notify();
+                                                })),
                                         )
-                                    })
-                                    // Branch list or PR list
-                                    .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
-                                    .when(pr_mode, |d| d.child(self.render_pr_list(t, cx)))
-                            )
+                                        .child(div().w(px(1.0)).h_full().bg(rgb(t.border)))
+                                        .child(
+                                            div()
+                                                .id("tab-from-pr")
+                                                .flex_1()
+                                                .px(px(12.0))
+                                                .py(px(6.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(ui_text_md(cx))
+                                                .cursor_pointer()
+                                                .when(pr_mode, |d| {
+                                                    d.bg(rgb(t.bg_selection))
+                                                        .text_color(rgb(t.text_primary))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                })
+                                                .when(!pr_mode, |d| {
+                                                    d.text_color(rgb(t.text_muted))
+                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                })
+                                                .child("From PR")
+                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                    this.pr_mode = true;
+                                                    this.selected_branch_index = None;
+                                                    if !this.prs_loaded_once {
+                                                        this.prs_loaded_once = true;
+                                                        this.load_prs(cx);
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                // Search input (only in branch mode)
+                                .when(!pr_mode, |d| {
+                                    d.child(
+                                        input_container(&t, Some(search_input_focused)).child(
+                                            SimpleInput::new(&branch_search_input)
+                                                .text_size(ui_text_md(cx)),
+                                        ),
+                                    )
+                                })
+                                // Branch list or PR list
+                                .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
+                                .when(pr_mode, |d| d.child(self.render_pr_list(t, cx))),
+                        ),
                     )
                     // Error message
                     .when_some(self.error_message.clone(), |d, msg| {
@@ -412,7 +422,7 @@ impl Render for WorktreeDialog {
                                 .bg(rgba(0xff00001a))
                                 .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
-                                .child(msg)
+                                .child(msg),
                         )
                     })
                     // Footer
@@ -441,7 +451,7 @@ impl Render for WorktreeDialog {
                                         this.create_worktree(cx);
                                     })),
                             ),
-                    )
+                    ),
             )
     }
 }

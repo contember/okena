@@ -1,27 +1,34 @@
 //! Global observable settings module
 //!
 //! Provides app-wide access to settings through the GlobalSettings global.
-//! Settings are automatically persisted to disk with debouncing.
+//! The desktop client publishes edits for its daemon to persist.
 
-use okena_terminal::session_backend::SessionBackend;
-use okena_terminal::shell_config::ShellType;
-use okena_theme::ThemeMode;
-use okena_workspace::toast::ToastManager;
-use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
+#[cfg(feature = "gpui")]
+use crate::workspace::persistence::AppSettings;
+use crate::workspace::persistence::{get_settings_path, load_settings, save_settings};
+#[cfg(feature = "gpui")]
 use gpui::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+#[cfg(feature = "gpui")]
+use okena_terminal::session_backend::SessionBackend;
+#[cfg(feature = "gpui")]
+use okena_terminal::shell_config::ShellType;
+#[cfg(feature = "gpui")]
+use okena_theme::ThemeMode;
+#[cfg(feature = "gpui")]
+use okena_workspace::toast::ToastManager;
 
 /// Global settings wrapper for app-wide access
+#[cfg(feature = "gpui")]
 #[derive(Clone)]
 pub struct GlobalSettings(pub Entity<SettingsState>);
 
+#[cfg(feature = "gpui")]
 impl Global for GlobalSettings {}
 
 /// Settings state that can be observed and updated
+#[cfg(feature = "gpui")]
 pub struct SettingsState {
     pub settings: AppSettings,
-    save_pending: Arc<AtomicBool>,
     /// The worktree path template that was active when settings were loaded or last migrated.
     /// Used to detect meaningful changes and suggest worktree migration.
     worktree_template_baseline: String,
@@ -29,7 +36,17 @@ pub struct SettingsState {
     template_migration_task: Option<gpui::Task<()>>,
 }
 
-/// Macro to generate setter methods with clamping and auto-save
+#[cfg(feature = "gpui")]
+#[derive(Clone)]
+pub enum SettingsEvent {
+    Changed(AppSettings),
+}
+
+#[cfg(feature = "gpui")]
+impl EventEmitter<SettingsEvent> for SettingsState {}
+
+/// Macro to generate setter methods with clamping and daemon sync.
+#[cfg(feature = "gpui")]
 macro_rules! setting_setter {
     // For f32 values with min/max clamping
     ($fn_name:ident, $field:ident, f32, $min:expr, $max:expr) => {
@@ -61,12 +78,12 @@ macro_rules! setting_setter {
     };
 }
 
+#[cfg(feature = "gpui")]
 impl SettingsState {
     pub fn new(settings: AppSettings) -> Self {
         let baseline = settings.worktree.path_template.clone();
         Self {
             settings,
-            save_pending: Arc::new(AtomicBool::new(false)),
             worktree_template_baseline: baseline,
             template_migration_task: None,
         }
@@ -83,23 +100,41 @@ impl SettingsState {
     setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
     setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
     /// Set the cursor style (Block, Bar, Underline)
-    pub fn set_cursor_style(&mut self, value: crate::workspace::settings::CursorShape, cx: &mut Context<Self>) {
+    pub fn set_cursor_style(
+        &mut self,
+        value: crate::workspace::settings::CursorShape,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.cursor_style = value;
         self.save_and_notify(cx);
     }
 
     /// Set the project column header density (Compact, Comfortable)
-    pub fn set_header_density(&mut self, value: crate::workspace::settings::HeaderDensity, cx: &mut Context<Self>) {
+    pub fn set_header_density(
+        &mut self,
+        value: crate::workspace::settings::HeaderDensity,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.header_density = value;
         self.save_and_notify(cx);
     }
 
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
-    setting_setter!(set_terminal_close_grace_secs, terminal_close_grace_secs, u32, 0, 60);
+    setting_setter!(
+        set_terminal_close_grace_secs,
+        terminal_close_grace_secs,
+        u32,
+        0,
+        60
+    );
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_color_tinted_background, color_tinted_background, bool);
-    setting_setter!(set_detached_overlays_by_default, detached_overlays_by_default, bool);
+    setting_setter!(
+        set_detached_overlays_by_default,
+        detached_overlays_by_default,
+        bool
+    );
 
     /// Persist the most recent detached overlay window bounds.
     pub fn set_detached_overlay_bounds(
@@ -111,7 +146,11 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
-    setting_setter!(set_terminal_ctrl_c_copies_selection, terminal_ctrl_c_copies_selection, bool);
+    setting_setter!(
+        set_terminal_ctrl_c_copies_selection,
+        terminal_ctrl_c_copies_selection,
+        bool
+    );
     setting_setter!(set_blame_visible, blame_visible, bool);
 
     /// Master switch for native desktop notifications (opt-in).
@@ -173,17 +212,30 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-
     /// Set per-extension settings blob (opaque JSON value).
-    pub fn set_extension_setting(&mut self, extension_id: &str, value: serde_json::Value, cx: &mut Context<Self>) {
-        self.settings.extension_settings.insert(extension_id.to_string(), value);
+    pub fn set_extension_setting(
+        &mut self,
+        extension_id: &str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings
+            .extension_settings
+            .insert(extension_id.to_string(), value);
         self.save_and_notify(cx);
     }
 
     /// Enable or disable an extension by ID.
-    pub fn set_extension_enabled(&mut self, extension_id: &str, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_extension_enabled(
+        &mut self,
+        extension_id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
         if enabled {
-            self.settings.enabled_extensions.insert(extension_id.to_string());
+            self.settings
+                .enabled_extensions
+                .insert(extension_id.to_string());
         } else {
             self.settings.enabled_extensions.remove(extension_id);
         }
@@ -204,7 +256,7 @@ impl SettingsState {
 
     /// Set sidebar width (clamped to min/max bounds)
     pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
-        use crate::workspace::persistence::{MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
+        use crate::workspace::persistence::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
         self.settings.sidebar.width = value.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         self.save_and_notify(cx);
     }
@@ -249,7 +301,11 @@ impl SettingsState {
         self.settings.hooks.terminal.on_close = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_terminal_shell_wrapper(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_terminal_shell_wrapper(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.terminal.shell_wrapper = value;
         self.save_and_notify(cx);
     }
@@ -271,19 +327,35 @@ impl SettingsState {
         self.settings.hooks.worktree.post_merge = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_before_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_before_remove(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.before_remove = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_after_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_after_remove(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.after_remove = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_on_rebase_conflict(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.on_rebase_conflict = value;
         self.save_and_notify(cx);
     }
-    pub fn set_hook_worktree_on_dirty_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_hook_worktree_on_dirty_close(
+        &mut self,
+        value: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.hooks.worktree.on_dirty_close = value;
         self.save_and_notify(cx);
     }
@@ -345,57 +417,29 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Synchronously flush any pending settings save (called on quit)
-    pub fn flush_pending_save(&self) {
-        if self.save_pending.swap(false, Ordering::Relaxed)
-            && let Err(e) = save_settings(&self.settings) {
-                log::error!("Failed to flush settings on quit: {}", e);
-            }
-    }
-
-    /// Save and notify - common logic for all setters.
-    /// Public so that the ExtensionSettingsStore setter callback can trigger persistence.
-    pub fn save_and_notify(&mut self, cx: &mut Context<Self>) {
-        self.save_debounced(cx);
+    /// Replace the local mirror without publishing the change back to the daemon.
+    pub fn replace_from_daemon(&mut self, mut settings: AppSettings, cx: &mut Context<Self>) {
+        settings.remote_connections = self.settings.remote_connections.clone();
+        self.worktree_template_baseline = settings.worktree.path_template.clone();
+        self.settings = settings;
         cx.notify();
     }
 
-    /// Save settings with debouncing to avoid excessive writes
-    fn save_debounced(&mut self, cx: &mut Context<Self>) {
-        self.save_pending.store(true, Ordering::Relaxed);
-        let save_pending = self.save_pending.clone();
-
-        cx.spawn(async move |this, cx| {
-            smol::Timer::after(std::time::Duration::from_millis(300)).await;
-
-            if save_pending.swap(false, Ordering::Relaxed) {
-                let settings = cx.update(|cx| {
-                    this.upgrade().map(|e| e.read(cx).settings.clone())
-                });
-                if let Some(settings) = settings {
-                    // Run blocking fs IO off the main thread; settings.json
-                    // also reads itself back to merge remote_connections, so
-                    // the cost is two sync IO ops under SETTINGS_LOCK.
-                    let save_result = smol::unblock(move || save_settings(&settings)).await;
-                    if let Err(e) = save_result {
-                        log::error!("Failed to save settings: {}", e);
-                        cx.update(|cx| {
-                            ToastManager::error(format!("Failed to save settings: {}", e), cx);
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+    /// Publish and notify — the daemon is the sole settings writer.
+    pub fn save_and_notify(&mut self, cx: &mut Context<Self>) {
+        cx.emit(SettingsEvent::Changed(self.settings.clone()));
+        cx.notify();
     }
 }
 
 /// Get the global settings entity
+#[cfg(feature = "gpui")]
 pub fn settings_entity(cx: &App) -> Entity<SettingsState> {
     cx.global::<GlobalSettings>().0.clone()
 }
 
 /// Get a copy of the current settings
+#[cfg(feature = "gpui")]
 pub fn settings(cx: &App) -> AppSettings {
     settings_entity(cx).read(cx).settings.clone()
 }
@@ -420,16 +464,20 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("xdg-open").arg(&path));
+        let _ = okena_core::process::spawn_and_reap(
+            okena_core::process::command("xdg-open").arg(&path),
+        );
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = okena_core::process::spawn_and_reap(okena_core::process::command("notepad").arg(&path));
+        let _ =
+            okena_core::process::spawn_and_reap(okena_core::process::command("notepad").arg(&path));
     }
 }
 
 /// Initialize global settings - call this at app startup
+#[cfg(feature = "gpui")]
 pub fn init_settings(cx: &mut App) -> Entity<SettingsState> {
     let settings = load_settings();
     let entity = cx.new(|_cx| SettingsState::new(settings));

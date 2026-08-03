@@ -105,12 +105,12 @@ impl FocusManager {
     /// This is the primary method for checking which terminal is focused.
     /// Returns None if no terminal is focused.
     pub fn focused_terminal_state(&self) -> Option<crate::state::FocusedTerminalState> {
-        self.current_focus.as_ref().map(|target| {
-            crate::state::FocusedTerminalState {
+        self.current_focus
+            .as_ref()
+            .map(|target| crate::state::FocusedTerminalState {
                 project_id: target.project_id.clone(),
                 layout_path: target.layout_path.clone(),
-            }
-        })
+            })
     }
 
     /// Get the current focus context
@@ -121,9 +121,9 @@ impl FocusManager {
 
     /// Check if a specific terminal is currently focused
     pub fn is_focused(&self, project_id: &str, layout_path: &[usize]) -> bool {
-        self.current_focus.as_ref().is_some_and(|f| {
-            f.project_id == project_id && f.layout_path == layout_path
-        })
+        self.current_focus
+            .as_ref()
+            .is_some_and(|f| f.project_id == project_id && f.layout_path == layout_path)
     }
 
     // --- Focused project ID (project zoom) ---
@@ -187,7 +187,9 @@ impl FocusManager {
             return None;
         }
         self.current_focus.as_ref().and_then(|f| {
-            f.terminal_id.as_deref().map(|tid| (f.project_id.as_str(), tid))
+            f.terminal_id
+                .as_deref()
+                .map(|tid| (f.project_id.as_str(), tid))
         })
     }
 
@@ -200,7 +202,10 @@ impl FocusManager {
     /// Check if any terminal is in fullscreen mode
     pub fn has_fullscreen(&self) -> bool {
         self.context == FocusContext::Fullscreen
-            && self.current_focus.as_ref().is_some_and(|f| f.terminal_id.is_some())
+            && self
+                .current_focus
+                .as_ref()
+                .is_some_and(|f| f.terminal_id.is_some())
     }
 
     /// Get the project ID of the fullscreened terminal (if any)
@@ -234,18 +239,35 @@ impl FocusManager {
     /// If already in fullscreen, the target is swapped in place — switching
     /// terminals via the zoom header arrows must not grow the stack, otherwise
     /// each switch would require another exit click to undo.
-    pub fn enter_fullscreen(&mut self, project_id: String, layout_path: Vec<usize>, terminal_id: String) {
+    pub fn enter_fullscreen(
+        &mut self,
+        project_id: String,
+        layout_path: Vec<usize>,
+        terminal_id: String,
+    ) {
         if self.context == FocusContext::Fullscreen {
-            self.current_focus = Some(FocusTarget::with_terminal(project_id.clone(), layout_path, terminal_id));
+            self.current_focus = Some(FocusTarget::with_terminal(
+                project_id.clone(),
+                layout_path,
+                terminal_id,
+            ));
             self.focused_project_id = Some(project_id);
             return;
         }
 
         // Save current state to stack (target may be None if nothing was focused)
-        self.push_focus(self.current_focus.clone(), self.context.clone(), self.focused_project_id.clone());
+        self.push_focus(
+            self.current_focus.clone(),
+            self.context.clone(),
+            self.focused_project_id.clone(),
+        );
 
         // Set fullscreen as current focus
-        self.current_focus = Some(FocusTarget::with_terminal(project_id.clone(), layout_path, terminal_id));
+        self.current_focus = Some(FocusTarget::with_terminal(
+            project_id.clone(),
+            layout_path,
+            terminal_id,
+        ));
         self.context = FocusContext::Fullscreen;
 
         // Also zoom to the project
@@ -421,13 +443,22 @@ impl FocusManager {
     }
 
     /// Push a focus entry onto the stack.
-    fn push_focus(&mut self, target: Option<FocusTarget>, context: FocusContext, focused_project_id: Option<String>) {
+    fn push_focus(
+        &mut self,
+        target: Option<FocusTarget>,
+        context: FocusContext,
+        focused_project_id: Option<String>,
+    ) {
         // Enforce max stack depth
         while self.focus_stack.len() >= self.max_stack_depth {
             self.focus_stack.remove(0);
         }
 
-        self.focus_stack.push(FocusStackEntry { target, context, focused_project_id });
+        self.focus_stack.push(FocusStackEntry {
+            target,
+            context,
+            focused_project_id,
+        });
     }
 
     /// Pop the most recent focus entry from the stack.

@@ -4,20 +4,17 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
-use crate::git::watcher::GitStatusWatcher;
-use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
-use crate::terminal::backend::{TerminalBackend, LocalBackend};
-use crate::terminal::pty_manager::PtyManager;
+use crate::settings::settings;
+use crate::views::chrome::title_bar::TitleBar;
+use crate::views::layout::split_pane::{ActiveDrag, new_active_drag};
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
-use crate::views::sidebar_controller::SidebarController;
 use crate::views::panels::sidebar::Sidebar;
-use crate::views::layout::split_pane::{new_active_drag, ActiveDrag};
 use crate::views::panels::status_bar::StatusBar;
 use crate::views::panels::toast::ToastOverlay;
-use crate::views::chrome::title_bar::TitleBar;
-use crate::settings::settings;
+use crate::views::sidebar_controller::SidebarController;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, Workspace};
@@ -36,7 +33,8 @@ pub use okena_terminal::TerminalsRegistry;
 /// in N project-column instances simultaneously (one per window whose visible
 /// set includes the host project), so the PTY notify path must fan out to
 /// every live entry. Dead weaks are pruned lazily on iteration.
-pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>>>;
+pub type ContentPaneRegistry =
+    Arc<Mutex<HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>>>;
 
 /// Global content pane registry instance.
 static CONTENT_PANE_REGISTRY: std::sync::OnceLock<ContentPaneRegistry> = std::sync::OnceLock::new();
@@ -51,12 +49,13 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
 /// whether any UI update was actually triggered). Generic over the target
 /// type so the same helper services the multi-window terminal fan-out and is
 /// testable without standing up a `TerminalContent`.
-pub fn notify_pane_weaks<T: 'static>(
+fn update_pane_weaks<T: 'static>(
     weaks: &mut Vec<WeakEntity<T>>,
     cx: &mut App,
+    mut update: impl FnMut(&mut T, &mut Context<T>),
 ) -> bool {
     let mut any_alive = false;
-    weaks.retain(|w| match w.update(cx, |_, cx| cx.notify()) {
+    weaks.retain(|weak| match weak.update(cx, |pane, cx| update(pane, cx)) {
         Ok(_) => {
             any_alive = true;
             true
@@ -64,6 +63,59 @@ pub fn notify_pane_weaks<T: 'static>(
         Err(_) => false,
     });
     any_alive
+}
+
+pub fn notify_pane_weaks<T: 'static>(weaks: &mut Vec<WeakEntity<T>>, cx: &mut App) -> bool {
+    update_pane_weaks(weaks, cx, |_, cx| cx.notify())
+}
+
+/// Notify panes for terminals whose remote content actually advanced. Empty
+/// registrations are removed so repeated activity cannot grow stale weak lists.
+pub fn notify_registered_panes<T: 'static>(
+    registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+) -> usize {
+    update_registered_panes(registry, terminal_ids, cx, notify_pane_weaks)
+}
+
+/// Request activity repaints from concrete terminal-content panes. Calls are
+/// already limited by the app-wide presentation cadence, so every visible copy
+/// remains live without each stream driving an independent clock.
+pub fn request_registered_content_pane_repaints(
+    registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+) -> usize {
+    update_registered_panes(registry, terminal_ids, cx, |weaks, cx| {
+        update_pane_weaks(weaks, cx, |pane, cx| {
+            pane.request_activity_repaint(cx);
+        })
+    })
+}
+
+fn update_registered_panes<T: 'static>(
+    registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+) -> usize {
+    let mut notified = 0;
+    let mut empty = Vec::new();
+    for terminal_id in terminal_ids {
+        if let Some(weaks) = registry.get_mut(terminal_id) {
+            if update(weaks, cx) {
+                notified += 1;
+            }
+            if weaks.is_empty() {
+                empty.push(terminal_id.clone());
+            }
+        }
+    }
+    for terminal_id in empty {
+        registry.remove(&terminal_id);
+    }
+    notified
 }
 
 /// Per-window view of the application: one instance per OS window.
@@ -84,6 +136,10 @@ pub enum WindowViewEvent {
         origin: WindowId,
         project_id: String,
     },
+    /// Rebuild the checkout release binary.
+    RebuildLocal,
+    /// Restart the UI-owned daemon and app with the rebuilt release binary.
+    RestartLocalBuild,
 }
 
 pub struct WindowView {
@@ -107,7 +163,6 @@ pub struct WindowView {
     focus_manager: Entity<FocusManager>,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
-    backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
     /// Sidebar state controller
@@ -135,8 +190,6 @@ pub struct WindowView {
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
-    /// Git status watcher (set by Okena after creation)
-    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Whether the pane switcher overlay is active
     pane_switch_active: bool,
     /// Pane switcher overlay entity (separate entity for proper focus handling)
@@ -170,12 +223,10 @@ impl WindowView {
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
-        pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-
         // Per-window UI request broker. Each window (slice 05 onward) owns its
         // own queue so overlay/sidebar requests stay scoped to the window that
         // produced them; closes slice 03 acceptance criterion that per-window
@@ -210,7 +261,16 @@ impl WindowView {
         }
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone(), terminals.clone(), cx));
+        let sidebar = cx.new(|cx| {
+            Sidebar::new(
+                window_id,
+                workspace.clone(),
+                focus_manager.clone(),
+                request_broker.clone(),
+                terminals.clone(),
+                cx,
+            )
+        });
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
@@ -230,16 +290,25 @@ impl WindowView {
         });
 
         // Create overlay manager
-        let overlay_manager = cx.new(|_cx| OverlayManager::new(window_id, workspace.clone(), focus_manager.clone(), request_broker.clone()));
+        let overlay_manager = cx.new(|_cx| {
+            OverlayManager::new(
+                window_id,
+                workspace.clone(),
+                focus_manager.clone(),
+                request_broker.clone(),
+            )
+        });
 
         // Create toast overlay
         let toast_overlay = cx.new(ToastOverlay::new);
 
         // Subscribe to overlay manager events
-        cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
+        cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event)
+            .detach();
 
         // Subscribe to toast action clicks (soft-close undo / close-now).
-        cx.subscribe(&toast_overlay, Self::handle_toast_action).detach();
+        cx.subscribe(&toast_overlay, Self::handle_toast_action)
+            .detach();
 
         // Observe RequestBroker to process overlay + terminal-send requests
         // outside of render().
@@ -253,7 +322,8 @@ impl WindowView {
             if has_send {
                 this.process_pending_send_to_terminal(cx);
             }
-        }).detach();
+        })
+        .detach();
 
         // Observe the shared project-hover state so this window re-renders its
         // project panels when the hovered project changes — including hovers
@@ -271,15 +341,10 @@ impl WindowView {
 
         let last_data_replacement_epoch = workspace.read(cx).data_replacement_epoch();
 
-        // Wrap PtyManager in LocalBackend for the TerminalBackend trait
-        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
-
         // Wire up sidebar callbacks
         {
             let workspace_for_dispatch = workspace.clone();
             let focus_manager_for_dispatch = focus_manager.clone();
-            let backend_for_dispatch = backend.clone();
-            let terminals_for_dispatch = terminals.clone();
             sidebar.update(cx, |s, _cx| {
                 // Dispatch action callback
                 s.set_dispatch_action(Box::new(move |project_id, action, cx| {
@@ -288,22 +353,10 @@ impl WindowView {
                         window_id,
                         &workspace_for_dispatch,
                         &focus_manager_for_dispatch,
-                        &Some(backend_for_dispatch.clone()),
-                        &terminals_for_dispatch,
-                        &None, // service_manager - wired later
                         &None, // remote_manager - wired later
                         cx,
                     ) {
                         dispatcher.dispatch(action, cx);
-                    }
-                }));
-
-                // Settings callback
-                s.set_settings(Box::new(|cx| {
-                    let app_settings = crate::settings::settings(cx);
-                    okena_views_sidebar::SidebarSettings {
-                        worktree_path_template: app_settings.worktree.path_template.clone(),
-                        hooks: app_settings.hooks.clone(),
                     }
                 }));
             });
@@ -314,7 +367,6 @@ impl WindowView {
             focus_manager,
             workspace,
             request_broker,
-            backend,
             terminals,
             sidebar,
             sidebar_ctrl,
@@ -328,13 +380,15 @@ impl WindowView {
             projects_scroll_handle: ScrollHandle::new(),
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
-                size: Size { width: px(800.0), height: px(600.0) },
+                size: Size {
+                    width: px(800.0),
+                    height: px(600.0),
+                },
             })),
             hscroll_dragging: false,
             hscroll_bounds: Rc::new(RefCell::new(None)),
             service_manager: None,
             remote_manager: None,
-            git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
             last_scroll_project: None,
@@ -357,6 +411,13 @@ impl WindowView {
         // path coalesce. Conversion mirrors the inverse path in
         // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
         // `PersistedWindowBounds` via four `f32::from(...)` calls).
+        cx.observe_window_activation(window, |_this, _window, cx| {
+            // Refresh key-window chrome while activity-driven presentation stays
+            // live in every visible window.
+            cx.notify();
+        })
+        .detach();
+
         cx.observe_window_bounds(window, |this, window, cx| {
             let bounds = window.window_bounds().get_bounds();
             let persisted = PersistedWindowBounds {
@@ -378,9 +439,8 @@ impl WindowView {
         cx.observe(&view.focus_manager, |this, fm, cx| {
             let fm = fm.read(cx);
             let is_project_focused = fm.focused_project_id().is_some();
-            let focused_terminal_project = fm
-                .focused_terminal_state()
-                .map(|f| f.project_id.clone());
+            let focused_terminal_project =
+                fm.focused_terminal_state().map(|f| f.project_id.clone());
             // Consumed once per observation: an explicit jump (switcher Tab)
             // centers the target; other switches just ensure it's visible.
             let center_navigation = std::mem::take(&mut this.center_next_navigation);
@@ -399,14 +459,21 @@ impl WindowView {
                 this.pending_center_scroll = focused_terminal_project;
             }
             // When the active terminal changes project, ensure it's visible
-            else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
+            else if focused_terminal_project != this.last_scroll_project
+                && focused_terminal_project.is_some()
+            {
                 this.last_scroll_project = focused_terminal_project.clone();
-                this.scroll_to_focused_project(focused_terminal_project.as_deref(), center_navigation, cx);
+                this.scroll_to_focused_project(
+                    focused_terminal_project.as_deref(),
+                    center_navigation,
+                    cx,
+                );
             }
 
             this.was_project_focused = is_project_focused;
             cx.notify();
-        }).detach();
+        })
+        .detach();
 
         // Observe workspace data changes so project path renames refresh
         // cached git providers / service paths.
@@ -424,7 +491,8 @@ impl WindowView {
             }
             this.refresh_for_project_path_changes(cx);
             this.prune_file_viewer_cache(cx);
-        }).detach();
+        })
+        .detach();
 
         // Initialize project columns
         view.sync_project_columns(cx);
@@ -472,16 +540,12 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
-    /// Set the git watcher entity (called by Okena after creation).
-    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
-        self.git_watcher = Some(watcher);
-        // Drop existing local columns so they get recreated with the watcher
-        self.project_columns.retain(|id, _| id.starts_with("remote:"));
-        self.sync_project_columns(cx);
-    }
-
     /// Set the remote connection manager (called after creation by Okena).
-    pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
+    pub fn set_remote_manager(
+        &mut self,
+        manager: Entity<RemoteConnectionManager>,
+        cx: &mut Context<Self>,
+    ) {
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
@@ -496,7 +560,8 @@ impl WindowView {
             );
             this.sync_project_columns(cx);
             cx.notify();
-        }).detach();
+        })
+        .detach();
 
         // Wire up remote callbacks on sidebar
         {
@@ -506,12 +571,17 @@ impl WindowView {
             self.sidebar.update(cx, |sidebar, _cx| {
                 // Get remote connections callback
                 sidebar.set_remote_connections(Box::new(move |cx| {
-                    rm_for_connections.read(cx).connections().iter().map(|(config, status, _state)| {
-                        okena_views_sidebar::RemoteConnectionSnapshot {
-                            config: (*config).clone(),
-                            status: (*status).clone(),
-                        }
-                    }).collect()
+                    rm_for_connections
+                        .read(cx)
+                        .connections()
+                        .iter()
+                        .map(|(config, status, _state)| {
+                            okena_views_sidebar::RemoteConnectionSnapshot {
+                                config: (*config).clone(),
+                                status: (*status).clone(),
+                            }
+                        })
+                        .collect()
                 }));
 
                 // Send remote action callback
@@ -523,36 +593,36 @@ impl WindowView {
 
                 // Get remote folder callback
                 sidebar.set_get_remote_folder(Box::new(move |conn_id, prefixed_project_id, cx| {
-                    let server_project_id = okena_transport::client::strip_prefix(prefixed_project_id, conn_id);
-                    rm_for_folder.read(cx).connections().iter()
+                    let server_project_id =
+                        okena_transport::client::strip_prefix(prefixed_project_id, conn_id);
+                    rm_for_folder
+                        .read(cx)
+                        .connections()
+                        .iter()
                         .find(|(config, _, _)| config.id == conn_id)
                         .and_then(|(_, _, state)| state.as_ref())
                         .and_then(|state| {
-                            state.folders.iter().find(|f| f.project_ids.contains(&server_project_id))
+                            state
+                                .folders
+                                .iter()
+                                .find(|f| f.project_ids.contains(&server_project_id))
                                 .map(|f| f.id.clone())
                         })
                 }));
             });
 
+            self.status_bar.update(cx, |status_bar, cx| {
+                status_bar.set_remote_manager(manager.clone(), cx);
+            });
+
             // Observe remote manager for sidebar updates
             let sidebar_for_observe = self.sidebar.clone();
+            let status_bar_for_observe = self.status_bar.clone();
             cx.observe(&manager, move |_this, _rm, cx| {
                 sidebar_for_observe.update(cx, |_, cx| cx.notify());
-            }).detach();
-
-            // Repaint the sidebar on remote terminal activity (bell / idle).
-            // The sidebar reads these flags straight from the TerminalsRegistry,
-            // which GPUI's dependency tracking can't see, so incoming server
-            // output would otherwise only surface on local input (issue #128).
-            // This rides a dedicated event rather than cx.notify() so the
-            // high-frequency output cadence doesn't trigger the project-sync
-            // observer above.
-            let sidebar_for_activity = self.sidebar.clone();
-            cx.subscribe(&manager, move |_this, _rm, event, cx| match event {
-                RemoteManagerEvent::TerminalActivity => {
-                    sidebar_for_activity.update(cx, |_, cx| cx.notify());
-                }
-            }).detach();
+                status_bar_for_observe.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
         }
 
         self.remote_manager = Some(manager);
@@ -561,11 +631,19 @@ impl WindowView {
         self.rebuild_sidebar_dispatch(cx);
     }
 
+    /// Request the sidebar half of the app-wide terminal activity frame.
+    /// Parsing and notifications already ran; this only presents current bell /
+    /// idle state at the shared capped cadence.
+    pub(crate) fn request_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |_, cx| cx.notify());
+    }
+
     /// Set the service manager entity (called by Okena after creation).
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
         cx.observe(&manager, |_this, _sm, cx| {
             cx.notify();
-        }).detach();
+        })
+        .detach();
 
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_service_manager(manager.clone(), cx);
@@ -584,15 +662,16 @@ impl WindowView {
         self.service_manager = Some(manager);
     }
 
-    /// Rebuild the sidebar dispatch action callback with current service/remote managers.
+    /// Rebuild the sidebar dispatch action callback with the current remote manager.
     fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        let service_manager = self.service_manager.clone();
         let remote_manager = self.remote_manager.clone();
         let window_id = self.window_id;
+        // Separate clones for the connection-targeted dispatch closure below.
+        let workspace_conn = self.workspace.clone();
+        let focus_manager_conn = self.focus_manager.clone();
+        let remote_manager_conn = self.remote_manager.clone();
         self.sidebar.update(cx, |s, _cx| {
             s.set_dispatch_action(Box::new(move |project_id, action, cx| {
                 if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
@@ -600,11 +679,22 @@ impl WindowView {
                     window_id,
                     &workspace,
                     &focus_manager,
-                    &Some(backend.clone()),
-                    &terminals,
-                    &service_manager,
                     &remote_manager,
                     cx,
+                ) {
+                    dispatcher.dispatch(action, cx);
+                }
+            }));
+            // Folder-scoped / workspace-global dispatch (no project to resolve a
+            // connection from). The sidebar resolves the connection id from the
+            // folder prefix (or uses the local daemon) and calls this.
+            s.set_dispatch_for_connection(Box::new(move |conn_id, action, cx| {
+                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_connection(
+                    conn_id,
+                    window_id,
+                    &workspace_conn,
+                    &focus_manager_conn,
+                    &remote_manager_conn,
                 ) {
                     dispatcher.dispatch(action, cx);
                 }
@@ -630,22 +720,50 @@ impl WindowView {
         // Snapshot all connection data into owned structures to release the borrow on cx
         let snapshots: Vec<RemoteSnapshot> = {
             let rm_read = rm.read(cx);
-            rm_read.connections().iter().map(|(config, _status, state)| {
-                RemoteSnapshot {
+            rm_read
+                .connections()
+                .iter()
+                .map(|(config, _status, state)| RemoteSnapshot {
                     config: (*config).clone(),
                     state: state.cloned(),
-                }
-            }).collect()
+                })
+                .collect()
         };
 
         focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| ws.apply_remote_snapshot(&snapshots, window_id, fm, cx));
+            workspace.update(cx, |ws, cx| {
+                ws.apply_remote_snapshot(&snapshots, window_id, fm, cx)
+            });
         });
+
+        // Mirror the local daemon's hook execution history into the client-side
+        // `HookMonitor` global so the Hook Log overlay reflects hooks that ran on
+        // the daemon. Only the local daemon connection feeds this global — remote
+        // connections carry their own, unrelated hook state — and the hooks run
+        // remotely, so without this the client's monitor would stay empty.
+        if let Some(local) = snapshots
+            .iter()
+            .find(|s| s.config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
+            && let Some(state) = local.state.as_ref()
+            && let Some(monitor) = cx.try_global::<okena_workspace::hook_monitor::HookMonitor>()
+        {
+            let monitor = monitor.clone();
+            monitor.replace_history(
+                state
+                    .hooks
+                    .iter()
+                    .map(okena_workspace::hook_monitor::HookExecution::from_api)
+                    .collect(),
+            );
+        }
     }
 
     /// Snapshot current on-disk paths for local projects (keyed by project_id).
     fn snapshot_local_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
-        self.workspace.read(cx).projects().iter()
+        self.workspace
+            .read(cx)
+            .projects()
+            .iter()
             .filter(|p| !p.is_remote)
             .map(|p| (p.id.clone(), p.path.clone()))
             .collect()
@@ -656,32 +774,38 @@ impl WindowView {
     fn refresh_for_project_path_changes(&mut self, cx: &mut Context<Self>) {
         let current = self.snapshot_local_project_paths(cx);
 
-        let changed: Vec<(String, String)> = current.iter()
+        let changed: Vec<(String, String)> = current
+            .iter()
             .filter(|(id, path)| self.last_project_paths.get(id.as_str()) != Some(*path))
             .map(|(id, path)| (id.clone(), path.clone()))
             .collect();
 
         if changed.is_empty() {
-            // Still drop entries for projects that no longer exist
-            if current.len() != self.last_project_paths.len() {
-                self.last_project_paths = current;
-            }
+            self.last_project_paths
+                .retain(|id, _| current.contains_key(id));
             return;
         }
 
         for (id, new_path) in &changed {
             if let Some(column) = self.project_columns.get(id).cloned()
-                && let Some(provider) = self.build_git_provider(id, cx) {
-                    column.update(cx, |col, cx| col.set_git_provider(provider, cx));
-                }
-            if let Some(sm) = self.service_manager.clone() {
+                && let Some(provider) = self.build_git_provider(id, cx)
+            {
+                column.update(cx, |col, cx| col.set_git_provider(provider, cx));
+            }
+            let services_converged = if let Some(sm) = self.service_manager.clone() {
                 let id = id.clone();
                 let new_path = new_path.clone();
-                sm.update(cx, move |sm, _cx| sm.update_project_path(&id, &new_path));
+                sm.update(cx, move |sm, cx| sm.update_project_path(&id, &new_path, cx))
+            } else {
+                true
+            };
+            if services_converged {
+                self.last_project_paths.insert(id.clone(), new_path.clone());
             }
         }
 
-        self.last_project_paths = current;
+        self.last_project_paths
+            .retain(|id, _| current.contains_key(id));
     }
 
     /// Ensure project columns exist for all visible projects
@@ -689,29 +813,58 @@ impl WindowView {
         let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
-                (p.id.clone(), p.is_remote, p.connection_id.clone())
-            }).collect()
+            ws.visible_projects(
+                self.window_id,
+                fm.focused_project_id(),
+                fm.is_focus_individual(),
+            )
+            .iter()
+            .map(|p| (p.id.clone(), p.is_remote, p.connection_id.clone()))
+            .collect()
         };
 
         // Clean up columns for projects that no longer exist
-        let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
+        let visible_ids: std::collections::HashSet<&str> = visible_projects
+            .iter()
             .map(|(id, _, _)| id.as_str())
             .collect();
-        self.project_columns.retain(|id, _| visible_ids.contains(id.as_str()));
+        self.project_columns
+            .retain(|id, _| visible_ids.contains(id.as_str()));
 
-        // Create columns for new projects
-        for (project_id, is_remote, connection_id) in &visible_projects {
-            if !self.project_columns.contains_key(project_id) {
-                let entity = if *is_remote {
+        // Create columns for new projects. Every project is a remote project
+        // of the local daemon.
+        for (project_id, _is_remote, connection_id) in &visible_projects {
+            if !self.project_columns.contains_key(project_id)
+                && let Some(entity) =
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
-                } else {
-                    Some(self.create_local_column(project_id, cx))
-                };
-                if let Some(entity) = entity {
-                    self.project_columns.insert(project_id.clone(), entity);
-                }
+            {
+                self.project_columns.insert(project_id.clone(), entity);
+                self.request_git_poll_for_visible_project(project_id, cx);
             }
+        }
+    }
+
+    /// Ask the daemon to refresh a project's git/PR/CI status now that it just
+    /// became visible in this window. Per-window visibility is client-owned, so
+    /// the daemon doesn't otherwise know the project is on screen until a
+    /// terminal subscribes — without this, its badge waits for the next poll
+    /// cycle. Mirrors the web client's request-on-visible. Fire-and-forget: the
+    /// fresh status arrives over the git-status stream, not this action's reply.
+    fn request_git_poll_for_visible_project(&self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
+            project_id,
+            self.window_id,
+            &self.workspace,
+            &self.focus_manager,
+            &self.remote_manager,
+            cx,
+        ) {
+            dispatcher.dispatch(
+                okena_core::api::ActionRequest::GitStatus {
+                    project_id: project_id.to_string(),
+                },
+                cx,
+            );
         }
     }
 
@@ -723,7 +876,9 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) -> Option<Entity<ProjectColumn>> {
         let conn_id = connection_id?;
-        let backend = self.remote_manager.as_ref()
+        let backend = self
+            .remote_manager
+            .as_ref()
             .and_then(|rm| rm.read(cx).backend_for(conn_id))?;
 
         let workspace_clone = self.workspace.clone();
@@ -769,69 +924,6 @@ impl WindowView {
             col
         }))
     }
-
-    /// Create a ProjectColumn for a local project.
-    fn create_local_column(
-        &self,
-        project_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Entity<ProjectColumn> {
-        let workspace_clone = self.workspace.clone();
-        let focus_manager_clone = self.focus_manager.clone();
-        let request_broker_clone = self.request_broker.clone();
-        let terminals_clone = self.terminals.clone();
-        let active_drag_clone = self.active_drag.clone();
-        let id = project_id.to_string();
-        let backend_clone = self.backend.clone();
-        let workspace_for_dispatch = self.workspace.clone();
-        let focus_manager_for_dispatch = self.focus_manager.clone();
-        let backend_for_dispatch = self.backend.clone();
-        let terminals_for_dispatch = self.terminals.clone();
-        let git_watcher = self.git_watcher.clone();
-
-        let git_provider = match self.build_git_provider(project_id, cx) {
-            Some(p) => p,
-            None => {
-                log::warn!("Cannot build git provider for project {}", project_id);
-                let path = self.workspace.read(cx).project(project_id)
-                    .map(|p| p.path.clone())
-                    .unwrap_or_default();
-                Arc::new(okena_views_git::diff_viewer::provider::LocalGitProvider::new(path))
-            }
-        };
-
-        let window_id = self.window_id;
-        let entity = cx.new(move |cx| {
-            let mut col = ProjectColumn::new(
-                window_id,
-                workspace_clone,
-                focus_manager_clone,
-                request_broker_clone,
-                id,
-                backend_clone,
-                terminals_clone,
-                active_drag_clone,
-                git_watcher,
-                git_provider,
-                cx,
-            );
-            col.set_action_dispatcher(Some(
-                crate::action_dispatch::ActionDispatcher::Local {
-                    workspace: workspace_for_dispatch,
-                    focus_manager: focus_manager_for_dispatch,
-                    backend: backend_for_dispatch,
-                    terminals: terminals_for_dispatch,
-                    service_manager: None, // set later via set_service_manager
-                    window_id,
-                },
-            ));
-            col
-        });
-        if let Some(ref sm) = self.service_manager {
-            entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
-        }
-        entity
-    }
 }
 
 impl_focusable!(WindowView);
@@ -840,10 +932,42 @@ impl EventEmitter<WindowViewEvent> for WindowView {}
 
 #[cfg(test)]
 mod tests {
-    use super::notify_pane_weaks;
+    use super::{notify_pane_weaks, notify_registered_panes};
     use gpui::AppContext as _;
+    use std::collections::HashMap;
 
     struct Stub;
+
+    #[gpui::test]
+    fn activity_notifies_only_registered_terminal_panes(cx: &mut gpui::TestAppContext) {
+        let (target, other, mut registry) = cx.update(|cx| {
+            let target = cx.new(|_| Stub);
+            let other = cx.new(|_| Stub);
+            let registry = HashMap::from([
+                ("target".to_string(), vec![target.downgrade()]),
+                ("other".to_string(), vec![other.downgrade()]),
+            ]);
+            (target, other, registry)
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                notify_registered_panes(&mut registry, &["target".to_string()], cx),
+                1
+            );
+            assert_eq!(registry.len(), 2, "unrelated registrations stay intact");
+        });
+
+        drop(target);
+        cx.update(|cx| {
+            assert_eq!(
+                notify_registered_panes(&mut registry, &["target".to_string()], cx),
+                0
+            );
+            assert!(!registry.contains_key("target"), "dead pane key is pruned");
+        });
+        drop(other);
+    }
 
     #[gpui::test]
     fn fans_out_to_every_alive_weak_and_prunes_dead(cx: &mut gpui::TestAppContext) {

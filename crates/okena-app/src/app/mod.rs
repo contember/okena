@@ -1,155 +1,170 @@
 mod detached_overlays;
 mod detached_terminals;
 mod extras;
-pub mod headless;
+mod local_build;
 mod notifications;
-mod remote_commands;
-mod remote_config;
 
 pub use detached_overlays::open_detached_overlay;
 
-use crate::git::watcher::GitStatusWatcher;
-use crate::workspace::worktree_sync::WorktreeSyncWatcher;
-use crate::remote::auth::AuthStore;
-use crate::remote::bridge;
-use crate::remote::pty_broadcaster::PtyBroadcaster;
-use crate::remote::server::RemoteServer;
-use crate::remote::{GlobalRemoteInfo, RemoteInfo};
-use crate::remote_client::manager::RemoteConnectionManager;
-use crate::services::manager::ServiceManager;
-use crate::settings::{GlobalSettings, settings};
-use crate::views::panels::toast::ToastManager;
-use crate::terminal::pty_manager::{PtyEvent, PtyManager};
-use okena_ext_claude::resolve_claude_dir;
-use crate::views::window::{TerminalsRegistry, WindowView};
-use crate::workspace::persistence;
+use crate::remote_client::manager::{RemoteConnectionManager, RemoteManagerEvent};
+use crate::views::window::{
+    TerminalsRegistry, WindowView, content_pane_registry, request_registered_content_pane_repaints,
+};
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
-use async_channel::Receiver;
 use gpui::*;
-use okena_core::api::ApiGitStatus;
+use okena_ui::activity_repaint::ActivityRepaintBatch;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::watch as tokio_watch;
+use std::time::Duration;
 
-fn is_default_claude_dir(claude_dir: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
+/// Repaint-only terminal activity is limited to one app-wide presentation frame.
+/// A ~50 FPS terminal scene keeps interactive output responsive without allowing
+/// independent TUI animations to drive the same OS window at aggregate rates.
+/// Parsing, notifications, and OSC clipboard replies are intentionally not delayed.
+const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(20);
+
+#[derive(Default)]
+struct WindowLayoutSaveTracker {
+    pending: parking_lot::Mutex<usize>,
+    drained: parking_lot::Condvar,
+}
+
+impl WindowLayoutSaveTracker {
+    fn start(self: &Arc<Self>) -> WindowLayoutSaveJob {
+        *self.pending.lock() += 1;
+        WindowLayoutSaveJob {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn flush(&self) {
+        let mut pending = self.pending.lock();
+        while *pending != 0 {
+            self.drained.wait(&mut pending);
+        }
+    }
+}
+
+struct WindowLayoutSaveJob {
+    tracker: Arc<WindowLayoutSaveTracker>,
+}
+
+impl Drop for WindowLayoutSaveJob {
+    fn drop(&mut self) {
+        let mut pending = self.tracker.pending.lock();
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.tracker.drained.notify_all();
+        }
+    }
+}
+
+fn flush_window_layout_saves_before_final<R>(
+    tracker: &WindowLayoutSaveTracker,
+    save_final: impl FnOnce() -> R,
+) -> R {
+    tracker.flush();
+    save_final()
+}
+
+/// Identity guard for [`kill_process_by_pid`]: OS pids recycle, so a pid taken
+/// from a possibly-stale `remote.json` may now belong to an unrelated process.
+/// Only a process whose name or executable file name starts with "okena" (the
+/// `okena`/`okena-daemon` binaries) may be killed. Pure so it's unit-testable.
+fn is_okena_process(name: Option<&str>, exe_file_name: Option<&str>) -> bool {
+    let is_okena = |s: &str| s.starts_with("okena");
+    name.is_some_and(is_okena) || exe_file_name.is_some_and(is_okena)
+}
+
+/// Best-effort kill a process by pid — SIGKILL on Unix, `TerminateProcess` on
+/// Windows, matching `std::process::Child::kill`. Used by the UI-owned daemon
+/// lifecycle to reap a daemon we own but hold no `Child` for: a restart spawns a
+/// *detached* successor, known to us only by the pid it advertises in
+/// `remote.json`. A pid of 0 (unknown) or an already-dead process is a no-op.
+/// Refuses (warn + skip) when the process at that pid doesn't look like an okena
+/// binary — see [`is_okena_process`].
+fn kill_process_by_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let spid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[spid]), true);
+    if let Some(proc) = sys.process(spid) {
+        let name = proc.name().to_str();
+        let exe_file_name = proc
+            .exe()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        if !is_okena_process(name, exe_file_name) {
+            log::warn!(
+                "Refusing to kill pid {pid}: process {name:?} (exe {exe_file_name:?}) is not an okena binary — the pid was likely recycled"
+            );
+            return;
+        }
+        proc.kill();
+    }
+}
+
+fn hand_off_ui_owned_daemon(mut spawned_child: Option<std::process::Child>) {
+    let Some(daemon) = okena_remote_server::local::running_daemon() else {
+        if let Some(child) = spawned_child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return;
     };
-    let default_dir = home.join(".claude");
-    let canonical_default = default_dir.canonicalize().unwrap_or(default_dir);
-    let canonical_dir = claude_dir
-        .canonicalize()
-        .unwrap_or_else(|_| claude_dir.to_path_buf());
-    canonical_dir == canonical_default
-}
-
-fn claude_pty_extra_env(
-    claude_dir: &Path,
-    multi_profile: bool,
-    parent_has_claude_config_dir: bool,
-) -> Vec<(String, Option<String>)> {
-    // Default `~/.claude`: actively remove CLAUDE_CONFIG_DIR from the PTY rather
-    // than just leaving it unset. This keeps Claude Code on its canonical Keychain
-    // service (an explicit CLAUDE_CONFIG_DIR=~/.claude makes it create a suffixed
-    // duplicate) *and* prevents a stale value — e.g. one exported in the shell
-    // that launched Okena and inherited by our process — from leaking into the
-    // terminal and silently pointing `claude` at the wrong account.
-    if is_default_claude_dir(claude_dir) {
-        return vec![("CLAUDE_CONFIG_DIR".to_string(), None)];
+    if !daemon.ui_owned {
+        log::info!("Leaving standalone local daemon pid {} running", daemon.pid);
+        return;
     }
 
-    // Single-profile user who manages CLAUDE_CONFIG_DIR themselves: there's no
-    // profile boundary to enforce, so leave their exported value untouched.
-    if !multi_profile && parent_has_claude_config_dir {
-        return Vec::new();
-    }
-
-    vec![(
-        "CLAUDE_CONFIG_DIR".to_string(),
-        Some(claude_dir.to_string_lossy().into_owned()),
-    )]
-}
-
-/// Push the resolved Claude config directory into the PTY manager as
-/// CLAUDE_CONFIG_DIR so `claude` invocations inside Okena terminals read the
-/// per-profile account.
-///
-/// Non-default dirs get an unconditional override for multi-profile users
-/// (otherwise account isolation would silently break for anyone with
-/// `CLAUDE_CONFIG_DIR` exported in their shell rc). The default `~/.claude` is
-/// actively *unset* instead so Claude Code uses its canonical Keychain service
-/// rather than creating a suffixed duplicate for the same path.
-fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
-    let multi_profile = okena_core::profiles::all_profiles()
-        .map(|p| p.len() > 1)
-        .unwrap_or(false);
-    let claude_dir = resolve_claude_dir(cx);
-    pty_manager.set_extra_env(claude_pty_extra_env(
-        &claude_dir,
-        multi_profile,
-        std::env::var("CLAUDE_CONFIG_DIR").is_ok(),
-    ));
-}
-
-/// Set up an observer that loads/unloads service configs when projects change.
-/// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
-pub(crate) fn observe_project_services<T: 'static>(
-    workspace: &Entity<Workspace>,
-    service_manager: &Entity<ServiceManager>,
-    cx: &mut Context<T>,
-) {
-    let service_manager = service_manager.clone();
-    let known: Arc<parking_lot::Mutex<HashSet<String>>> =
-        Arc::new(parking_lot::Mutex::new(HashSet::new()));
-
-    // Initial load
-    {
-        let data = workspace.read(cx).data().clone();
-        sync_services(&data, &mut known.lock(), &service_manager, cx);
-    }
-
-    let known_for_observer = known.clone();
-    cx.observe(workspace, move |_this, workspace: Entity<Workspace>, cx| {
-        let data = workspace.read(cx).data().clone();
-        sync_services(&data, &mut known_for_observer.lock(), &service_manager, cx);
-    })
-    .detach();
-}
-
-fn sync_services(
-    data: &WorkspaceData,
-    known: &mut HashSet<String>,
-    service_manager: &Entity<ServiceManager>,
-    cx: &mut impl AppContext,
-) {
-    let current_ids: HashSet<String> = data.projects.iter()
-        .filter(|p| !p.is_remote)
-        .map(|p| p.id.clone())
-        .collect();
-
-    for p in &data.projects {
-        if p.is_remote || known.contains(&p.id) {
-            continue;
+    let owns_current_process = spawned_child
+        .as_ref()
+        .is_some_and(|child| child.id() == daemon.pid);
+    match okena_remote_server::local::request_local_shutdown(&daemon) {
+        Ok(outcome) if outcome.accepted && outcome.active_clients == 0 => {
+            if !okena_remote_server::local::wait_for_pid_exit(daemon.pid, Duration::from_secs(3)) {
+                if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                    let _ = child.kill();
+                } else {
+                    // No owned `Child` handle — e.g. a detached post-restart
+                    // successor we only know by the pid it advertises. Reap it by
+                    // pid, guarded by the is_okena_process recycle check, so a
+                    // UI-owned daemon we own the lifecycle of never lingers.
+                    log::info!(
+                        "UI-owned daemon pid {} did not exit gracefully; reaping by pid",
+                        daemon.pid
+                    );
+                    kill_process_by_pid(daemon.pid);
+                }
+            }
+            if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                let _ = child.wait();
+            }
         }
-        // Skip projects whose directory doesn't exist yet (deferred worktrees).
-        if !std::path::Path::new(&p.path).exists() {
-            continue;
+        Ok(outcome) if outcome.accepted => {
+            log::info!(
+                "UI-owned daemon shutdown armed until {} other client(s) disconnect",
+                outcome.active_clients
+            );
         }
-        service_manager.update(cx, |sm, cx| {
-            sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
-        });
-        known.insert(p.id.clone());
-    }
-
-    let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
-    for id in &removed {
-        service_manager.update(cx, |sm, cx| {
-            sm.unload_project_services(id, cx);
-        });
-        known.remove(id);
+        Ok(_) => {
+            log::info!("Local daemon declined UI lifecycle handoff");
+        }
+        Err(error) => {
+            if let Some(child) = spawned_child.as_mut().filter(|_| owns_current_process) {
+                log::warn!("Shutdown request failed ({error}); killing owned daemon child");
+                let _ = child.kill();
+                let _ = child.wait();
+            } else {
+                log::warn!(
+                    "Shutdown request failed ({error}); refusing to kill daemon without a matching child handle"
+                );
+            }
+        }
     }
 }
 
@@ -166,8 +181,8 @@ pub struct Okena {
     /// Ephemeral extras spawned at runtime, keyed by `WindowId::Extra(uuid)`.
     /// Populated by the workspace observer in `handle_extra_windows_changed`
     /// when `WorkspaceData.extra_windows` gains a new entry; the matching
-    /// `Entity<WindowView>` is created and inserted as part of the
-    /// `cx.open_window` build closure (see `extras.rs`).
+    /// `Entity<WindowView>` is registered immediately after `cx.open_window`
+    /// succeeds (see `extras.rs`).
     extra_windows: HashMap<WindowId, Entity<WindowView>>,
     /// OS window handles for extras, keyed by `WindowId::Extra(uuid)`. Populated
     /// alongside `extra_windows` in `extras.rs::open_extra_window`. Same
@@ -175,121 +190,58 @@ pub struct Okena {
     /// remote-bridge boundary (PRD cri 13).
     pub(super) extra_window_handles: HashMap<WindowId, AnyWindowHandle>,
     pub(crate) workspace: Entity<Workspace>,
-    pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
     pub(crate) opened_detached_windows: HashSet<String>,
-    /// Flag indicating workspace needs to be saved (for debouncing)
-    /// Note: Field is read by spawned tasks, not directly
-    #[allow(dead_code)]
-    save_pending: Arc<AtomicBool>,
-    // ── Git status watcher ────────────────────────────────────────────
-    #[allow(dead_code)]
-    git_watcher: Entity<GitStatusWatcher>,
-    // ── Worktree sync watcher ────────────────────────────────────────
-    #[allow(dead_code)]
-    worktree_sync: Entity<WorktreeSyncWatcher>,
-    git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
-    remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
-    next_remote_connection_id: Arc<AtomicU64>,
-    // ── Remote control fields ───────────────────────────────────────────
-    remote_server: Option<RemoteServer>,
-    pub auth_store: Arc<AuthStore>,
-    pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
-    pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
-    remote_info: RemoteInfo,
-    listen_addr: IpAddr,
-    /// Serve the remote server over TLS (mirrors settings.remote_tls_enabled).
-    remote_tls_enabled: bool,
-    /// Whether the listen address was forced via CLI --listen flag
-    force_remote: bool,
-    /// Service manager for project-scoped background processes
-    service_manager: Entity<ServiceManager>,
     /// Remote connection manager. Held so extras spawned at runtime can
     /// be wired with the same singleton main was wired with at startup
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
     remote_manager: Entity<RemoteConnectionManager>,
+    /// Exact terminal panes dirtied during the current app-wide frame window.
+    /// The idle-to-active edge is presented immediately; sustained activity is
+    /// coalesced while parsing and notification handling remain immediate.
+    terminal_activity_repaints: ActivityRepaintBatch<String>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
     notification_jump_tx: async_channel::Sender<notifications::NotificationJump>,
+    /// Child this GUI spawned, retained for owner-checked recovery fallback.
+    spawned_daemon: Option<std::process::Child>,
+    /// A rebuilt successor already owns the daemon; quitting must not shut it down.
+    preserve_daemon_on_quit: bool,
+    /// Single-flight guard for the local-daemon recovery task: set while a
+    /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
+    /// up parallel recoveries (each would re-run `ensure_local_daemon`).
+    recovering: Arc<AtomicBool>,
+    /// Set at the start of the quit handler so an in-flight (or newly triggered)
+    /// recovery bails instead of resurrecting the connection or spawning a
+    /// daemon we'd immediately orphan. Guards the part-B quit path's
+    /// `remove_connection` from being mistaken for a recoverable failure.
+    /// Also set from the main window's close handler (see main.rs) so pending
+    /// extra-window forgets never commit during app teardown.
+    quitting: Arc<AtomicBool>,
+    /// Deferred forgets for OS-closed extra windows — see
+    /// `extras.rs::handle_extra_window_os_close` for the quit-vs-close story.
+    pending_extra_forgets: extras::PendingExtraForgets,
 }
 
 impl Okena {
     pub fn new(
         workspace_data: WorkspaceData,
-        pty_manager: Arc<PtyManager>,
-        pty_events: Receiver<PtyEvent>,
-        listen_addr: Option<IpAddr>,
+        client_project_layouts: HashMap<String, crate::workspace::state::LayoutNode>,
+        local_daemon: okena_remote_server::local::EnsuredDaemon,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let force_remote = listen_addr.is_some();
-        let listen_addr = listen_addr.unwrap_or_else(|| {
-            cx.global::<GlobalSettings>().0.read(cx).get()
-                .remote_listen_address.parse::<IpAddr>()
-                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        // Create workspace entity. The GUI is always a thin daemon client: the
+        // daemon owns persistence + the instance lock and is the single writer,
+        // so the GUI's `Workspace` is a pure mirror with no autosave.
+        let workspace = cx.new(|_cx| {
+            let mut workspace = Workspace::new(workspace_data);
+            workspace.seed_client_project_layouts(client_project_layouts);
+            workspace
         });
-        let remote_tls_enabled = cx
-            .global::<GlobalSettings>()
-            .0
-            .read(cx)
-            .get()
-            .remote_tls_enabled;
-        // Create workspace entity
-        let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
-
-        // Shared flag for debounced save
-        let save_pending = Arc::new(AtomicBool::new(false));
-        // Track last saved data_version to skip saves for UI-only changes
-        let last_saved_version = Arc::new(AtomicU64::new(0));
-
-        // Set up debounced auto-save on workspace changes
-        let save_pending_for_observer = save_pending.clone();
-        let last_saved_version_for_observer = last_saved_version.clone();
-        let workspace_for_save = workspace.clone();
-        cx.observe(&workspace, move |_this, _workspace, cx| {
-            // Check if persistent data actually changed
-            let current_version = _workspace.read(cx).data_version();
-            if current_version == last_saved_version_for_observer.load(Ordering::Relaxed) {
-                return; // UI-only change, skip save
-            }
-
-            save_pending_for_observer.store(true, Ordering::Relaxed);
-
-            let save_pending = save_pending_for_observer.clone();
-            let last_saved = last_saved_version_for_observer.clone();
-            let workspace = workspace_for_save.clone();
-            cx.spawn(async move |_, cx| {
-                smol::Timer::after(std::time::Duration::from_millis(500)).await;
-
-                if save_pending.swap(false, Ordering::Relaxed) {
-                    let (data, version) = cx.update(|cx| {
-                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
-                        let ws = workspace.read(cx);
-                        (ws.data().clone(), ws.data_version())
-                    });
-                    // Run blocking fs IO off the GPUI main thread — on Windows
-                    // an AV scan or OneDrive sync of workspace.json can stall
-                    // for seconds and would otherwise freeze the UI.
-                    let save_result = smol::unblock(move || persistence::save_workspace(&data)).await;
-                    match save_result {
-                        Ok(()) => {
-                            last_saved.store(version, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            log::error!("Failed to save workspace: {}", e);
-                            cx.update(|cx| {
-                                ToastManager::error(format!("Failed to save workspace: {}", e), cx);
-                            });
-                            // Don't update last_saved — next mutation will retry the save
-                        }
-                    }
-                }
-            }).detach();
-        })
-        .detach();
 
         // Shared terminals registry — one per Okena instance, threaded into
         // every WindowView (main + extras). Each TerminalPane looks up the
@@ -298,44 +250,54 @@ impl Okena {
         // already shown in main would create a NEW Terminal model and PTY
         // bytes (which feed the original Arc<Terminal>) would never reach
         // the extra's content pane.
-        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let terminals: TerminalsRegistry =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
         // Create the main window's per-window view, sharing the registry.
-        let pty_manager_clone = pty_manager.clone();
         let terminals_for_main = terminals.clone();
         let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
+            WindowView::new(
+                WindowId::Main,
+                workspace.clone(),
+                terminals_for_main,
+                window,
+                cx,
+            )
         });
 
         // Listen for cross-window requests (e.g. "jump into a project's terminal"
         // from the Switch Project overlay). Okena is the only place that holds
         // every window's view + OS handle, so it executes these.
-        cx.subscribe(&main_window, Self::handle_window_view_event).detach();
-
-        // Create service manager for project-scoped background processes
-        let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
-            Arc::new(crate::terminal::backend::LocalBackend::new(pty_manager.clone()));
-        let service_manager = cx.new(|_cx| {
-            ServiceManager::new(local_backend_for_services.clone(), terminals.clone())
-        });
-        main_window.update(cx, |rv, cx| {
-            rv.set_service_manager(service_manager.clone(), cx);
-        });
-
-        // Create HookRunner for PTY-backed hook execution
-        cx.set_global(crate::workspace::hooks::HookRunner::new(
-            local_backend_for_services.clone(),
-            terminals.clone(),
-        ));
+        cx.subscribe(&main_window, Self::handle_window_view_event)
+            .detach();
 
         // Create remote connection manager and wire to main window
-        let remote_manager = cx.new(|cx| {
-            RemoteConnectionManager::new(terminals.clone(), cx)
-        });
+        let remote_manager = cx.new(|cx| RemoteConnectionManager::new(terminals.clone(), cx));
         main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
-        // Auto-connect to saved connections with valid tokens
+
+        // Register the implicit, trusted loopback connection to our local
+        // daemon so its projects mirror into the GUI. A spawned child handle is
+        // retained for bounded fallback cleanup if graceful UI lifecycle handoff
+        // fails; an attached daemon is never force-killed. The connection uses a
+        // fixed id so it's recognizable and dedup-safe, and is never written to
+        // settings — `add_connection` does not persist, and the only insertion
+        // site (`OverlayManagerEvent::RemoteConnected`) is never fired for it.
+        let spawned_daemon = {
+            let ensured = local_daemon;
+            let cfg = ensured.daemon.connection_config(ensured.token.clone());
+            if let Err(e) = remote_manager.update(cx, |rm, cx| rm.add_connection(cfg, cx)) {
+                eprintln!("Failed to register local-daemon loopback connection: {e}");
+                std::process::exit(1);
+            }
+            ensured.spawned
+        };
+
+        // Auto-connect to saved connections with valid tokens after the
+        // reserved local-daemon connection is present. Saved user-managed
+        // remotes that point at the same endpoint are skipped by the manager;
+        // the implicit local connection is the authoritative one.
         remote_manager.update(cx, |rm, cx| {
             rm.auto_connect_all(cx);
             rm.start_token_refresh_task(cx);
@@ -346,50 +308,6 @@ impl Okena {
             cx.notify();
         })
         .detach();
-
-        // ── Git status watcher ─────────────────────────────────────────
-        let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
-        let git_status_tx = Arc::new(git_status_tx);
-        let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
-            Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let next_remote_connection_id = Arc::new(AtomicU64::new(0));
-        let git_watcher = cx.new({
-            let workspace = workspace.clone();
-            let git_status_tx = git_status_tx.clone();
-            let remote_subscribed_terminals = remote_subscribed_terminals.clone();
-            |cx| GitStatusWatcher::new(workspace, git_status_tx, remote_subscribed_terminals, cx)
-        });
-
-        // ── Worktree sync watcher ─────────────────────────────────────
-        let worktree_sync = cx.new({
-            let workspace = workspace.clone();
-            |cx| WorktreeSyncWatcher::new(workspace, cx)
-        });
-
-        // Pass git_watcher to main window so ProjectColumns can observe it
-        main_window.update(cx, |rv, cx| {
-            rv.set_git_watcher(git_watcher.clone(), cx);
-        });
-
-        // ── Remote control setup ────────────────────────────────────────
-        let auth_store = Arc::new(AuthStore::new());
-        let pty_broadcaster = Arc::new(PtyBroadcaster::new());
-        // Publish PTY output directly from reader threads (bypasses GPUI event loop latency)
-        pty_manager.set_output_sink(pty_broadcaster.clone());
-        let (state_version_tx, _) = tokio_watch::channel(0u64);
-        let state_version = Arc::new(state_version_tx);
-        let remote_info = RemoteInfo::new();
-        cx.set_global(GlobalRemoteInfo(remote_info.clone()));
-
-        // Bump state_version on workspace changes
-        let sv = state_version.clone();
-        cx.observe(&workspace, move |_this, _workspace, _cx| {
-            sv.send_modify(|v| *v += 1);
-        })
-        .detach();
-
-        // Create bridge channel and start command loop
-        let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         // Channel for clicked desktop notifications → "jump to that pane".
         let (notification_jump_tx, notification_jump_rx) = async_channel::unbounded();
@@ -402,47 +320,118 @@ impl Okena {
             extra_windows: HashMap::new(),
             extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
-            pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),
-            save_pending,
-            git_watcher,
-            worktree_sync,
-            git_status_tx: git_status_tx.clone(),
-            remote_subscribed_terminals: remote_subscribed_terminals.clone(),
-            next_remote_connection_id: next_remote_connection_id.clone(),
-            remote_server: None,
-            auth_store: auth_store.clone(),
-            pty_broadcaster: pty_broadcaster.clone(),
-            state_version: state_version.clone(),
-            remote_info: remote_info.clone(),
-            listen_addr,
-            remote_tls_enabled,
-            force_remote,
-            service_manager: service_manager.clone(),
             remote_manager: remote_manager.clone(),
+            terminal_activity_repaints: ActivityRepaintBatch::default(),
             notification_jump_tx,
+            spawned_daemon,
+            preserve_daemon_on_quit: false,
+            recovering: Arc::new(AtomicBool::new(false)),
+            quitting: Arc::new(AtomicBool::new(false)),
+            pending_extra_forgets: extras::PendingExtraForgets::default(),
         };
-
-        // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
-        // Okena terminals pick the same install as the status-bar widget.
-        sync_claude_pty_env(&manager.pty_manager, cx);
-        let settings_entity = cx.global::<GlobalSettings>().0.clone();
-        cx.observe(&settings_entity, move |this, _settings, cx| {
-            sync_claude_pty_env(&this.pty_manager, cx);
-        })
-        .detach();
-
-        // Start PTY event loop (centralized for all windows)
-        manager.start_pty_event_loop(pty_events, cx);
 
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
 
-        // Start remote command bridge loop
-        let local_backend: Arc<dyn crate::terminal::backend::TerminalBackend> =
-            Arc::new(crate::terminal::backend::LocalBackend::new(manager.pty_manager.clone()));
-        manager.start_remote_command_loop(bridge_rx, local_backend, cx);
+        // Fire OS notifications for remote (daemon-served) terminals. Their PTY
+        // output never reaches the local PTY event loop above — it arrives over
+        // the WS and is only parsed by the remote activity pump, which drains
+        // each terminal's pending bytes (populating the OSC 9/777/99 + bell
+        // queues) but doesn't fire OS bubbles. The pump emits the advanced
+        // terminal ids here so we reuse the exact same focus-suppressed,
+        // settings-gated notification path the local loop uses. Without this,
+        // notifications from real (remote) terminals would be parsed and then
+        // silently dropped in the daemon-client model.
+        {
+            let remote_manager = remote_manager.clone();
+            let settings = crate::settings::settings_entity(cx);
+            cx.subscribe(&settings, move |_this, _settings, event, cx| {
+                let crate::settings::SettingsEvent::Changed(settings) = event;
+                match serde_json::to_value(settings) {
+                    Ok(mut patch) => {
+                        if let Some(object) = patch.as_object_mut() {
+                            object.remove("remote_connections");
+                        }
+                        remote_manager.update(cx, |manager, cx| {
+                            manager.send_action(
+                                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                                okena_core::api::ActionRequest::SetSettings { patch },
+                                cx,
+                            );
+                        });
+                    }
+                    Err(error) => {
+                        log::error!("Failed to encode settings update: {error}");
+                    }
+                }
+            })
+            .detach();
+        }
+
+        cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
+            RemoteManagerEvent::TerminalActivity(terminal_ids) => {
+                if !terminal_ids.is_empty() {
+                    for terminal_id in terminal_ids {
+                        okena_core::latency_probe::client_activity_received(terminal_id);
+                    }
+                    // Parsing already happened in the manager pump. Present the
+                    // first output immediately, then coalesce sustained output,
+                    // while notification and clipboard semantics stay immediate.
+                    this.queue_terminal_activity_repaints(terminal_ids, cx);
+                    this.process_terminal_notifications(terminal_ids, cx);
+                    this.process_clipboard_writes(terminal_ids, cx);
+                    // Answer (or, when disabled, drop) OSC 52 clipboard *read*
+                    // requests for remote terminals. The clipboard physically
+                    // lives on this client machine, so the reply must be
+                    // produced here and written back over the terminal's
+                    // RemoteTransport to the daemon PTY. Without this the dead
+                    // local PTY loop's clipboard-read handling no longer runs,
+                    // leaving remote OSC 52 reads unanswered.
+                    this.process_clipboard_reads(terminal_ids, cx);
+                }
+            }
+            RemoteManagerEvent::TerminalFocusRequested {
+                project_id,
+                terminal_id,
+                window,
+            } => {
+                this.jump_to_terminal(project_id, terminal_id, window.as_deref(), cx);
+            }
+            // Local daemon connection dead-ended — re-run discovery/ensure so
+            // the GUI recovers instead of staying wedged on a dead socket.
+            RemoteManagerEvent::LocalConnectionFailed => {
+                this.recover_local_daemon(cx);
+            }
+            RemoteManagerEvent::SettingsChanged(settings) => {
+                let settings = settings.as_ref().clone();
+                let mode = settings.theme_mode;
+                let custom_id = settings.custom_theme_id.clone();
+                crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                    state.replace_from_daemon(settings.clone(), cx);
+                });
+
+                if let Some(global_theme) = cx.try_global::<crate::theme::GlobalTheme>() {
+                    let theme = global_theme.0.clone();
+                    theme.update(cx, |theme, cx| {
+                        if mode == crate::theme::ThemeMode::Custom
+                            && let Some(custom_id) = custom_id.as_ref()
+                            && let Some((_, colors)) = crate::theme::load_custom_themes()
+                                .into_iter()
+                                .find(|(info, _)| info.id == format!("custom:{custom_id}"))
+                        {
+                            theme.set_custom_colors(colors);
+                            theme.set_mode(crate::theme::ThemeMode::Custom);
+                        } else {
+                            theme.set_mode(mode);
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
 
         // Kill orphaned terminals when projects are deleted
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -450,29 +439,69 @@ impl Okena {
             if !kills.is_empty() {
                 let mut reg = this.terminals.lock();
                 for tid in &kills {
-                    this.pty_manager.kill(tid);
                     reg.remove(tid);
                 }
             }
         })
         .detach();
 
+        let window_layout_saves = Arc::new(WindowLayoutSaveTracker::default());
+
         // Flush soft-closed terminals on quit. Their grace timer can't fire once
         // the app is gone, so tear the PTYs down here — otherwise a terminal
         // closed seconds before quitting would leak its persistent (dtach/tmux)
         // session. on_app_quit fires for every exit path.
         cx.on_app_quit(move |this: &mut Self, cx| {
-            let ids = this
-                .workspace
-                .update(cx, |ws, _| ws.drain_pending_closes());
+            let ids = this.workspace.update(cx, |ws, _| ws.drain_pending_closes());
             if !ids.is_empty() {
                 let mut reg = this.terminals.lock();
                 for tid in &ids {
-                    this.pty_manager.kill(tid);
                     reg.remove(tid);
                 }
             }
             async {}
+        })
+        .detach();
+
+        // Hand UI-owned lifecycle to the daemon on quit. It exits after the
+        // final client disconnects; standalone daemons are left running.
+        let final_window_layout_saves = window_layout_saves.clone();
+        cx.on_app_quit(move |this: &mut Self, cx| {
+            // Stop any recovery from resurrecting the connection or spawning a
+            // daemon while we tear down (esp. the remove_connection just below).
+            this.quitting.store(true, Ordering::SeqCst);
+            let (final_layout, project_layouts) = {
+                let workspace = this.workspace.read(cx);
+                (workspace.data().clone(), workspace.client_project_layouts())
+            };
+            // Disconnect our own loopback connection before handing lifecycle
+            // to the daemon, so its live-client count excludes this GUI.
+            this.remote_manager.update(cx, |rm, cx| {
+                rm.remove_connection(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID, cx);
+            });
+            if this.preserve_daemon_on_quit {
+                if let Some(child) = this.spawned_daemon.as_mut() {
+                    let _ = child.try_wait();
+                }
+                this.spawned_daemon = None;
+            } else {
+                hand_off_ui_owned_daemon(this.spawned_daemon.take());
+            }
+            let window_layout_saves = final_window_layout_saves.clone();
+            async move {
+                if let Err(error) = smol::unblock(move || {
+                    flush_window_layout_saves_before_final(&window_layout_saves, || {
+                        crate::workspace::persistence::save_window_layout(
+                            &final_layout,
+                            project_layouts,
+                        )
+                    })
+                })
+                .await
+                {
+                    log::error!("Failed to save final window layout: {error}");
+                }
+            }
         })
         .detach();
 
@@ -491,6 +520,64 @@ impl Okena {
         })
         .detach();
 
+        // Client-owned window-layout autosave. The GUI (not the daemon) owns its
+        // window PRESENTATION — which windows are open, their OS bounds, and
+        // per-window viewport. The `observe_window_bounds → set_os_bounds` wiring
+        // in `WindowView::new` and the spawn/close mutations all bump
+        // `data_version`; this debounced observer persists the window layout to
+        // window-layout.json (NEVER workspace.json — the daemon is its single
+        // writer). Mirrors the daemon's workspace autosave. Without it, the
+        // captured bounds + extra-window set are lost on exit and only one window
+        // reopens next launch.
+        {
+            let save_pending = Arc::new(AtomicBool::new(false));
+            let last_saved_version = Arc::new(AtomicU64::new(0));
+            let workspace_for_save = workspace.clone();
+            let window_layout_saves = window_layout_saves.clone();
+            cx.observe(&workspace, move |_this, ws_entity, cx| {
+                let current_version = ws_entity.read(cx).data_version();
+                if current_version == last_saved_version.load(Ordering::Relaxed) {
+                    return;
+                }
+                save_pending.store(true, Ordering::Relaxed);
+
+                let save_pending = save_pending.clone();
+                let last_saved = last_saved_version.clone();
+                let workspace = workspace_for_save.clone();
+                let window_layout_saves = window_layout_saves.clone();
+                cx.spawn(async move |_, cx| {
+                    smol::Timer::after(Duration::from_millis(500)).await;
+                    if save_pending.swap(false, Ordering::Relaxed) {
+                        let (data, project_layouts, version) = cx.update(|cx| {
+                            let ws = workspace.read(cx);
+                            (
+                                ws.data().clone(),
+                                ws.client_project_layouts(),
+                                ws.data_version(),
+                            )
+                        });
+                        // Register after the snapshot but before the first yield,
+                        // so quit cannot miss a stale snapshot queued for blocking I/O.
+                        let save_job = window_layout_saves.start();
+                        let save_result = smol::unblock(move || {
+                            let _save_job = save_job;
+                            crate::workspace::persistence::save_window_layout(
+                                &data,
+                                project_layouts,
+                            )
+                        })
+                        .await;
+                        match save_result {
+                            Ok(()) => last_saved.store(version, Ordering::Relaxed),
+                            Err(e) => log::error!("Failed to save window layout: {}", e),
+                        }
+                    }
+                })
+                .detach();
+            })
+            .detach();
+        }
+
         // Scrub stale focus across every window's FocusManager on each
         // workspace change. Deleting a project from one window can leave
         // another window's focus pointing at a now-gone project; without
@@ -503,7 +590,8 @@ impl Okena {
                 .iter()
                 .map(|p| p.id.clone())
                 .collect();
-            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> = Vec::with_capacity(1 + this.extra_windows.len());
+            let mut fms: Vec<Entity<crate::workspace::focus::FocusManager>> =
+                Vec::with_capacity(1 + this.extra_windows.len());
             fms.push(this.main_window.read(cx).focus_manager());
             for view in this.extra_windows.values() {
                 fms.push(view.read(cx).focus_manager());
@@ -518,94 +606,17 @@ impl Okena {
         })
         .detach();
 
-        // Slice 07 cri 1: kick the extras observer once so persisted
-        // `WorkspaceData.extra_windows` entries reopen at launch. The observer
-        // above only fires when `workspace` notifies, but `Workspace::new` does
-        // not notify on construction — without an explicit kick, persisted
-        // extras would stay invisible until the user mutates the workspace.
-        // Deferred via `cx.spawn` because `open_extra_window` captures
-        // `cx.entity()` and calls `okena.update` inside `cx.open_window`'s
-        // build closure; running synchronously inside `Okena::new` would touch
-        // a half-constructed entity. By the time the spawned task body runs,
-        // the entity is fully wrapped and `update` is safe.
-        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
-            let _ = this.update(cx, |this, cx| {
-                this.handle_extra_windows_changed(cx);
-            });
-        })
-        .detach();
-
-        // Observe workspace to load/unload service configs when projects change
-        observe_project_services(&workspace, &service_manager, cx);
-
-        // Observe service manager to sync terminal IDs back to workspace for persistence
-        {
-            let workspace_for_svc = workspace.clone();
-            cx.observe(&service_manager, move |_this, service_manager, cx| {
-                let sm = service_manager.read(cx);
-                // Collect project IDs that have services
-                let project_ids: Vec<String> = sm.instances().keys()
-                    .map(|(pid, _)| pid.clone())
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                let terminal_maps: Vec<(String, HashMap<String, String>)> = project_ids
-                    .into_iter()
-                    .map(|pid| {
-                        let ids = sm.service_terminal_ids(&pid);
-                        (pid, ids)
-                    })
-                    .collect();
-
-                workspace_for_svc.update(cx, |ws, cx| {
-                    for (project_id, terminals) in terminal_maps {
-                        ws.sync_service_terminals(&project_id, terminals, cx);
-                    }
+        // Linux starts its platform event loop only after the application
+        // startup callback returns. Use the foreground executor so restored
+        // Wayland windows are created on the first live event-loop turn, while
+        // retaining Okena strongly until the one-shot restore has completed.
+        let okena = cx.entity();
+        cx.spawn(async move |_, cx| {
+            cx.update(|cx| {
+                okena.update(cx, |this, cx| {
+                    this.handle_extra_windows_changed(cx);
                 });
-            })
-            .detach();
-        }
-
-        // Auto-start remote server if enabled in settings or forced via --remote
-        let settings = cx.global::<GlobalSettings>().0.clone();
-        if settings.read(cx).get().remote_server_enabled || force_remote {
-            manager.start_remote_server(bridge_tx.clone());
-        }
-
-        // Observe settings changes to start/stop server dynamically
-        let bridge_tx_for_observer = bridge_tx.clone();
-        cx.observe(&settings, move |this, settings, cx| {
-            let s = settings.read(cx).get();
-            let enabled = s.remote_server_enabled;
-            let running = this.remote_server.is_some();
-
-            let tls_enabled = s.remote_tls_enabled;
-
-            if enabled && !running {
-                // Update listen_addr from settings if not forced via CLI
-                if !this.force_remote
-                    && let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
-                        this.listen_addr = addr;
-                    }
-                this.remote_tls_enabled = tls_enabled;
-                this.start_remote_server(bridge_tx_for_observer.clone());
-            } else if !enabled && running {
-                this.stop_remote_server();
-            } else if enabled && running && !this.force_remote {
-                // Restart if the listen address OR the TLS toggle changed.
-                let new_addr = s.remote_listen_address.parse::<IpAddr>().ok();
-                let addr_changed = new_addr.is_some_and(|a| a != this.listen_addr);
-                let tls_changed = tls_enabled != this.remote_tls_enabled;
-                if addr_changed || tls_changed {
-                    if let Some(a) = new_addr {
-                        this.listen_addr = a;
-                    }
-                    this.remote_tls_enabled = tls_enabled;
-                    this.stop_remote_server();
-                    this.start_remote_server(bridge_tx_for_observer.clone());
-                }
-            }
+            });
         })
         .detach();
 
@@ -614,506 +625,96 @@ impl Okena {
 
         manager
     }
+}
 
-    /// Start the remote HTTP/WS server.
-    fn start_remote_server(&mut self, bridge_tx: bridge::BridgeSender) {
-        match RemoteServer::start(
-            bridge_tx,
-            self.auth_store.clone(),
-            self.pty_broadcaster.clone(),
-            self.state_version.clone(),
-            self.listen_addr,
-            self.git_status_tx.clone(),
-            self.remote_subscribed_terminals.clone(),
-            self.next_remote_connection_id.clone(),
-            self.remote_tls_enabled,
-        ) {
-            Ok(server) => {
-                let port = server.port();
-                let fingerprint = server.cert_fingerprint();
-                self.remote_info
-                    .set_active(port, self.auth_store.clone(), fingerprint);
-                log::info!("Remote server started on port {}", port);
-
-                let code = self.auth_store.get_or_create_code();
-                println!("Remote server listening on port {port}");
-                println!("Pairing code: {code} (expires in 60s)");
-                println!("Run `okena pair` anytime for a fresh code.");
-
-                self.remote_server = Some(server);
-            }
-            Err(e) => {
-                log::error!("Failed to start remote server: {}", e);
-            }
-        }
-    }
-
-    /// Stop the remote server.
-    fn stop_remote_server(&mut self) {
-        if let Some(mut server) = self.remote_server.take() {
-            server.stop();
-        }
-        self.remote_info.set_inactive();
-    }
-
-    /// Centralized PTY event loop - notifies all windows (main and detached)
-    fn start_pty_event_loop(
+impl Okena {
+    fn queue_terminal_activity_repaints(
         &mut self,
-        pty_events: Receiver<PtyEvent>,
+        terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
-        let terminals = self.terminals.clone();
-        let pty_manager = self.pty_manager.clone();
+        let input_response_ids: Vec<_> = {
+            let registry = self.terminals.lock();
+            terminal_ids
+                .iter()
+                .filter(|terminal_id| {
+                    registry
+                        .get(*terminal_id)
+                        .is_some_and(|terminal| terminal.take_input_repaint_request())
+                })
+                .cloned()
+                .collect()
+        };
 
-        // Per-turn work budget. A single high-bandwidth terminal (cat hugefile,
-        // `yes`, a runaway build log) can keep this loop draining the channel
-        // forever, starving input/render/resize for ALL terminals (they all
-        // funnel through this one loop on the GPUI thread). Once we've parsed
-        // this many bytes in one drain pass we stop, yield to the executor so
-        // input/render get scheduled, then loop back — the remaining events
-        // stay in the bounded channel and are picked up next turn (nothing is
-        // dropped). 256 KiB is a few render frames' worth of throughput while
-        // staying small enough to keep the UI responsive under sustained load.
-        const MAX_BYTES_PER_TURN: usize = 256 * 1024;
+        let decision = self
+            .terminal_activity_repaints
+            .queue_activity(terminal_ids.iter().cloned(), input_response_ids);
+        if !decision.immediate.is_empty() {
+            let immediate_ids: Vec<_> = decision.immediate.into_iter().collect();
+            self.present_terminal_activity_repaints(&immediate_ids, cx);
+        }
+        if !decision.start_timer {
+            return;
+        }
 
-        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {
-                let event = match pty_events.recv().await {
-                    Ok(event) => event,
-                    Err(_) => break,
-                };
-
-                let _slow = okena_core::timing::SlowGuard::new("Okena::pty_event_batch");
-
-                // Collect exit events and track which terminals received data
-                let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
-                let mut dirty_terminal_ids: Vec<String> = Vec::new();
-
-                // Bytes parsed so far in this drain pass (across batched events).
-                let mut bytes_this_turn: usize = 0;
-
-                // Process first event (broadcasting handled by PtyOutputSink in reader threads)
-                match &event {
-                    PtyEvent::Data { terminal_id, data } => {
-                        // Hold the registry lock only for the HashMap lookup —
-                        // clone the Arc<Terminal> out and drop the guard before
-                        // the (potentially long) ANSI parse, so send_input /
-                        // resize / kill on OTHER terminals don't block behind it.
-                        let term = terminals.lock().get(terminal_id).cloned();
-                        if let Some(term) = term {
-                            bytes_this_turn += data.len();
-                            term.process_output(data);
-                        }
-                        dirty_terminal_ids.push(terminal_id.clone());
-                    }
-                    PtyEvent::Exit { terminal_id, exit_code } => {
-                        // Clean up the PtyHandle (reader/writer threads) but don't
-                        // remove the UI Terminal yet — service manager may keep it
-                        // so users can see crash output.
-                        pty_manager.cleanup_exited(terminal_id);
-                        exit_events.push((terminal_id.clone(), *exit_code));
-                    }
-                }
-
-                // Drain any additional pending events (batch processing), but
-                // stop once we exceed the per-turn byte budget so we yield back
-                // to the executor instead of monopolizing the GPUI thread.
-                while bytes_this_turn < MAX_BYTES_PER_TURN {
-                    let event = match pty_events.try_recv() {
-                        Ok(event) => event,
-                        Err(_) => break,
-                    };
-                    match &event {
-                        PtyEvent::Data { terminal_id, data } => {
-                            // Clone the Arc out and drop the registry guard
-                            // before parsing (see note above).
-                            let term = terminals.lock().get(terminal_id).cloned();
-                            if let Some(term) = term {
-                                bytes_this_turn += data.len();
-                                term.process_output(data);
-                            }
-                            dirty_terminal_ids.push(terminal_id.clone());
-                        }
-                        PtyEvent::Exit { terminal_id, exit_code } => {
-                            pty_manager.cleanup_exited(terminal_id);
-                            exit_events.push((terminal_id.clone(), *exit_code));
-                        }
-                    }
-                }
-
-                // Notify main window after processing the batch
-                let _ = this.update(cx, |this, cx| {
-                    if !exit_events.is_empty() {
-                        // Two-phase hook exit handling:
-                        // Phase 1 (here): notify_exit unblocks any sync hook threads
-                        // waiting on a PTY terminal via mpsc::Receiver. This MUST happen
-                        // before handle_hook_terminal_exits (phase 2) which updates
-                        // workspace status and may trigger project removal.
-                        if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
-                            for (terminal_id, exit_code) in &exit_events {
-                                monitor.notify_exit(terminal_id, *exit_code);
-                            }
-                        }
-
-                        // Let service manager handle service terminals (may keep
-                        // their UI Terminal for viewing crash output)
-                        let service_tids: std::collections::HashSet<String> =
-                            this.service_manager.update(cx, |sm, cx| {
-                                let mut handled = std::collections::HashSet::new();
-                                for (terminal_id, exit_code) in &exit_events {
-                                    if sm.handle_service_exit(terminal_id, *exit_code, cx) {
-                                        handled.insert(terminal_id.clone());
-                                    }
-                                }
-                                handled
-                            });
-
-                        // Handle hook terminal exits (status updates, pending close, cleanup)
-                        let hook_tids = this.handle_hook_terminal_exits(&exit_events, &service_tids, cx);
-
-                        // Fire terminal.on_close hook for user terminals (not service, not hook)
-                        let terminal_close_infos: Vec<_> = {
-                            let global_on_close = crate::settings::settings(cx).hooks.terminal.on_close.is_some();
-                            let ws = this.workspace.read(cx);
-                            exit_events.iter()
-                                .filter(|(tid, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
-                                .filter_map(|(tid, exit_code)| {
-                                    ws.find_project_for_terminal(tid).and_then(|p| {
-                                        let parent_on_close = p.worktree_info.as_ref()
-                                            .and_then(|wt| ws.project(&wt.parent_project_id))
-                                            .and_then(|pp| pp.hooks.terminal.on_close.as_ref())
-                                            .is_some();
-                                        if global_on_close || p.hooks.terminal.on_close.is_some() || parent_on_close {
-                                            let parent_hooks = p.worktree_info.as_ref()
-                                                .and_then(|wt| ws.project(&wt.parent_project_id))
-                                                .map(|pp| pp.hooks.clone());
-                                            let terminal_name = p.terminal_names.get(tid).cloned();
-                                            let is_worktree = p.worktree_info.is_some();
-                                            let folder = ws.folder_for_project_or_parent(&p.id);
-                                            let fid = folder.map(|f| f.id.clone());
-                                            let fname = folder.map(|f| f.name.clone());
-                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), terminal_name, is_worktree, *exit_code, fid, fname))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
-                                .collect()
+                cx.background_executor()
+                    .timer(TERMINAL_ACTIVITY_REPAINT_INTERVAL)
+                    .await;
+                let keep_scheduled = this
+                    .update(cx, |this, cx| {
+                        let Some(terminal_ids) = this.terminal_activity_repaints.take_scheduled()
+                        else {
+                            return false;
                         };
-                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, terminal_name, is_worktree, exit_code, folder_id, folder_name) in terminal_close_infos {
-                            crate::workspace::hooks::fire_terminal_on_close(
-                                &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
-                                &project_path, &terminal_id, terminal_name.as_deref(), is_worktree, exit_code,
-                                folder_id.as_deref(), folder_name.as_deref(), &crate::settings::settings(cx).hooks, cx,
-                            );
-                        }
-
-                        // Kill session backends and remove UI Terminals for non-service, non-hook terminals.
-                        // This is critical for dtach: the PTY exit only means the client disconnected,
-                        // but the dtach daemon keeps running. kill() ensures kill_session() is called
-                        // to SIGTERM the daemon and remove the socket file.
-                        {
-                            let mut reg = this.terminals.lock();
-                            for (terminal_id, _) in &exit_events {
-                                if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
-                                    this.pty_manager.kill(terminal_id);
-                                    reg.remove(terminal_id);
-                                }
-                            }
-                        }
-
-                        // If any exited terminal was mid soft-close, its undo toast
-                        // is now useless (the PTY is gone) and the pending record
-                        // would otherwise linger until the grace timer fired a
-                        // redundant kill — drop both now.
-                        let stale_toasts: Vec<String> = this.workspace.update(cx, |ws, _| {
-                            exit_events
-                                .iter()
-                                .filter_map(|(tid, _)| ws.cancel_pending_close(tid))
-                                .collect()
-                        });
-                        for toast_id in &stale_toasts {
-                            crate::workspace::toast::ToastManager::dismiss(toast_id, cx);
-                        }
-
-                        // If an exited terminal had just been *restored* by a
-                        // soft-close undo that raced this exit, its PTY is dead
-                        // now — the registry-based `alive` check let undo bring
-                        // back a doomed pane. Tear it back out so it doesn't
-                        // linger (and respawn a fresh shell on next render).
-                        this.workspace.update(cx, |ws, cx| {
-                            for (tid, _) in &exit_events {
-                                ws.reap_restored_close(tid, cx);
-                            }
-                        });
-                    }
-                    // Notify dirty terminal content panes directly (batched in one update).
-                    // All notifications happen in the same GPUI update → single layout pass.
-                    // Each terminal_id may be rendered by multiple panes (one per window
-                    // whose visible set includes its host project), so iterate the vec
-                    // and prune dead weaks lazily.
-                    if !dirty_terminal_ids.is_empty() {
-                        dirty_terminal_ids.dedup();
-                        let mut registry = crate::views::window::content_pane_registry().lock();
-                        let mut any_local_pane = false;
-                        for tid in &dirty_terminal_ids {
-                            let now_empty = if let Some(weaks) = registry.get_mut(tid) {
-                                if crate::views::window::notify_pane_weaks(weaks, cx) {
-                                    any_local_pane = true;
-                                }
-                                weaks.is_empty()
-                            } else {
-                                false
-                            };
-                            if now_empty {
-                                registry.remove(tid);
-                            }
-                        }
-                        drop(registry);
-                        // Remote-only terminals have no local content pane. Without
-                        // cx.notify(), GPUI's draw cycle won't run and the event loop
-                        // effectively stalls. Notify main_window to keep GPUI responsive
-                        // for bridge commands, state queries, and other remote work.
-                        if !any_local_pane {
-                            this.main_window.update(cx, |_, cx| cx.notify());
-                        }
-                    }
-
-                    // Check if any hook terminal reported its exit code via
-                    // OSC title (__okena_hook_exit:<code>). This happens when
-                    // keep_alive hooks finish their command but the PTY stays
-                    // alive as an interactive shell.
-                    if !dirty_terminal_ids.is_empty() {
-                        let terminals_guard = this.terminals.lock();
-                        let ws = this.workspace.read(cx);
-                        let mut status_updates: Vec<(String, crate::workspace::state::HookTerminalStatus)> = Vec::new();
-                        for tid in &dirty_terminal_ids {
-                            if ws.is_hook_terminal(tid).is_none() {
-                                continue;
-                            }
-                            if let Some(terminal) = terminals_guard.get(tid)
-                                && let Some(title) = terminal.title()
-                                    && let Some(code_str) = title.strip_prefix("__okena_hook_exit:") {
-                                        let exit_code = code_str.parse::<i32>().unwrap_or(-1);
-                                        let status = if exit_code == 0 {
-                                            crate::workspace::state::HookTerminalStatus::Succeeded
-                                        } else {
-                                            crate::workspace::state::HookTerminalStatus::Failed { exit_code }
-                                        };
-                                        status_updates.push((tid.clone(), status));
-                                    }
-                        }
-                        drop(terminals_guard);
-                        if !status_updates.is_empty() {
-                            this.workspace.update(cx, |ws, cx| {
-                                for (tid, status) in status_updates {
-                                    ws.update_hook_terminal_status(&tid, status, cx);
-                                }
-                            });
-                        }
-                    }
-
-                    // Drain OSC 9 / OSC 777 notifications for terminals that
-                    // produced output this batch and raise OS notifications
-                    // for background panes. Runs here (not in a pane's render)
-                    // so background tabs and detached windows are covered too.
-                    if !dirty_terminal_ids.is_empty() {
-                        this.process_terminal_notifications(&dirty_terminal_ids, cx);
-                        // Stamp project activity for any command that finished
-                        // this batch (OSC 133 ;D), independent of bell/OSC alerts.
-                        this.process_command_finished_activity(&dirty_terminal_ids, cx);
-                        // Answer (or, when disabled, drop) OSC 52 clipboard
-                        // read requests queued by these terminals.
-                        this.process_clipboard_reads(&dirty_terminal_ids, cx);
-                    }
-
-                    if !exit_events.is_empty() {
-                        // A terminal exited — every window rendering its
-                        // project column needs to re-render so the layout
-                        // reflects the removal. Fan out to all live windows.
-                        this.main_window.update(cx, |_, cx| cx.notify());
-                        for view in this.extra_windows.values() {
-                            view.update(cx, |_, cx| cx.notify());
-                        }
-                    }
-                });
-
-                // Cooperatively yield to the executor between drain passes so
-                // input, rendering, resize, and other terminals' parsing get
-                // scheduled even under a sustained high-bandwidth stream. The
-                // next recv().await picks up any events left in the channel, so
-                // the loop always makes progress and nothing is dropped.
-                smol::future::yield_now().await;
+                        let terminal_ids: Vec<_> = terminal_ids.into_iter().collect();
+                        this.present_terminal_activity_repaints(&terminal_ids, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_scheduled {
+                    break;
+                }
             }
         })
         .detach();
     }
 
-    // ── Hook terminal exit handling ──────────────────────────────────────
-
-    /// Process hook terminal exit events: update status, resolve pending worktree closes,
-    /// and schedule cleanup. Returns the set of terminal IDs that were hook terminals.
-    fn handle_hook_terminal_exits(
+    fn present_terminal_activity_repaints(
         &mut self,
-        exit_events: &[(String, Option<u32>)],
-        service_tids: &std::collections::HashSet<String>,
-        cx: &mut Context<Self>,
-    ) -> std::collections::HashSet<String> {
-        let hook_tids: std::collections::HashSet<String> = {
-            let ws = self.workspace.read(cx);
-            exit_events.iter()
-                .filter(|(tid, _)| !service_tids.contains(tid))
-                .filter(|(tid, _)| ws.is_hook_terminal(tid).is_some())
-                .map(|(tid, _)| tid.clone())
-                .collect()
-        };
-
-        for (terminal_id, exit_code) in exit_events {
-            if !hook_tids.contains(terminal_id) {
-                continue;
-            }
-
-            let success = *exit_code == Some(0);
-            let tid = terminal_id.clone();
-
-            // Update HookMonitor so the hook log shows correct status
-            if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
-                monitor.finish_by_terminal_id(&tid, *exit_code);
-            }
-
-            // Single workspace.update: set hook status, then handle pending close atomically.
-            // Pull the focus_manager from main_window so the delete_project call
-            // scrubs focus state on the main window's per-window manager.
-            let focus_manager = self.main_window.read(cx).focus_manager();
-            let pending_data = focus_manager.update(cx, |fm, cx| {
-                let pending_data = self.workspace.update(cx, |ws, cx| {
-                    // Update hook terminal status
-                    let status = if success {
-                        crate::workspace::state::HookTerminalStatus::Succeeded
-                    } else {
-                        let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                        crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
-                    };
-                    ws.update_hook_terminal_status(&tid, status, cx);
-
-                    // Check for pending worktree close tied to this hook terminal
-                    let pending = ws.take_pending_worktree_close(&tid)?;
-                    let folder = ws.folder_for_project_or_parent(&pending.project_id);
-                    let hook_folder_id = folder.map(|f| f.id.clone());
-                    let hook_folder_name = folder.map(|f| f.name.clone());
-                    let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
-                        .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
-                        .unwrap_or((None, None));
-                    if success {
-                        ws.remove_hook_terminal(&tid, cx);
-                        // Collect remaining hook terminal IDs before deleting the project
-                        let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                        ws.delete_project(fm, &pending.project_id, &settings(cx).hooks, cx);
-                        Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
-                    } else {
-                        ws.finish_closing_project(&pending.project_id);
-                        None
-                    }
-                });
-                cx.notify();
-                pending_data
-            });
-
-            if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
-                self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name, cx);
-            }
-            // Hook terminal persists — no auto-cleanup. User can dismiss manually or rerun.
-        }
-
-        hook_tids
-    }
-
-    /// Handle the result of a pending worktree close after hook exit (success path only).
-    // Threads the cohesive set of close-result params; no reusable grouping.
-    #[allow(clippy::too_many_arguments)]
-    fn handle_pending_close_result(
-        &mut self,
-        tid: &str,
-        pending: crate::workspace::state::PendingWorktreeClose,
-        project_path_for_git: Option<String>,
-        hook_info: Option<(crate::workspace::persistence::HooksConfig, String, String)>,
-        remaining_hook_tids: Vec<String>,
-        folder_id: Option<String>,
-        folder_name: Option<String>,
+        terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
-        log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
+        for terminal_id in terminal_ids {
+            okena_core::latency_probe::client_repaint_dispatched(terminal_id);
+        }
 
-        let global_hooks = crate::settings::settings(cx).hooks;
-        let monitor = crate::workspace::hooks::try_monitor(cx);
-        let runner = crate::workspace::hooks::try_runner(cx);
-        // Clean up primary and any other persisted hook terminals in a single lock
+        // Pane and sidebar notifications happen in one app update so GPUI can
+        // present one frame for all windows rather than racing per-view timers.
         {
-            let mut guard = self.terminals.lock();
-            guard.remove(tid);
-            for hook_tid in &remaining_hook_tids {
-                guard.remove(hook_tid);
-            }
+            let mut registry = content_pane_registry().lock();
+            request_registered_content_pane_repaints(&mut registry, terminal_ids, cx);
         }
 
-        // Fire lifecycle hooks
-        if let Some((project_hooks, project_name, project_path)) = hook_info {
-            crate::workspace::hooks::fire_on_worktree_close(
-                &project_hooks,
-                &pending.project_id,
-                &project_name,
-                &project_path,
-                &pending.branch,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                &global_hooks,
-                cx,
-            );
-            let _ = crate::workspace::hooks::fire_worktree_removed(
-                &project_hooks,
-                &global_hooks,
-                &pending.project_id,
-                &project_name,
-                &project_path,
-                &pending.branch,
-                &pending.main_repo_path,
-                folder_id.as_deref(),
-                folder_name.as_deref(),
-                monitor.as_ref(),
-                runner.as_ref(),
-            );
-        }
-
-        // Git worktree remove in the background
-        let pending_clone = pending.clone();
-        let workspace = self.workspace.clone();
-        if let Some(ref path) = project_path_for_git {
-            workspace.update(cx, |ws, _| {
-                ws.mark_worktree_removing(path);
+        let mut window_views = Vec::with_capacity(1 + self.extra_windows.len());
+        window_views.push(self.main_window.clone());
+        window_views.extend(self.extra_windows.values().cloned());
+        for window_view in window_views {
+            window_view.update(cx, |window_view, cx| {
+                window_view.request_sidebar_activity_repaint(cx);
             });
         }
-        cx.spawn(async move |_this, cx| {
-            if let Some(path) = project_path_for_git {
-                let main_repo = pending_clone.main_repo_path.clone();
-                let path_clone = path.clone();
-                let result = smol::unblock(move || {
-                    crate::git::remove_worktree_fast(
-                        &std::path::PathBuf::from(&path_clone),
-                        &std::path::PathBuf::from(&main_repo),
-                    )
-                }).await;
-                if let Err(e) = result {
-                    log::error!("Background worktree remove failed: {}", e);
-                }
-                cx.update(|cx| {
-                    workspace.update(cx, |ws, _| {
-                        ws.finish_worktree_removing(&path);
-                    });
-                });
-            }
-        }).detach();
     }
 
+    /// Mark the app as quitting before the platform loop stops. Called from
+    /// the main window's close handler (main.rs) ahead of `cx.quit()` so
+    /// deferred extra-window forgets and daemon recovery bail immediately —
+    /// on_app_quit alone would set this only after close events for every
+    /// window have already been processed.
+    pub fn note_quitting(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Render for Okena {
@@ -1122,39 +723,396 @@ impl Render for Okena {
     }
 }
 
+/// After this many consecutive failed recovery attempts, surface one error
+/// toast. We do NOT stop retrying afterwards: the local daemon backs the whole
+/// GUI, so giving up would leave the app dead until a manual restart — exactly
+/// the bug this heals. Instead we keep retrying at the 30s cap (see
+/// [`recovery_backoff_delay`]) and toast only once, so we never spam.
+const RECOVERY_TOAST_AFTER_ATTEMPTS: u32 = 5;
+
+/// Attach patience for the recovery path's `ensure` calls. Shorter than the 30s
+/// startup default so a live-but-unreachable daemon (which makes `ensure` error
+/// only after the attach timeout) is escalated on sooner.
+const RECOVERY_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Spawn budget for the recovery path — the full startup patience, NOT the short
+/// attach patience: daemon boot loads the workspace before the server binds and
+/// can take many seconds under load, and `ensure` SIGKILLs its own child on this
+/// deadline — a short one would kill every mid-boot respawn forever.
+const RECOVERY_SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// After this many consecutive failed recovery attempts, escalate: if a live but
+/// unreachable local daemon is what's blocking us, kill it so the next attempt
+/// takes the spawn path instead of forever re-hitting the attach timeout.
+const RECOVERY_ESCALATE_AFTER_ATTEMPTS: u32 = 2;
+
+/// Confirm-probe timeout before an escalation kill. Deliberately much longer
+/// than the 300ms probe `ensure` uses internally: under a system-wide stall a
+/// slow-but-healthy daemon must not be misread as dead and killed, while a truly
+/// dead socket still fails the connect instantly, so the extra patience is free.
+const RECOVERY_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Whether recovery should escalate to killing the local daemon. Escalate only
+/// once we've failed enough consecutive times AND a live-but-unreachable daemon
+/// is the thing blocking us (so we never kill a daemon that's merely absent, nor
+/// one that's actually healthy). Pure so the decision is unit-testable.
+fn should_escalate_recovery(
+    failed_attempts: u32,
+    live_unreachable_daemon: bool,
+    owns_daemon: bool,
+) -> bool {
+    failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS && live_unreachable_daemon && owns_daemon
+}
+
+/// Backoff before the next local-daemon recovery attempt, given how many have
+/// already failed. Ramps 1 → 2 → 5 → 10s then caps at 30s: quick enough to heal
+/// a brief daemon gap (the common fast-restart race) yet without a spawn storm
+/// when the daemon stays down. Pure so the schedule is unit-testable.
+fn recovery_backoff_delay(failed_attempts: u32) -> Duration {
+    let secs = match failed_attempts {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 5,
+        4 => 10,
+        _ => 30,
+    };
+    Duration::from_secs(secs)
+}
+
+impl Okena {
+    /// Self-heal the implicit local-daemon loopback connection after it hit a
+    /// terminal failure (both dead-end client paths surface `Error`). Re-runs
+    /// `ensure_local_daemon` — attach to a live daemon or spawn a fresh one —
+    /// then re-points the loopback connection at the new endpoint/token.
+    /// Single-flight and quit-aware; mirrors `perform_restart_daemon`'s pattern
+    /// of running the blocking remote-server call on the background pool.
+    fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {
+        if self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        // Single-flight: a recovery already running will re-point the connection
+        // when it succeeds, so further failure events until then are redundant.
+        if self.recovering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let recovering = self.recovering.clone();
+        let quitting = self.quitting.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let mut failed_attempts: u32 = 0;
+            loop {
+                if quitting.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // `ensure_local_daemon_with_timeouts` blocks (short attach
+                // patience, full spawn budget); run it on the blocking pool
+                // like `perform_restart_daemon` does with restart.
+                let outcome = cx
+                    .background_executor()
+                    .spawn(async move {
+                        okena_remote_server::local::ensure_local_daemon_with_timeouts(
+                            RECOVERY_ATTACH_TIMEOUT,
+                            RECOVERY_SPAWN_TIMEOUT,
+                        )
+                    })
+                    .await;
+
+                match outcome {
+                    Ok(ensured) => {
+                        // Hold `ensured` outside the closure: if the entity is
+                        // gone the closure never runs, and dropping a Child does
+                        // not kill it — we'd orphan a daemon we just spawned.
+                        let mut ensured = Some(ensured);
+                        let applied = this.update(cx, |this, cx| {
+                            if let Some(ensured) = ensured.take() {
+                                this.apply_recovered_daemon(ensured, cx);
+                            }
+                        });
+                        // Entity dropped mid-recovery: best-effort reap the child.
+                        if applied.is_err()
+                            && let Some(mut child) = ensured.and_then(|e| e.spawned)
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        break;
+                    }
+                    Err(msg) => {
+                        failed_attempts += 1;
+                        log::warn!("Local daemon recovery attempt {failed_attempts} failed: {msg}");
+
+                        // Escalation: a live-but-unreachable daemon makes every
+                        // `ensure` error at the attach timeout, forever. Once we've
+                        // failed enough times, kill that wedged daemon so the next
+                        // `ensure` takes the spawn path. Never while quitting; this
+                        // loop only ever handles the local daemon.
+                        if failed_attempts >= RECOVERY_ESCALATE_AFTER_ATTEMPTS
+                            && !quitting.load(Ordering::SeqCst)
+                        {
+                            let stuck_daemon = cx
+                                .background_executor()
+                                .spawn(async {
+                                    okena_remote_server::local::running_daemon().filter(|d| {
+                                        !okena_remote_server::local::daemon_endpoint_responds(
+                                            d,
+                                            RECOVERY_HEALTH_PROBE_TIMEOUT,
+                                        )
+                                    })
+                                })
+                                .await;
+                            if let Some(daemon) = stuck_daemon
+                            {
+                                let owns_daemon = this
+                                    .update(cx, |this, _cx| {
+                                        this.spawned_daemon
+                                            .as_ref()
+                                            .is_some_and(|child| child.id() == daemon.pid)
+                                    })
+                                    .unwrap_or(false);
+                                if should_escalate_recovery(
+                                    failed_attempts,
+                                    true,
+                                    owns_daemon,
+                                ) {
+                                    log::warn!(
+                                        "Owned local daemon pid {} is live but unreachable after {failed_attempts} failed recovery attempts; killing it so the next attempt respawns",
+                                        daemon.pid
+                                    );
+                                    kill_process_by_pid(daemon.pid);
+                                    let _ = this.update(cx, |this, _cx| {
+                                        if let Some(child) = this.spawned_daemon.as_mut()
+                                            && child.id() == daemon.pid
+                                        {
+                                            let _ = child.wait();
+                                            this.spawned_daemon = None;
+                                        }
+                                    });
+                                } else {
+                                    log::warn!(
+                                        "Attached local daemon pid {} is unreachable; refusing to kill a process this GUI did not spawn",
+                                        daemon.pid
+                                    );
+                                }
+                            }
+                        }
+
+                        // Update every attempt so a dropped entity ends the loop
+                        // (and the app isn't left spawning daemons post-quit).
+                        let should_toast = failed_attempts == RECOVERY_TOAST_AFTER_ATTEMPTS;
+                        let alive = this
+                            .update(cx, |_this, cx| {
+                                if should_toast {
+                                    crate::workspace::toast::ToastManager::error(
+                                        "Local daemon unreachable; still retrying in the background…"
+                                            .to_string(),
+                                        cx,
+                                    );
+                                }
+                            })
+                            .is_ok();
+                        if !alive {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(recovery_backoff_delay(failed_attempts))
+                            .await;
+                    }
+                }
+            }
+            recovering.store(false, Ordering::SeqCst);
+        })
+        .detach();
+    }
+
+    /// Apply a freshly-ensured daemon on the GPUI thread: re-point the loopback
+    /// connection at its endpoint/token and adopt any child we spawned. Bails
+    /// (reaping a just-spawned daemon) if a quit began while we were ensuring.
+    fn apply_recovered_daemon(
+        &mut self,
+        ensured: okena_remote_server::local::EnsuredDaemon,
+        cx: &mut Context<Self>,
+    ) {
+        // Raced a quit: don't resurrect the connection, and don't orphan a daemon
+        // we just spawned (dropping the Child doesn't kill it on Unix).
+        if self.quitting.load(Ordering::SeqCst) {
+            if let Some(mut child) = ensured.spawned {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return;
+        }
+
+        if let Some(local_build) = cx
+            .try_global::<okena_ext_updater::GlobalLocalBuild>()
+            .map(|global| global.0.clone())
+        {
+            local_build.update(cx, |state, cx| {
+                state.set_daemon_ui_owned(ensured.daemon.ui_owned, cx);
+            });
+        }
+
+        let cfg = ensured.daemon.connection_config(ensured.token.clone());
+        self.remote_manager.update(cx, |rm, cx| {
+            rm.redirect_and_reconnect(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                cfg,
+                ensured.token.clone(),
+                cx,
+            );
+        });
+
+        // If we spawned a fresh daemon, we now own it. Reap the old (dead) child
+        // handle first so we don't leak a zombie, then take over the new one.
+        match ensured.spawned {
+            Some(child) => {
+                if let Some(mut old) = self.spawned_daemon.take() {
+                    let _ = old.kill();
+                    let _ = old.wait();
+                }
+                self.spawned_daemon = Some(child);
+            }
+            None => {
+                // Attach path: reap our previous child only if it ALREADY exited
+                // (e.g. after an escalation kill) so no zombie outlives recovery.
+                // try_wait never touches a live child — the daemon we attached to
+                // may well BE that child.
+                if let Some(child) = self.spawned_daemon.as_mut()
+                    && matches!(child.try_wait(), Ok(Some(_)))
+                {
+                    self.spawned_daemon = None;
+                }
+            }
+        }
+
+        crate::workspace::toast::ToastManager::info("Local daemon reconnected".to_string(), cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::claude_pty_extra_env;
+    use super::{
+        RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, WindowLayoutSaveTracker,
+        flush_window_layout_saves_before_final, is_okena_process, recovery_backoff_delay,
+        should_escalate_recovery,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
-    fn default_claude_dir_unsets_pty_env() {
-        let default_dir = dirs::home_dir().unwrap().join(".claude");
+    fn final_window_layout_save_waits_for_older_snapshot() {
+        let tracker = Arc::new(WindowLayoutSaveTracker::default());
+        let old_job = tracker.start();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (old_started_tx, old_started_rx) = std::sync::mpsc::channel();
+        let (release_old_tx, release_old_rx) = std::sync::mpsc::channel();
+        let (flush_started_tx, flush_started_rx) = std::sync::mpsc::channel();
 
-        // The default dir must produce an explicit removal so a stale inherited
-        // CLAUDE_CONFIG_DIR can't leak in — regardless of profile count or whether
-        // the parent process happened to have the var set.
-        for &(multi, parent) in &[(false, false), (true, false), (false, true), (true, true)] {
-            let env = claude_pty_extra_env(&default_dir, multi, parent);
-            assert_eq!(env.len(), 1, "multi={multi} parent={parent}");
-            assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-            assert_eq!(env[0].1, None, "default dir must unset, not set");
+        std::thread::scope(|scope| {
+            let old_writes = writes.clone();
+            scope.spawn(move || {
+                let _old_job = old_job;
+                old_started_tx.send(()).expect("signal old save");
+                release_old_rx.recv().expect("release old save");
+                old_writes.lock().expect("writes lock").push("old");
+            });
+            old_started_rx.recv().expect("old save started");
+
+            let tracker = tracker.clone();
+            let final_writes = writes.clone();
+            let final_thread = scope.spawn(move || {
+                flush_started_tx.send(()).expect("signal final flush");
+                flush_window_layout_saves_before_final(&tracker, || {
+                    assert_eq!(
+                        *final_writes.lock().expect("writes lock"),
+                        ["old"],
+                        "the older snapshot must finish before the final write"
+                    );
+                    final_writes.lock().expect("writes lock").push("final");
+                });
+            });
+
+            flush_started_rx.recv().expect("final flush started");
+            assert!(
+                writes.lock().expect("writes lock").is_empty(),
+                "the final write must remain behind the older snapshot"
+            );
+            release_old_tx.send(()).expect("release old save");
+            final_thread.join().expect("final save thread");
+        });
+
+        assert_eq!(*writes.lock().expect("writes lock"), ["old", "final"]);
+    }
+
+    #[test]
+    fn okena_process_identity_guard() {
+        // Our binaries — killable.
+        assert!(is_okena_process(Some("okena"), None));
+        assert!(is_okena_process(Some("okena-daemon"), None));
+        assert!(is_okena_process(None, Some("okena-daemon")));
+        // Exe name matches even when the reported name doesn't (truncation etc.).
+        assert!(is_okena_process(Some("some-thread"), Some("okena")));
+        // Recycled pid pointing at an unrelated process — never kill.
+        assert!(!is_okena_process(Some("cargo"), Some("cargo")));
+        assert!(!is_okena_process(Some("firefox"), None));
+        assert!(!is_okena_process(None, None));
+    }
+
+    #[test]
+    fn escalates_only_after_threshold_and_when_stuck() {
+        // Below the threshold: never escalate, even if a daemon is stuck.
+        assert!(!should_escalate_recovery(0, true, true));
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS - 1,
+            true,
+            true,
+        ));
+        // At/after the threshold WITH a live-unreachable daemon: escalate.
+        assert!(should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS,
+            true,
+            true,
+        ));
+        assert!(should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            true,
+            true,
+        ));
+        // No live-unreachable daemon (absent or healthy): never kill.
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            false,
+            true,
+        ));
+        // A daemon this GUI merely attached to is never killable.
+        assert!(!should_escalate_recovery(
+            RECOVERY_ESCALATE_AFTER_ATTEMPTS + 5,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn backoff_ramps_then_caps_at_30s() {
+        assert_eq!(recovery_backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(recovery_backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(recovery_backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(recovery_backoff_delay(3), Duration::from_secs(5));
+        assert_eq!(recovery_backoff_delay(4), Duration::from_secs(10));
+        assert_eq!(recovery_backoff_delay(5), Duration::from_secs(30));
+        assert_eq!(recovery_backoff_delay(50), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn backoff_is_monotonic_nondecreasing() {
+        // Never speeds up as failures accumulate — guards against a spawn storm.
+        let mut prev = Duration::ZERO;
+        for n in 0..12 {
+            let d = recovery_backoff_delay(n);
+            assert!(d >= prev, "delay must not decrease at attempt {n}");
+            prev = d;
         }
-    }
-
-    #[test]
-    fn single_profile_keeps_parent_claude_config_dir() {
-        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
-
-        assert!(claude_pty_extra_env(&custom_dir, false, true).is_empty());
-    }
-
-    #[test]
-    fn custom_claude_dir_is_exported_to_pty() {
-        let custom_dir = std::env::temp_dir().join("okena-custom-claude-dir");
-        let env = claude_pty_extra_env(&custom_dir, true, true);
-
-        assert_eq!(env.len(), 1);
-        assert_eq!(env[0].0, "CLAUDE_CONFIG_DIR");
-        assert_eq!(env[0].1.as_deref(), Some(custom_dir.to_string_lossy().as_ref()));
+        // The one-shot give-up toast fires during the ramp, not only at the cap.
+        const { assert!(RECOVERY_TOAST_AFTER_ATTEMPTS >= 4) };
     }
 }

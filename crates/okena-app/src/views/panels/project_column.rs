@@ -1,26 +1,77 @@
+use crate::action_dispatch::ActionDispatcher;
 use crate::git;
 use crate::git::watcher::GitStatusWatcher;
-use crate::action_dispatch::ActionDispatcher;
-use okena_views_git::git_header::GitHeader;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
-use crate::theme::{theme, ThemeColors};
+use crate::theme::{ThemeColors, theme};
+use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
-use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
+use okena_views_git::git_header::GitHeader;
 use std::sync::Arc;
 
-use okena_core::api::ActionRequest;
-use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
-use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::window::TerminalsRegistry;
+use okena_core::api::ActionRequest;
+use okena_views_services::service_panel::ServicePanel;
+use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
+
+fn project_header_display_name(project: &ProjectData) -> String {
+    project.name.clone()
+}
+
+/// What the project column paints in its main content area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnContent {
+    /// Worktree teardown is underway and its terminals are already gone.
+    Closing,
+    /// Normal case: render the pane tree.
+    Layout,
+    /// Worktree checkout is still being created.
+    Creating,
+    /// Bookmark project with no terminal attached.
+    Empty,
+}
+
+/// Pick the content branch for a project column.
+///
+/// `Closing` wins over `Layout` because a closing worktree keeps `layout: Some`
+/// — `prepare_background_worktree_removal` nulls every leaf's `terminal_id` but
+/// leaves the tree shape standing so `ensure_terminal` can't resurrect a PTY
+/// inside the doomed checkout. Without this branch those id-less panes each
+/// render the "Starting terminal…" placeholder for the whole removal window,
+/// which is seconds on a real checkout.
+///
+/// Deliberately gated on the terminals being *gone*, not on `closing` alone:
+/// the merge/`before_remove`-hook phases also set the closing flag while the
+/// terminals are still live and useful, and those must keep painting.
+fn column_content(project: &ProjectData, closing: bool) -> ColumnContent {
+    let has_terminals = project
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.has_terminal_ids());
+
+    if closing && !has_terminals {
+        ColumnContent::Closing
+    } else if project.layout.is_some() {
+        ColumnContent::Layout
+    } else if project.is_creating {
+        // Explicit mid-create marker set by the daemon while the git checkout
+        // runs and mirrored over the wire. NOT derived from a missing layout: a
+        // worktree whose last terminal the user closed is a legitimate bookmark
+        // (layout None) and must fall through to the empty state with its Start
+        // Terminal button, not the creating placeholder.
+        ColumnContent::Creating
+    } else {
+        ColumnContent::Empty
+    }
+}
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
@@ -84,13 +135,33 @@ impl ProjectColumn {
         git_provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Observe git watcher for re-renders (replaces per-column polling)
+        // Observe git watcher for re-renders (replaces per-column polling).
+        // In daemon-client mode this is always `None` (every project is remote,
+        // so git status arrives via the remote snapshot); the immediate refresh
+        // for a newly visible project is requested by `WindowView` sending a
+        // `GitStatus` action to the daemon (see
+        // `request_git_poll_for_visible_project`).
         if let Some(ref watcher) = git_watcher {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
         }
 
-        let initial_service_height = workspace.read(cx).data.service_panel_heights
-            .get(&project_id).copied().unwrap_or(200.0);
+        // Observe the workspace itself. In daemon-client mode there is no local
+        // git_watcher (it's `None`); the header reads git status from the remote
+        // snapshot, which is refreshed via `apply_remote_snapshot` +
+        // `notify_ui_only` on the Workspace. Since ProjectColumn renders inside a
+        // `.cached()` view, only a notify from an entity it observes repaints it
+        // — without this observer remote git-status updates (branch, ahead/behind,
+        // diff stats) never reach the header chip and go stale. Services don't
+        // hit this because ServicePanel already observes the workspace.
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+
+        let initial_service_height = workspace
+            .read(cx)
+            .data
+            .service_panel_heights
+            .get(&project_id)
+            .copied()
+            .unwrap_or(200.0);
 
         let git_header = {
             let pid = project_id.clone();
@@ -112,14 +183,30 @@ impl ProjectColumn {
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                ServicePanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_service_height, cx)
+                ServicePanel::new(
+                    pid,
+                    ws,
+                    fm,
+                    rb,
+                    be,
+                    ts,
+                    ad,
+                    window_id,
+                    initial_service_height,
+                    cx,
+                )
             })
         };
         // Observe service_panel so ProjectColumn re-renders when panel state changes
         cx.observe(&service_panel, |_, _, cx| cx.notify()).detach();
 
-        let initial_hook_height = workspace.read(cx).data.hook_panel_heights
-            .get(&project_id).copied().unwrap_or(200.0);
+        let initial_hook_height = workspace
+            .read(cx)
+            .data
+            .hook_panel_heights
+            .get(&project_id)
+            .copied()
+            .unwrap_or(200.0);
 
         let hook_panel = {
             let pid = project_id.clone();
@@ -130,7 +217,18 @@ impl ProjectColumn {
             let ts = terminals.clone();
             let ad = active_drag.clone();
             cx.new(move |cx| {
-                HookPanel::new(pid, ws, fm, rb, be, ts, ad, window_id, initial_hook_height, cx)
+                HookPanel::new(
+                    pid,
+                    ws,
+                    fm,
+                    rb,
+                    be,
+                    ts,
+                    ad,
+                    window_id,
+                    initial_hook_height,
+                    cx,
+                )
             })
         };
         cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
@@ -189,14 +287,21 @@ impl ProjectColumn {
         });
     }
 
+    /// Sync the action dispatcher to the hook panel entity (mirrors the service
+    /// panel sync — the hook panel needs it to dispatch RerunHook to the daemon).
+    fn sync_hook_panel_dispatcher(&self, cx: &mut Context<Self>) {
+        let dispatcher = self.action_dispatcher.clone();
+        self.hook_panel.update(cx, |hp, _cx| {
+            hp.set_action_dispatcher(dispatcher);
+        });
+    }
+
     /// Set the service manager and observe it for changes.
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
-        // Also update the action dispatcher so it can route service actions locally
-        if let Some(ActionDispatcher::Local { ref mut service_manager, .. }) = self.action_dispatcher {
-            *service_manager = Some(manager.clone());
-        }
-        // Sync dispatcher to service panel (may have been set before panel was created)
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created).
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.set_service_manager(manager, cx);
         });
@@ -233,13 +338,15 @@ impl ProjectColumn {
         provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) {
-        self.git_header.update(cx, |gh, cx| gh.set_git_provider(provider, cx));
+        self.git_header
+            .update(cx, |gh, cx| gh.set_git_provider(provider, cx));
     }
 
     /// Open the branch switcher popover for this project's header.
     /// No-op when the provider is read-only (remote-mirrored project).
     pub fn show_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.git_header.update(cx, |gh, cx| gh.show_branch_picker(window, cx));
+        self.git_header
+            .update(cx, |gh, cx| gh.show_branch_picker(window, cx));
     }
 
     /// Show a hook terminal in the hook panel.
@@ -258,9 +365,16 @@ impl ProjectColumn {
     }
 
     /// Observe workspace for remote service state changes (used for remote project columns).
-    pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
-        // Sync dispatcher to service panel (may have been set before panel was created)
+    pub fn observe_remote_services(
+        &mut self,
+        workspace: Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
+        // Sync dispatcher to service + hook panels (may have been set before the
+        // panels were created). This is the sync point for daemon-client columns,
+        // which is how the hook panel gets its dispatcher to route RerunHook.
         self.sync_service_panel_dispatcher(cx);
+        self.sync_hook_panel_dispatcher(cx);
         self.service_panel.update(cx, |sp, cx| {
             sp.observe_remote_services(workspace, cx);
         });
@@ -305,11 +419,20 @@ impl ProjectColumn {
         workspace.project(&self.project_id)
     }
 
-    fn render_hidden_taskbar(&self, project: &ProjectData, t: ThemeColors, cx: &App) -> impl IntoElement {
-        let minimized_terminals = project.layout.as_ref()
+    fn render_hidden_taskbar(
+        &self,
+        project: &ProjectData,
+        t: ThemeColors,
+        cx: &App,
+    ) -> impl IntoElement {
+        let minimized_terminals = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_minimized_terminals())
             .unwrap_or_default();
-        let detached_terminals = project.layout.as_ref()
+        let detached_terminals = project
+            .layout
+            .as_ref()
             .map(|l| l.collect_detached_terminals())
             .unwrap_or_default();
 
@@ -321,76 +444,118 @@ impl ProjectColumn {
         h_flex()
             // Minimized terminals
             .children(
-                minimized_terminals.into_iter().map(|(terminal_id, layout_path)| {
-                    let workspace = self.workspace.clone();
-                    let project_id = self.project_id.clone();
+                minimized_terminals
+                    .into_iter()
+                    .map(|(terminal_id, layout_path)| {
+                        let workspace = self.workspace.clone();
+                        let project_id = self.project_id.clone();
 
-                    let terminal_name = {
-                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
-                        project.terminal_display_name(&terminal_id, osc_title)
-                    };
+                        let terminal_name = {
+                            let osc_title = self
+                                .terminals
+                                .lock()
+                                .get(&terminal_id)
+                                .and_then(|t| t.title());
+                            project.terminal_display_name(&terminal_id, osc_title)
+                        };
 
-                    div()
-                        .id(ElementId::Name(format!("minimized-{}", terminal_id).into()))
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .border_l_1()
-                        .border_color(rgb(t.border))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .text_size(ui_text_sm(cx))
-                        .child(
-                            svg()
-                                .path("icons/terminal-minimized.svg")
-                                .size(px(10.0))
-                                .text_color(rgb(t.text_muted))
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(t.text_primary))
-                                .child(terminal_name)
-                        )
-                        .on_click(move |_, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.restore_terminal(&project_id, &layout_path, cx);
-                            });
-                        })
-                })
+                        div()
+                            .id(ElementId::Name(format!("minimized-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .border_l_1()
+                            .border_color(rgb(t.border))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(ui_text_sm(cx))
+                            .child(
+                                svg()
+                                    .path("icons/terminal-minimized.svg")
+                                    .size(px(10.0))
+                                    .text_color(rgb(t.text_muted)),
+                            )
+                            .child(div().text_color(rgb(t.text_primary)).child(terminal_name))
+                            .on_click(move |_, _window, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.restore_terminal(&project_id, &layout_path, cx);
+                                });
+                            })
+                    }),
             )
             // Detached terminals (with different styling)
             .children(
-                detached_terminals.into_iter().map(|(terminal_id, _layout_path)| {
-                    let workspace = self.workspace.clone();
-                    let terminal_id_for_click = terminal_id.clone();
+                detached_terminals
+                    .into_iter()
+                    .map(|(terminal_id, _layout_path)| {
+                        let workspace = self.workspace.clone();
+                        let terminal_id_for_click = terminal_id.clone();
 
-                    let terminal_name = {
-                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
-                        project.terminal_display_name(&terminal_id, osc_title)
-                    };
+                        let terminal_name = {
+                            let osc_title = self
+                                .terminals
+                                .lock()
+                                .get(&terminal_id)
+                                .and_then(|t| t.title());
+                            project.terminal_display_name(&terminal_id, osc_title)
+                        };
 
-                    div()
-                        .id(ElementId::Name(format!("detached-{}", terminal_id).into()))
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .border_l_1()
-                        .border_color(rgb(t.border))
-                        .bg(rgb(t.bg_hover))
-                        .hover(|s| s.bg(rgb(t.bg_selection)))
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(format!("\u{2197} {}", terminal_name))
-                        .on_click(move |_, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.attach_terminal(&terminal_id_for_click, cx);
-                            });
-                        })
-                })
+                        div()
+                            .id(ElementId::Name(format!("detached-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .border_l_1()
+                            .border_color(rgb(t.border))
+                            .bg(rgb(t.bg_hover))
+                            .hover(|s| s.bg(rgb(t.bg_selection)))
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("\u{2197} {}", terminal_name))
+                            .on_click(move |_, _window, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.attach_terminal(&terminal_id_for_click, cx);
+                                });
+                            })
+                    }),
             )
             .into_any_element()
+    }
+
+    /// Resolve the project's git status: prefer the local watcher, fall back to
+    /// the remote snapshot (daemon-client mode, where `git_watcher` is `None`).
+    /// Both the header badge and the CI-checks popover MUST go through this so
+    /// they agree on the source — otherwise the badge renders from the snapshot
+    /// while the popover reads an empty watcher and shows nothing (a pill you
+    /// can't open).
+    fn resolve_git_status(&self, cx: &Context<Self>) -> Option<git::GitStatus> {
+        self.git_watcher
+            .as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                self.workspace
+                    .read(cx)
+                    .remote_snapshot(&self.project_id)
+                    .and_then(|snap| snap.git_status.as_ref())
+                    .map(|g| git::GitStatus {
+                        branch: g.branch.clone(),
+                        lines_added: g.lines_added,
+                        lines_removed: g.lines_removed,
+                        pr_info: g.pr_info.clone(),
+                        ci_checks: g.ci_checks.clone(),
+                        ahead: g.ahead,
+                        behind: g.behind,
+                        unpushed: g.unpushed,
+                        // Carried over the wire (ApiGitStatus.review_base /
+                        // .default_branch) so the "Review changes" chip renders
+                        // and the base label hides on the default branch for
+                        // daemon-backed projects too.
+                        review_base: g.review_base.clone(),
+                        default_branch: g.default_branch.clone(),
+                    })
+            })
     }
 
     fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
@@ -408,31 +573,18 @@ impl ProjectColumn {
         // In the rows layout each project is short, so vertical space is
         // precious: collapse the comfortable two-row header back to a single
         // row (git info still shows, just inline) when the grid is stacked.
-        let is_rows = self.workspace.read(cx).project_layout_mode(self.window_id).is_rows();
+        let is_rows = self
+            .workspace
+            .read(cx)
+            .project_layout_mode(self.window_id)
+            .is_rows();
         let is_comfortable =
             density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
 
-        // Fetch git status once for both header badge and git status area
-        let git_status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                self.workspace.read(cx).remote_snapshot(&self.project_id)
-                    .and_then(|snap| snap.git_status.as_ref())
-                    .map(|g| git::GitStatus {
-                        branch: g.branch.clone(),
-                        lines_added: g.lines_added,
-                        lines_removed: g.lines_removed,
-                        pr_info: g.pr_info.clone(),
-                        ci_checks: g.ci_checks.clone(),
-                        ahead: g.ahead,
-                        behind: g.behind,
-                        unpushed: g.unpushed,
-                        // Not carried over the wire yet; remote projects don't
-                        // surface the "Review changes" chip.
-                        review_base: None,
-                        default_branch: None,
-                    })
-            });
+        // Fetch git status once for both header badge and git status area.
+        // Goes through resolve_git_status so the CI popover (below) sees the
+        // same source — watcher locally, remote snapshot in daemon-client mode.
+        let git_status = self.resolve_git_status(cx);
 
         // Worktree indicator: filled dot for normal project, ring for worktree.
         let worktree_dot = if project.worktree_info.is_some() {
@@ -455,14 +607,7 @@ impl ProjectColumn {
         };
 
         let project_name_el = {
-            let display_name = if let Some(ref wt_info) = project.worktree_info {
-                let ws = self.workspace.read(cx);
-                ws.project(&wt_info.parent_project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| project.name.clone())
-            } else {
-                project.name.clone()
-            };
+            let display_name = project_header_display_name(project);
             let path_for_tooltip = project.path.clone();
             let project_id_for_click = self.project_id.clone();
             let request_broker_for_click = self.request_broker.clone();
@@ -567,7 +712,10 @@ impl ProjectColumn {
                                     focus_manager_for_hide.update(cx, |fm, cx| {
                                         workspace_for_hide.update(cx, |ws, cx| {
                                             ws.toggle_project_overview_visibility(
-                                                fm, window_id_for_hide, &project_id_for_hide, cx,
+                                                fm,
+                                                window_id_for_hide,
+                                                &project_id_for_hide,
+                                                cx,
                                             );
                                         });
                                     });
@@ -603,7 +751,8 @@ impl ProjectColumn {
                                         workspace.update(cx, |ws, cx| {
                                             // Toggle: when already focused, clear
                                             // focus to return to the overview.
-                                            let target = if is_focused_view { None } else { Some(pid) };
+                                            let target =
+                                                if is_focused_view { None } else { Some(pid) };
                                             ws.set_focused_project(fm, target, cx);
                                         });
                                         cx.notify();
@@ -621,21 +770,22 @@ impl ProjectColumn {
                         )
                     })
                     .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_hook_indicator(&t, cx)
-                        })
+                        self.hook_panel
+                            .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))
                     })
                     .child({
-                        self.service_panel.update(cx, |sp, cx| {
-                            sp.render_service_indicator(&t, cx)
-                        })
+                        self.service_panel
+                            .update(cx, |sp, cx| sp.render_service_indicator(&t, cx))
                     }),
             );
 
         let git_status_el = self.git_header.update(cx, |gh, cx| {
             gh.render_git_status(git_status.clone(), &t, cx)
         });
-        let has_git = git_status.as_ref().and_then(|g| g.branch.as_ref()).is_some();
+        let has_git = git_status
+            .as_ref()
+            .and_then(|g| g.branch.as_ref())
+            .is_some();
 
         let context_menu_handler = {
             let request_broker = self.request_broker.clone();
@@ -746,6 +896,40 @@ impl ProjectColumn {
             .child(header_body)
     }
 
+    /// Render the closing state shown while a worktree is being torn down.
+    fn render_closing_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        v_flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .gap(px(12.0))
+            .bg(rgb(t.bg_primary))
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(48.0))
+                    .text_color(rgb(t.text_muted)),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_xl(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child("Closing worktree\u{2026}"),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .max_w(px(240.0))
+                    .text_center()
+                    // Deliberately not "removing the checkout": the before_remove
+                    // hook phase reaches this screen too, and that phase is still
+                    // abortable — nothing has been deleted yet.
+                    .child("This project disappears once the worktree is gone."),
+            )
+    }
+
     /// Render empty state for bookmark projects (no terminal)
     fn render_creating_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -791,13 +975,13 @@ impl ProjectColumn {
                 svg()
                     .path("icons/folder.svg")
                     .size(px(48.0))
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(t.text_muted)),
             )
             .child(
                 div()
                     .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_muted))
-                    .child("No terminal attached")
+                    .child("No terminal attached"),
             )
             .child(
                 div()
@@ -815,14 +999,14 @@ impl ProjectColumn {
                         svg()
                             .path("icons/terminal.svg")
                             .size(px(14.0))
-                            .text_color(rgb(t.button_primary_fg))
+                            .text_color(rgb(t.button_primary_fg)),
                     )
                     .child(
                         div()
                             .text_size(ui_text_md(cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.button_primary_fg))
-                            .child("Start Terminal")
+                            .child("Start Terminal"),
                     )
                     .on_click({
                         let dispatcher = self.action_dispatcher.clone();
@@ -836,7 +1020,7 @@ impl ProjectColumn {
                                 );
                             }
                         }
-                    })
+                    }),
             )
             .child(self.render_tip(cx))
     }
@@ -915,11 +1099,7 @@ impl ProjectColumn {
                             .size(px(11.0))
                             .text_color(rgb(t.text_muted)),
                     )
-                    .child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .child("Another tip"),
-                    )
+                    .child(div().text_size(ui_text_sm(cx)).child("Another tip"))
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.tip_index = this.tip_index.wrapping_add(1);
                         cx.notify();
@@ -936,15 +1116,21 @@ impl Render for ProjectColumn {
 
         match project {
             Some(project) => {
-                let has_layout = project.layout.is_some();
-
-                let is_creating = workspace.is_creating_project(&self.project_id);
+                // Daemon-authoritative flag mirrored over the wire, OR'd with the
+                // initiating client's optimistic tracker — same pair the sidebar
+                // row reads for its "Closing…" label.
+                let is_closing = project.is_closing || workspace.is_project_closing(&project.id);
+                let content_kind = column_content(&project, is_closing);
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
                     let color = workspace.effective_folder_color(&project);
                     if color != crate::theme::FolderColor::Default {
-                        rgb(crate::ui::tint_color(t.bg_primary, t.get_folder_color(color), 0.025))
+                        rgb(crate::ui::tint_color(
+                            t.bg_primary,
+                            t.get_folder_color(color),
+                            0.025,
+                        ))
                     } else {
                         rgb(t.bg_primary)
                     }
@@ -952,31 +1138,33 @@ impl Render for ProjectColumn {
                     rgb(t.bg_primary)
                 };
 
-                // Content: layout, creating state, or empty bookmark state
-                let content = if has_layout {
-                    self.ensure_layout_container(project.path.clone(), cx);
+                // Content: layout, closing/creating placeholder, or empty bookmark state
+                let content = match content_kind {
+                    ColumnContent::Layout => {
+                        self.ensure_layout_container(project.path.clone(), cx);
 
-                    div()
-                        .id("project-column-content")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .when_some(self.layout_container.clone(), |d, container| {
-                            d.child(AnyView::from(container).cached(
-                                StyleRefinement::default().size_full(),
-                            ))
-                        })
-                        .into_any_element()
-                } else if is_creating {
-                    self.render_creating_state(cx).into_any_element()
-                } else {
-                    self.render_empty_state(cx).into_any_element()
+                        div()
+                            .id("project-column-content")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .when_some(self.layout_container.clone(), |d, container| {
+                                d.child(
+                                    AnyView::from(container)
+                                        .cached(StyleRefinement::default().size_full()),
+                                )
+                            })
+                            .into_any_element()
+                    }
+                    ColumnContent::Closing => self.render_closing_state(cx).into_any_element(),
+                    ColumnContent::Creating => self.render_creating_state(cx).into_any_element(),
+                    ColumnContent::Empty => self.render_empty_state(cx).into_any_element(),
                 };
 
-                // Get current branch for commit log popover and update git header
-                let current_branch = self.git_watcher.as_ref()
-                    .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-                    .and_then(|s| s.branch);
+                // Get current branch for commit log popover and update git header.
+                // Same source as the badge (resolve_git_status) so the branch is
+                // present in daemon-client mode too, where git_watcher is None.
+                let current_branch = self.resolve_git_status(cx).and_then(|s| s.branch);
                 self.git_header.update(cx, |gh, _cx| {
                     gh.set_current_branch(current_branch.clone());
                 });
@@ -992,22 +1180,16 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     // Hook panel (delegated to HookPanel entity)
-                    .child({
-                        self.hook_panel.update(cx, |hp, cx| {
-                            hp.render_panel(&t, cx)
-                        })
-                    })
+                    .child(self.hook_panel.update(cx, |hp, cx| hp.render_panel(&t, cx)))
                     // Service panel (delegated to ServicePanel entity)
                     .child({
-                        self.service_panel.update(cx, |sp, cx| {
-                            sp.render_panel(&t, cx)
-                        })
+                        self.service_panel
+                            .update(cx, |sp, cx| sp.render_panel(&t, cx))
                     })
                     // Diff popover (delegated to GitHeader entity)
                     .child({
-                        self.git_header.update(cx, |gh, cx| {
-                            gh.render_diff_popover(&t, cx)
-                        })
+                        self.git_header
+                            .update(cx, |gh, cx| gh.render_diff_popover(&t, cx))
                     })
                     // Commit log popover (delegated to GitHeader entity)
                     .child({
@@ -1017,18 +1199,25 @@ impl Render for ProjectColumn {
                     })
                     // Branch picker popover (delegated to GitHeader entity)
                     .child({
-                        self.git_header.update(cx, |gh, cx| {
-                            gh.render_branch_picker(window, &t, cx)
-                        })
+                        self.git_header
+                            .update(cx, |gh, cx| gh.render_branch_picker(window, &t, cx))
                     })
-                    // CI checks popover (delegated to GitHeader entity)
+                    // CI checks popover (delegated to GitHeader entity).
+                    // Resolve via the same path as the badge: in daemon-client
+                    // mode git_watcher is None, so the watcher-only fetch left
+                    // ci_checks empty and the popover rendered nothing (the pill
+                    // toggled but never opened). Fall back to the remote snapshot.
                     .child({
-                        let git_status = self.git_watcher.as_ref()
-                            .and_then(|w| w.read(cx).get(&self.project_id).cloned());
+                        let git_status = self.resolve_git_status(cx);
                         let ci_checks = git_status.as_ref().and_then(|g| g.ci_checks.clone());
                         let pr_info = git_status.and_then(|g| g.pr_info);
                         self.git_header.update(cx, |gh, cx| {
-                            gh.render_ci_checks_popover(ci_checks.as_ref(), pr_info.as_ref(), &t, cx)
+                            gh.render_ci_checks_popover(
+                                ci_checks.as_ref(),
+                                pr_info.as_ref(),
+                                &t,
+                                cx,
+                            )
                         })
                     })
                     .into_any_element()
@@ -1043,5 +1232,138 @@ impl Render for ProjectColumn {
                 .child("Project not found")
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColumnContent, column_content, project_header_display_name};
+    use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, WorktreeMetadata};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn project_with_name(name: &str) -> ProjectData {
+        ProjectData {
+            id: "p1".to_string(),
+            name: name.to_string(),
+            path: "/tmp/repo-worktree".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        }
+    }
+
+    /// A layout tree in the exact shape `prepare_background_worktree_removal`
+    /// leaves behind: structure intact, every leaf's terminal id nulled.
+    fn split_layout(terminal_ids: [Option<&str>; 2]) -> LayoutNode {
+        let children = terminal_ids
+            .into_iter()
+            .map(|id| {
+                let mut node = LayoutNode::new_terminal();
+                if let LayoutNode::Terminal { terminal_id, .. } = &mut node {
+                    *terminal_id = id.map(str::to_string);
+                }
+                node
+            })
+            .collect();
+
+        LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children,
+        }
+    }
+
+    #[test]
+    fn closing_worktree_with_nulled_terminal_ids_shows_closing_state() {
+        let mut project = project_with_name("feature-login");
+        project.layout = Some(split_layout([None, None]));
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "id-less panes mid-teardown must not fall through to \"Starting terminal…\"",
+        );
+    }
+
+    #[test]
+    fn closing_worktree_keeps_painting_live_terminals() {
+        let mut project = project_with_name("feature-login");
+        project.layout = Some(split_layout([Some("t1"), None]));
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Layout,
+            "merge and before_remove-hook phases keep the terminals alive and visible",
+        );
+    }
+
+    #[test]
+    fn closing_bookmark_without_layout_shows_closing_not_empty_state() {
+        let mut project = project_with_name("feature-login");
+        project.is_closing = true;
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "a closing project must not offer a Start Terminal button",
+        );
+    }
+
+    #[test]
+    fn optimistic_client_closing_flag_alone_triggers_closing_state() {
+        let project = project_with_name("feature-login");
+
+        assert_eq!(
+            column_content(&project, true),
+            ColumnContent::Closing,
+            "the initiating client marks closing in its tracker before the mirror catches up",
+        );
+    }
+
+    #[test]
+    fn non_closing_project_branches_are_unchanged() {
+        let mut project = project_with_name("feature-login");
+        assert_eq!(column_content(&project, false), ColumnContent::Empty);
+
+        project.is_creating = true;
+        assert_eq!(column_content(&project, false), ColumnContent::Creating);
+
+        project.layout = Some(split_layout([None, None]));
+        assert_eq!(
+            column_content(&project, false),
+            ColumnContent::Layout,
+            "a fresh worktree's uninitialized slots still render panes, not a placeholder",
+        );
+    }
+
+    #[test]
+    fn project_header_uses_worktree_project_name() {
+        let mut project = project_with_name("feature-login");
+        project.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/repo-worktree".to_string(),
+            branch_name: "feature/login".to_string(),
+        });
+
+        assert_eq!(project_header_display_name(&project), "feature-login");
     }
 }

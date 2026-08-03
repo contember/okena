@@ -83,7 +83,10 @@ fn send_escape_and_backtab_actions_are_kitty_aware() {
     // Legacy before the protocol is enabled.
     t.send_escape();
     t.send_backtab();
-    assert_eq!(transport.writes(), vec![b"\x1b".to_vec(), b"\x1b[Z".to_vec()]);
+    assert_eq!(
+        transport.writes(),
+        vec![b"\x1b".to_vec(), b"\x1b[Z".to_vec()]
+    );
 
     // After the app pushes disambiguate, the same actions emit CSI u.
     t.process_output(b"\x1b[>1u");

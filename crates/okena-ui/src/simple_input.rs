@@ -1,5 +1,5 @@
-use crate::theme::theme;
 use crate::text_utils::find_word_boundaries;
+use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
 
@@ -160,11 +160,7 @@ impl SimpleInputState {
 
     /// Run a delete operation: clears selection if present, otherwise calls `delete_fn`,
     /// then emits `InputChangedEvent` only if the value actually changed.
-    fn delete_with(
-        &mut self,
-        delete_fn: impl FnOnce(&mut Self),
-        cx: &mut Context<Self>,
-    ) {
+    fn delete_with(&mut self, delete_fn: impl FnOnce(&mut Self), cx: &mut Context<Self>) {
         let old_len = self.value.len();
         if let Some(range) = self.selection.take() {
             self.value
@@ -181,67 +177,85 @@ impl SimpleInputState {
     }
 
     fn delete_backward(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            if this.cursor_position > 0 {
-                let prev_pos = this.cursor_position - 1;
-                let byte_range = this.byte_range_for_chars(&(prev_pos..this.cursor_position));
-                this.value.replace_range(byte_range, "");
-                this.cursor_position = prev_pos;
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                if this.cursor_position > 0 {
+                    let prev_pos = this.cursor_position - 1;
+                    let byte_range = this.byte_range_for_chars(&(prev_pos..this.cursor_position));
+                    this.value.replace_range(byte_range, "");
+                    this.cursor_position = prev_pos;
+                }
+            },
+            cx,
+        );
     }
 
     fn delete_forward(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            let char_count = this.value.chars().count();
-            if this.cursor_position < char_count {
-                let next_pos = this.cursor_position + 1;
-                let byte_range = this.byte_range_for_chars(&(this.cursor_position..next_pos));
-                this.value.replace_range(byte_range, "");
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                let char_count = this.value.chars().count();
+                if this.cursor_position < char_count {
+                    let next_pos = this.cursor_position + 1;
+                    let byte_range = this.byte_range_for_chars(&(this.cursor_position..next_pos));
+                    this.value.replace_range(byte_range, "");
+                }
+            },
+            cx,
+        );
     }
 
     fn delete_word_backward(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            if this.cursor_position > 0 {
-                let pos = this.word_boundary_left();
-                let byte_range = this.byte_range_for_chars(&(pos..this.cursor_position));
-                this.value.replace_range(byte_range, "");
-                this.cursor_position = pos;
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                if this.cursor_position > 0 {
+                    let pos = this.word_boundary_left();
+                    let byte_range = this.byte_range_for_chars(&(pos..this.cursor_position));
+                    this.value.replace_range(byte_range, "");
+                    this.cursor_position = pos;
+                }
+            },
+            cx,
+        );
     }
 
     fn delete_word_forward(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            let chars_len = this.value.chars().count();
-            if this.cursor_position < chars_len {
-                let pos = this.word_boundary_right();
-                let byte_range = this.byte_range_for_chars(&(this.cursor_position..pos));
-                this.value.replace_range(byte_range, "");
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                let chars_len = this.value.chars().count();
+                if this.cursor_position < chars_len {
+                    let pos = this.word_boundary_right();
+                    let byte_range = this.byte_range_for_chars(&(this.cursor_position..pos));
+                    this.value.replace_range(byte_range, "");
+                }
+            },
+            cx,
+        );
     }
 
     fn delete_to_start(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            if this.cursor_position > 0 {
-                let byte_range = this.byte_range_for_chars(&(0..this.cursor_position));
-                this.value.replace_range(byte_range, "");
-                this.cursor_position = 0;
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                if this.cursor_position > 0 {
+                    let byte_range = this.byte_range_for_chars(&(0..this.cursor_position));
+                    this.value.replace_range(byte_range, "");
+                    this.cursor_position = 0;
+                }
+            },
+            cx,
+        );
     }
 
     fn delete_to_end(&mut self, cx: &mut Context<Self>) {
-        self.delete_with(|this| {
-            let char_count = this.value.chars().count();
-            if this.cursor_position < char_count {
-                let byte_range = this.byte_range_for_chars(&(this.cursor_position..char_count));
-                this.value.replace_range(byte_range, "");
-            }
-        }, cx);
+        self.delete_with(
+            |this| {
+                let char_count = this.value.chars().count();
+                if this.cursor_position < char_count {
+                    let byte_range = this.byte_range_for_chars(&(this.cursor_position..char_count));
+                    this.value.replace_range(byte_range, "");
+                }
+            },
+            cx,
+        );
     }
 
     fn move_cursor_left(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
@@ -441,7 +455,9 @@ impl SimpleInputState {
         let byte_pos = self.byte_position_for_char(self.cursor_position);
         let before = &self.value[..byte_pos];
         let line_idx = before.matches('\n').count();
-        let col_bytes = before.rfind('\n').map_or(before.len(), |i| before.len() - i - 1);
+        let col_bytes = before
+            .rfind('\n')
+            .map_or(before.len(), |i| before.len() - i - 1);
         let col_chars = before[before.len() - col_bytes..].chars().count();
         (line_idx, col_chars)
     }
@@ -639,19 +655,20 @@ impl SimpleInputState {
             }
             "v" if modifiers.platform || modifiers.control => {
                 if let Some(clipboard_item) = cx.read_from_clipboard()
-                    && let Some(text) = clipboard_item.text() {
-                        if self.multiline {
-                            if !text.is_empty() {
-                                self.insert_text(&text, cx);
-                            }
-                        } else {
-                            // Only insert first line (no newlines in single-line input)
-                            let line = text.lines().next().unwrap_or("");
-                            if !line.is_empty() {
-                                self.insert_text(line, cx);
-                            }
+                    && let Some(text) = clipboard_item.text()
+                {
+                    if self.multiline {
+                        if !text.is_empty() {
+                            self.insert_text(&text, cx);
+                        }
+                    } else {
+                        // Only insert first line (no newlines in single-line input)
+                        let line = text.lines().next().unwrap_or("");
+                        if !line.is_empty() {
+                            self.insert_text(line, cx);
                         }
                     }
+                }
                 return KeyHandled::Handled;
             }
             "c" if modifiers.platform || modifiers.control => {
@@ -700,9 +717,9 @@ impl SimpleInputState {
                 return KeyHandled::Handled;
             }
             // Skip modifier-only and function keys
-            "shift" | "control" | "alt" | "meta" | "capslock"
-            | "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
-            | "f12" | "up" | "down" | "pageup" | "pagedown" => {
+            "shift" | "control" | "alt" | "meta" | "capslock" | "f1" | "f2" | "f3" | "f4"
+            | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" | "up" | "down"
+            | "pageup" | "pagedown" => {
                 return KeyHandled::Ignored;
             }
             _ => {}
@@ -719,7 +736,6 @@ impl SimpleInputState {
 
         KeyHandled::Ignored
     }
-
 }
 
 /// Whether a character is a "word" character (alphanumeric or underscore).
@@ -736,16 +752,17 @@ fn var_segments(text: &str) -> Vec<(&str, bool)> {
 
     while i < bytes.len() {
         if bytes[i] == b'{'
-            && let Some(close) = text[i..].find('}') {
-                if i > last_end {
-                    segments.push((&text[last_end..i], false));
-                }
-                let end = i + close + 1;
-                segments.push((&text[i..end], true));
-                last_end = end;
-                i = end;
-                continue;
+            && let Some(close) = text[i..].find('}')
+        {
+            if i > last_end {
+                segments.push((&text[last_end..i], false));
             }
+            let end = i + close + 1;
+            segments.push((&text[i..end], true));
+            last_end = end;
+            i = end;
+            continue;
+        }
         i += 1;
     }
     if last_end < text.len() {
@@ -784,10 +801,13 @@ impl Render for SimpleInputState {
                 for (seg, is_var) in var_segments(&placeholder) {
                     if is_var {
                         let start = seg.as_ptr() as usize - placeholder.as_ptr() as usize;
-                        highlights.push((start..start + seg.len(), HighlightStyle {
-                            color: Some(rgb(var_color).into()),
-                            ..Default::default()
-                        }));
+                        highlights.push((
+                            start..start + seg.len(),
+                            HighlightStyle {
+                                color: Some(rgb(var_color).into()),
+                                ..Default::default()
+                            },
+                        ));
                     }
                 }
                 div()
@@ -809,7 +829,11 @@ impl Render for SimpleInputState {
             let mut byte_offset = 0;
 
             for (line_idx, line_text) in lines.iter().enumerate() {
-                let display = if line_text.is_empty() { "\u{200B}".to_string() } else { line_text.to_string() };
+                let display = if line_text.is_empty() {
+                    "\u{200B}".to_string()
+                } else {
+                    line_text.to_string()
+                };
                 let line_char_count = line_text.chars().count();
 
                 // Compute per-line selection highlights
@@ -818,15 +842,29 @@ impl Render for SimpleInputState {
                     let line_end = line_start + line_char_count;
                     let sel_start_in_line = sel.start.max(line_start).saturating_sub(line_start);
                     let sel_end_in_line = sel.end.min(line_end).saturating_sub(line_start);
-                    if sel_start_in_line < sel_end_in_line && sel.end > line_start && sel.start < line_end {
+                    if sel_start_in_line < sel_end_in_line
+                        && sel.end > line_start
+                        && sel.start < line_end
+                    {
                         // Compute byte offsets within this line's text
-                        let sel_start_byte: usize = line_text.char_indices().nth(sel_start_in_line).map(|(i, _)| i).unwrap_or(line_text.len());
-                        let sel_end_byte: usize = line_text.char_indices().nth(sel_end_in_line).map(|(i, _)| i).unwrap_or(line_text.len());
-                        let highlights = vec![(sel_start_byte..sel_end_byte, HighlightStyle {
-                            background_color: Some(rgb(t.selection_bg).into()),
-                            color: Some(rgb(t.selection_fg).into()),
-                            ..Default::default()
-                        })];
+                        let sel_start_byte: usize = line_text
+                            .char_indices()
+                            .nth(sel_start_in_line)
+                            .map(|(i, _)| i)
+                            .unwrap_or(line_text.len());
+                        let sel_end_byte: usize = line_text
+                            .char_indices()
+                            .nth(sel_end_in_line)
+                            .map(|(i, _)| i)
+                            .unwrap_or(line_text.len());
+                        let highlights = vec![(
+                            sel_start_byte..sel_end_byte,
+                            HighlightStyle {
+                                background_color: Some(rgb(t.selection_bg).into()),
+                                color: Some(rgb(t.selection_fg).into()),
+                                ..Default::default()
+                            },
+                        )];
                         StyledText::new(display).with_highlights(highlights)
                     } else {
                         StyledText::new(display)
@@ -840,15 +878,17 @@ impl Render for SimpleInputState {
                 let local_cursor_byte = cursor_byte.saturating_sub(byte_offset);
                 let is_cursor_line = line_idx == cursor_line;
 
-                container = container.child(
-                    div()
-                        .relative()
-                        .min_h(px(18.0))
-                        .child(styled)
-                        .when(is_cursor_line, |d| {
-                            d.child(cursor_canvas(layout, local_cursor_byte, cursor_visible, cursor_color))
-                        })
-                );
+                container = container.child(div().relative().min_h(px(18.0)).child(styled).when(
+                    is_cursor_line,
+                    |d| {
+                        d.child(cursor_canvas(
+                            layout,
+                            local_cursor_byte,
+                            cursor_visible,
+                            cursor_color,
+                        ))
+                    },
+                ));
 
                 byte_offset += line_text.len() + 1; // +1 for '\n'
             }
@@ -858,21 +898,27 @@ impl Render for SimpleInputState {
             let styled = if let Some(ref sel) = selection {
                 let sel_start_byte = self.byte_position_for_char(sel.start);
                 let sel_end_byte = self.byte_position_for_char(sel.end);
-                let highlights = vec![(sel_start_byte..sel_end_byte, HighlightStyle {
-                    background_color: Some(rgb(t.selection_bg).into()),
-                    color: Some(rgb(t.selection_fg).into()),
-                    ..Default::default()
-                })];
+                let highlights = vec![(
+                    sel_start_byte..sel_end_byte,
+                    HighlightStyle {
+                        background_color: Some(rgb(t.selection_bg).into()),
+                        color: Some(rgb(t.selection_fg).into()),
+                        ..Default::default()
+                    },
+                )];
                 StyledText::new(value.clone()).with_highlights(highlights)
             } else if highlight_vars {
                 let mut highlights = Vec::new();
                 for (seg, is_var) in var_segments(&value) {
                     if is_var {
                         let start = seg.as_ptr() as usize - value.as_ptr() as usize;
-                        highlights.push((start..start + seg.len(), HighlightStyle {
-                            color: Some(rgb(var_color).into()),
-                            ..Default::default()
-                        }));
+                        highlights.push((
+                            start..start + seg.len(),
+                            HighlightStyle {
+                                color: Some(rgb(var_color).into()),
+                                ..Default::default()
+                            },
+                        ));
                     }
                 }
                 StyledText::new(value.clone()).with_highlights(highlights)
@@ -887,7 +933,12 @@ impl Render for SimpleInputState {
                 .relative()
                 .text_color(cursor_color)
                 .child(styled)
-                .child(cursor_canvas(layout, cursor_byte, cursor_visible, cursor_color))
+                .child(cursor_canvas(
+                    layout,
+                    cursor_byte,
+                    cursor_visible,
+                    cursor_color,
+                ))
                 .into_any_element()
         };
 
@@ -904,38 +955,48 @@ impl Render for SimpleInputState {
             .when(!multiline, |d| d.h(px(24.0)))
             .px(px(8.0))
             .cursor_text()
-            .child(canvas({
-                let entity = cx.entity().downgrade();
-                move |bounds, _, cx: &mut App| {
-                    if let Some(entity) = entity.upgrade() {
-                        entity.update(cx, |this, _| {
-                            this.input_bounds = Some(bounds);
-                        });
-                    }
-                }
-            }, |_, _, _, _| {}).absolute().size_full())
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.focus(window, cx);
-                let pos = this.char_position_for_mouse(event.position);
+            .child(
+                canvas(
+                    {
+                        let entity = cx.entity().downgrade();
+                        move |bounds, _, cx: &mut App| {
+                            if let Some(entity) = entity.upgrade() {
+                                entity.update(cx, |this, _| {
+                                    this.input_bounds = Some(bounds);
+                                });
+                            }
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.focus(window, cx);
+                    let pos = this.char_position_for_mouse(event.position);
 
-                if event.click_count >= 3 {
-                    // Triple-click: select line (multiline) or all
-                    this.is_selecting = false;
-                    this.select_line_at(pos, cx);
-                } else if event.click_count == 2 {
-                    // Double-click: select word
-                    this.is_selecting = false;
-                    this.select_word_at(pos, cx);
-                } else {
-                    // Single click: position cursor, start drag selection
-                    this.cursor_position = pos;
-                    this.selection = None;
-                    this.is_selecting = true;
-                    this.select_anchor = pos;
-                    this.reset_cursor_blink();
-                    cx.notify();
-                }
-            }))
+                    if event.click_count >= 3 {
+                        // Triple-click: select line (multiline) or all
+                        this.is_selecting = false;
+                        this.select_line_at(pos, cx);
+                    } else if event.click_count == 2 {
+                        // Double-click: select word
+                        this.is_selecting = false;
+                        this.select_word_at(pos, cx);
+                    } else {
+                        // Single click: position cursor, start drag selection
+                        this.cursor_position = pos;
+                        this.selection = None;
+                        this.is_selecting = true;
+                        this.select_anchor = pos;
+                        this.reset_cursor_blink();
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.is_selecting {
                     if event.pressed_button != Some(MouseButton::Left) {
@@ -954,9 +1015,12 @@ impl Render for SimpleInputState {
                     cx.notify();
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
-                this.is_selecting = false;
-            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                    this.is_selecting = false;
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if this.handle_key_down(event, cx) == KeyHandled::Handled {
                     cx.stop_propagation();
@@ -968,7 +1032,7 @@ impl Render for SimpleInputState {
                     svg()
                         .path(icon_path)
                         .size(px(12.0))
-                        .text_color(rgb(t.text_muted))
+                        .text_color(rgb(t.text_muted)),
                 )
             })
             .child(content)
@@ -994,16 +1058,12 @@ fn cursor_canvas(
         },
         // Paint: draw the 1px cursor line, vertically centered within the text line
         move |_bounds, (cursor_pos, line_h), window, _cx| {
-            if visible
-                && let Some(pos) = cursor_pos {
-                    let cursor_h = px(14.0).min(line_h);
-                    let y_offset = (line_h - cursor_h) * 0.5;
-                    let adjusted = point(pos.x, pos.y + y_offset);
-                    window.paint_quad(fill(
-                        Bounds::new(adjusted, size(px(1.0), cursor_h)),
-                        color,
-                    ));
-                }
+            if visible && let Some(pos) = cursor_pos {
+                let cursor_h = px(14.0).min(line_h);
+                let y_offset = (line_h - cursor_h) * 0.5;
+                let adjusted = point(pos.x, pos.y + y_offset);
+                window.paint_quad(fill(Bounds::new(adjusted, size(px(1.0), cursor_h)), color));
+            }
         },
     )
     .absolute()

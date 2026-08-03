@@ -173,12 +173,11 @@ fn is_pwsh_available() -> bool {
 /// Detect installed WSL distributions
 #[cfg(windows)]
 pub fn detect_wsl_distros() -> Vec<String> {
-    let output = match crate::process::safe_output(
-        crate::process::command("wsl.exe").args(["-l", "-q"]),
-    ) {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
+    let output =
+        match crate::process::safe_output(crate::process::command("wsl.exe").args(["-l", "-q"])) {
+            Ok(o) if o.status.success() => o,
+            _ => return Vec::new(),
+        };
 
     // WSL outputs UTF-16LE encoded text
     let stdout = &output.stdout;
@@ -223,7 +222,8 @@ pub fn parse_wsl_unc_path(path: &str) -> Option<(String, String)> {
     let rest = normalized.strip_prefix("//")?;
 
     // Check for wsl.localhost/ or wsl$/
-    let after_host = rest.strip_prefix("wsl.localhost/")
+    let after_host = rest
+        .strip_prefix("wsl.localhost/")
         .or_else(|| rest.strip_prefix("wsl$/"))?;
 
     // Next segment is the distro name
@@ -273,10 +273,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_windows_path_to_wsl() {
-        assert_eq!(
-            windows_path_to_wsl("C:\\Users\\test"),
-            "/mnt/c/Users/test"
-        );
+        assert_eq!(windows_path_to_wsl("C:\\Users\\test"), "/mnt/c/Users/test");
         assert_eq!(
             windows_path_to_wsl("D:\\Projects\\app"),
             "/mnt/d/Projects/app"
@@ -297,14 +294,8 @@ mod tests {
             "/home/user"
         );
         // Forward-slash UNC paths
-        assert_eq!(
-            windows_path_to_wsl("//wsl.localhost/Debian/tmp"),
-            "/tmp"
-        );
-        assert_eq!(
-            windows_path_to_wsl("//wsl$/Arch/etc/config"),
-            "/etc/config"
-        );
+        assert_eq!(windows_path_to_wsl("//wsl.localhost/Debian/tmp"), "/tmp");
+        assert_eq!(windows_path_to_wsl("//wsl$/Arch/etc/config"), "/etc/config");
     }
 
     #[test]

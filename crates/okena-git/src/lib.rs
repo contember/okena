@@ -8,42 +8,24 @@ pub mod error;
 pub(crate) mod gix_helpers;
 pub mod repository;
 
-pub use blame::{get_blame, BlameCommit, BlameError, BlameKind, BlameLine};
-pub use error::{GitError, GitResult};
+pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;
-pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
+pub use diff::{
+    DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options,
+    get_file_contents_for_diff, is_git_repo,
+};
+pub use error::{GitError, GitResult};
 pub use repository::{
-    create_worktree,
-    remove_worktree,
-    remove_worktree_fast,
-    get_available_branches_for_worktree,
-    get_repo_root,
-    resolve_git_root_and_subdir,
-    compute_target_paths,
-    project_path_in_worktree,
-    has_uncommitted_changes,
-    get_current_branch,
-    get_default_branch,
-    resolve_review_base,
-    rebase_onto,
-    merge_branch,
-    stash_changes,
-    stash_pop,
-    stage_file,
-    unstage_file,
-    discard_file_changes,
-    fetch_all,
-    delete_local_branch,
-    delete_remote_branch,
-    push_branch,
-    count_unpushed_commits,
-    count_ahead_behind,
-    list_branches,
-    list_branches_classified,
-    BranchList,
-    checkout_local_branch,
-    checkout_remote_branch,
-    create_and_checkout_branch,
+    BranchList, HeadSnapshot, VerifiedWorktree, checkout_local_branch, checkout_remote_branch,
+    compute_target_paths, count_ahead_behind, count_unpushed_commits, create_and_checkout_branch,
+    create_worktree, create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
+    discard_file_changes, fetch_all, fetch_and_fast_forward, get_available_branches_for_worktree,
+    get_current_branch, get_default_branch, get_head_snapshot, get_repo_common_dir, get_repo_root,
+    has_uncommitted_changes, list_branches, list_branches_classified, list_linked_worktree_paths,
+    list_pull_requests, merge_branch, move_worktree, project_path_in_worktree, push_branch,
+    rebase_onto, remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir,
+    resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
+    verify_linked_worktree_fresh,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look
@@ -215,11 +197,15 @@ pub fn refresh_git_status_with_pr_base(path: &Path, pr_base: Option<&str>) -> Op
             if let Some(base) = pr_base {
                 repository::apply_pr_base(&mut s, path, base);
             }
-            with_cache(|cache| { cache.insert(path_buf, Some(s.clone())); });
+            with_cache(|cache| {
+                cache.insert(path_buf, Some(s.clone()));
+            });
             Some(s)
         }
         repository::StatusFetch::NotRepo => {
-            with_cache(|cache| { cache.insert(path_buf, None); });
+            with_cache(|cache| {
+                cache.insert(path_buf, None);
+            });
             None
         }
         repository::StatusFetch::Transient => {
@@ -242,25 +228,29 @@ pub fn warm_branch_cache(path: &Path) {
         return;
     };
     with_cache(|cache| {
-        cache.entry(path_buf).or_insert_with(|| Some(GitStatus {
-            branch: Some(branch),
-            lines_added: 0,
-            lines_removed: 0,
-            pr_info: None,
-            ci_checks: None,
-            ahead: None,
-            behind: None,
-            unpushed: None,
-            review_base: None,
-            default_branch: None,
-        }));
+        cache.entry(path_buf).or_insert_with(|| {
+            Some(GitStatus {
+                branch: Some(branch),
+                lines_added: 0,
+                lines_removed: 0,
+                pr_info: None,
+                ci_checks: None,
+                ahead: None,
+                behind: None,
+                unpushed: None,
+                review_base: None,
+                default_branch: None,
+            })
+        });
     });
 }
 
 /// Invalidate cache for a specific path (call when you know files changed)
 #[allow(dead_code)]
 pub fn invalidate_cache(path: &Path) {
-    with_cache(|cache| { cache.remove(path); });
+    with_cache(|cache| {
+        cache.remove(path);
+    });
 }
 
 /// Get per-file diff summary for a repository.
@@ -315,7 +305,10 @@ mod tests {
         std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
         std::fs::write(repo.join("doomed.txt"), "x\ny\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+        );
         std::fs::write(repo.join("file.txt"), "a\nB\nc\nd\n").unwrap();
         std::fs::remove_file(repo.join("doomed.txt")).unwrap();
         std::fs::write(repo.join("staged.txt"), "p\nq\n").unwrap();
@@ -326,47 +319,83 @@ mod tests {
         let mut want: std::collections::HashMap<String, (usize, usize, bool)> =
             std::collections::HashMap::new();
         let out = std::process::Command::new("git")
-            .args(["-C", repo.to_str().unwrap(), "diff", "--numstat", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"])
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "diff",
+                "--numstat",
+                "--no-renames",
+                "--no-color",
+                "--no-ext-diff",
+                "HEAD",
+            ])
             .output()
             .unwrap();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let p: Vec<&str> = line.split('\t').collect();
             if p.len() >= 3 {
-                want.insert(p[2].to_string(), (p[0].parse().unwrap_or(0), p[1].parse().unwrap_or(0), false));
+                want.insert(
+                    p[2].to_string(),
+                    (p[0].parse().unwrap_or(0), p[1].parse().unwrap_or(0), false),
+                );
             }
         }
         want.insert("untracked.txt".to_string(), (2, 0, true));
 
-        let got: std::collections::HashMap<String, (usize, usize, bool)> = get_diff_file_summary(&repo)
-            .into_iter()
-            .map(|s| (s.path, (s.added, s.removed, s.is_new)))
-            .collect();
+        let got: std::collections::HashMap<String, (usize, usize, bool)> =
+            get_diff_file_summary(&repo)
+                .into_iter()
+                .map(|s| (s.path, (s.added, s.removed, s.is_new)))
+                .collect();
 
         assert_eq!(got, want);
     }
 
     #[test]
     fn ci_tooltip_all_passed() {
-        let summary = CiCheckSummary { status: CiStatus::Success, passed: 4, failed: 0, pending: 0, total: 4, checks: Vec::new() };
+        let summary = CiCheckSummary {
+            status: CiStatus::Success,
+            passed: 4,
+            failed: 0,
+            pending: 0,
+            total: 4,
+            checks: Vec::new(),
+        };
         assert_eq!(summary.tooltip_text(), "4/4 checks passed");
     }
 
     #[test]
     fn ci_tooltip_failure() {
-        let summary = CiCheckSummary { status: CiStatus::Failure, passed: 3, failed: 1, pending: 0, total: 4, checks: Vec::new() };
+        let summary = CiCheckSummary {
+            status: CiStatus::Failure,
+            passed: 3,
+            failed: 1,
+            pending: 0,
+            total: 4,
+            checks: Vec::new(),
+        };
         assert_eq!(summary.tooltip_text(), "1 failed, 3 passed of 4 checks");
     }
 
     #[test]
     fn ci_tooltip_pending() {
-        let summary = CiCheckSummary { status: CiStatus::Pending, passed: 1, failed: 0, pending: 2, total: 3, checks: Vec::new() };
+        let summary = CiCheckSummary {
+            status: CiStatus::Pending,
+            passed: 1,
+            failed: 0,
+            pending: 2,
+            total: 3,
+            checks: Vec::new(),
+        };
         assert_eq!(summary.tooltip_text(), "2 pending, 1 passed of 3 checks");
     }
 
     #[test]
     fn format_relative_time_just_now() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         assert_eq!(format_relative_time(now), "just now");
         assert_eq!(format_relative_time(now - 30), "just now");
     }
@@ -374,7 +403,9 @@ mod tests {
     #[test]
     fn format_relative_time_minutes() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         assert_eq!(format_relative_time(now - 60), "1m ago");
         assert_eq!(format_relative_time(now - 300), "5m ago");
         assert_eq!(format_relative_time(now - 3599), "59m ago");
@@ -383,7 +414,9 @@ mod tests {
     #[test]
     fn format_relative_time_hours() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         assert_eq!(format_relative_time(now - 3600), "1h ago");
         assert_eq!(format_relative_time(now - 7200), "2h ago");
     }
@@ -391,7 +424,9 @@ mod tests {
     #[test]
     fn format_relative_time_days() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         assert_eq!(format_relative_time(now - 86400), "1d ago");
         assert_eq!(format_relative_time(now - 259200), "3d ago");
     }
@@ -407,16 +442,30 @@ mod tests {
 
     #[test]
     fn validate_git_ref_rejects_flag_like_refs() {
-        assert!(matches!(validate_git_ref("--upload-pack=evil"), Err(GitError::InvalidRef(_))));
-        assert!(matches!(validate_git_ref("-b"), Err(GitError::InvalidRef(_))));
-        assert!(matches!(validate_git_ref("--exec=malicious"), Err(GitError::InvalidRef(_))));
-        assert!(matches!(validate_git_ref("-"), Err(GitError::InvalidRef(_))));
+        assert!(matches!(
+            validate_git_ref("--upload-pack=evil"),
+            Err(GitError::InvalidRef(_))
+        ));
+        assert!(matches!(
+            validate_git_ref("-b"),
+            Err(GitError::InvalidRef(_))
+        ));
+        assert!(matches!(
+            validate_git_ref("--exec=malicious"),
+            Err(GitError::InvalidRef(_))
+        ));
+        assert!(matches!(
+            validate_git_ref("-"),
+            Err(GitError::InvalidRef(_))
+        ));
     }
 
     #[test]
     fn format_relative_time_weeks() {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         assert_eq!(format_relative_time(now - 604800), "1w ago");
         assert_eq!(format_relative_time(now - 1209600), "2w ago");
     }

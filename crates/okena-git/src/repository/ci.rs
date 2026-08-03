@@ -17,6 +17,62 @@ use super::status::get_pushed_sha;
 /// elapses so one stuck repo can never wedge the git-status loop.
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPullRequest {
+    number: u32,
+    title: String,
+    head_ref_name: String,
+}
+
+/// List open pull requests that can be checked out as worktrees.
+pub fn list_pull_requests(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
+    let limit = limit.clamp(1, 100).to_string();
+    let output = safe_output_with_timeout(
+        command("gh")
+            .args([
+                "pr",
+                "list",
+                "--json",
+                "number,title,headRefName",
+                "--limit",
+                &limit,
+            ])
+            .current_dir(path),
+        GH_TIMEOUT,
+    )
+    .map_err(|error| format!("Failed to run GitHub CLI: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "GitHub CLI failed to list pull requests".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    parse_pull_request_list(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_pull_request_list(
+    json: &str,
+) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
+    let pull_requests: Vec<GhPullRequest> = serde_json::from_str(json)
+        .map_err(|error| format!("Failed to parse pull requests: {error}"))?;
+    Ok(pull_requests
+        .into_iter()
+        .map(|pull_request| okena_core::api::WorktreePullRequest {
+            number: pull_request.number,
+            title: pull_request.title,
+            branch: pull_request.head_ref_name,
+        })
+        .collect())
+}
+
 /// Whether the repo has any remote pointing at github.com (https or ssh).
 ///
 /// Used to gate `gh` PR/CI polling: repos with no GitHub remote (local-only,
@@ -55,13 +111,24 @@ pub fn has_github_remote(path: &Path) -> bool {
 pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
     let path_str = path.to_str()?;
     let branch = super::status::get_current_branch(path)?;
+    let current_sha = super::status::get_head_sha(path);
+    let pushed_sha = get_pushed_sha(path);
 
     let output = safe_output_with_timeout(
         command("gh")
             .args([
-                "pr", "list", "--head", &branch, "--state", "all", "--limit", "1",
-                "--json", "url,state,isDraft,number,baseRefName",
-                "--jq", ".[0] | [.url, .state, .isDraft, .number, .baseRefName] | @tsv",
+                "pr",
+                "list",
+                "--head",
+                &branch,
+                "--state",
+                "all",
+                "--limit",
+                "1",
+                "--json",
+                "url,state,isDraft,number,baseRefName,headRefOid",
+                "--jq",
+                ".[0] | [.url, .state, .isDraft, .number, .baseRefName, .headRefOid] | @tsv",
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
@@ -70,28 +137,38 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return parse_pr_list_tsv(stdout.trim());
+        return parse_pr_list_tsv(stdout.trim(), current_sha.as_deref(), pushed_sha.as_deref());
     }
 
     None
 }
 
 /// Parse the single TSV line our `gh pr list --jq ... | @tsv` query emits into a
-/// [`PrInfo`]. Fields, in order: url, state, isDraft, number, baseRefName (the
-/// last may be absent on older `gh`). Returns `None` for an empty line or one
-/// that doesn't start with a URL (i.e. no PR found for the branch).
-fn parse_pr_list_tsv(line: &str) -> Option<crate::PrInfo> {
+/// [`PrInfo`]. Fields, in order: url, state, isDraft, number, baseRefName,
+/// headRefOid. Returns `None` for an empty line, no PR, or a closed PR whose
+/// head is no longer the current branch head.
+fn parse_pr_list_tsv(
+    line: &str,
+    current_sha: Option<&str>,
+    pushed_sha: Option<&str>,
+) -> Option<crate::PrInfo> {
     let parts: Vec<&str> = line.split('\t').collect();
     if parts.len() < 4 || !parts[0].starts_with("http") {
         return None;
     }
     let url = parts[0].to_string();
+    let raw_state = parts[1];
     let is_draft = parts[2] == "true";
     let number = parts[3].parse::<u32>().unwrap_or(0);
+    let head_oid = parts.get(5).map(|s| s.trim()).filter(|s| !s.is_empty());
+    let is_closed_pr = !is_draft && matches!(raw_state, "MERGED" | "CLOSED");
+    if is_closed_pr && !closed_pr_head_matches(head_oid, current_sha, pushed_sha) {
+        return None;
+    }
     let state = if is_draft {
         crate::PrState::Draft
     } else {
-        match parts[1] {
+        match raw_state {
             "OPEN" => crate::PrState::Open,
             "MERGED" => crate::PrState::Merged,
             "CLOSED" => crate::PrState::Closed,
@@ -107,7 +184,23 @@ fn parse_pr_list_tsv(line: &str) -> Option<crate::PrInfo> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    Some(crate::PrInfo { url, state, number, base })
+    Some(crate::PrInfo {
+        url,
+        state,
+        number,
+        base,
+    })
+}
+
+fn closed_pr_head_matches(
+    head_oid: Option<&str>,
+    current_sha: Option<&str>,
+    pushed_sha: Option<&str>,
+) -> bool {
+    let Some(head_oid) = head_oid else {
+        return false;
+    };
+    current_sha == Some(head_oid) || pushed_sha == Some(head_oid)
 }
 
 /// Compute elapsed milliseconds between two ISO-8601 timestamps (those
@@ -352,33 +445,62 @@ pub(crate) fn parse_branch_ci(
         } else {
             // Concatenated pages — split on top-level `}{` boundaries.
             for chunk in json.split("}{").map(|s| s.to_string()).collect::<Vec<_>>() {
-                let normalized = if !chunk.starts_with('{') { format!("{{{chunk}") } else { chunk.clone() };
-                let normalized = if !normalized.ends_with('}') { format!("{normalized}}}") } else { normalized };
+                let normalized = if !chunk.starts_with('{') {
+                    format!("{{{chunk}")
+                } else {
+                    chunk.clone()
+                };
+                let normalized = if !normalized.ends_with('}') {
+                    format!("{normalized}}}")
+                } else {
+                    normalized
+                };
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&normalized)
-                    && let Some(arr) = v.get("check_runs").and_then(|x| x.as_array()) {
-                        runs.extend(arr.iter().cloned());
-                    }
+                    && let Some(arr) = v.get("check_runs").and_then(|x| x.as_array())
+                {
+                    runs.extend(arr.iter().cloned());
+                }
             }
         }
 
         for run in runs {
-            let name = run.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)").to_string();
+            let name = run
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
             let status_str = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
             let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
             let (status, is_skipped) = match (status_str, conclusion) {
-                (_, "success") => { passed += 1; (crate::CiStatus::Success, false) }
-                (_, "failure") | (_, "timed_out") | (_, "action_required") | (_, "cancelled") | (_, "stale") | (_, "startup_failure") => {
+                (_, "success") => {
+                    passed += 1;
+                    (crate::CiStatus::Success, false)
+                }
+                (_, "failure")
+                | (_, "timed_out")
+                | (_, "action_required")
+                | (_, "cancelled")
+                | (_, "stale")
+                | (_, "startup_failure") => {
                     failed += 1;
                     (crate::CiStatus::Failure, false)
                 }
                 (_, "skipped") | (_, "neutral") => (crate::CiStatus::Pending, true),
-                ("queued", _) | ("in_progress", _) | ("waiting", _) | ("pending", _) | ("requested", _) => {
+                ("queued", _)
+                | ("in_progress", _)
+                | ("waiting", _)
+                | ("pending", _)
+                | ("requested", _) => {
                     pending += 1;
                     (crate::CiStatus::Pending, false)
                 }
                 _ => continue,
             };
-            let link = run.get("html_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+            let link = run
+                .get("html_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let description = run
                 .get("output")
                 .and_then(|o| o.get("summary"))
@@ -388,7 +510,11 @@ pub(crate) fn parse_branch_ci(
             let workflow = run
                 .get("check_suite")
                 .and_then(|s| s.get("workflow_id"))
-                .and_then(|_| run.get("app").and_then(|a| a.get("name")).and_then(|v| v.as_str()))
+                .and_then(|_| {
+                    run.get("app")
+                        .and_then(|a| a.get("name"))
+                        .and_then(|v| v.as_str())
+                })
                 .filter(|s| !s.is_empty())
                 .map(String::from);
             let elapsed_ms = compute_elapsed_ms(
@@ -410,33 +536,55 @@ pub(crate) fn parse_branch_ci(
 
     if let Some(json) = statuses_json
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
-            && let Some(arr) = v.get("statuses").and_then(|x| x.as_array()) {
-                for st in arr {
-                    let name = st.get("context").and_then(|v| v.as_str()).unwrap_or("(unnamed)").to_string();
-                    let state = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
-                    let (status, is_skipped) = match state {
-                        "success" => { passed += 1; (crate::CiStatus::Success, false) }
-                        "failure" | "error" => { failed += 1; (crate::CiStatus::Failure, false) }
-                        "pending" => { pending += 1; (crate::CiStatus::Pending, false) }
-                        _ => continue,
-                    };
-                    let link = st.get("target_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-                    let description = st.get("description").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
-                    let elapsed_ms = compute_elapsed_ms(
-                        st.get("created_at").and_then(|v| v.as_str()),
-                        st.get("updated_at").and_then(|v| v.as_str()),
-                    );
-                    checks.push(crate::CiCheck {
-                        name,
-                        workflow: None,
-                        status,
-                        is_skipped,
-                        link,
-                        description,
-                        elapsed_ms,
-                    });
+        && let Some(arr) = v.get("statuses").and_then(|x| x.as_array())
+    {
+        for st in arr {
+            let name = st
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            let state = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let (status, is_skipped) = match state {
+                "success" => {
+                    passed += 1;
+                    (crate::CiStatus::Success, false)
                 }
-            }
+                "failure" | "error" => {
+                    failed += 1;
+                    (crate::CiStatus::Failure, false)
+                }
+                "pending" => {
+                    pending += 1;
+                    (crate::CiStatus::Pending, false)
+                }
+                _ => continue,
+            };
+            let link = st
+                .get("target_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let description = st
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let elapsed_ms = compute_elapsed_ms(
+                st.get("created_at").and_then(|v| v.as_str()),
+                st.get("updated_at").and_then(|v| v.as_str()),
+            );
+            checks.push(crate::CiCheck {
+                name,
+                workflow: None,
+                status,
+                is_skipped,
+                link,
+                description,
+                elapsed_ms,
+            });
+        }
+    }
 
     let total = passed + failed + pending;
     if total == 0 && checks.is_empty() {
@@ -467,12 +615,27 @@ pub(crate) fn parse_branch_ci(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_worktree_pull_requests() {
+        let json = r#"[{"number":12,"title":"Remote worktree","headRefName":"feature/remote"}]"#;
+        let pull_requests = super::parse_pull_request_list(json).expect("should parse");
+        assert_eq!(pull_requests.len(), 1);
+        assert_eq!(pull_requests[0].number, 12);
+        assert_eq!(pull_requests[0].title, "Remote worktree");
+        assert_eq!(pull_requests[0].branch, "feature/remote");
+    }
+
+    #[test]
+    fn malformed_worktree_pull_requests_are_rejected() {
+        assert!(super::parse_pull_request_list("not json").is_err());
+    }
+
     // ─── PR list TSV parsing tests ─────────────────────────────────────
 
     #[test]
     fn parse_pr_list_tsv_captures_base_branch() {
-        let line = "https://github.com/o/r/pull/9\tOPEN\tfalse\t9\tdevelop";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        let line = "https://github.com/o/r/pull/9\tOPEN\tfalse\t9\tdevelop\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("different"), None).expect("should parse");
         assert_eq!(pr.url, "https://github.com/o/r/pull/9");
         assert_eq!(pr.state, crate::PrState::Open);
         assert_eq!(pr.number, 9);
@@ -482,26 +645,40 @@ mod tests {
     #[test]
     fn parse_pr_list_tsv_base_absent_is_none() {
         // Older `gh` without baseRefName: only four fields.
-        let line = "https://github.com/o/r/pull/3\tMERGED\tfalse\t3";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
-        assert_eq!(pr.state, crate::PrState::Merged);
+        let line = "https://github.com/o/r/pull/3\tOPEN\tfalse\t3";
+        let pr = super::parse_pr_list_tsv(line, None, None).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Open);
         assert_eq!(pr.number, 3);
         assert_eq!(pr.base, None);
     }
 
     #[test]
     fn parse_pr_list_tsv_draft_overrides_state() {
-        let line = "https://github.com/o/r/pull/5\tOPEN\ttrue\t5\tmain";
-        let pr = super::parse_pr_list_tsv(line).expect("should parse");
+        let line = "https://github.com/o/r/pull/5\tOPEN\ttrue\t5\tmain\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("different"), None).expect("should parse");
         assert_eq!(pr.state, crate::PrState::Draft);
         assert_eq!(pr.base.as_deref(), Some("main"));
     }
 
     #[test]
+    fn parse_pr_list_tsv_keeps_closed_pr_at_current_head() {
+        let line = "https://github.com/o/r/pull/3\tMERGED\tfalse\t3\tmain\tabc123";
+        let pr = super::parse_pr_list_tsv(line, Some("abc123"), None).expect("should parse");
+        assert_eq!(pr.state, crate::PrState::Merged);
+        assert_eq!(pr.number, 3);
+    }
+
+    #[test]
+    fn parse_pr_list_tsv_ignores_stale_closed_pr() {
+        let line = "https://github.com/o/r/pull/4\tCLOSED\tfalse\t4\tmain\toldsha";
+        assert!(super::parse_pr_list_tsv(line, Some("newsha"), Some("newsha")).is_none());
+    }
+
+    #[test]
     fn parse_pr_list_tsv_empty_or_no_pr_is_none() {
-        assert!(super::parse_pr_list_tsv("").is_none());
+        assert!(super::parse_pr_list_tsv("", None, None).is_none());
         // A jq null/empty result — no leading URL.
-        assert!(super::parse_pr_list_tsv("\t\t\t").is_none());
+        assert!(super::parse_pr_list_tsv("\t\t\t", None, None).is_none());
     }
 
     // ─── CI check parsing tests ────────────────────────────────────────
@@ -658,7 +835,8 @@ mod tests {
 
     #[test]
     fn parse_branch_ci_combines_runs_and_statuses() {
-        let runs = r#"{"check_runs":[{"name":"Lint","status":"completed","conclusion":"success"}]}"#;
+        let runs =
+            r#"{"check_runs":[{"name":"Lint","status":"completed","conclusion":"success"}]}"#;
         let statuses = r#"{"statuses":[{"context":"vercel/deploy","state":"failure"}]}"#;
         let result = super::parse_branch_ci(Some(runs), Some(statuses)).unwrap();
         assert_eq!(result.status, crate::CiStatus::Failure);

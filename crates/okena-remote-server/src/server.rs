@@ -2,12 +2,18 @@ use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
-use okena_core::api::ApiGitStatus;
+use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::git_poll::GitPollTrigger;
+use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
+
+fn tls_listener_allows_plaintext(addr: IpAddr) -> bool {
+    addr.is_loopback()
+}
 
 /// Handle to a running remote control server.
 /// Dropping this will trigger shutdown.
@@ -31,11 +37,18 @@ impl RemoteServer {
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
         state_version: Arc<watch::Sender<u64>>,
-        bind_addr: IpAddr,
+        bind_addrs: Vec<IpAddr>,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+        toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
+        terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+        git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
         next_connection_id: Arc<AtomicU64>,
+        active_connections: Arc<AtomicU64>,
+        process_shutdown: Arc<tokio::sync::Notify>,
+        ui_owned: bool,
         tls_enabled: bool,
+        app_version: &'static str,
     ) -> anyhow::Result<Self> {
         let _slow = okena_core::timing::SlowGuard::new("RemoteServer::start");
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -49,21 +62,14 @@ impl RemoteServer {
         // Clean up stale remote.json from a previous crash
         cleanup_stale_remote_json();
 
-        // Try to bind to a port
-        let listener = runtime.block_on(async {
-            // Try preferred range first
-            for port in 19100..=19200 {
-                let addr = SocketAddr::new(bind_addr, port);
-                if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
-                    return Ok(listener);
-                }
-            }
-            // Fall back to OS-assigned port
-            let addr = SocketAddr::new(bind_addr, 0);
-            tokio::net::TcpListener::bind(addr).await
-        })?;
-
-        let port = listener.local_addr()?.port();
+        let bind_addrs = normalize_bind_addrs(bind_addrs);
+        let listeners = runtime.block_on(bind_listeners(&bind_addrs))?;
+        let port = listeners
+            .first()
+            .expect("bind_listeners returns at least one listener")
+            .1
+            .local_addr()?
+            .port();
 
         // Load (or generate) the persisted self-signed cert when TLS is enabled.
         // If cert setup fails we deliberately do NOT silently fall back to plain
@@ -76,15 +82,25 @@ impl RemoteServer {
             None
         };
         let cert_fingerprint = tls_material.as_ref().map(|m| m.fingerprint.clone());
+        let tls_server_config = match tls_material.as_ref() {
+            Some(material) => Some(crate::tls::server_config(material)?),
+            None => None,
+        };
 
-        let scheme = if tls_enabled {
-            "http+https dual-stack"
+        let scheme = if tls_enabled && bind_addrs.iter().any(|addr| !addr.is_loopback()) {
+            "https (remote), http+https (loopback)"
+        } else if tls_enabled {
+            "http+https (loopback)"
         } else {
             "http/ws"
         };
         log::info!(
             "Remote control server listening on {}:{} ({})",
-            bind_addr,
+            bind_addrs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
             port,
             scheme
         );
@@ -97,27 +113,85 @@ impl RemoteServer {
 
         // Warn loudly when bound to a non-loopback address WITHOUT TLS: the
         // pairing token and all terminal I/O would travel the network in cleartext.
-        if !bind_addr.is_loopback() && !tls_enabled {
+        if bind_addrs.iter().any(|addr| !addr.is_loopback()) && !tls_enabled {
             log::warn!(
                 "Remote control server is bound to a NON-LOOPBACK address ({}:{}) WITHOUT TLS.\n\
                  The connection is UNENCRYPTED (http/ws): the pairing token and all terminal\n\
                  I/O (including passwords, SSH keys, and any typed secrets) are sent in cleartext\n\
                  and visible to anyone on the network. Enable TLS in settings, only use this on a\n\
                  trusted network, or tunnel it over SSH/WireGuard.",
-                bind_addr, port
+                bind_addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                port
             );
         }
 
+        let mut local_endpoint = crate::local::default_local_endpoint();
+        #[cfg(unix)]
+        let local_listener = match &local_endpoint {
+            Some(LocalEndpoint::UnixSocket { path }) => {
+                let path_buf = std::path::PathBuf::from(path);
+                // `UnixListener::bind` registers with the tokio reactor, so it
+                // must run inside the runtime context. The TCP binds get this for
+                // free via `block_on` above; here we're on the plain caller thread
+                // (daemon main / GPUI thread), so enter the runtime explicitly.
+                let bound = {
+                    let _guard = runtime.enter();
+                    crate::serve::bind_unix_socket(&path_buf)
+                };
+                match bound {
+                    Ok(listener) => Some((path_buf, listener)),
+                    Err(e) => {
+                        log::warn!("Failed to bind local daemon socket at {path}: {e}");
+                        local_endpoint = None;
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // Write remote.json
-        if let Err(e) = write_remote_json(port, tls_enabled) {
+        if let Err(e) = write_remote_json(
+            port,
+            tls_enabled,
+            ui_owned,
+            &bind_addrs,
+            local_endpoint.as_ref(),
+        ) {
             log::warn!("Failed to write remote.json: {}", e);
         }
 
         let start_time = std::time::Instant::now();
+        okena_ext_updater::installer::cleanup_old_binary();
+        let update_info = okena_ext_updater::UpdateInfo::new(app_version.to_string());
+
+        // Set true once a client authenticates; gates the idle-exit monitor so a
+        // freshly-spawned daemon isn't reaped before its GUI first connects.
+        let had_client = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Spawn the server task
-        let shutdown_rx_clone = shutdown_rx.clone();
+        let mut shutdown_rx_clone = shutdown_rx.clone();
         runtime.spawn(async move {
+            if okena_ext_updater::detect_local_checkout().is_none() {
+                routes::update::spawn_background_checker(update_info.clone());
+            }
+
+            // UI-owned daemons self-terminate once idle (see
+            // `run_idle_exit_monitor`) so a closed or crashed GUI never leaves a
+            // daemon holding the instance lock. Spawned here, inside the runtime,
+            // BEFORE `build_router` moves the shared handles.
+            if ui_owned {
+                tokio::spawn(routes::shutdown::run_idle_exit_monitor(
+                    active_connections.clone(),
+                    had_client.clone(),
+                    process_shutdown.clone(),
+                ));
+            }
+
             let app = routes::build_router(
                 bridge_tx,
                 auth_store,
@@ -125,40 +199,75 @@ impl RemoteServer {
                 state_version,
                 start_time,
                 git_status,
+                toast_tx,
+                terminal_focus_tx,
                 remote_subscribed_terminals,
+                git_poll_trigger_tx,
                 next_connection_id,
+                active_connections,
+                process_shutdown,
+                ui_owned,
+                had_client,
+                update_info,
             );
-            let serve_result = if let Some(material) = tls_material {
-                // TLS enabled → dual-stack: accept BOTH http and TLS on this one
-                // port so already-paired plain-http clients keep working while
-                // new/auto clients negotiate TLS.
-                match crate::tls::server_config(&material) {
-                    Ok(tls_config) => {
-                        crate::serve::serve_dual_stack(
-                            listener,
-                            app,
-                            tls_config,
-                            shutdown_signal(shutdown_rx_clone),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        log::error!("Failed to build TLS server config: {e:#}");
-                        Err(std::io::Error::other(e.to_string()))
-                    }
-                }
+            #[cfg(unix)]
+            let local_server = if let Some((path, listener)) = local_listener {
+                Some(tokio::spawn(crate::serve::serve_unix_listener(
+                    path,
+                    listener,
+                    app.clone(),
+                    shutdown_signal(shutdown_rx.clone()),
+                )))
             } else {
-                // TLS disabled → plain http only.
-                let make_service =
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-                axum::serve(listener, make_service)
-                    .with_graceful_shutdown(shutdown_signal(shutdown_rx_clone))
-                    .await
+                None
             };
 
-            match serve_result {
-                Ok(()) => log::info!("Remote control server shut down"),
-                Err(e) => log::error!("Remote control server exited with error: {e}"),
+            let mut tcp_servers = Vec::new();
+            for (addr, listener) in listeners {
+                let app = app.clone();
+                let shutdown_rx = shutdown_rx_clone.clone();
+                let tls_config = tls_server_config.clone();
+                tcp_servers.push(tokio::spawn(async move {
+                    let result = if let Some(tls_config) = tls_config {
+                        if tls_listener_allows_plaintext(addr) {
+                            // Preserve local plain-http compatibility only where
+                            // traffic cannot leave the host.
+                            crate::serve::serve_dual_stack(
+                                listener,
+                                app,
+                                tls_config,
+                                shutdown_signal(shutdown_rx),
+                            )
+                            .await
+                        } else {
+                            crate::serve::serve_tls(
+                                listener,
+                                app,
+                                tls_config,
+                                shutdown_signal(shutdown_rx),
+                            )
+                            .await
+                        }
+                    } else {
+                        // TLS disabled → plain http only.
+                        crate::serve::serve_plain(listener, app, shutdown_signal(shutdown_rx)).await
+                    };
+                    match result {
+                        Ok(()) => log::info!("Remote control server on {addr} shut down"),
+                        Err(e) => {
+                            log::error!("Remote control server on {addr} exited with error: {e}")
+                        }
+                    }
+                }));
+            }
+            let _ = shutdown_rx_clone.changed().await;
+            for handle in tcp_servers {
+                let _ = handle.await;
+            }
+
+            #[cfg(unix)]
+            if let Some(handle) = local_server {
+                handle.abort();
             }
         });
 
@@ -197,6 +306,55 @@ impl RemoteServer {
     }
 }
 
+fn normalize_bind_addrs(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for addr in addrs {
+        if out.contains(&addr) {
+            continue;
+        }
+        out.push(addr);
+    }
+    if out.is_empty() {
+        out.push(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    }
+    out
+}
+
+async fn bind_listeners(
+    bind_addrs: &[IpAddr],
+) -> anyhow::Result<Vec<(IpAddr, tokio::net::TcpListener)>> {
+    let primary = *bind_addrs
+        .first()
+        .unwrap_or(&IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    for port in 19100..=19200 {
+        if let Ok(listeners) = bind_all_on_port(bind_addrs, port).await {
+            return Ok(listeners);
+        }
+    }
+
+    let first = tokio::net::TcpListener::bind(SocketAddr::new(primary, 0)).await?;
+    let port = first.local_addr()?.port();
+    let mut listeners = vec![(primary, first)];
+    for addr in bind_addrs.iter().copied().skip(1) {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(addr, port)).await?;
+        listeners.push((addr, listener));
+    }
+    Ok(listeners)
+}
+
+async fn bind_all_on_port(
+    bind_addrs: &[IpAddr],
+    port: u16,
+) -> std::io::Result<Vec<(IpAddr, tokio::net::TcpListener)>> {
+    let mut listeners = Vec::with_capacity(bind_addrs.len());
+    for addr in bind_addrs {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(*addr, port)).await?;
+        listeners.push((*addr, listener));
+    }
+    Ok(listeners)
+}
+
 impl Drop for RemoteServer {
     fn drop(&mut self) {
         if self.runtime.is_some() {
@@ -220,17 +378,28 @@ fn remote_json_path() -> std::path::PathBuf {
 }
 
 /// Write remote.json atomically (temp file + rename).
-fn write_remote_json(port: u16, tls_enabled: bool) -> anyhow::Result<()> {
+fn write_remote_json(
+    port: u16,
+    tls_enabled: bool,
+    ui_owned: bool,
+    bind_addrs: &[IpAddr],
+    local_endpoint: Option<&LocalEndpoint>,
+) -> anyhow::Result<()> {
     let path = remote_json_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "port": port,
+        "local_host": local_tcp_host(bind_addrs),
         "pid": std::process::id(),
         "tls": tls_enabled,
+        "ui_owned": ui_owned,
     });
+    if let Some(local_endpoint) = local_endpoint {
+        content["local_endpoint"] = serde_json::to_value(local_endpoint)?;
+    }
 
     let tmp_path = path.with_extension("tmp");
     std::fs::write(&tmp_path, serde_json::to_string_pretty(&content)?)?;
@@ -247,10 +416,41 @@ fn write_remote_json(port: u16, tls_enabled: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remove remote.json on shutdown.
-fn remove_remote_json() {
+fn local_tcp_host(bind_addrs: &[IpAddr]) -> &'static str {
+    if bind_addrs.iter().any(|addr| match addr {
+        IpAddr::V4(v4) => *v4 == std::net::Ipv4Addr::LOCALHOST || v4.is_unspecified(),
+        IpAddr::V6(_) => false,
+    }) {
+        return crate::local::LOCAL_HOST;
+    }
+
+    if bind_addrs.iter().any(|addr| match addr {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(v6) => *v6 == std::net::Ipv6Addr::LOCALHOST || v6.is_unspecified(),
+    }) {
+        return "::1";
+    }
+
+    crate::local::LOCAL_HOST
+}
+
+/// Read remote.json and return its path + parsed contents ONLY when it still
+/// advertises THIS process. The shared pid-guard ensures a late or concurrent
+/// teardown never clobbers a successor daemon's discovery file.
+fn read_remote_json_if_ours() -> Option<(std::path::PathBuf, serde_json::Value)> {
     let path = remote_json_path();
-    if path.exists() {
+    let data = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let owned_by_us = json
+        .get("pid")
+        .and_then(|p| p.as_u64())
+        .is_some_and(|pid| pid == u64::from(std::process::id()));
+    owned_by_us.then_some((path, json))
+}
+
+/// Remove remote.json on shutdown, pid-guarded (see `read_remote_json_if_ours`).
+pub(crate) fn remove_remote_json() {
+    if let Some((path, _)) = read_remote_json_if_ours() {
         let _ = std::fs::remove_file(&path);
     }
 }
@@ -272,25 +472,39 @@ fn cleanup_stale_remote_json() {
     };
 
     if let Some(pid) = json.get("pid").and_then(|v| v.as_u64())
-        && !is_process_alive(pid as u32) {
-            log::info!("Removing stale remote.json (pid {} is dead)", pid);
-            let _ = std::fs::remove_file(&path);
-        }
+        && !crate::local::is_process_alive(pid as u32)
+    {
+        log::info!("Removing stale remote.json (pid {} is dead)", pid);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
-/// Check if a process with the given PID is still running.
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // signal 0 checks if process exists without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_tcp_host_prefers_ipv4_loopback_when_available() {
+        let addrs = [
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        ];
+        assert_eq!(local_tcp_host(&addrs), crate::local::LOCAL_HOST);
     }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, assume the process may be alive to avoid
-        // accidentally removing a valid remote.json. The stale file is
-        // harmless — the port will simply fail to bind and we'll pick another.
-        let _ = pid;
-        true
+
+    #[test]
+    fn local_tcp_host_uses_ipv6_loopback_for_ipv6_only_binds() {
+        let addrs = [IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)];
+        assert_eq!(local_tcp_host(&addrs), "::1");
+    }
+
+    #[test]
+    fn tls_plaintext_compatibility_is_loopback_only() {
+        assert!(tls_listener_allows_plaintext("127.0.0.1".parse().unwrap()));
+        assert!(tls_listener_allows_plaintext("::1".parse().unwrap()));
+        assert!(!tls_listener_allows_plaintext("0.0.0.0".parse().unwrap()));
+        assert!(!tls_listener_allows_plaintext(
+            "192.168.1.20".parse().unwrap()
+        ));
     }
 }

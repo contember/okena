@@ -3,23 +3,39 @@
 //! Shows all git worktrees for a project with checkboxes to toggle sidebar visibility.
 //! Rendered at WindowView level via OverlayManager, like context menus.
 
+use gpui::prelude::*;
+use gpui::*;
 use okena_ui::overlay::CloseEvent;
 use okena_ui::theme::theme;
-use okena_ui::tokens::{ui_text_ms, ui_text_md};
-use okena_workspace::settings::HooksConfig;
-use okena_workspace::state::{WindowId, Workspace};
-use gpui::*;
-use gpui::prelude::*;
+use okena_ui::tokens::{ui_text_md, ui_text_ms};
+use okena_workspace::state::Workspace;
 
 use crate::Cancel;
+use okena_core::api::ApiWorktreeEntry;
 
 /// Event emitted by WorktreeListPopover.
 pub enum WorktreeListPopoverEvent {
     Close,
+    /// Untrack (delete) a tracked worktree project. The daemon owns the
+    /// project, so the host routes this to `ActionRequest::DeleteProject`
+    /// rather than mutating the read-only mirror here.
+    DeleteProject {
+        project_id: String,
+    },
+    /// Track an already-on-disk worktree as a project. The daemon owns the
+    /// project list, so the host routes this to
+    /// `ActionRequest::AddDiscoveredWorktree` rather than mutating the mirror.
+    AddDiscoveredWorktree {
+        parent_project_id: String,
+        worktree_path: String,
+        branch: String,
+    },
 }
 
 impl CloseEvent for WorktreeListPopoverEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
 }
 
 impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
@@ -27,56 +43,90 @@ impl EventEmitter<WorktreeListPopoverEvent> for WorktreeListPopover {}
 /// Standalone worktree list popover entity.
 pub struct WorktreeListPopover {
     workspace: Entity<Workspace>,
-    focus_manager: Entity<okena_workspace::focus::FocusManager>,
-    /// Spawning window for the multi-window new-project visibility rule
-    /// (PRD user story 14): a click that adds a discovered worktree
-    /// makes the new project visible in this window only, hidden in
-    /// every other window. Threaded from the originating `WindowView`
-    /// through `OverlayManager::show_worktree_list`.
-    window_id: WindowId,
     project_id: String,
-    entries: Vec<(String, String)>,
+    entries: Vec<ApiWorktreeEntry>,
+    loading: bool,
+    error_message: Option<String>,
     position: Point<Pixels>,
-    hooks: HooksConfig,
     focus_handle: FocusHandle,
-    /// Normalized git root (for filtering out the main repo entry).
-    norm_git_root: std::path::PathBuf,
-    /// Subdirectory within the git repo (empty for non-monorepo projects).
-    subdir: std::path::PathBuf,
 }
 
 impl WorktreeListPopover {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        client: okena_transport::remote_action::RemoteActionClient,
+        daemon_project_id: String,
         workspace: Entity<Workspace>,
-        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         position: Point<Pixels>,
-        hooks: HooksConfig,
-        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
-        let project_path = workspace.read(cx).project(&project_id)
-            .map(|p| p.path.clone())
-            .unwrap_or_default();
-        let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
-            std::path::Path::new(&project_path),
-        );
-        let norm_git_root = okena_git::repository::normalize_path(&git_root);
-        let entries = okena_git::repository::list_git_worktrees(&git_root);
         let focus_handle = cx.focus_handle();
-        Self { workspace, focus_manager, window_id, project_id, entries, position, hooks, focus_handle, norm_git_root, subdir }
+        let mut popover = Self {
+            workspace,
+            project_id,
+            entries: Vec::new(),
+            loading: true,
+            error_message: None,
+            position,
+            focus_handle,
+        };
+        popover.load_worktrees(client, daemon_project_id, cx);
+        popover
+    }
+
+    fn load_worktrees(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        project_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || Self::fetch_worktrees(&client, project_id)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(entries) => this.entries = entries,
+                    Err(error) => this.error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch the worktree listing from the daemon. The git repo lives on the
+    /// daemon, so we post a `GitListWorktrees` action rather than scanning the
+    fn fetch_worktrees(
+        client: &okena_transport::remote_action::RemoteActionClient,
+        project_id: String,
+    ) -> Result<Vec<ApiWorktreeEntry>, String> {
+        let action = okena_core::api::ActionRequest::GitListWorktrees { project_id };
+        let value = client
+            .post_action(action)?
+            .ok_or_else(|| "Missing worktree list response".to_string())?;
+        let entries = value
+            .get("entries")
+            .cloned()
+            .ok_or_else(|| "Invalid worktree list response".to_string())?;
+        serde_json::from_value(entries)
+            .map_err(|error| format!("Invalid worktree list response: {error}"))
     }
 
     /// Find a tracked worktree project by its worktree root path.
     /// Checks both the expected project path (with monorepo subdir) and the
     /// bare worktree root for backwards compatibility with older workspace files.
-    fn find_tracked_project_id(&self, wt_path: &str, cx: &App) -> Option<String> {
-        let expected_path = okena_git::repository::project_path_in_worktree(wt_path, &self.subdir);
+    fn find_tracked_project_id(&self, entry: &ApiWorktreeEntry, cx: &App) -> Option<String> {
         let ws = self.workspace.read(cx);
-        ws.data().projects.iter()
-            .find(|p| (p.path == expected_path || p.path == wt_path)
-                && p.worktree_info.as_ref()
-                    .is_some_and(|wt| wt.parent_project_id == self.project_id))
+        ws.data()
+            .projects
+            .iter()
+            .find(|p| {
+                (p.path == entry.project_path || p.path == entry.worktree_path)
+                    && p.worktree_info
+                        .as_ref()
+                        .is_some_and(|wt| wt.parent_project_id == self.project_id)
+            })
             .map(|p| p.id.clone())
     }
 
@@ -88,6 +138,8 @@ impl WorktreeListPopover {
 impl Render for WorktreeListPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let loading = self.loading;
+        let error_message = self.error_message.clone();
 
         if !self.focus_handle.is_focused(window) {
             window.focus(&self.focus_handle, cx);
@@ -95,24 +147,27 @@ impl Render for WorktreeListPopover {
 
         let ws = self.workspace.read(cx);
         let project_id = &self.project_id;
-        let subdir = &self.subdir;
 
-        let tracked_project_paths: std::collections::HashSet<String> = ws.data().projects.iter()
-            .filter(|p| p.worktree_info.as_ref()
-                .is_some_and(|wt| wt.parent_project_id == *project_id))
+        let tracked_project_paths: std::collections::HashSet<String> = ws
+            .data()
+            .projects
+            .iter()
+            .filter(|p| {
+                p.worktree_info
+                    .as_ref()
+                    .is_some_and(|wt| wt.parent_project_id == *project_id)
+            })
             .map(|p| p.path.clone())
             .collect();
 
-        let worktrees: Vec<(String, String, bool)> = self.entries.iter()
-            .filter(|(wt_path, _)| {
-                let norm_wt = okena_git::repository::normalize_path(std::path::Path::new(wt_path));
-                norm_wt != self.norm_git_root
-            })
-            .map(|(wt_path, branch)| {
-                let expected_path = okena_git::repository::project_path_in_worktree(wt_path, subdir);
-                let is_tracked = tracked_project_paths.contains(&expected_path)
-                    || tracked_project_paths.contains(wt_path);
-                (wt_path.clone(), branch.clone(), is_tracked)
+        let worktrees: Vec<(ApiWorktreeEntry, bool)> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_main)
+            .map(|entry| {
+                let is_tracked = tracked_project_paths.contains(&entry.project_path)
+                    || tracked_project_paths.contains(&entry.worktree_path);
+                (entry.clone(), is_tracked)
             })
             .collect();
 
@@ -130,100 +185,120 @@ impl Render for WorktreeListPopover {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .pb(px(6.0))
-                    .child("WORKTREES")
+                    .child("WORKTREES"),
             )
             .child(
                 div()
                     .id("worktree-list-scroll")
                     .max_h(scroll_max_h)
                     .overflow_y_scroll()
-                    .when(worktrees.is_empty(), |d| {
+                    .when(loading, |d| {
                         d.child(
                             div()
                                 .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.text_muted))
                                 .py(px(8.0))
-                                .child("No worktrees found")
+                                .child("Loading\u{2026}"),
                         )
                     })
-                    .children(worktrees.into_iter().map(|(wt_path, branch, is_tracked)| {
-                let project_id = self.project_id.clone();
-                let wt_path_clone = wt_path.clone();
-                let branch_clone = branch.clone();
-                let hooks = self.hooks.clone();
-
-                div()
-                    .id(ElementId::Name(format!("wt-list-{}", wt_path).into()))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(4.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        if is_tracked {
-                            if let Some(id) = this.find_tracked_project_id(&wt_path_clone, cx) {
-                                let workspace = this.workspace.clone();
-                                this.focus_manager.update(cx, |fm, cx| {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.delete_project(fm, &id, &hooks, cx);
-                                    });
-                                    cx.notify();
-                                });
-                            }
-                        } else {
-                            let window_id = this.window_id;
-                            this.workspace.update(cx, |ws, cx| {
-                                if let Some(new_id) = ws.add_discovered_worktree(
-                                    &wt_path_clone,
-                                    &branch_clone,
-                                    &project_id,
-                                    window_id,
-                                ) {
-                                    ws.add_to_worktree_ids(&project_id, &new_id);
-                                }
-                                ws.notify_data(cx);
-                            });
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(14.0))
-                            .h(px(14.0))
-                            .rounded(px(3.0))
-                            .border_1()
-                            .border_color(rgb(if is_tracked { t.border_active } else { t.border }))
-                            .when(is_tracked, |d| d.bg(rgb(t.border_active)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(is_tracked, |d| {
-                                d.child(
-                                    svg()
-                                        .path("icons/check.svg")
-                                        .size(px(10.0))
-                                        .text_color(rgb(t.bg_primary))
-                                )
-                            })
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
+                    .when_some(error_message, |d, error| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.error))
+                                .py(px(8.0))
+                                .child(error),
+                        )
+                    })
+                    .when(
+                        worktrees.is_empty() && !loading && self.error_message.is_none(),
+                        |d| {
+                            d.child(
                                 div()
                                     .text_size(ui_text_md(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(branch.clone())
+                                    .text_color(rgb(t.text_muted))
+                                    .py(px(8.0))
+                                    .child("No worktrees found"),
                             )
+                        },
                     )
-            }))
+                    .children(worktrees.into_iter().map(|(entry, is_tracked)| {
+                        let project_id = self.project_id.clone();
+                        let entry_for_click = entry.clone();
+
+                        div()
+                            .id(ElementId::Name(
+                                format!("wt-list-{}", entry.worktree_path).into(),
+                            ))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(4.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if is_tracked {
+                                    if let Some(id) =
+                                        this.find_tracked_project_id(&entry_for_click, cx)
+                                    {
+                                        // Daemon owns the project — emit an event so the
+                                        // host dispatches DeleteProject; the removal
+                                        // mirrors back. No direct mirror mutation here.
+                                        cx.emit(WorktreeListPopoverEvent::DeleteProject {
+                                            project_id: id,
+                                        });
+                                    }
+                                } else {
+                                    // The daemon owns the project list — emit an event so
+                                    // the host dispatches AddDiscoveredWorktree; the new
+                                    // worktree project mirrors back. No direct mirror
+                                    // mutation here.
+                                    cx.emit(WorktreeListPopoverEvent::AddDiscoveredWorktree {
+                                        parent_project_id: project_id.clone(),
+                                        worktree_path: entry_for_click.worktree_path.clone(),
+                                        branch: entry_for_click.branch.clone(),
+                                    });
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .rounded(px(3.0))
+                                    .border_1()
+                                    .border_color(rgb(if is_tracked {
+                                        t.border_active
+                                    } else {
+                                        t.border
+                                    }))
+                                    .when(is_tracked, |d| d.bg(rgb(t.border_active)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(is_tracked, |d| {
+                                        d.child(
+                                            svg()
+                                                .path("icons/check.svg")
+                                                .size(px(10.0))
+                                                .text_color(rgb(t.bg_primary)),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    div()
+                                        .text_size(ui_text_md(cx))
+                                        .text_color(rgb(t.text_primary))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(entry.branch.clone()),
+                                ),
+                            )
+                    })),
             );
 
         let position = self.position;
@@ -238,18 +313,23 @@ impl Render for WorktreeListPopover {
             .inset_0()
             .occlude()
             .id("worktree-list-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
-                this.close(cx);
-            }))
-            .on_scroll_wheel(|_, _, cx| { cx.stop_propagation(); })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(panel)
+                anchored().position(position).snap_to_window().child(panel),
             ))
     }
 }

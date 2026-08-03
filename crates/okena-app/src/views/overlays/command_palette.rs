@@ -1,13 +1,14 @@
-use crate::keybindings::{format_keystroke, get_action_descriptions, get_config, Cancel};
+use crate::keybindings::{Cancel, format_keystroke, get_action_descriptions, get_config};
 use crate::theme::theme;
-use crate::views::components::{
-    badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
-    search_input_area_selected, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
-};
 use crate::ui::tokens::{ui_text, ui_text_ms};
+use crate::views::components::{
+    ListOverlayAction, ListOverlayConfig, ListOverlayState, badge, handle_list_overlay_key,
+    keyboard_hints_footer, modal_backdrop, modal_content, search_input_area_selected,
+    substring_filter,
+};
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
-use gpui::prelude::*;
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
 
@@ -53,7 +54,12 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(workspace: Entity<okena_workspace::state::Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, window_id: okena_workspace::state::WindowId, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<okena_workspace::state::Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
+        window_id: okena_workspace::state::WindowId,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Build command list from action descriptions
         let descriptions = get_action_descriptions();
         let config_data = get_config();
@@ -80,7 +86,8 @@ impl CommandPalette {
             .collect();
 
         // Restore from previous session
-        let (query, recent) = cx.try_global::<CommandPaletteMemory>()
+        let (query, recent) = cx
+            .try_global::<CommandPaletteMemory>()
             .map(|m| (m.query.clone(), m.recent.clone()))
             .unwrap_or_default();
         let select_all = !query.is_empty();
@@ -110,7 +117,14 @@ impl CommandPalette {
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
 
-        let mut palette = Self { workspace, focus_manager, window_id, focus_handle, state, select_all };
+        let mut palette = Self {
+            workspace,
+            focus_manager,
+            window_id,
+            focus_handle,
+            state,
+            select_all,
+        };
 
         if !query.is_empty() {
             palette.state.search_query = query;
@@ -121,7 +135,8 @@ impl CommandPalette {
     }
 
     fn save_memory(&self, cx: &mut Context<Self>) {
-        let recent = cx.try_global::<CommandPaletteMemory>()
+        let recent = cx
+            .try_global::<CommandPaletteMemory>()
             .map(|m| m.recent.clone())
             .unwrap_or_default();
         cx.set_global(CommandPaletteMemory {
@@ -131,7 +146,8 @@ impl CommandPalette {
     }
 
     fn record_recent(&self, action_key: &'static str, cx: &mut Context<Self>) {
-        let mut recent = cx.try_global::<CommandPaletteMemory>()
+        let mut recent = cx
+            .try_global::<CommandPaletteMemory>()
             .map(|m| m.recent.clone())
             .unwrap_or_default();
         recent.retain(|k| *k != action_key);
@@ -159,12 +175,12 @@ impl CommandPalette {
             // context-scoped actions (e.g. CloseTerminal on "TerminalPane")
             // are routed to the correct element.
             let pane_map = okena_views_terminal::layout::navigation::get_pane_map(self.window_id);
-            if let Some(focused) = self.focus_manager.read(cx)
-                .focused_terminal_state()
+            if let Some(focused) = self.focus_manager.read(cx).focused_terminal_state()
                 && let Some(pane) = pane_map.find_pane(&focused.project_id, &focused.layout_path)
-                    && let Some(ref fh) = pane.focus_handle {
-                        window.focus(fh, cx);
-                    }
+                && let Some(ref fh) = pane.focus_handle
+            {
+                window.focus(fh, cx);
+            }
 
             window.dispatch_action(action, cx);
             cx.emit(CommandPaletteEvent::Close);
@@ -182,7 +198,12 @@ impl CommandPalette {
         self.state.set_filtered(filtered);
     }
 
-    fn render_command_row(&self, filtered_index: usize, cmd_index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_command_row(
+        &self,
+        filtered_index: usize,
+        cmd_index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let command = &self.state.items[cmd_index];
         let is_selected = filtered_index == self.state.selected_index;
@@ -193,58 +214,57 @@ impl CommandPalette {
         let keybinding = command.keybinding.clone();
 
         selectable_list_item(
-                ElementId::Name(format!("command-{}", filtered_index).into()),
-                is_selected,
-                &t,
-            )
-            .justify_between()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.execute_command(filtered_index, window, cx);
-                }),
-            )
-            .child(
-                // Left side: name + description
+            ElementId::Name(format!("command-{}", filtered_index).into()),
+            is_selected,
+            &t,
+        )
+        .justify_between()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                this.execute_command(filtered_index, window, cx);
+            }),
+        )
+        .child(
+            // Left side: name + description
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    h_flex()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(ui_text(13.0, cx))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(t.text_primary))
+                                .child(name),
+                        )
+                        .child(badge(category, &t)),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(description),
+                ),
+        )
+        .child(
+            // Right side: keybinding
+            h_flex().children(keybinding.map(|kb| {
                 div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        h_flex()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(ui_text(13.0, cx))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(t.text_primary))
-                                    .child(name),
-                            )
-                            .child(badge(category, &t)),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(description),
-                    ),
-            )
-            .child(
-                // Right side: keybinding
-                h_flex()
-                    .children(keybinding.map(|kb| {
-                        div()
-                            .px(px(8.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .text_size(ui_text_ms(cx))
-                            .font_family("monospace")
-                            .text_color(rgb(t.text_secondary))
-                            .child(kb)
-                    })),
-            )
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_secondary))
+                    .text_size(ui_text_ms(cx))
+                    .font_family("monospace")
+                    .text_color(rgb(t.text_secondary))
+                    .child(kb)
+            })),
+        )
     }
 }
 
@@ -261,7 +281,12 @@ impl Render for CommandPalette {
         let search_query = self.state.search_query.clone();
         let config_width = self.state.config.width;
         let config_max_height = self.state.config.max_height;
-        let search_placeholder = self.state.config.search_placeholder.clone().unwrap_or_default();
+        let search_placeholder = self
+            .state
+            .config
+            .search_placeholder
+            .clone()
+            .unwrap_or_default();
         let empty_message = self.state.config.empty_message.clone();
 
         // Focus on first render
@@ -293,7 +318,9 @@ impl Render for CommandPalette {
                             let Some(ch) = k.chars().next() else {
                                 return;
                             };
-                            if "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./".contains(ch) {
+                            if "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./"
+                                .contains(ch)
+                            {
                                 this.state.search_query.clear();
                                 this.select_all = false;
                                 // Fall through to handle_list_overlay_key which will push the char
@@ -333,7 +360,12 @@ impl Render for CommandPalette {
                     .w(px(config_width))
                     .max_h(px(config_max_height))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(search_input_area_selected(&search_query, &search_placeholder, self.select_all, &t))
+                    .child(search_input_area_selected(
+                        &search_query,
+                        &search_placeholder,
+                        self.select_all,
+                        &t,
+                    ))
                     .child(
                         // Command list
                         div()
@@ -341,17 +373,19 @@ impl Render for CommandPalette {
                             .flex_1()
                             .overflow_y_scroll()
                             .track_scroll(&self.state.scroll_handle)
-                            .children(
-                                self.state.filtered
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
-                            )
+                            .children(self.state.filtered.iter().enumerate().map(
+                                |(i, filter_result)| {
+                                    self.render_command_row(i, filter_result.index, cx)
+                                },
+                            ))
                             .when(self.state.is_empty(), |d| {
                                 d.child(empty_state(empty_message.clone(), &t, cx))
                             }),
                     )
-                    .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
+                    .child(keyboard_hints_footer(
+                        &[("Enter", "to select"), ("Esc", "to close")],
+                        &t,
+                    )),
             )
     }
 }

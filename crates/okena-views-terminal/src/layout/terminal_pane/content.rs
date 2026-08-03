@@ -1,16 +1,17 @@
 //! Terminal content component.
 
 use crate::elements::terminal_element::{
-    deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id, LinkKind,
-    SearchMatch, TerminalElement,
+    LinkKind, SearchMatch, TerminalElement,
+    deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id,
 };
-use crate::terminal_view_settings;
-use okena_terminal::terminal::Terminal;
-use okena_files::theme::theme;
-use okena_ui::color_utils::tint_color;
 use crate::layout::navigation::register_pane_bounds;
-use okena_workspace::state::{WindowId, Workspace};
+use crate::terminal_view_settings;
 use gpui::*;
+use okena_files::theme::theme;
+use okena_terminal::terminal::Terminal;
+use okena_ui::color_utils::tint_color;
+use okena_workspace::request_broker::RequestBroker;
+use okena_workspace::state::{WindowId, Workspace};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ pub struct TerminalContent {
     terminal: Option<Arc<Terminal>>,
     resize_viewer_id: u64,
     focus_handle: FocusHandle,
+    window_activation_subscription: Option<Subscription>,
     url_detector: UrlDetector,
     scrollbar: Entity<Scrollbar>,
     is_selecting: bool,
@@ -44,6 +46,7 @@ pub struct TerminalContent {
     layout_path: Vec<usize>,
     window_id: Option<WindowId>,
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     scroll_accumulator: f32,
     /// True while we're in the inertial "momentum" tail after a trackpad scroll
     /// gesture was released. On macOS the OS keeps emitting scroll-wheel events
@@ -68,6 +71,7 @@ impl TerminalContent {
         project_id: String,
         layout_path: Vec<usize>,
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         cx: &mut Context<Self>,
     ) -> Self {
         let scrollbar = cx.new(Scrollbar::new);
@@ -76,6 +80,7 @@ impl TerminalContent {
             terminal: None,
             resize_viewer_id: next_resize_viewer_id(),
             focus_handle,
+            window_activation_subscription: None,
             url_detector: UrlDetector::new(),
             scrollbar,
             is_selecting: false,
@@ -89,12 +94,48 @@ impl TerminalContent {
             layout_path,
             window_id,
             workspace,
+            request_broker,
             scroll_accumulator: 0.0,
             in_scroll_inertia: false,
             mouse_down_cell: None,
             forwarded_button: None,
             autoscroll_task: None,
         }
+    }
+
+    /// Present the latest parsed terminal state. Calls are already coalesced by
+    /// the app-wide activity frame, so visible non-key windows stay live without
+    /// each terminal stream driving an independent repaint clock.
+    pub fn request_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = &self.terminal {
+            okena_core::latency_probe::client_notify_requested(
+                &terminal.terminal_id,
+                self.resize_viewer_id,
+            );
+        }
+        cx.notify();
+    }
+
+    fn bind_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.window_activation_subscription.is_some() {
+            return;
+        }
+
+        let subscription = cx.observe_window_activation(window, |this, window, cx| {
+            // A GPUI focus handle remains focused when its OS window deactivates.
+            // Keep the notification-suppression reporter aligned with the exact
+            // key window.
+            if let Some(ref terminal) = this.terminal {
+                terminal.update_focus_reporter(
+                    this.resize_viewer_id,
+                    window.is_window_active() && this.focus_handle.is_focused(window),
+                );
+            }
+
+            // Activation changes update focused styling immediately.
+            cx.notify();
+        });
+        self.window_activation_subscription = Some(subscription);
     }
 
     fn mouse_modifier_bits(m: &Modifiers) -> u8 {
@@ -156,10 +197,11 @@ impl TerminalContent {
             return false;
         }
         if let Some(terminal) = self.terminal.as_ref()
-            && let Some((col, row, _)) = self.pixel_to_cell(event_position) {
-                let mods = Self::mouse_modifier_bits(modifiers);
-                terminal.send_mouse_button(button_code, false, col, row as usize, mods);
-            }
+            && let Some((col, row, _)) = self.pixel_to_cell(event_position)
+        {
+            let mods = Self::mouse_modifier_bits(modifiers);
+            terminal.send_mouse_button(button_code, false, col, row as usize, mods);
+        }
         self.forwarded_button = None;
         self.mouse_down_cell = None;
         true
@@ -167,7 +209,9 @@ impl TerminalContent {
 
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
         if let Some(old_terminal) = self.terminal.as_ref() {
-            let next_id = terminal.as_ref().map(|terminal| terminal.terminal_id.as_str());
+            let next_id = terminal
+                .as_ref()
+                .map(|terminal| terminal.terminal_id.as_str());
             if next_id != Some(old_terminal.terminal_id.as_str()) {
                 deregister_shared_resize_viewer(&old_terminal.terminal_id, self.resize_viewer_id);
                 old_terminal.remove_focus_reporter(self.resize_viewer_id);
@@ -263,7 +307,10 @@ impl TerminalContent {
 
     const TERMINAL_PADDING: f32 = 4.0;
 
-    fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
+    fn pixel_to_cell(
+        &self,
+        pos: Point<Pixels>,
+    ) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
         let bounds = self.element_bounds?;
         let terminal = self.terminal.as_ref()?;
         let (cell_width, cell_height) = terminal.cell_dimensions();
@@ -288,7 +335,12 @@ impl TerminalContent {
         Some((col, row, side))
     }
 
-    fn pixel_to_cell_raw(&self, pos: Point<Pixels>, cell_width: f32, cell_height: f32) -> (usize, usize) {
+    fn pixel_to_cell_raw(
+        &self,
+        pos: Point<Pixels>,
+        cell_width: f32,
+        cell_height: f32,
+    ) -> (usize, usize) {
         if let Some(bounds) = self.element_bounds {
             let x = (f32::from(pos.x) - f32::from(bounds.origin.x)).max(0.0);
             let y = (f32::from(pos.y) - f32::from(bounds.origin.y)).max(0.0);
@@ -296,6 +348,26 @@ impl TerminalContent {
         } else {
             (0, 0)
         }
+    }
+
+    /// Best-effort project-relative path for opening a clicked terminal path in
+    /// the file viewer. Strips any trailing :line:col, then makes it relative to
+    /// the project root (the daemon-side project path). Returns None for absolute
+    /// paths outside the project or `~`-prefixed paths we can't resolve.
+    fn project_relative_path(&self, raw: &str, cx: &App) -> Option<String> {
+        let clean = super::url_detector::strip_line_col_suffix(raw);
+        let project_path = self
+            .workspace
+            .read(cx)
+            .project(&self.project_id)?
+            .path
+            .clone();
+        let cwd = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.current_cwd())
+            .unwrap_or_else(|| project_path.clone());
+        remote_project_relative_path(clean, &project_path, &cwd)
     }
 
     fn handle_mouse_down(
@@ -312,7 +384,11 @@ impl TerminalContent {
         self.mouse_down_cell = Some((col, row));
 
         if event.modifiers.platform || event.modifiers.control {
-            if let Some(uri) = self.terminal.as_ref().and_then(|t| t.hyperlink_at(col, row)) {
+            if let Some(uri) = self
+                .terminal
+                .as_ref()
+                .and_then(|t| t.hyperlink_at(col, row))
+            {
                 UrlDetector::open_url(&uri);
                 self.mouse_down_cell = None;
                 return;
@@ -323,8 +399,28 @@ impl TerminalContent {
                         UrlDetector::open_url(&url_match.url);
                     }
                     LinkKind::FilePath { line, col } => {
-                        let file_opener = terminal_view_settings(cx).file_opener.clone();
-                        UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
+                        if self
+                            .workspace
+                            .read(cx)
+                            .is_local_daemon_project(&self.project_id)
+                        {
+                            let file_opener = terminal_view_settings(cx).file_opener.clone();
+                            UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
+                        } else if let Some(relative_path) =
+                            self.project_relative_path(&url_match.url, cx)
+                        {
+                            self.request_broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    okena_workspace::requests::OverlayRequest::Project(
+                                        okena_workspace::requests::ProjectOverlay {
+                                            project_id: self.project_id.clone(),
+                                            kind: okena_workspace::requests::ProjectOverlayKind::FileViewer { relative_path },
+                                        },
+                                    ),
+                                    cx,
+                                );
+                            });
+                        }
                     }
                 }
                 self.mouse_down_cell = None;
@@ -344,7 +440,11 @@ impl TerminalContent {
             let same_position =
                 (col as i32 - last_col as i32).abs() <= 1 && (row - last_row).abs() <= 0;
             if elapsed < 400 && same_position {
-                if self.click_count >= 3 { 1 } else { self.click_count + 1 }
+                if self.click_count >= 3 {
+                    1
+                } else {
+                    self.click_count + 1
+                }
             } else {
                 1
             }
@@ -450,9 +550,10 @@ impl TerminalContent {
         if let Some((button, mods)) = self.forwarded_button {
             if let Some(ref terminal) = self.terminal
                 && terminal.supports_mouse_drag()
-                    && let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
-                        terminal.send_mouse_drag(button, col, row as usize, mods);
-                    }
+                && let Some((col, row, _side)) = self.pixel_to_cell(event.position)
+            {
+                terminal.send_mouse_drag(button, col, row as usize, mods);
+            }
             return;
         }
 
@@ -461,7 +562,10 @@ impl TerminalContent {
                 if let Some(ref terminal) = self.terminal {
                     terminal.end_selection();
                     if !terminal.has_selection()
-                        || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true)
+                        || terminal
+                            .get_selected_text()
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true)
                     {
                         terminal.clear_selection();
                     }
@@ -472,10 +576,11 @@ impl TerminalContent {
             }
 
             if let Some(ref terminal) = self.terminal
-                && let Some((col, row, side)) = self.pixel_to_cell(event.position) {
-                    terminal.update_selection(col, row, side);
-                    cx.notify();
-                }
+                && let Some((col, row, side)) = self.pixel_to_cell(event.position)
+            {
+                terminal.update_selection(col, row, side);
+                cx.notify();
+            }
         }
     }
 
@@ -486,34 +591,42 @@ impl TerminalContent {
         }
 
         if self.is_selecting
-            && let Some(ref terminal) = self.terminal {
-                terminal.end_selection();
-                self.is_selecting = false;
+            && let Some(ref terminal) = self.terminal
+        {
+            terminal.end_selection();
+            self.is_selecting = false;
 
-                let empty_selection = !terminal.has_selection()
-                    || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true);
+            let empty_selection = !terminal.has_selection()
+                || terminal
+                    .get_selected_text()
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true);
 
-                if empty_selection {
-                    terminal.clear_selection();
+            if empty_selection {
+                terminal.clear_selection();
 
-                    // Click-to-cursor: on a clean single click (no drag), move cursor
-                    if self.click_count == 1
-                        && let Some((col, row)) = self.mouse_down_cell.take()
-                            && !terminal.is_mouse_mode() && !terminal.is_alt_screen() && !terminal.has_running_child() {
-                                terminal.move_cursor_to_click(col, row);
-                            }
+                // Click-to-cursor: on a clean single click (no drag), move cursor
+                if self.click_count == 1
+                    && let Some((col, row)) = self.mouse_down_cell.take()
+                    && !terminal.is_mouse_mode()
+                    && !terminal.is_alt_screen()
+                    && !terminal.has_running_child()
+                {
+                    terminal.move_cursor_to_click(col, row);
                 }
-                cx.notify();
             }
+            cx.notify();
+        }
 
         // Sync any non-empty selection to PRIMARY so middle-click paste works
         // for drag, double-click (word), and triple-click (line) selections.
         #[cfg(target_os = "linux")]
         if let Some(ref terminal) = self.terminal
             && let Some(text) = terminal.get_selected_text()
-                && !text.is_empty() {
-                    cx.write_to_primary(ClipboardItem::new_string(text));
-                }
+            && !text.is_empty()
+        {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
 
         self.mouse_down_cell = None;
     }
@@ -521,8 +634,10 @@ impl TerminalContent {
 
 impl Render for TerminalContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bind_window_activation(window, cx);
+
         let t = theme(cx);
-        let is_focused = self.focus_handle.is_focused(window);
+        let is_focused = window.is_window_active() && self.focus_handle.is_focused(window);
 
         if let Some(ref terminal) = self.terminal {
             terminal.update_focus_reporter(self.resize_viewer_id, is_focused);
@@ -560,23 +675,30 @@ impl Render for TerminalContent {
             None => base_bg,
         };
 
-        self.url_detector.update_matches(&self.terminal);
+        let validate_paths_locally = self
+            .workspace
+            .read(cx)
+            .is_local_daemon_project(&self.project_id);
+        self.url_detector
+            .update_matches(&self.terminal, validate_paths_locally);
 
         let Some(ref terminal) = self.terminal else {
             return div()
-                .flex_1()
-                .min_h(px(200.0))
+                .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(t.text_muted))
-                .child("Creating terminal...")
+                .child("Starting terminal\u{2026}")
                 .into_any_element();
         };
 
         let terminal_clone = terminal.clone();
         let focus_handle = self.focus_handle.clone();
-        let zoom_level = self.workspace.read(cx).get_terminal_zoom(&self.project_id, &self.layout_path);
+        let zoom_level = self
+            .workspace
+            .read(cx)
+            .get_terminal_zoom(&self.project_id, &self.layout_path);
 
         let element_bounds_setter = {
             let entity = cx.entity().downgrade();
@@ -586,7 +708,13 @@ impl Render for TerminalContent {
             let fh = self.focus_handle.clone();
             move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
                 if let Some(window_id) = window_id {
-                    register_pane_bounds(window_id, project_id.clone(), layout_path.clone(), bounds, Some(fh.clone()));
+                    register_pane_bounds(
+                        window_id,
+                        project_id.clone(),
+                        layout_path.clone(),
+                        bounds,
+                        Some(fh.clone()),
+                    );
                 }
 
                 if let Some(entity) = entity.upgrade() {
@@ -660,7 +788,10 @@ impl Render for TerminalContent {
                     this.in_scroll_inertia && matches!(event.delta, ScrollDelta::Pixels(_));
 
                 if event.modifiers.control && !is_inertial_momentum {
-                    let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
+                    let current_zoom = this
+                        .workspace
+                        .read(cx)
+                        .get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);
                     let project_id = this.project_id.clone();
@@ -669,7 +800,12 @@ impl Render for TerminalContent {
                         workspace.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
                     });
                 } else {
-                    this.handle_scroll(f32::from(delta.y), event.position, event.modifiers.shift, cx);
+                    this.handle_scroll(
+                        f32::from(delta.y),
+                        event.position,
+                        event.modifiers.shift,
+                        cx,
+                    );
                 }
             }))
             .on_mouse_down(
@@ -679,12 +815,19 @@ impl Render for TerminalContent {
                         cx.notify();
                         return;
                     }
-                    let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
-                    let link_url = this.pixel_to_cell(event.position).and_then(|(col, row, _side)| {
-                        this.url_detector.find_at(col, row)
-                            .filter(|m| m.kind == LinkKind::Url)
-                            .map(|m| m.url)
-                    });
+                    let has_selection = this
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.has_selection())
+                        .unwrap_or(false);
+                    let link_url =
+                        this.pixel_to_cell(event.position)
+                            .and_then(|(col, row, _side)| {
+                                this.url_detector
+                                    .find_at(col, row)
+                                    .filter(|m| m.kind == LinkKind::Url)
+                                    .map(|m| m.url)
+                            });
                     cx.emit(TerminalContentEvent::RequestContextMenu {
                         position: event.position,
                         has_selection,
@@ -725,24 +868,24 @@ impl Render for TerminalContent {
                     }
                 }),
             )
-            .child(canvas(element_bounds_setter, |_, _, _, _| {}).absolute().size_full())
             .child(
-                div()
-                    .size_full()
-                    .p(px(4.0))
-                    .bg(rgb(term_bg))
-                    .child(
-                        TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
-                            .with_zoom(zoom_level)
-                            .with_bg_tint(bg_tint)
-                            .with_search(self.search_matches.clone(), self.search_current_index)
-                            .with_urls(
-                                self.url_detector.matches_arc(),
-                                self.url_detector.hovered_group(),
-                            )
-                            .with_cursor_visible(self.cursor_visible)
-                            .with_cursor_style(render_settings.cursor_style),
-                    ),
+                canvas(element_bounds_setter, |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div().size_full().p(px(4.0)).bg(rgb(term_bg)).child(
+                    TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
+                        .with_zoom(zoom_level)
+                        .with_bg_tint(bg_tint)
+                        .with_search(self.search_matches.clone(), self.search_current_index)
+                        .with_urls(
+                            self.url_detector.matches_arc(),
+                            self.url_detector.hovered_group(),
+                        )
+                        .with_cursor_visible(self.cursor_visible)
+                        .with_cursor_style(render_settings.cursor_style),
+                ),
             )
             .child(self.scrollbar.clone())
             .into_any_element()
@@ -757,6 +900,65 @@ impl Drop for TerminalContent {
 }
 
 impl EventEmitter<TerminalContentEvent> for TerminalContent {}
+
+fn remote_project_relative_path(raw: &str, project_path: &str, cwd: &str) -> Option<String> {
+    if raw.starts_with('~') {
+        return None;
+    }
+
+    let raw = raw.replace('\\', "/");
+    let project_path = project_path.replace('\\', "/");
+    let cwd = cwd.replace('\\', "/");
+    let raw_is_absolute = is_absolute_path(&raw);
+    let candidate = if raw_is_absolute {
+        raw
+    } else if cwd.is_empty() {
+        format!("{project_path}/{raw}")
+    } else {
+        format!("{cwd}/{raw}")
+    };
+
+    let project_parts = normalize_path_parts(&project_path)?;
+    let candidate_parts = normalize_path_parts(&candidate)?;
+    let windows_path =
+        project_path.as_bytes().get(1) == Some(&b':') || project_path.starts_with("//");
+    if candidate_parts.len() <= project_parts.len()
+        || !candidate_parts
+            .iter()
+            .zip(&project_parts)
+            .all(|(candidate, project)| {
+                if windows_path {
+                    candidate.eq_ignore_ascii_case(project)
+                } else {
+                    candidate == project
+                }
+            })
+    {
+        return None;
+    }
+
+    Some(candidate_parts[project_parts.len()..].join("/"))
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with("//")
+        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes().get(2) == Some(&b'/'))
+}
+
+fn normalize_path_parts(path: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts)
+}
 
 /// Lines to scroll for drag-selection auto-scroll, given the pointer's `y` and
 /// the terminal content's `top`/`bottom` edges (all window-space pixels).
@@ -781,7 +983,7 @@ fn autoscroll_lines(y: f32, top: f32, bottom: f32, cell_height: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::autoscroll_lines;
+    use super::{autoscroll_lines, remote_project_relative_path};
 
     const CELL: f32 = 16.0;
     const TOP: f32 = 100.0;
@@ -819,5 +1021,49 @@ mod tests {
     #[test]
     fn zero_cell_height_is_safe() {
         assert_eq!(autoscroll_lines(TOP - 50.0, TOP, BOTTOM, 0.0), 0);
+    }
+
+    #[test]
+    fn remote_absolute_path_is_made_project_relative() {
+        assert_eq!(
+            remote_project_relative_path(
+                "/srv/project/src/main.rs",
+                "/srv/project",
+                "/srv/project"
+            ),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_relative_path_uses_terminal_cwd() {
+        assert_eq!(
+            remote_project_relative_path("../shared.rs", "/srv/project", "/srv/project/src/bin"),
+            Some("src/shared.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_windows_paths_are_normalized_without_client_path_rules() {
+        assert_eq!(
+            remote_project_relative_path(
+                r"C:\work\project\src\main.rs",
+                r"c:\work\project",
+                r"C:\work\project"
+            ),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_path_outside_project_is_rejected() {
+        assert_eq!(
+            remote_project_relative_path("/etc/passwd", "/srv/project", "/srv/project"),
+            None
+        );
+        assert_eq!(
+            remote_project_relative_path("../../../etc/passwd", "/srv/project", "/srv/project"),
+            None
+        );
     }
 }

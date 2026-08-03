@@ -5,9 +5,9 @@
 // clarifies here.
 #![allow(clippy::too_many_arguments)]
 
+use crate::context::WorkspaceCx;
 use crate::focus::FocusManager;
 use crate::state::{DropZone, LayoutNode, SplitDirection, Workspace};
-use gpui::*;
 
 impl Workspace {
     /// Move a terminal pane to a new position relative to a target terminal.
@@ -23,7 +23,7 @@ impl Workspace {
         target_project_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Self-drop check
         if source_terminal_id == target_terminal_id {
@@ -31,9 +31,24 @@ impl Workspace {
         }
 
         if source_project_id == target_project_id {
-            self.move_pane_same_project(focus_manager, source_project_id, source_terminal_id, target_terminal_id, zone, cx);
+            self.move_pane_same_project(
+                focus_manager,
+                source_project_id,
+                source_terminal_id,
+                target_terminal_id,
+                zone,
+                cx,
+            );
         } else {
-            self.move_pane_cross_project(focus_manager, source_project_id, source_terminal_id, target_project_id, target_terminal_id, zone, cx);
+            self.move_pane_cross_project(
+                focus_manager,
+                source_project_id,
+                source_terminal_id,
+                target_project_id,
+                target_terminal_id,
+                zone,
+                cx,
+            );
         }
     }
 
@@ -45,7 +60,7 @@ impl Workspace {
         source_terminal_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let project = match self.project(project_id) {
             Some(p) => p,
@@ -136,14 +151,24 @@ impl Workspace {
         target_project_id: &str,
         target_terminal_id: &str,
         zone: DropZone,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         // Find project indices (needed for split borrows)
-        let src_idx = match self.data.projects.iter().position(|p| p.id == source_project_id) {
+        let src_idx = match self
+            .data
+            .projects
+            .iter()
+            .position(|p| p.id == source_project_id)
+        {
             Some(i) => i,
             None => return,
         };
-        let tgt_idx = match self.data.projects.iter().position(|p| p.id == target_project_id) {
+        let tgt_idx = match self
+            .data
+            .projects
+            .iter()
+            .position(|p| p.id == target_project_id)
+        {
             Some(i) => i,
             None => return,
         };
@@ -163,7 +188,11 @@ impl Workspace {
         };
 
         // Block if terminal is a service terminal
-        if self.data.projects[src_idx].service_terminals.values().any(|id| id == source_terminal_id) {
+        if self.data.projects[src_idx]
+            .service_terminals
+            .values()
+            .any(|id| id == source_terminal_id)
+        {
             return;
         }
 
@@ -196,20 +225,30 @@ impl Workspace {
         let hidden_state = src_project.hidden_terminals.remove(source_terminal_id);
 
         // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project.layout.as_ref()
+        let src_layout_ids: std::collections::HashSet<String> = src_project
+            .layout
+            .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
-        src_project.terminal_names.retain(|id, _| src_layout_ids.contains(id));
-        src_project.hidden_terminals.retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .terminal_names
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
         let tgt_project = &mut self.data.projects[tgt_idx];
 
         if let Some(name) = terminal_name {
-            tgt_project.terminal_names.insert(source_terminal_id.to_string(), name);
+            tgt_project
+                .terminal_names
+                .insert(source_terminal_id.to_string(), name);
         }
         if let Some(hidden) = hidden_state {
-            tgt_project.hidden_terminals.insert(source_terminal_id.to_string(), hidden);
+            tgt_project
+                .hidden_terminals
+                .insert(source_terminal_id.to_string(), hidden);
         }
 
         let new_focus_path = if let Some(ref mut tgt_layout) = tgt_project.layout {
@@ -247,7 +286,11 @@ impl Workspace {
     }
 
     /// Build wrapper node for drop zone placement.
-    fn build_drop_zone_wrapper(source_node: LayoutNode, target_node: LayoutNode, zone: DropZone) -> LayoutNode {
+    fn build_drop_zone_wrapper(
+        source_node: LayoutNode,
+        target_node: LayoutNode,
+        zone: DropZone,
+    ) -> LayoutNode {
         match zone {
             DropZone::Top => LayoutNode::Split {
                 direction: SplitDirection::Horizontal,
@@ -298,12 +341,27 @@ impl Workspace {
         target_project_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         if source_project_id == target_project_id {
-            self.move_terminal_to_tab_group_same_project(focus_manager, source_project_id, terminal_id, tabs_path, insert_index, cx);
+            self.move_terminal_to_tab_group_same_project(
+                focus_manager,
+                source_project_id,
+                terminal_id,
+                tabs_path,
+                insert_index,
+                cx,
+            );
         } else {
-            self.move_terminal_to_tab_group_cross_project(focus_manager, source_project_id, terminal_id, target_project_id, tabs_path, insert_index, cx);
+            self.move_terminal_to_tab_group_cross_project(
+                focus_manager,
+                source_project_id,
+                terminal_id,
+                target_project_id,
+                tabs_path,
+                insert_index,
+                cx,
+            );
         }
     }
 
@@ -315,7 +373,7 @@ impl Workspace {
         terminal_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
         let project = match self.project(project_id) {
             Some(p) => p,
@@ -405,7 +463,11 @@ impl Workspace {
                 None => return,
             };
 
-            if let LayoutNode::Tabs { children, active_tab } = tabs_node {
+            if let LayoutNode::Tabs {
+                children,
+                active_tab,
+            } = tabs_node
+            {
                 let idx = insert_index.unwrap_or(children.len());
                 let clamped = idx.min(children.len());
                 children.insert(clamped, source_node);
@@ -435,13 +497,23 @@ impl Workspace {
         target_project_id: &str,
         tabs_path: &[usize],
         insert_index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut impl WorkspaceCx,
     ) {
-        let src_idx = match self.data.projects.iter().position(|p| p.id == source_project_id) {
+        let src_idx = match self
+            .data
+            .projects
+            .iter()
+            .position(|p| p.id == source_project_id)
+        {
             Some(i) => i,
             None => return,
         };
-        let tgt_idx = match self.data.projects.iter().position(|p| p.id == target_project_id) {
+        let tgt_idx = match self
+            .data
+            .projects
+            .iter()
+            .position(|p| p.id == target_project_id)
+        {
             Some(i) => i,
             None => return,
         };
@@ -461,7 +533,11 @@ impl Workspace {
         };
 
         // Block service terminals
-        if self.data.projects[src_idx].service_terminals.values().any(|id| id == terminal_id) {
+        if self.data.projects[src_idx]
+            .service_terminals
+            .values()
+            .any(|id| id == terminal_id)
+        {
             return;
         }
 
@@ -503,20 +579,30 @@ impl Workspace {
         let hidden_state = src_project.hidden_terminals.remove(terminal_id);
 
         // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project.layout.as_ref()
+        let src_layout_ids: std::collections::HashSet<String> = src_project
+            .layout
+            .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
-        src_project.terminal_names.retain(|id, _| src_layout_ids.contains(id));
-        src_project.hidden_terminals.retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .terminal_names
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
         let tgt_project = &mut self.data.projects[tgt_idx];
 
         if let Some(name) = terminal_name {
-            tgt_project.terminal_names.insert(terminal_id.to_string(), name);
+            tgt_project
+                .terminal_names
+                .insert(terminal_id.to_string(), name);
         }
         if let Some(hidden) = hidden_state {
-            tgt_project.hidden_terminals.insert(terminal_id.to_string(), hidden);
+            tgt_project
+                .hidden_terminals
+                .insert(terminal_id.to_string(), hidden);
         }
 
         let new_focus_path = if let Some(ref mut tgt_layout) = tgt_project.layout {
@@ -536,7 +622,11 @@ impl Workspace {
                 None => return,
             };
 
-            if let LayoutNode::Tabs { children, active_tab } = tabs_node {
+            if let LayoutNode::Tabs {
+                children,
+                active_tab,
+            } = tabs_node
+            {
                 let idx = insert_index.unwrap_or(children.len());
                 let clamped = idx.min(children.len());
                 children.insert(clamped, source_node);

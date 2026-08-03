@@ -199,7 +199,12 @@ impl CommandSpec {
         let env = cmd
             .get_envs()
             .filter_map(|(k, v)| {
-                v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
             })
             .collect();
         Self {
@@ -253,20 +258,31 @@ impl CommandSpec {
 /// it can be killed mid-flight.
 struct JobControl {
     cancelled: AtomicBool,
-    /// Set by the worker once the child is spawned; taken to kill it.
+    /// Set by the worker once the process tree is owned; taken to kill it.
     kill: Mutex<Option<KillHandle>>,
 }
 
-/// A minimal handle that can kill a spawned child from another thread.
+/// A minimal handle that can kill a spawned process tree from another thread.
 struct KillHandle {
-    inner: Arc<Mutex<std::process::Child>>,
+    tree: Arc<ProcessTree>,
 }
 
 impl KillHandle {
     fn kill(&self) {
-        if let Ok(mut child) = self.inner.lock() {
-            let _ = child.kill();
-        }
+        self.tree.terminate();
+    }
+}
+
+/// Clears the externally reachable kill handle before the owned process-group
+/// identifier or job handle can become stale.
+struct KillRegistration<'a> {
+    control: &'a JobControl,
+}
+
+impl Drop for KillRegistration<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.control.kill.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
     }
 }
 
@@ -289,6 +305,12 @@ impl JobControl {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn register(&self, tree: Arc<ProcessTree>) -> KillRegistration<'_> {
+        let mut guard = self.kill.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(KillHandle { tree });
+        KillRegistration { control: self }
     }
 }
 
@@ -477,6 +499,9 @@ fn worker_loop(queue: &LaneQueue) {
 /// latency-sensitive UI handler, then back off so long commands don't spin.
 const POLL_MIN: Duration = Duration::from_millis(1);
 const POLL_MAX: Duration = Duration::from_millis(20);
+/// Give reader threads a brief chance to collect bytes already in the pipes
+/// before treating open pipe handles as descendants left behind by the parent.
+const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
 
 fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output> {
     // Cancelled before we even started.
@@ -523,7 +548,7 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn()?;
+    let (mut child, tree) = ProcessTree::spawn(&mut cmd)?;
 
     // Drain stdout/stderr on dedicated threads, concurrently with the wait loop
     // below. Otherwise a child that writes more than the OS pipe buffer (~64KB)
@@ -532,17 +557,13 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
     let out_reader = spawn_pipe_reader(child.stdout.take());
     let err_reader = spawn_pipe_reader(child.stderr.take());
 
-    let child = Arc::new(Mutex::new(child));
-
-    // Publish the kill handle so cancel()/cancel_scope() can reach this child.
-    if let Ok(mut guard) = ctl.kill.lock() {
-        *guard = Some(KillHandle {
-            inner: child.clone(),
-        });
-    }
+    // Publish the kill handle so cancel()/cancel_scope() can reach the whole
+    // process tree. The registration clears it before the OS identity can be
+    // reused for an unrelated process.
+    let _registration = ctl.register(tree.clone());
     // Lost a cancellation race between the check above and registering: honor it.
     if ctl.is_cancelled() {
-        kill_and_reap(&child);
+        terminate_and_reap(&tree, &mut child);
         let _ = out_reader.join();
         let _ = err_reader.join();
         return Err(cancelled_err());
@@ -555,22 +576,24 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         // Check cancellation before reaping: a killed child exits, and we must
         // report that as cancelled rather than as a (signal) success.
         if ctl.is_cancelled() {
-            kill_and_reap(&child);
+            terminate_and_reap(&tree, &mut child);
             let _ = out_reader.join();
             let _ = err_reader.join();
             return Err(cancelled_err());
         }
 
-        let status = {
-            let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
-            c.try_wait()?
-        };
-
-        if let Some(status) = status {
-            // Child exited → its write ends are closed, so the reader threads
-            // hit EOF and finish; join collects everything they buffered.
+        if process_exited(&mut child)? {
+            // A direct parent may exit while a background descendant still
+            // owns the inherited pipes. Bound the drain, then terminate the
+            // owned tree so joining the readers cannot hang forever.
+            let _ = wait_for_readers(&out_reader, &err_reader, POST_EXIT_DRAIN);
+            tree.terminate();
+            let status = child.wait()?;
             let stdout = out_reader.join().unwrap_or_default();
             let stderr = err_reader.join().unwrap_or_default();
+            if ctl.is_cancelled() {
+                return Err(cancelled_err());
+            }
             return Ok(Output {
                 status,
                 stdout,
@@ -581,7 +604,7 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         if let Some(deadline) = deadline
             && Instant::now() >= deadline
         {
-            kill_and_reap(&child);
+            terminate_and_reap(&tree, &mut child);
             let _ = out_reader.join();
             let _ = err_reader.join();
             return Err(std::io::Error::new(
@@ -593,6 +616,35 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(POLL_MAX);
     }
+}
+
+/// Detect exit without reaping on supported Unix hosts. Keeping the group
+/// leader as a zombie until tree cleanup prevents its process-group ID from
+/// being reused for an unrelated process before the group signal is sent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: info points to writable siginfo storage. WNOWAIT observes only
+    // this owned child and deliberately leaves it waitable by Child::wait.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: waitid initialized the siginfo structure on success; si_pid is
+    // zero for the WNOHANG case where the child has not exited.
+    Ok(unsafe { info.assume_init().si_pid() } != 0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
 }
 
 /// Spawn a thread that reads a child pipe to EOF into a buffer. Reading
@@ -609,11 +661,205 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
     })
 }
 
-fn kill_and_reap(child: &Arc<Mutex<std::process::Child>>) {
-    if let Ok(mut c) = child.lock() {
-        let _ = c.kill();
-        let _ = c.wait();
+fn wait_for_readers(
+    stdout: &std::thread::JoinHandle<Vec<u8>>,
+    stderr: &std::thread::JoinHandle<Vec<u8>>,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !(stdout.is_finished() && stderr.is_finished()) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_MIN);
     }
+    true
+}
+
+fn terminate_and_reap(tree: &ProcessTree, child: &mut std::process::Child) {
+    tree.terminate();
+    // The direct kill is an exact Child handle fallback if platform tree
+    // setup succeeded but group/job termination itself was denied.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+struct ProcessTree {
+    process_group: libc::pid_t,
+    terminated: AtomicBool,
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+        use std::os::unix::process::CommandExt;
+
+        cmd.process_group(0);
+        let mut child = cmd.spawn()?;
+        let process_group = match libc::pid_t::try_from(child.id()) {
+            Ok(process_group) if process_group > 0 => process_group,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::other(
+                    "spawned process has an invalid process group",
+                ));
+            }
+        };
+        Ok((
+            child,
+            Arc::new(Self {
+                process_group,
+                terminated: AtomicBool::new(false),
+            }),
+        ))
+    }
+
+    fn terminate(&self) {
+        if self.terminated.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(group_target) = self.process_group.checked_neg() else {
+            return;
+        };
+        // SAFETY: process_group is the positive PID returned for a child that
+        // was atomically placed in its own group before exec. Registration is
+        // cleared before this identity can be reused by an unrelated process.
+        let _ = unsafe { libc::kill(group_target, libc::SIGKILL) };
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTree {
+    job: std::os::windows::io::OwnedHandle,
+    terminated: AtomicBool,
+}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        // Assign the process before any user code can create descendants that
+        // would escape the job. This repeats CREATE_NO_WINDOW from command().
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+
+        // SAFETY: null security/name pointers request a private unnamed job.
+        let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw_job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: CreateJobObjectW returned a unique owned handle on success.
+        let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limits_size = u32::try_from(std::mem::size_of_val(&limits))
+            .map_err(|_| std::io::Error::other("job limits structure is too large"))?;
+        // SAFETY: limits points to the structure required by this information
+        // class and remains valid for the duration of the call.
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                limits_size,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut child = cmd.spawn()?;
+        // SAFETY: both handles are live and owned for the duration of the call.
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = resume_suspended_process(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+
+        Ok((
+            child,
+            Arc::new(Self {
+                job,
+                terminated: AtomicBool::new(false),
+            }),
+        ))
+    }
+
+    fn terminate(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if self.terminated.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // SAFETY: the owned job handle remains live for this call.
+        let _ = unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(process_id: u32) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    // SAFETY: the snapshot call has no borrowed pointer arguments.
+    let raw_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if raw_snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful snapshot call returned a unique owned handle.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(raw_snapshot) };
+    let mut entry = THREADENTRY32 {
+        dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+            .map_err(|_| std::io::Error::other("thread entry structure is too large"))?,
+        ..THREADENTRY32::default()
+    };
+
+    // SAFETY: entry is initialized with the required size and remains live.
+    let mut has_entry = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) } != 0;
+    while has_entry {
+        if entry.th32OwnerProcessID == process_id {
+            // SAFETY: the enumerated thread ID belongs to the suspended child.
+            let raw_thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if raw_thread.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: OpenThread returned a unique owned handle on success.
+            let thread = unsafe { OwnedHandle::from_raw_handle(raw_thread) };
+            // SAFETY: the thread handle grants THREAD_SUSPEND_RESUME access.
+            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        // SAFETY: entry and snapshot remain valid across enumeration calls.
+        has_entry = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } != 0;
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "suspended process thread was not found",
+    ))
 }
 
 fn cancelled_err() -> std::io::Error {

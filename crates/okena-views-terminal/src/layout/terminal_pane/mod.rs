@@ -1,13 +1,13 @@
 //! Terminal pane view - composition of child entity views.
 
-pub mod url_detector;
-mod scrollbar;
-mod search_bar;
-mod content;
 mod actions;
-mod zoom;
+mod content;
 mod navigation;
 mod render;
+mod scrollbar;
+mod search_bar;
+pub mod url_detector;
+mod zoom;
 
 use content::TerminalContentEvent;
 use search_bar::{SearchBar, SearchBarEvent};
@@ -16,15 +16,14 @@ pub use content::TerminalContent;
 
 use crate::ActionDispatch;
 use crate::terminal_view_settings;
+use gpui::*;
+use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_terminal::TerminalsRegistry;
 use okena_workspace::focus::FocusManager;
-use okena_workspace::hooks;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{WindowId, Workspace};
-use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,13 +96,15 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 project_id.clone(),
                 layout_path.clone(),
                 workspace.clone(),
+                request_broker.clone(),
                 cx,
             )
         });
 
         let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), focus_manager.clone(), cx));
 
-        cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
+        cx.subscribe(&search_bar, Self::handle_search_bar_event)
+            .detach();
         cx.subscribe(&content, Self::handle_content_event).detach();
 
         let mut pane = Self {
@@ -136,9 +137,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             pane.create_new_terminal(cx);
         }
 
-        if pane.terminal_id.as_deref().is_some_and(|id| id.starts_with("remote:")) {
-            pane.start_remote_dirty_check_loop(cx);
-        }
         pane.start_cursor_blink_loop(cx);
         pane.start_idle_check_loop(cx);
 
@@ -175,7 +173,11 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TerminalContentEvent::RequestContextMenu { position, has_selection, link_url } => {
+            TerminalContentEvent::RequestContextMenu {
+                position,
+                has_selection,
+                link_url,
+            } => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
@@ -195,33 +197,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 }
             }
         }
-    }
-
-    fn start_remote_dirty_check_loop(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<TerminalPane<D>>, cx| {
-            let interval = Duration::from_millis(8);
-            loop {
-                smol::Timer::after(interval).await;
-                let result = this.update(cx, |pane, cx| {
-                    if let Some(terminal) = pane.terminal.as_ref()
-                        && terminal.take_dirty() {
-                        // Parse the freshly-arrived bytes up front so derived
-                        // state (bell, waiting) is current before the frame is
-                        // built. Otherwise the lazy parse inside the content
-                        // child's `with_content` runs *after* the pane border
-                        // and sidebar read `has_bell()`, leaving those server-
-                        // driven indicators stale until local input forces a
-                        // second repaint (issue #128).
-                        terminal.process_pending_output();
-                        pane.content.update(cx, |_, cx| cx.notify());
-                    }
-                });
-                if result.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
@@ -315,7 +290,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     if was_waiting {
                         was_waiting = false;
                         terminal.set_waiting_for_input(false);
-                        let _ = this.update(cx, |_pane, cx| { cx.notify(); });
+                        let _ = this.update(cx, |_pane, cx| {
+                            cx.notify();
+                        });
                     }
                     continue;
                 }
@@ -354,7 +331,8 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         let settings = terminal_view_settings(cx);
         let ws = self.workspace.read(cx);
         let shell = self.shell_type.clone().resolve_default(
-            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            ws.project(&self.project_id)
+                .and_then(|p| p.default_shell.as_ref()),
             &settings.default_shell,
         );
 
@@ -369,7 +347,12 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
 
         let size = TerminalSize::default();
-        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
+        let terminal = Arc::new(Terminal::new(
+            terminal_id.clone(),
+            size,
+            self.backend.transport(),
+            self.project_path.clone(),
+        ));
         if let Some(pid) = self.backend.get_foreground_shell_pid(&terminal_id) {
             terminal.set_shell_pid(pid);
         }
@@ -378,85 +361,16 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         self.update_child_terminals(terminal, cx);
     }
 
-    fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.backend.is_remote() {
-            return;
-        }
-
-        let settings = terminal_view_settings(cx);
-        let ws = self.workspace.read(cx);
-        let mut shell = self.shell_type.clone().resolve_default(
-            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
-            &settings.default_shell,
+    fn create_new_terminal(&mut self, _cx: &mut Context<Self>) {
+        log::warn!(
+            "TerminalPane rendered without daemon-assigned terminal id for project {} at {:?}",
+            self.project_id,
+            self.layout_path
         );
-
-        // Read fresh path and project info from workspace state
-        let (project_path, project_name, project_hooks, parent_hooks, is_worktree, folder_id, folder_name) = {
-            let project = ws.project(&self.project_id);
-            let path = project.map(|p| p.path.clone())
-                .unwrap_or_else(|| self.project_path.clone());
-            let name = project.map(|p| p.name.clone()).unwrap_or_default();
-            let hooks_cfg = project.map(|p| p.hooks.clone()).unwrap_or_default();
-            let parent = project
-                .and_then(|p| p.worktree_info.as_ref())
-                .and_then(|wt| ws.project(&wt.parent_project_id))
-                .map(|p| p.hooks.clone());
-            let is_wt = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
-            let folder = ws.folder_for_project_or_parent(&self.project_id);
-            let fid = folder.map(|f| f.id.clone());
-            let fname = folder.map(|f| f.name.clone());
-            (path, name, hooks_cfg, parent, is_wt, fid, fname)
-        };
-
-        let env = hooks::terminal_hook_env(&self.project_id, &project_name, &project_path, is_worktree, folder_id.as_deref(), folder_name.as_deref());
-
-        // Apply shell_wrapper if configured
-        let global_hooks = settings.hooks;
-        if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_shell_wrapper(&shell, &wrapper, &env);
-        }
-
-        // Apply on_create: wrap shell to run command first, then exec into shell
-        if let Some(cmd) = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_on_create(&shell, &cmd, &env);
-        }
-
-        match self
-            .backend
-            .create_terminal(&project_path, Some(&shell))
-        {
-            Ok(terminal_id) => {
-                self.terminal_id = Some(terminal_id.clone());
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_id(&self.project_id, &self.layout_path, terminal_id.clone(), cx);
-                });
-
-                let size = TerminalSize::default();
-                let terminal =
-                    Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), project_path));
-                if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
-                    terminal.set_shell_pid(pid);
-                }
-                self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
-                self.terminal = Some(terminal.clone());
-
-                self.update_child_terminals(terminal, cx);
-
-                self.pending_focus = true;
-                cx.notify();
-            }
-            Err(e) => {
-                log::error!("Failed to create terminal: {}", e);
-                crate::toast_error(format!("Failed to create terminal: {}", e), cx);
-            }
-        }
     }
 
     fn update_child_terminals(&mut self, terminal: Arc<Terminal>, cx: &mut Context<Self>) {
-        crate::register_content_pane(
-            terminal.terminal_id.clone(),
-            self.content.downgrade(),
-        );
+        crate::register_content_pane(terminal.terminal_id.clone(), self.content.downgrade());
 
         self.content.update(cx, |content, cx| {
             content.set_terminal(Some(terminal.clone()), cx);
@@ -509,14 +423,17 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             )
         })
     }
-
 }
 
 impl<D: ActionDispatch> Drop for TerminalPane<D> {
     fn drop(&mut self) {
         // Remove this pane from the spatial navigation map so stale entries
         // don't linger after a terminal is closed.
-        crate::layout::navigation::deregister_pane_bounds(self.window_id, &self.project_id, &self.layout_path);
+        crate::layout::navigation::deregister_pane_bounds(
+            self.window_id,
+            &self.project_id,
+            &self.layout_path,
+        );
     }
 }
 

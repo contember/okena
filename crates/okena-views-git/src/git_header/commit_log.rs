@@ -29,6 +29,7 @@ impl GitHeader {
 
         self.commit_log_visible = true;
         self.commit_log_loading = true;
+        self.commit_log_error = None;
         self.commit_log_entries.clear();
         self.commit_log_count = 0;
         self.commit_log_has_more = false;
@@ -53,11 +54,21 @@ impl GitHeader {
 
             let _ = this.update(cx, |this, cx| {
                 this.commit_log_loading = false;
-                let commit_count = entries.len();
-                this.commit_log_has_more = commit_count >= page;
-                this.commit_log_count = commit_count;
-                this.commit_log_entries = entries;
-                this.commit_log_branches = branches;
+                let mut errors = Vec::new();
+                match entries {
+                    Ok(entries) => {
+                        let commit_count = entries.len();
+                        this.commit_log_has_more = commit_count >= page;
+                        this.commit_log_count = commit_count;
+                        this.commit_log_entries = entries;
+                    }
+                    Err(error) => errors.push(error),
+                }
+                match branches {
+                    Ok(branches) => this.commit_log_branches = branches,
+                    Err(error) => errors.push(error),
+                }
+                this.commit_log_error = (!errors.is_empty()).then(|| errors.join("; "));
                 cx.notify();
             });
         })
@@ -69,6 +80,7 @@ impl GitHeader {
         self.commit_log_branch_picker = false;
         self.commit_log_branch_filter.clear();
         self.commit_log_loading = true;
+        self.commit_log_error = None;
         self.commit_log_entries.clear();
         self.commit_log_count = 0;
         self.commit_log_has_more = false;
@@ -78,17 +90,20 @@ impl GitHeader {
         let page = COMMIT_PAGE_SIZE;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let entries = smol::unblock(move || {
-                provider.get_commit_graph(page, branch.as_deref())
-            })
-            .await;
+            let result =
+                smol::unblock(move || provider.get_commit_graph(page, branch.as_deref())).await;
 
             let _ = this.update(cx, |this, cx| {
                 this.commit_log_loading = false;
-                let commit_count = entries.len();
-                this.commit_log_has_more = commit_count >= page;
-                this.commit_log_count = commit_count;
-                this.commit_log_entries = entries;
+                match result {
+                    Ok(entries) => {
+                        let commit_count = entries.len();
+                        this.commit_log_has_more = commit_count >= page;
+                        this.commit_log_count = commit_count;
+                        this.commit_log_entries = entries;
+                    }
+                    Err(error) => this.commit_log_error = Some(error),
+                }
                 cx.notify();
             });
         })
@@ -101,6 +116,7 @@ impl GitHeader {
         }
 
         self.commit_log_loading = true;
+        self.commit_log_error = None;
         cx.notify();
 
         let provider = self.git_provider.clone();
@@ -110,17 +126,21 @@ impl GitHeader {
         let new_total = already_loaded + page;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let entries = smol::unblock(move || {
-                provider.get_commit_graph(new_total, branch.as_deref())
-            })
-            .await;
+            let result =
+                smol::unblock(move || provider.get_commit_graph(new_total, branch.as_deref()))
+                    .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.commit_log_loading = false;
-                let commit_count = entries.len();
-                this.commit_log_has_more = commit_count >= new_total;
-                this.commit_log_count = commit_count;
-                this.commit_log_entries = entries;
+                match result {
+                    Ok(entries) => {
+                        let commit_count = entries.len();
+                        this.commit_log_has_more = commit_count >= new_total;
+                        this.commit_log_count = commit_count;
+                        this.commit_log_entries = entries;
+                    }
+                    Err(error) => this.commit_log_error = Some(error),
+                }
                 cx.notify();
             });
         })
@@ -164,56 +184,84 @@ impl GitHeader {
                     None
                 } else {
                     let all_commits: Vec<CommitLogEntry> = self.commit_log_entries.clone();
-                    Some(Arc::new(move |hash: &str, msg: &str, commit_idx: usize, _window: &mut Window, cx: &mut App| {
-                        let commit_hash = hash.to_string();
-                        let commit_msg = msg.to_string();
-                        let commits_vec = all_commits.clone();
-                        entity_handle.update(cx, |this: &mut GitHeader, cx| {
-                            this.hide_commit_log(cx);
-                        });
-                        request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                project_id: project_id.clone(),
-                                kind: ProjectOverlayKind::DiffViewer {
-                                    file: None,
-                                    mode: Some(DiffMode::Commit(commit_hash)),
-                                    commit_message: Some(commit_msg),
-                                    commits: Some(commits_vec),
-                                    commit_index: Some(commit_idx),
-                                },
-                            }), cx);
-                        });
-                    }))
+                    Some(Arc::new(
+                        move |hash: &str,
+                              msg: &str,
+                              commit_idx: usize,
+                              _window: &mut Window,
+                              cx: &mut App| {
+                            let commit_hash = hash.to_string();
+                            let commit_msg = msg.to_string();
+                            let commits_vec = all_commits.clone();
+                            entity_handle.update(cx, |this: &mut GitHeader, cx| {
+                                this.hide_commit_log(cx);
+                            });
+                            request_broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    OverlayRequest::Project(ProjectOverlay {
+                                        project_id: project_id.clone(),
+                                        kind: ProjectOverlayKind::DiffViewer {
+                                            file: None,
+                                            mode: Some(DiffMode::Commit(commit_hash)),
+                                            commit_message: Some(commit_msg),
+                                            commits: Some(commits_vec),
+                                            commit_index: Some(commit_idx),
+                                        },
+                                    }),
+                                    cx,
+                                );
+                            });
+                        },
+                    ))
                 };
             let on_commit_right_click: crate::project_header::CommitRightClickCallback = {
                 let entity_handle = cx.entity().clone();
-                Some(Arc::new(move |hash: &str, position: Point<Pixels>, _window: &mut Window, cx: &mut App| {
-                    let hash = hash.to_string();
-                    entity_handle.update(cx, |this, cx| {
-                        let entry = this
-                            .commit_log_entries
-                            .iter()
-                            .find(|e| e.hash == hash)
-                            .cloned();
-                        if let Some(entry) = entry {
-                            this.commit_row_menu = Some(CommitRowContextMenu {
-                                position,
-                                hash: entry.hash.clone(),
-                                send_text: crate::commit_send::format_commit_entry(&entry),
-                            });
-                            cx.notify();
-                        }
-                    });
-                }))
+                Some(Arc::new(
+                    move |hash: &str,
+                          position: Point<Pixels>,
+                          _window: &mut Window,
+                          cx: &mut App| {
+                        let hash = hash.to_string();
+                        entity_handle.update(cx, |this, cx| {
+                            let entry = this
+                                .commit_log_entries
+                                .iter()
+                                .find(|e| e.hash == hash)
+                                .cloned();
+                            if let Some(entry) = entry {
+                                this.commit_row_menu = Some(CommitRowContextMenu {
+                                    position,
+                                    hash: entry.hash.clone(),
+                                    send_text: crate::commit_send::format_commit_entry(&entry),
+                                });
+                                cx.notify();
+                            }
+                        });
+                    },
+                ))
             };
-            project_header::render_commit_log_content(
+            let graph = project_header::render_commit_log_content(
                 &self.commit_log_entries,
                 self.commit_log_loading,
                 on_commit_click,
                 on_commit_right_click,
                 t,
                 cx,
-            )
+            );
+            div()
+                .when_some(self.commit_log_error.clone(), |d, error| {
+                    d.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .bg(rgba(0xff00001a))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.error))
+                            .child(error),
+                    )
+                })
+                .child(graph)
+                .into_any_element()
         };
 
         let popover = deferred(
@@ -617,12 +665,13 @@ impl GitHeader {
             )
             .child(menu_separator(t))
             .child(
-                menu_item("commit-row-ctx-copy", "icons/copy.svg", "Copy Hash", t)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                menu_item("commit-row-ctx-copy", "icons/copy.svg", "Copy Hash", t).on_click(
+                    cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(hash_for_copy.clone()));
                         this.commit_row_menu = None;
                         cx.notify();
-                    })),
+                    }),
+                ),
             );
 
         Some(

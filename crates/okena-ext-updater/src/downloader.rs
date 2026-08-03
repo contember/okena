@@ -19,7 +19,8 @@ pub async fn download_asset(
             verify_checksum(&path, &asset_name, &cs_url)?;
         }
         Ok(path)
-    }).await
+    })
+    .await
 }
 
 fn download_blocking(
@@ -30,8 +31,7 @@ fn download_blocking(
     cancel_token: u64,
 ) -> Result<PathBuf> {
     let updates_dir = crate::process::get_config_dir().join("updates");
-    std::fs::create_dir_all(&updates_dir)
-        .context("failed to create updates directory")?;
+    std::fs::create_dir_all(&updates_dir).context("failed to create updates directory")?;
 
     cleanup_updates_dir();
 
@@ -49,8 +49,7 @@ fn download_blocking(
     let total = resp.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut last_pct: u8 = 0;
-    let mut file = std::fs::File::create(&dest)
-        .context("failed to create download file")?;
+    let mut file = std::fs::File::create(&dest).context("failed to create download file")?;
 
     let mut reader = resp;
     let mut buf = [0u8; 65536];
@@ -67,8 +66,7 @@ fn download_blocking(
             anyhow::bail!("download cancelled");
         }
 
-        let n = std::io::Read::read(&mut reader, &mut buf)
-            .context("download read error")?;
+        let n = std::io::Read::read(&mut reader, &mut buf).context("download read error")?;
         if n == 0 {
             break;
         }
@@ -109,7 +107,7 @@ fn download_blocking(
 }
 
 fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Result<()> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     use std::io::Read;
 
     log::info!("Verifying checksum for {}", asset_name);
@@ -136,8 +134,8 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
         })
         .with_context(|| format!("no checksum found for '{}' in SHA256SUMS", asset_name))?;
 
-    let mut file = std::fs::File::open(file_path)
-        .context("failed to open downloaded file for checksum")?;
+    let mut file =
+        std::fs::File::open(file_path).context("failed to open downloaded file for checksum")?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {
@@ -165,14 +163,15 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
 pub fn cleanup_updates_dir() {
     let updates_dir = crate::process::get_config_dir().join("updates");
     if updates_dir.exists()
-        && let Ok(entries) = std::fs::read_dir(&updates_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let _ = std::fs::remove_dir_all(&path);
-                } else {
-                    let _ = std::fs::remove_file(&path);
-                }
+        && let Ok(entries) = std::fs::read_dir(&updates_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
             }
         }
+    }
 }

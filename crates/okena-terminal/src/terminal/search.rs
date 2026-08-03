@@ -8,7 +8,12 @@ impl Terminal {
     /// Search the terminal grid for occurrences of a query string
     /// Returns a list of (line, col, length) for each match
     /// Supports case-sensitive and regex search, and searches through scrollback buffer
-    pub fn search_grid(&self, query: &str, case_sensitive: bool, is_regex: bool) -> Vec<(i32, usize, usize)> {
+    pub fn search_grid(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        is_regex: bool,
+    ) -> Vec<(i32, usize, usize)> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -59,7 +64,8 @@ impl Terminal {
 
                 // Convert a byte offset to a column index
                 let col_at_byte = |byte_offset: usize| -> usize {
-                    line_text.char_indices()
+                    line_text
+                        .char_indices()
                         .enumerate()
                         .find(|(_, (b, _))| *b == byte_offset)
                         .map(|(col, _)| col)
