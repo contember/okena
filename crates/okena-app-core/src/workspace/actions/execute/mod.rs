@@ -1309,6 +1309,7 @@ mod reconnect_shell_tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell,
             hook_terminals: HashMap::new(),
             pinned: false,
