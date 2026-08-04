@@ -382,22 +382,18 @@ impl Okena {
         let Some((view, handle)) = self.window_view_and_handle(target) else {
             return;
         };
-        let reveal = !self.project_visible_in(target, &view, project_id, cx);
-
         let workspace = self.workspace.clone();
         let focus_manager = view.read(cx).focus_manager();
         let pid = project_id.to_string();
         let tid = terminal_id.to_string();
         focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
-                if reveal {
-                    // Zoom into the project. The focus override is shown even
-                    // when the project is in the window's hidden set or behind
-                    // a folder filter, and supersedes a zoom into another
-                    // project — so the terminal below becomes reachable.
-                    ws.set_focused_project(fm, Some(pid.clone()), cx);
-                }
-                ws.focus_terminal_by_id(fm, &pid, &tid, cx);
+                // Revealing an off-screen project is `focus_terminal_by_id`'s
+                // job now. Zooming here first cancelled fullscreen (changing the
+                // focused project drops that context) before the reveal could
+                // retarget it, so a jump out of a fullscreened pane dumped the
+                // user back into the overview.
+                ws.focus_terminal_by_id(fm, target, &pid, &tid, cx);
             });
             cx.notify();
         });
