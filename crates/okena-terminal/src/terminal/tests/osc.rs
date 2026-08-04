@@ -1566,3 +1566,75 @@ fn test_agent_session_rejects_non_uuid_session_id() {
     assert_eq!(terminal.agent_session(), None);
     assert!(!terminal.take_agent_session_dirty());
 }
+
+#[test]
+fn test_agent_session_survives_label_flood() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // 64 labels sorting before "agent" used to evict the reserved keys, because
+    // the session was read from the display-clamped (MAX_LABELS) map.
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let mut fields = vec![format!(r#""agent":"claude-code","session_id":"{uuid}""#)];
+    for i in 0..64 {
+        fields.push(format!(r#""aaa{i:04}":"filler""#));
+    }
+    let lbl = b64(&format!("{{{}}}", fields.join(",")));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let session = terminal.agent_session().expect("session survives the flood");
+    assert_eq!(session.session_id, uuid);
+    // The displayed labels stay bounded regardless.
+    let status = terminal.agent_status().expect("status");
+    assert!(status.labels.len() <= okena_core::agent_status::MAX_LABELS);
+}
+
+#[test]
+fn test_agent_session_keeps_transcript_path_across_partial_updates() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let with_path = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"/tmp/t.jsonl"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={with_path}\x07").as_bytes());
+    assert!(terminal.take_agent_session_dirty());
+
+    // Most status events omit `transcript_path`; that is a partial update of the
+    // same session, not a retraction of the path we already know.
+    let without_path = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=blocked;lbl={without_path}\x07").as_bytes());
+    assert_eq!(
+        terminal
+            .agent_session()
+            .and_then(|s| s.transcript_path)
+            .as_deref(),
+        Some("/tmp/t.jsonl"),
+    );
+    // Unchanged session — nothing to re-persist.
+    assert!(!terminal.take_agent_session_dirty());
+
+    // A different session replaces the record wholesale.
+    let other = "11111111-2222-3333-4444-555555555555";
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{other}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+    let session = terminal.agent_session().expect("session");
+    assert_eq!(session.session_id, other);
+    assert_eq!(session.transcript_path, None);
+    assert!(terminal.take_agent_session_dirty());
+}

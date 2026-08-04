@@ -158,6 +158,11 @@ impl AgentStatus {
 
 /// Truncate `s` in place to at most `max` bytes, never splitting a UTF-8 char
 /// (drops the straddling char whole). Used to bound agent-supplied text.
+///
+/// Releases the backing allocation too. `String::truncate` only moves `len`, so
+/// a decoded multi-megabyte `msg=` would keep its full capacity alive for as
+/// long as the status is held on the `Terminal` — making the documented cap a
+/// length limit but not a memory limit.
 fn truncate_to_bytes(s: &mut String, max: usize) {
     if s.len() <= max {
         return;
@@ -167,12 +172,16 @@ fn truncate_to_bytes(s: &mut String, max: usize) {
         end -= 1;
     }
     s.truncate(end);
+    s.shrink_to_fit();
 }
 
 /// Bound a labels map against hostile input: keep at most [`MAX_LABELS`]
 /// entries (lowest keys first) and truncate over-long keys/values. Truncated
 /// keys may collide; the map dedups them, which is fine — this is a memory
 /// bound, not a fidelity guarantee.
+///
+/// Lossy by design, so anything Okena *acts on* must be read from the raw map
+/// before this runs — see [`crate::agent_session::RESERVED_LABEL_KEYS`].
 fn clamp_labels(labels: BTreeMap<String, String>) -> BTreeMap<String, String> {
     labels
         .into_iter()
@@ -268,6 +277,28 @@ mod tests {
             assert!(k.len() <= MAX_LABEL_KEY_LEN);
             assert!(v.len() <= MAX_LABEL_VALUE_LEN);
         }
+    }
+
+    #[test]
+    fn clamping_releases_the_oversized_allocation() {
+        // The cap must bound retained memory, not just the reported length —
+        // the status is held on the Terminal until the next report.
+        let huge = "x".repeat(MAX_CUSTOM_LEN * 256);
+        let s = AgentStatus::new_clamped(AgentLifecycle::Working, Some(huge), BTreeMap::new());
+        let custom = s.custom.expect("custom kept");
+        assert_eq!(custom.len(), MAX_CUSTOM_LEN);
+        assert!(
+            custom.capacity() < MAX_CUSTOM_LEN * 2,
+            "truncated custom still holds {} bytes of capacity",
+            custom.capacity()
+        );
+
+        let mut labels = BTreeMap::new();
+        labels.insert("k".to_string(), "v".repeat(MAX_LABEL_VALUE_LEN * 256));
+        let s = AgentStatus::new_clamped(AgentLifecycle::Working, None, labels);
+        let value = s.labels.get("k").expect("label kept");
+        assert_eq!(value.len(), MAX_LABEL_VALUE_LEN);
+        assert!(value.capacity() < MAX_LABEL_VALUE_LEN * 2);
     }
 
     #[test]

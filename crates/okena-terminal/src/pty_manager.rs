@@ -2362,17 +2362,15 @@ fn first_proc_child(_pid: u32) -> Option<u32> {
 }
 
 /// Resolve the slave device path for a pty master.
+///
+/// Uses portable-pty's cached name (resolved once via the reentrant
+/// `ttyname_r` at `openpty`) rather than `libc::ptsname`, which returns a
+/// pointer into a single static buffer — terminals are created without holding
+/// the `instances` lock, so two concurrent creations could read each other's
+/// path and hand a pane the wrong `$OKENA_TTY`.
 #[cfg(unix)]
 fn slave_pty_path(master: &dyn MasterPty) -> Option<String> {
-    let fd = master.as_raw_fd()?;
-    let ptr = unsafe { libc::ptsname(fd) };
-    if ptr.is_null() {
-        return None;
-    }
-    unsafe { std::ffi::CStr::from_ptr(ptr) }
-        .to_str()
-        .ok()
-        .map(str::to_owned)
+    Some(master.tty_name()?.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

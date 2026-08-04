@@ -372,30 +372,21 @@ impl SidecarPerform {
             .and_then(decode_osc_base64)
             .map(|json| okena_core::agent_status::parse_labels_json(&json))
             .unwrap_or_default();
-        let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
 
         // Durable session capture (resume + transcript stats). The `agent` +
         // `session_id` labels are the pane's *sticky* session identity, NOT part
         // of the ephemeral status — record them on a separate field that
         // survives `st=clear`, so the pane can later offer to resume or show
-        // stats. Require both (without an `agent` id we don't know which harness
-        // could resume it) and validate the id looks like a UUID: it's
-        // untrusted in-band data that may reach a resume command.
-        if let (Some(agent), Some(sid)) = (
-            new_status.labels.get("agent"),
-            new_status.labels.get("session_id"),
-        ) && okena_core::agent_session::is_uuid_like(sid)
-        {
-            let session = AgentSession {
-                agent: agent.clone(),
-                session_id: sid.clone(),
-                transcript_path: new_status.labels.get("transcript_path").cloned(),
-            };
-            let mut s = self.agent_session.lock();
-            if s.as_ref() != Some(&session) {
-                *s = Some(session);
-                self.agent_session_dirty.store(true, Ordering::Relaxed);
-            }
+        // stats. Read from the RAW label map: `new_clamped` below keeps only the
+        // lowest `MAX_LABELS` keys and truncates values, so reading the reserved
+        // keys after it would let a label flood hide a valid session (and a long
+        // path be silently cut).
+        let reported_session = AgentSession::from_labels(&labels);
+
+        let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
+
+        if let Some(session) = reported_session {
+            self.record_agent_session(session);
         }
 
         // Notify only on a *transition* into a notifying state, so repeated
@@ -432,6 +423,38 @@ impl SidecarPerform {
             self.pending_notifications
                 .lock()
                 .push(TerminalNotification { title: None, body });
+        }
+    }
+
+    /// Store the session identity a pane just reported, marking the persist
+    /// edge when it actually changed.
+    ///
+    /// A report for the session already on record is treated as a **partial
+    /// update**: agents send `agent` + `session_id` on every status, but only
+    /// some events carry `transcript_path`, so a plain replace would keep
+    /// flipping a known path back to `None`. A different session replaces the
+    /// record wholesale.
+    fn record_agent_session(&self, session: AgentSession) {
+        let mut slot = self.agent_session.lock();
+        let changed = match slot.as_mut() {
+            Some(existing) if existing.is_same_session(&session) => {
+                match session.transcript_path {
+                    Some(path) if existing.transcript_path.as_deref() != Some(path.as_str()) => {
+                        existing.transcript_path = Some(path);
+                        true
+                    }
+                    // No path reported, or the same one — nothing to record.
+                    _ => false,
+                }
+            }
+            _ => {
+                *slot = Some(session);
+                true
+            }
+        };
+        drop(slot);
+        if changed {
+            self.agent_session_dirty.store(true, Ordering::Relaxed);
         }
     }
 }
