@@ -1638,3 +1638,54 @@ fn test_agent_session_keeps_transcript_path_across_partial_updates() {
     assert_eq!(session.transcript_path, None);
     assert!(terminal.take_agent_session_dirty());
 }
+
+#[test]
+fn test_agent_status_rejects_a_status_addressed_to_another_pane() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // A process holding a recorded pty path across a reattach can write into
+    // whichever pane now owns that path. Driving another agent's indicator is
+    // worse than showing nothing, so a mismatched `tid` is dropped whole.
+    terminal.process_output(b"\x1b]9001;st=working;tid=someone-else\x07");
+    assert_eq!(terminal.agent_status(), None);
+    assert!(!terminal.take_remote_dirty());
+
+    // Our own id is accepted...
+    terminal.process_output(b"\x1b]9001;st=working;tid=t\x07");
+    assert!(terminal.agent_status().is_some());
+
+    // ...and so is an omitted one (senders predating the param, or outside Okena).
+    terminal.process_output(b"\x1b]9001;st=blocked\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(okena_core::agent_status::AgentLifecycle::Blocked)
+    );
+}
+
+#[test]
+fn test_agent_session_not_captured_from_a_foreign_pane() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;tid=elsewhere;lbl={lbl}\x07").as_bytes());
+
+    // The guard runs before capture, so a stray pane cannot plant a session
+    // that would later be persisted and resumed here.
+    assert_eq!(terminal.agent_session(), None);
+    assert!(!terminal.take_agent_session_dirty());
+}

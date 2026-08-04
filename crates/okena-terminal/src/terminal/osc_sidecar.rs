@@ -316,6 +316,7 @@ impl SidecarPerform {
         let mut st: Option<&str> = None;
         let mut msg_b64: Option<&str> = None;
         let mut lbl_b64: Option<&str> = None;
+        let mut tid: Option<&str> = None;
         for kv in &params[1..] {
             let Ok(s) = std::str::from_utf8(kv) else {
                 continue;
@@ -327,8 +328,25 @@ impl SidecarPerform {
                 "st" => st = Some(val),
                 "msg" => msg_b64 = Some(val),
                 "lbl" => lbl_b64 = Some(val),
+                "tid" => tid = Some(val),
                 _ => {}
             }
+        }
+
+        // A sender that knows which pane it belongs to (via `$OKENA_TERMINAL_ID`)
+        // stamps it here. Reject a mismatch: a process holding a recorded pty
+        // path across a reattach can end up writing into a pane that path now
+        // belongs to, and silently driving another agent's indicator is worse
+        // than showing nothing. `tid` is optional — senders that omit it (and
+        // anything predating it) are still accepted.
+        if let Some(tid) = tid
+            && tid != self.terminal_id
+        {
+            log::debug!(
+                "agent-status[{}]: dropping status addressed to {tid:?}",
+                self.terminal_id
+            );
+            return;
         }
 
         let Some(st) = st else {

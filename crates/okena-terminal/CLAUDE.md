@@ -57,14 +57,20 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; msg=<b64> ] [ ; lbl=<b64-j
   per-feature drain. A transition into `blocked`/`done` also queues a
   `TerminalNotification` (reusing the OSC 9 notification path + focus
   suppression).
-- `pty_manager.rs` exports `OKENA_TTY` (the pane's slave pty path, from
-  `ptsname` on the master fd) into the pane env so a process **without a
-  controlling terminal** — e.g. a Claude Code hook — can emit this OSC by
-  writing to `$OKENA_TTY` (writing to the slave reaches Okena's master reader
-  even through a nested dtach/tmux pty). `/dev/tty` only works for interactive
-  processes, not hooks. Captured at first spawn via `cmd.env`, so it goes
-  **stale on reattach** to a persistent dtach/tmux session (not yet refreshed
-  per-attach — known follow-up).
+- `pty_manager.rs` exports two env vars into the pane at spawn:
+  - `OKENA_TTY` — the pane's slave pty path (portable-pty's `tty_name`, i.e.
+    reentrant `ttyname_r`; **not** `libc::ptsname`, whose static buffer races
+    concurrent terminal creation). It exists for processes **without a
+    controlling terminal** — e.g. a Claude Code hook — since writing to the
+    slave reaches Okena's master reader even through a nested dtach/tmux pty.
+    It is a **fallback**: captured once at spawn, it goes stale when the pane
+    reattaches to a persistent session, so senders must prefer `/dev/tty` when
+    they have one (that always names the pane's current pty).
+  - `OKENA_TERMINAL_ID` — the pane's terminal id, echoed back as the OSC's
+    `tid=`. The sidecar drops a status whose `tid` isn't its own, which is what
+    contains the stale-`OKENA_TTY` failure mode: a recorded path can be
+    recycled by another pane, and driving the wrong agent's indicator is worse
+    than dropping the update. Omitted `tid` is accepted.
 
 ## Threading Model
 

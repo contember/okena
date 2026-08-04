@@ -882,8 +882,18 @@ impl PtyManager {
             }
         }
 
+        // Let anything in the pane name the pane it is running in. The
+        // agent-status OSC carries it back as `tid=`, which lets the receiving
+        // terminal reject a status meant for a different pane — the failure
+        // mode when a status is written to a recorded pty path that has since
+        // been recycled.
+        cmd.env("OKENA_TERMINAL_ID", terminal_id);
+
         // Expose the pane's slave pty so agent hooks without a controlling
         // terminal can emit in-band status updates through `$OKENA_TTY`.
+        // Captured once here, so it is only a fallback: a process that has a
+        // controlling terminal should prefer that, since this path goes stale
+        // when the pane later reattaches to a persistent tmux/dtach session.
         #[cfg(unix)]
         if let Some(path) = slave_pty_path(pair.master.as_ref()) {
             cmd.env("OKENA_TTY", path);
