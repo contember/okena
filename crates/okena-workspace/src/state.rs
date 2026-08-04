@@ -2189,8 +2189,18 @@ impl Workspace {
             .collect();
         self.lifecycle.retain_closing(&still_closing);
 
+        // Through the revealing primitive, not `set_focused_terminal`: the
+        // terminal was created from another client, and its project may be in
+        // this window's hidden set or outside its folder filter — in which case
+        // focusing by path alone lands on a pane that renders nowhere.
         for target in outcome.focus_targets {
-            self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
+            self.focus_terminal_by_id(
+                focus_manager,
+                window_id,
+                &target.project_id,
+                &target.terminal_id,
+                cx,
+            );
         }
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)

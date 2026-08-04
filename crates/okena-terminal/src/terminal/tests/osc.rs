@@ -1884,3 +1884,33 @@ fn test_agent_status_valid_base64_of_invalid_utf8_drops_the_field() {
         "an undecodable msg falls back to the default body",
     );
 }
+
+#[test]
+fn test_pending_notifications_are_bounded() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // The consumer spawns a thread per bubble and blocks it until dismissed, so
+    // an unbounded queue turns ~22 bytes of pane output into a thread per
+    // notification. Keep the newest and drop the rest.
+    for i in 0..500 {
+        terminal.process_output(format!("\x1b]9;msg {i}\x07").as_bytes());
+    }
+
+    let pending = terminal.take_pending_notifications();
+    assert!(
+        pending.len() <= 32,
+        "queue grew unbounded: {} entries",
+        pending.len()
+    );
+    assert_eq!(
+        pending.last().map(|n| n.body.as_str()),
+        Some("msg 499"),
+        "the most recent notification must survive the flood"
+    );
+}

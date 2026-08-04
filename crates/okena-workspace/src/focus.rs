@@ -307,6 +307,13 @@ impl FocusManager {
             // Zooming is the narrowest way to make it reachable; leaving the
             // hidden set / folder filter alone means the user's view returns to
             // exactly what it was when they zoom back out.
+            //
+            // This is a None→Some zoom transition, so it must save the pre-zoom
+            // focus like every other one — otherwise zooming back out leaves
+            // focus stranded on the revealed (now invisible) project: no pane
+            // renders a focus ring, `focused_terminal_state()` lies, and
+            // keystrokes go to whatever GPUI handle was focused before.
+            self.apply_zoom_focus_save_restore(&Some(project_id.clone()));
             self.focused_project_id = Some(project_id.clone());
             self.focus_project_individual = false;
         }
@@ -741,6 +748,26 @@ mod tests {
         let state = fm.focused_terminal_state().unwrap();
         assert_eq!(state.project_id, "proj2");
         assert_eq!(state.layout_path, vec![1]);
+    }
+
+    #[test]
+    fn reveal_terminal_offscreen_from_overview_restores_focus_on_zoom_out() {
+        // Revealing an off-screen project from overview zooms into it. That is a
+        // None→Some zoom transition like any other, so zooming back out must
+        // return focus to where the user was — otherwise focus is stranded on a
+        // project that is no longer rendered.
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.reveal_terminal("proj2".to_string(), vec![1], "term2".to_string(), true);
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("proj2"));
+        assert_eq!(fm.focused_terminal_state().unwrap().project_id, "proj2");
+
+        fm.set_focused_project_id(None);
+        assert_eq!(fm.focused_project_id(), None);
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
+        assert_eq!(state.layout_path, vec![0]);
     }
 
     #[test]

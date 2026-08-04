@@ -37,6 +37,15 @@ pub struct TerminalNotification {
 const OSC99_MAX_FIELD_LEN: usize = 4096;
 const OSC99_MAX_PENDING: usize = 32;
 
+/// Cap on notifications queued but not yet drained by the GPUI thread.
+///
+/// The consumer spawns a thread per bubble and, on XDG, blocks it until the
+/// bubble is dismissed or times out — with no bound of its own. A pane can
+/// queue one notification per ~22 bytes of output (`OSC 9`, or an agent status
+/// flipping blocked/done), so a single 256 KiB drain could ask for thousands of
+/// threads. Nobody can read more than a handful anyway; keep the newest.
+const MAX_PENDING_NOTIFICATIONS: usize = 32;
+
 /// Reassembly buffer for a chunked `OSC 99` notification keyed by its `i=` id.
 #[derive(Default)]
 struct Osc99Accumulator {
@@ -124,6 +133,22 @@ struct SidecarPerform {
 }
 
 impl SidecarPerform {
+    /// Queue a desktop notification, bounding the backlog.
+    ///
+    /// Every `OSC 9` / `OSC 777` / `OSC 99` / agent-status notification goes
+    /// through here so the cap lives on the sink rather than on each emitter —
+    /// otherwise every new emitter has to remember it, and the newest one
+    /// (agent status) is also the easiest to drive.
+    fn queue_notification(&self, notification: TerminalNotification) {
+        let mut queue = self.pending_notifications.lock();
+        if queue.len() >= MAX_PENDING_NOTIFICATIONS {
+            // Drop-oldest: a backlog this deep is a flood, and the most recent
+            // state is the one worth showing.
+            queue.remove(0);
+        }
+        queue.push(notification);
+    }
+
     /// Handle the kitty notification protocol: `OSC 99 ; metadata ; payload`.
     ///
     /// `metadata` is colon-separated `key=value` pairs (ASCII). We care about:
@@ -234,7 +259,7 @@ impl SidecarPerform {
         } else {
             return; // nothing to show
         };
-        self.pending_notifications.lock().push(notification);
+        self.queue_notification(notification);
     }
 
     /// Handle the ConEmu / Windows Terminal progress protocol
@@ -447,9 +472,7 @@ impl SidecarPerform {
             self.remote_dirty.store(true, Ordering::Relaxed);
         }
         if let Some(body) = notify_body {
-            self.pending_notifications
-                .lock()
-                .push(TerminalNotification { title: None, body });
+            self.queue_notification(TerminalNotification { title: None, body });
         }
     }
 
@@ -589,12 +612,10 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let message = message.trim();
                 if !message.is_empty() {
-                    self.pending_notifications
-                        .lock()
-                        .push(TerminalNotification {
-                            title: None,
-                            body: message.to_string(),
-                        });
+                    self.queue_notification(TerminalNotification {
+                        title: None,
+                        body: message.to_string(),
+                    });
                 }
             }
             b"777" => {
@@ -620,12 +641,10 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let body = body.trim();
                 if !body.is_empty() {
-                    self.pending_notifications
-                        .lock()
-                        .push(TerminalNotification {
-                            title: (!title.is_empty()).then(|| title.to_string()),
-                            body: body.to_string(),
-                        });
+                    self.queue_notification(TerminalNotification {
+                        title: (!title.is_empty()).then(|| title.to_string()),
+                        body: body.to_string(),
+                    });
                 }
             }
             b"99" => self.handle_osc99(params),

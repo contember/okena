@@ -412,9 +412,16 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             // and its free-form text shows in the tab tooltip.
             let agent_tooltip: Option<String> = agent_status.as_ref().map(|a| {
                 let life = a.lifecycle.label();
-                match a.custom.as_deref() {
-                    Some(c) if !c.is_empty() => format!("{life} · {c}"),
-                    _ => format!("agent {life}"),
+                // The text is agent-supplied and only byte-bounded, so flatten
+                // and clip it — the tooltip is the one surface with no ellipsis.
+                match a
+                    .custom
+                    .as_deref()
+                    .map(okena_core::agent_status::display_snippet)
+                    .filter(|c| !c.is_empty())
+                {
+                    Some(c) => format!("{life} · {c}"),
+                    None => format!("agent {life}"),
                 }
             });
 
