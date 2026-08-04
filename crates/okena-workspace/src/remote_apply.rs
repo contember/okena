@@ -46,6 +46,39 @@ pub struct RemoteSyncOutcome {
     pub focus_targets: Vec<RemoteFocusTarget>,
 }
 
+/// The agent status each snapshot reports, keyed by the **client-side**
+/// (connection-prefixed) terminal id, so the caller can apply it straight to
+/// its terminal registry.
+///
+/// Every terminal in a snapshot's layout gets an entry — `None` when the daemon
+/// reports no status for it. That is what makes reconnects converge: a snapshot
+/// is the full truth, so a status the daemon has since cleared must be cleared
+/// on the client rather than left behind.
+///
+/// Separate from [`apply_remote_snapshot`] because agent status is runtime-only:
+/// it lives on `Terminal`, not in `WorkspaceData`. GPUI-free and unit-testable.
+pub fn snapshot_agent_statuses(
+    snapshots: &[RemoteSnapshot],
+) -> Vec<(String, Option<okena_core::agent_status::AgentStatus>)> {
+    let mut out = Vec::new();
+    for snap in snapshots {
+        let Some(state) = snap.state.as_ref() else {
+            continue;
+        };
+        let conn_id = &snap.config.id;
+        for api_project in &state.projects {
+            let Some(layout) = api_project.layout.as_ref() else {
+                continue;
+            };
+            for terminal_id in layout.collect_terminal_ids() {
+                let status = api_project.terminal_agent_status.get(&terminal_id).cloned();
+                out.push((format!("remote:{conn_id}:{terminal_id}"), status));
+            }
+        }
+    }
+    out
+}
+
 /// Apply remote connection snapshots to `data`, reconciling materialized remote
 /// projects, folders, and project order, while preserving local visual state and
 /// pruning stale remote entries.
@@ -1204,5 +1237,55 @@ mod tests {
                 .hidden_project_ids
                 .contains("remote:conn:p1")
         );
+    }
+
+    // === snapshot_agent_statuses ===
+
+    fn working(custom: &str) -> okena_core::agent_status::AgentStatus {
+        okena_core::agent_status::AgentStatus {
+            lifecycle: okena_core::agent_status::AgentLifecycle::Working,
+            custom: Some(custom.to_string()),
+            labels: Default::default(),
+        }
+    }
+
+    #[test]
+    fn snapshot_agent_statuses_prefixes_ids_and_clears_the_rest() {
+        let mut project = api_project(
+            "p1",
+            Some(ApiLayoutNode::Split {
+                direction: okena_state::SplitDirection::Horizontal,
+                sizes: vec![50.0, 50.0],
+                children: vec![terminal("t1"), terminal("t2")],
+            }),
+        );
+        project
+            .terminal_agent_status
+            .insert("t1".to_string(), working("running tests"));
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![project], vec!["p1".to_string()], Vec::new())),
+        };
+
+        let statuses = snapshot_agent_statuses(&[snap]);
+
+        assert_eq!(
+            statuses,
+            vec![
+                ("remote:c1:t1".to_string(), Some(working("running tests"))),
+                // Reported for every pane in the layout, so a status the daemon
+                // has cleared gets cleared on the client instead of lingering.
+                ("remote:c1:t2".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_agent_statuses_ignores_a_connection_with_no_state() {
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: None,
+        };
+        assert!(snapshot_agent_statuses(&[snap]).is_empty());
     }
 }

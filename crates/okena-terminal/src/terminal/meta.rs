@@ -74,6 +74,22 @@ impl Terminal {
         self.agent_status.lock().clone()
     }
 
+    /// Adopt the agent status a remote snapshot reports for this terminal.
+    ///
+    /// A client parses `OSC 9001` from the live byte stream, but a snapshot
+    /// replays a *rendered grid* — the OSC that set the current status was
+    /// consumed long before, so a client that connects (or reconnects) mid-run
+    /// would otherwise show no agent until the next report, or keep showing a
+    /// status the daemon has since cleared.
+    ///
+    /// Deliberately not the parser path: it neither queues a notification (the
+    /// daemon already raised one when the transition happened; re-raising it on
+    /// every reconnect would spam) nor sets `remote_dirty` (this *is* remote
+    /// state arriving, not local state to push back).
+    pub fn hydrate_agent_status(&self, status: Option<okena_core::agent_status::AgentStatus>) {
+        *self.agent_status.lock() = status;
+    }
+
     /// Consume the one-shot "remote-visible state changed since last drain"
     /// edge. Returns true if anything marked it since the previous call, then
     /// resets it. The PTY event loop uses this to bump the remote
