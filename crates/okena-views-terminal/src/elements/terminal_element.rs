@@ -4,6 +4,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
+use okena_core::theme::ThemeColors;
 use okena_files::theme::theme;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_ui::color_utils::tint_color;
@@ -33,7 +34,12 @@ pub(crate) fn next_resize_viewer_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{deregister_resize_viewer, shared_resize_target};
+    use super::{
+        TerminalGridLayout, TerminalRenderCache, TerminalRenderCacheKey, deregister_resize_viewer,
+        shared_resize_target,
+    };
+    use gpui::{Font, FontFeatures, FontStyle, FontWeight};
+    use okena_core::theme::{DARK_THEME, LIGHT_THEME};
     use okena_terminal::terminal::TerminalSize;
 
     fn size(cols: u16, rows: u16) -> TerminalSize {
@@ -88,6 +94,75 @@ mod tests {
         assert_eq!((target.cols, target.rows), (120, 40));
 
         deregister_resize_viewer(terminal_id, 2);
+    }
+
+    fn cache_key() -> TerminalRenderCacheKey {
+        TerminalRenderCacheKey {
+            content_generation: 7,
+            selection: None,
+            font: Font {
+                family: "Test Mono".into(),
+                features: FontFeatures::disable_ligatures(),
+                fallbacks: None,
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Normal,
+            },
+            theme: DARK_THEME,
+        }
+    }
+
+    fn empty_layout() -> TerminalGridLayout {
+        TerminalGridLayout {
+            batched_runs: Vec::new(),
+            rects: Vec::new(),
+            screen_lines: 0,
+            display_offset: 0,
+            cursor_col: 0,
+            cursor_visual_line: 0,
+            cells_scanned: 0,
+        }
+    }
+
+    #[test]
+    fn render_cache_hits_only_for_an_exact_key_with_layout() {
+        let key = cache_key();
+        let mut cache = TerminalRenderCache::default();
+        assert!(!cache.matches(&key));
+
+        cache.store(key.clone(), empty_layout());
+        assert!(cache.matches(&key));
+
+        let mut changed_generation = key.clone();
+        changed_generation.content_generation += 1;
+        assert!(!cache.matches(&changed_generation));
+
+        let mut changed_selection = key.clone();
+        changed_selection.selection = Some(((1, 2), (3, 4)));
+        assert!(!cache.matches(&changed_selection));
+
+        let mut changed_font = key.clone();
+        changed_font.font.weight = FontWeight::BOLD;
+        assert!(!cache.matches(&changed_font));
+
+        let mut changed_theme = key;
+        changed_theme.theme = LIGHT_THEME;
+        assert!(!cache.matches(&changed_theme));
+
+        cache.layout = None;
+        assert!(!cache.matches(&cache_key()));
+    }
+
+    #[test]
+    fn render_cache_invalidate_drops_key_and_layout() {
+        let key = cache_key();
+        let mut cache = TerminalRenderCache::default();
+        cache.store(key.clone(), empty_layout());
+
+        cache.invalidate();
+
+        assert!(!cache.matches(&key));
+        assert!(cache.key.is_none());
+        assert!(cache.layout.is_none());
     }
 }
 
@@ -229,6 +304,7 @@ pub struct TerminalElement {
     terminal: Arc<Terminal>,
     focus_handle: FocusHandle,
     resize_viewer_id: u64,
+    render_cache: Arc<Mutex<TerminalRenderCache>>,
     search_matches: Arc<Vec<SearchMatch>>,
     current_match_index: Option<usize>,
     url_matches: Arc<Vec<URLMatch>>,
@@ -246,6 +322,7 @@ impl TerminalElement {
             terminal,
             focus_handle,
             resize_viewer_id,
+            render_cache: Arc::new(Mutex::new(TerminalRenderCache::default())),
             search_matches: Arc::new(Vec::new()),
             current_match_index: None,
             url_matches: Arc::new(Vec::new()),
@@ -255,6 +332,14 @@ impl TerminalElement {
             zoom_level: 1.0,
             bg_tint: None,
         }
+    }
+
+    pub(crate) fn with_render_cache(
+        mut self,
+        render_cache: Arc<Mutex<TerminalRenderCache>>,
+    ) -> Self {
+        self.render_cache = render_cache;
+        self
     }
 
     pub fn with_bg_tint(mut self, tint: Option<u32>) -> Self {
@@ -316,6 +401,274 @@ pub struct TerminalElementState {
     font_bold: Font,
     font_italic: Font,
     font_bold_italic: Font,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TerminalRenderCacheKey {
+    content_generation: u64,
+    selection: Option<((usize, i32), (usize, i32))>,
+    font: Font,
+    theme: ThemeColors,
+}
+
+#[derive(Debug)]
+struct TerminalGridLayout {
+    batched_runs: Vec<BatchedTextRun>,
+    rects: Vec<LayoutRect>,
+    screen_lines: usize,
+    display_offset: i32,
+    cursor_col: usize,
+    cursor_visual_line: i32,
+    cells_scanned: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TerminalRenderCache {
+    key: Option<TerminalRenderCacheKey>,
+    layout: Option<Arc<TerminalGridLayout>>,
+}
+
+impl TerminalRenderCache {
+    fn matches(&self, key: &TerminalRenderCacheKey) -> bool {
+        self.key.as_ref() == Some(key) && self.layout.is_some()
+    }
+
+    fn store(&mut self, key: TerminalRenderCacheKey, layout: TerminalGridLayout) {
+        self.key = Some(key);
+        self.layout = Some(Arc::new(layout));
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.key = None;
+        self.layout = None;
+    }
+}
+
+fn build_terminal_grid_layout(
+    terminal: &Terminal,
+    selection: Option<((usize, i32), (usize, i32))>,
+    t: &ThemeColors,
+    state: &TerminalElementState,
+) -> TerminalGridLayout {
+    let (batched_runs, rects, screen_lines, display_offset, cursor_point, cols) = terminal
+        .with_content(|term| {
+            let grid = term.grid();
+            let screen_lines = grid.screen_lines();
+            let cols = grid.columns();
+            let display_offset = grid.display_offset() as i32;
+            let cursor_point = grid.cursor.point;
+
+            let mut batched_runs: Vec<BatchedTextRun> = Vec::new();
+            let mut rects: Vec<LayoutRect> = Vec::new();
+            let mut current_batch: Option<BatchedTextRun> = None;
+            let mut current_rect: Option<LayoutRect> = None;
+
+            for row in 0..screen_lines {
+                let visual_line = row as i32;
+                let buffer_line = visual_line - display_offset;
+
+                if let Some(batch) = current_batch.take() {
+                    batched_runs.push(batch);
+                }
+                if let Some(rect) = current_rect.take() {
+                    rects.push(rect);
+                }
+
+                for col in 0..cols {
+                    let cell_point = alacritty_terminal::index::Point {
+                        line: Line(buffer_line),
+                        column: Column(col),
+                    };
+                    let cell = &grid[cell_point];
+                    let col_i32 = col as i32;
+
+                    let mut fg = cell.fg;
+                    let mut bg = cell.bg;
+
+                    if cell.flags.contains(Flags::BOLD) {
+                        fg = match fg {
+                            Color::Named(NamedColor::Black) => {
+                                Color::Named(NamedColor::BrightBlack)
+                            }
+                            Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
+                            Color::Named(NamedColor::Green) => {
+                                Color::Named(NamedColor::BrightGreen)
+                            }
+                            Color::Named(NamedColor::Yellow) => {
+                                Color::Named(NamedColor::BrightYellow)
+                            }
+                            Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
+                            Color::Named(NamedColor::Magenta) => {
+                                Color::Named(NamedColor::BrightMagenta)
+                            }
+                            Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
+                            Color::Named(NamedColor::White) => {
+                                Color::Named(NamedColor::BrightWhite)
+                            }
+                            Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
+                            other => other,
+                        };
+                    }
+
+                    if cell.flags.contains(Flags::INVERSE) {
+                        std::mem::swap(&mut fg, &mut bg);
+                    }
+
+                    let is_selected =
+                        if let Some(((start_col, start_row), (end_col, end_row))) = selection {
+                            let (start_row, start_col, end_row, end_col) = if start_row < end_row
+                                || (start_row == end_row && start_col <= end_col)
+                            {
+                                (start_row, start_col, end_row, end_col)
+                            } else {
+                                (end_row, end_col, start_row, start_col)
+                            };
+                            if buffer_line >= start_row && buffer_line <= end_row {
+                                if start_row == end_row {
+                                    col >= start_col && col <= end_col
+                                } else if buffer_line == start_row {
+                                    col >= start_col
+                                } else if buffer_line == end_row {
+                                    col <= end_col
+                                } else {
+                                    true
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                    let bg_color = if is_selected {
+                        Some(rgb(t.selection_bg).into())
+                    } else if !is_default_bg(&bg, t) {
+                        Some(ansi_to_hsla(t, &bg))
+                    } else {
+                        None
+                    };
+
+                    if let Some(color) = bg_color {
+                        let can_extend = current_rect.as_ref().is_some_and(|rect| {
+                            rect.line == visual_line
+                                && rect.start_col + rect.num_cells as i32 == col_i32
+                                && rect.color == color
+                        });
+                        if can_extend {
+                            if let Some(rect) = current_rect.as_mut() {
+                                rect.extend();
+                            }
+                        } else {
+                            if let Some(previous) = current_rect.take() {
+                                rects.push(previous);
+                            }
+                            current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
+                        }
+                    } else if let Some(rect) = current_rect.take() {
+                        rects.push(rect);
+                    }
+
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT)
+                    {
+                        continue;
+                    }
+
+                    let mut fg_color = if is_selected {
+                        rgb(t.selection_fg).into()
+                    } else {
+                        ansi_to_hsla(t, &fg)
+                    };
+
+                    if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
+                        fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
+                    }
+
+                    let is_bold = cell.flags.contains(Flags::BOLD);
+                    let is_italic = cell.flags.contains(Flags::ITALIC);
+                    let font = match (is_bold, is_italic) {
+                        (true, true) => state.font_bold_italic.clone(),
+                        (true, false) => state.font_bold.clone(),
+                        (false, true) => state.font_italic.clone(),
+                        (false, false) => state.font.clone(),
+                    };
+
+                    let text_style = TextRun {
+                        len: cell.c.len_utf8(),
+                        font,
+                        color: fg_color,
+                        background_color: None,
+                        underline: if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                            let line_color = cell
+                                .underline_color()
+                                .map(|color| ansi_to_hsla(t, &color))
+                                .unwrap_or(fg_color);
+                            Some(UnderlineStyle {
+                                color: Some(line_color),
+                                thickness: px(1.0),
+                                wavy: cell.flags.contains(Flags::UNDERCURL),
+                            })
+                        } else {
+                            None
+                        },
+                        strikethrough: if cell.flags.contains(Flags::STRIKEOUT) {
+                            Some(StrikethroughStyle {
+                                color: Some(fg_color),
+                                thickness: px(1.0),
+                            })
+                        } else {
+                            None
+                        },
+                    };
+
+                    let can_append = current_batch
+                        .as_ref()
+                        .is_some_and(|batch| batch.can_append(&text_style, visual_line, col_i32));
+                    if can_append {
+                        if let Some(batch) = current_batch.as_mut() {
+                            batch.append_char(cell.c);
+                        }
+                    } else {
+                        if let Some(previous) = current_batch.take() {
+                            batched_runs.push(previous);
+                        }
+                        current_batch = Some(BatchedTextRun::new(
+                            visual_line,
+                            col_i32,
+                            cell.c,
+                            text_style,
+                        ));
+                    }
+                }
+            }
+
+            if let Some(batch) = current_batch {
+                batched_runs.push(batch);
+            }
+            if let Some(rect) = current_rect {
+                rects.push(rect);
+            }
+
+            (
+                batched_runs,
+                rects,
+                screen_lines,
+                display_offset,
+                cursor_point,
+                cols,
+            )
+        });
+    TerminalGridLayout {
+        batched_runs,
+        rects,
+        screen_lines,
+        display_offset,
+        cursor_col: cursor_point.column.0,
+        cursor_visual_line: cursor_point.line.0 + display_offset,
+        cells_scanned: screen_lines.saturating_mul(cols),
+    }
 }
 
 impl Element for TerminalElement {
@@ -446,6 +799,8 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let render_probe = okena_core::render_probe::terminal_paint();
+
         // Get theme colors
         let t = theme(cx);
 
@@ -455,6 +810,11 @@ impl Element for TerminalElement {
             viewer_id: self.resize_viewer_id,
         };
         window.handle_input(&self.focus_handle, input_handler, cx);
+
+        // Remote readers enqueue bytes without advancing `content_generation`;
+        // drain before sampling the cache key so newly arrived output can never
+        // be mistaken for an unchanged frame.
+        self.terminal.process_pending_output();
 
         let cell_width = state.cell_width;
         let line_height = state.line_height;
@@ -554,344 +914,177 @@ impl Element for TerminalElement {
             None => self.cursor_style,
         };
 
-        self.terminal.with_content(|term| {
-            let grid = term.grid();
-            let screen_lines = grid.screen_lines();
-            let cols = grid.columns();
-            let display_offset = grid.display_offset() as i32;
+        let mut cache_key = TerminalRenderCacheKey {
+            content_generation: self.terminal.content_generation(),
+            selection,
+            font: state.font.clone(),
+            theme: t,
+        };
+        let mut render_cache = self.render_cache.lock();
+        let grid_cache_hit = render_cache.matches(&cache_key);
+        if !grid_cache_hit {
+            let layout = build_terminal_grid_layout(&self.terminal, selection, &t, state);
+            // `with_content` drains pending remote output before taking the grid
+            // snapshot, so retain the generation that the cached layout actually
+            // represents rather than the value observed before the drain.
+            cache_key.content_generation = self.terminal.content_generation();
+            render_cache.store(cache_key, layout);
+        }
+        let layout = render_cache.layout.as_ref().cloned();
+        drop(render_cache);
+        let Some(layout) = layout else {
+            debug_assert!(false, "terminal render cache missing after initialization");
+            return;
+        };
 
-            let origin = bounds.origin;
+        // Phase 2: Paint backgrounds
+        for rect in &layout.rects {
+            rect.paint(bounds.origin, cell_width, line_height, window);
+        }
 
-            // Phase 1: Layout grid - collect batched runs and background rects
-            let mut batched_runs: Vec<BatchedTextRun> = Vec::new();
-            let mut rects: Vec<LayoutRect> = Vec::new();
-            let mut current_batch: Option<BatchedTextRun> = None;
-            let mut current_rect: Option<LayoutRect> = None;
-
-            for row in 0..screen_lines {
-                let visual_line = row as i32;
-                let buffer_line = visual_line - display_offset;
-
-                if let Some(batch) = current_batch.take() {
-                    batched_runs.push(batch);
-                }
-                if let Some(rect) = current_rect.take() {
-                    rects.push(rect);
-                }
-
-                for col in 0..cols {
-                    let cell_point = alacritty_terminal::index::Point {
-                        line: Line(buffer_line),
-                        column: Column(col),
-                    };
-                    let cell = &grid[cell_point];
-                    let col_i32 = col as i32;
-
-                    let mut fg = cell.fg;
-                    let mut bg = cell.bg;
-
-                    if cell.flags.contains(Flags::BOLD) {
-                        fg = match fg {
-                            Color::Named(NamedColor::Black) => {
-                                Color::Named(NamedColor::BrightBlack)
-                            }
-                            Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
-                            Color::Named(NamedColor::Green) => {
-                                Color::Named(NamedColor::BrightGreen)
-                            }
-                            Color::Named(NamedColor::Yellow) => {
-                                Color::Named(NamedColor::BrightYellow)
-                            }
-                            Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
-                            Color::Named(NamedColor::Magenta) => {
-                                Color::Named(NamedColor::BrightMagenta)
-                            }
-                            Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
-                            Color::Named(NamedColor::White) => {
-                                Color::Named(NamedColor::BrightWhite)
-                            }
-                            Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
-                            other => other,
-                        };
-                    }
-
-                    if cell.flags.contains(Flags::INVERSE) {
-                        std::mem::swap(&mut fg, &mut bg);
-                    }
-
-                    let is_selected =
-                        if let Some(((start_col, start_row), (end_col, end_row))) = selection {
-                            let (start_row, start_col, end_row, end_col) = if start_row < end_row
-                                || (start_row == end_row && start_col <= end_col)
-                            {
-                                (start_row, start_col, end_row, end_col)
-                            } else {
-                                (end_row, end_col, start_row, start_col)
-                            };
-                            if buffer_line >= start_row && buffer_line <= end_row {
-                                if start_row == end_row {
-                                    col >= start_col && col <= end_col
-                                } else if buffer_line == start_row {
-                                    col >= start_col
-                                } else if buffer_line == end_row {
-                                    col <= end_col
-                                } else {
-                                    true
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                    let bg_color = if is_selected {
-                        Some(rgb(t.selection_bg).into())
-                    } else if !is_default_bg(&bg, &t) {
-                        Some(ansi_to_hsla(&t, &bg))
-                    } else {
-                        None
-                    };
-
-                    if let Some(color) = bg_color {
-                        let can_extend = current_rect.as_ref().is_some_and(|rect| {
-                            rect.line == visual_line
-                                && rect.start_col + rect.num_cells as i32 == col_i32
-                                && rect.color == color
-                        });
-                        if can_extend {
-                            if let Some(rect) = current_rect.as_mut() {
-                                rect.extend();
-                            }
-                        } else {
-                            if let Some(prev) = current_rect.take() {
-                                rects.push(prev);
-                            }
-                            current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
-                        }
-                    } else if let Some(rect) = current_rect.take() {
-                        rects.push(rect);
-                    }
-
-                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                        continue;
-                    }
-                    if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT)
-                    {
-                        continue;
-                    }
-
-                    let mut fg_color = if is_selected {
-                        rgb(t.selection_fg).into()
-                    } else {
-                        ansi_to_hsla(&t, &fg)
-                    };
-
-                    if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
-                        fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
-                    }
-
-                    let is_bold = cell.flags.contains(Flags::BOLD);
-                    let is_italic = cell.flags.contains(Flags::ITALIC);
-                    let font = match (is_bold, is_italic) {
-                        (true, true) => state.font_bold_italic.clone(),
-                        (true, false) => state.font_bold.clone(),
-                        (false, true) => state.font_italic.clone(),
-                        (false, false) => state.font.clone(),
-                    };
-
-                    let text_style = TextRun {
-                        len: cell.c.len_utf8(),
-                        font,
-                        color: fg_color,
-                        background_color: None,
-                        underline: if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                            let line_color = cell
-                                .underline_color()
-                                .map(|c| ansi_to_hsla(&t, &c))
-                                .unwrap_or(fg_color);
-                            Some(UnderlineStyle {
-                                color: Some(line_color),
-                                thickness: px(1.0),
-                                wavy: cell.flags.contains(Flags::UNDERCURL),
-                            })
-                        } else {
-                            None
-                        },
-                        strikethrough: if cell.flags.contains(Flags::STRIKEOUT) {
-                            Some(StrikethroughStyle {
-                                color: Some(fg_color),
-                                thickness: px(1.0),
-                            })
-                        } else {
-                            None
-                        },
-                    };
-
-                    let can_append = current_batch
-                        .as_ref()
-                        .is_some_and(|batch| batch.can_append(&text_style, visual_line, col_i32));
-                    if can_append {
-                        if let Some(batch) = current_batch.as_mut() {
-                            batch.append_char(cell.c);
-                        }
-                    } else {
-                        if let Some(prev) = current_batch.take() {
-                            batched_runs.push(prev);
-                        }
-                        current_batch = Some(BatchedTextRun::new(
-                            visual_line,
-                            col_i32,
-                            cell.c,
-                            text_style,
-                        ));
-                    }
-                }
+        // Phase 2.5: Paint search highlights
+        // search_match.line is an absolute grid line; convert to visual row
+        for (idx, search_match) in self.search_matches.iter().enumerate() {
+            let visual_line = search_match.line + layout.display_offset;
+            if visual_line < 0 || visual_line >= layout.screen_lines as i32 {
+                continue;
             }
 
-            if let Some(batch) = current_batch {
-                batched_runs.push(batch);
-            }
-            if let Some(rect) = current_rect {
-                rects.push(rect);
+            let is_current = self.current_match_index == Some(idx);
+            let highlight_color = if is_current {
+                let c = rgb(t.search_current_bg);
+                Hsla::from(Rgba {
+                    r: c.r,
+                    g: c.g,
+                    b: c.b,
+                    a: 0.7,
+                })
+            } else {
+                let c = rgb(t.search_match_bg);
+                Hsla::from(Rgba {
+                    r: c.r,
+                    g: c.g,
+                    b: c.b,
+                    a: 0.5,
+                })
+            };
+
+            let position = point(
+                px((f32::from(bounds.origin.x) + search_match.col as f32 * cell_width_f).floor()),
+                bounds.origin.y + line_height * visual_line as f32,
+            );
+            let size = size(
+                px((cell_width_f * search_match.len as f32).ceil()),
+                line_height,
+            );
+
+            window.paint_quad(fill(Bounds::new(position, size), highlight_color));
+        }
+
+        // Phase 2.6: Paint URL underlines
+        for url_match in self.url_matches.iter() {
+            let is_hovered = self.hovered_url_group == Some(url_match.link_group);
+
+            if url_match.line < 0 || url_match.line >= layout.screen_lines as i32 {
+                continue;
             }
 
-            // Phase 2: Paint backgrounds
-            for rect in &rects {
-                rect.paint(origin, cell_width, line_height, window);
-            }
+            let url_x =
+                px((f32::from(bounds.origin.x) + url_match.col as f32 * cell_width_f).floor());
+            let url_y = bounds.origin.y + line_height * url_match.line as f32;
+            let url_width = px((cell_width_f * url_match.len as f32).ceil());
 
-            // Phase 2.5: Paint search highlights
-            // search_match.line is an absolute grid line; convert to visual row
-            for (idx, search_match) in self.search_matches.iter().enumerate() {
-                let visual_line = search_match.line + display_offset;
-                if visual_line < 0 || visual_line >= screen_lines as i32 {
-                    continue;
-                }
-
-                let is_current = self.current_match_index == Some(idx);
-                let highlight_color = if is_current {
-                    let c = rgb(t.search_current_bg);
-                    Hsla::from(Rgba {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
-                        a: 0.7,
-                    })
-                } else {
-                    let c = rgb(t.search_match_bg);
-                    Hsla::from(Rgba {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
-                        a: 0.5,
-                    })
+            if is_hovered {
+                let hover_bg = Hsla::from(Rgba {
+                    r: 0.0,
+                    g: 0.48,
+                    b: 0.8,
+                    a: 0.2,
+                });
+                let hover_bounds = Bounds {
+                    origin: point(url_x, url_y),
+                    size: size(url_width, line_height),
                 };
+                window.paint_quad(fill(hover_bounds, hover_bg));
 
-                let position = point(
-                    px((f32::from(origin.x) + search_match.col as f32 * cell_width_f).floor()),
-                    origin.y + line_height * visual_line as f32,
-                );
-                let size = size(
-                    px((cell_width_f * search_match.len as f32).ceil()),
-                    line_height,
-                );
-
-                window.paint_quad(fill(Bounds::new(position, size), highlight_color));
+                let underline_color = rgb(t.border_active);
+                let underline_y = url_y + line_height - px(2.0);
+                let underline_bounds = Bounds {
+                    origin: point(url_x, underline_y),
+                    size: size(url_width, px(1.0)),
+                };
+                window.paint_quad(fill(underline_bounds, underline_color));
+            } else {
+                let underline_color = Hsla::from(Rgba {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 0.5,
+                });
+                let underline_y = url_y + line_height - px(2.0);
+                let underline_bounds = Bounds {
+                    origin: point(url_x, underline_y),
+                    size: size(url_width, px(1.0)),
+                };
+                window.paint_quad(fill(underline_bounds, underline_color));
             }
+        }
 
-            // Phase 2.6: Paint URL underlines
-            for url_match in self.url_matches.iter() {
-                let is_hovered = self.hovered_url_group == Some(url_match.link_group);
+        // Phase 3: Paint text runs
+        for batch in &layout.batched_runs {
+            batch.paint(
+                bounds.origin,
+                cell_width,
+                line_height,
+                font_size,
+                window,
+                cx,
+            );
+        }
 
-                if url_match.line < 0 || url_match.line >= screen_lines as i32 {
-                    continue;
-                }
+        // Phase 4: Paint cursor
+        if cursor_visible
+            && layout.cursor_visual_line >= 0
+            && layout.cursor_visual_line < layout.screen_lines as i32
+        {
+            let cursor_x =
+                px((f32::from(bounds.origin.x) + layout.cursor_col as f32 * cell_width_f).floor());
+            let cursor_y = px((f32::from(bounds.origin.y)
+                + layout.cursor_visual_line as f32 * line_height_f)
+                .floor());
 
-                let url_x = px((f32::from(origin.x) + url_match.col as f32 * cell_width_f).floor());
-                let url_y = origin.y + line_height * url_match.line as f32;
-                let url_width = px((cell_width_f * url_match.len as f32).ceil());
+            let cursor_rgba = rgb(t.cursor);
+            let cursor_color = Hsla::from(Rgba {
+                r: cursor_rgba.r,
+                g: cursor_rgba.g,
+                b: cursor_rgba.b,
+                a: 0.8,
+            });
 
-                if is_hovered {
-                    let hover_bg = Hsla::from(Rgba {
-                        r: 0.0,
-                        g: 0.48,
-                        b: 0.8,
-                        a: 0.2,
-                    });
-                    let hover_bounds = Bounds {
-                        origin: point(url_x, url_y),
-                        size: size(url_width, line_height),
-                    };
-                    window.paint_quad(fill(hover_bounds, hover_bg));
+            let cursor_bounds = match cursor_style {
+                CursorShape::Block => Bounds {
+                    origin: point(cursor_x, cursor_y),
+                    size: size(cell_width, line_height),
+                },
+                CursorShape::Bar => Bounds {
+                    origin: point(cursor_x, cursor_y),
+                    size: size(px(2.0), line_height),
+                },
+                CursorShape::Underline => Bounds {
+                    origin: point(cursor_x, cursor_y + line_height - px(2.0)),
+                    size: size(cell_width, px(2.0)),
+                },
+            };
+            window.paint_quad(fill(cursor_bounds, cursor_color));
+        }
 
-                    let underline_color = rgb(t.border_active);
-                    let underline_y = url_y + line_height - px(2.0);
-                    let underline_bounds = Bounds {
-                        origin: point(url_x, underline_y),
-                        size: size(url_width, px(1.0)),
-                    };
-                    window.paint_quad(fill(underline_bounds, underline_color));
-                } else {
-                    let underline_color = Hsla::from(Rgba {
-                        r: 0.5,
-                        g: 0.5,
-                        b: 0.5,
-                        a: 0.5,
-                    });
-                    let underline_y = url_y + line_height - px(2.0);
-                    let underline_bounds = Bounds {
-                        origin: point(url_x, underline_y),
-                        size: size(url_width, px(1.0)),
-                    };
-                    window.paint_quad(fill(underline_bounds, underline_color));
-                }
-            }
-
-            // Phase 3: Paint text runs
-            for batch in &batched_runs {
-                batch.paint(origin, cell_width, line_height, font_size, window, cx);
-            }
-
-            // Phase 4: Paint cursor
-            if cursor_visible {
-                let cursor_point = term.grid().cursor.point;
-                let cursor_visual_line = cursor_point.line.0 + display_offset;
-
-                if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
-                    let cursor_x = px((f32::from(origin.x)
-                        + cursor_point.column.0 as f32 * cell_width_f)
-                        .floor());
-                    let cursor_y = px((f32::from(origin.y)
-                        + cursor_visual_line as f32 * line_height_f)
-                        .floor());
-
-                    let cursor_rgba = rgb(t.cursor);
-                    let cursor_color = Hsla::from(Rgba {
-                        r: cursor_rgba.r,
-                        g: cursor_rgba.g,
-                        b: cursor_rgba.b,
-                        a: 0.8,
-                    });
-
-                    let cursor_bounds = match cursor_style {
-                        CursorShape::Block => Bounds {
-                            origin: point(cursor_x, cursor_y),
-                            size: size(cell_width, line_height),
-                        },
-                        CursorShape::Bar => Bounds {
-                            origin: point(cursor_x, cursor_y),
-                            size: size(px(2.0), line_height),
-                        },
-                        CursorShape::Underline => Bounds {
-                            origin: point(cursor_x, cursor_y + line_height - px(2.0)),
-                            size: size(cell_width, px(2.0)),
-                        },
-                    };
-                    window.paint_quad(fill(cursor_bounds, cursor_color));
-                }
-            }
-        });
+        let cells_scanned = if grid_cache_hit {
+            0
+        } else {
+            layout.cells_scanned
+        };
+        let text_runs = layout.batched_runs.len();
+        let background_rects = layout.rects.len();
 
         // Phase 5: Paint fog overlay for unfocused terminals
         if !is_focused {
@@ -904,6 +1097,15 @@ impl Element for TerminalElement {
             });
             window.paint_quad(fill(bounds, fog));
         }
+
+        render_probe.finish(okena_core::render_probe::TerminalPaintStats {
+            live_viewers: n_viewers,
+            grid_cache_hit,
+            cells_scanned,
+            cells_changed: None,
+            text_runs,
+            background_rects,
+        });
 
         let painted_samples = okena_core::latency_probe::client_painted(
             &self.terminal.terminal_id,

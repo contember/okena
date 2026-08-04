@@ -10,6 +10,55 @@ pub struct ActivityRepaintDecision<T> {
     pub start_timer: bool,
 }
 
+/// Decision produced when activity enters a throttled repaint stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActivityRepaintThrottleDecision {
+    /// Present immediately on the idle-to-active edge.
+    pub repaint_now: bool,
+    /// Start the stream's sole cadence timer.
+    pub start_timer: bool,
+}
+
+/// Leading-edge repaint plus coalesced sustained/trailing updates.
+///
+/// The caller presents [`ActivityRepaintThrottleDecision::repaint_now`]
+/// immediately and starts one timer when requested. Each timer tick calls
+/// [`timer_tick`](Self::timer_tick): `true` presents one coalesced repaint and
+/// keeps the timer alive; `false` returns the stream to idle.
+#[derive(Debug, Default)]
+pub struct ActivityRepaintThrottle {
+    pending: bool,
+    scheduled: bool,
+}
+
+impl ActivityRepaintThrottle {
+    pub fn on_activity(&mut self) -> ActivityRepaintThrottleDecision {
+        self.pending = true;
+        if self.scheduled {
+            return ActivityRepaintThrottleDecision::default();
+        }
+
+        self.pending = false;
+        self.scheduled = true;
+        ActivityRepaintThrottleDecision {
+            repaint_now: true,
+            start_timer: true,
+        }
+    }
+
+    /// Advance one cadence tick. A pending event produces the trailing/sustained
+    /// repaint; an empty tick stops the timer and rearms the leading edge.
+    pub fn timer_tick(&mut self) -> bool {
+        if self.pending {
+            self.pending = false;
+            true
+        } else {
+            self.scheduled = false;
+            false
+        }
+    }
+}
+
 /// Collects exact repaint keys behind a leading-edge presentation batch.
 ///
 /// [`queue_activity`](Self::queue_activity) presents the idle-to-active edge
@@ -72,7 +121,7 @@ impl<T: Eq + Hash> ActivityRepaintBatch<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::ActivityRepaintBatch;
+    use super::{ActivityRepaintBatch, ActivityRepaintThrottle};
     use std::collections::HashSet;
 
     #[test]
@@ -105,6 +154,39 @@ mod tests {
         let next = batch.queue_activity(["next"], []);
         assert!(next.start_timer);
         assert_eq!(next.immediate, HashSet::from(["next"]));
+    }
+
+    #[test]
+    fn throttled_activity_has_one_leading_edge_trailing_ticks_and_idle_rearming() {
+        let mut throttle = ActivityRepaintThrottle::default();
+
+        let leading = throttle.on_activity();
+        assert!(leading.repaint_now);
+        assert!(leading.start_timer);
+
+        let repeated = throttle.on_activity();
+        assert!(!repeated.repaint_now);
+        assert!(!repeated.start_timer);
+        assert!(
+            throttle.timer_tick(),
+            "pending activity gets one trailing repaint"
+        );
+
+        let sustained = throttle.on_activity();
+        assert!(!sustained.repaint_now);
+        assert!(!sustained.start_timer);
+        assert!(
+            throttle.timer_tick(),
+            "the existing timer handles sustained activity"
+        );
+        assert!(
+            !throttle.timer_tick(),
+            "an empty tick returns the stream to idle"
+        );
+
+        let rearmed = throttle.on_activity();
+        assert!(rearmed.repaint_now);
+        assert!(rearmed.start_timer);
     }
 
     #[test]

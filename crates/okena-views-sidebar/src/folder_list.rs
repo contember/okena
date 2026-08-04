@@ -4,7 +4,6 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use okena_ui::color_dot::color_dot;
-use okena_ui::icon_button::icon_button;
 use okena_ui::rename_state::is_renaming;
 use okena_ui::theme::theme;
 
@@ -192,13 +191,27 @@ impl Sidebar {
                 // Delete folder button (on hover)
                 {
                     let folder_id = folder_id.clone();
-                    icon_button(
-                        ElementId::Name(format!("folder-delete-{}", folder_id).into()),
-                        "icons/close.svg",
-                        &t,
-                    )
+                    // `icon_button` already owns a hover style; this button also
+                    // reveals itself on hover, and GPUI permits only one style.
+                    div()
+                        .id(ElementId::Name(
+                            format!("folder-delete-{}", folder_id).into(),
+                        ))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .size(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
                         .opacity(0.0)
                         .hover(|s| s.bg(rgb(t.bg_hover)).opacity(1.0))
+                        .child(
+                            svg()
+                                .path("icons/close.svg")
+                                .size(px(12.0))
+                                .text_color(rgb(t.text_secondary)),
+                        )
                         .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                             cx.stop_propagation();
                         }))

@@ -1,7 +1,7 @@
 use super::types::FolderColor;
 
 /// Theme colors - all UI colors in one struct
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     // Background colors
     pub bg_primary: u32,

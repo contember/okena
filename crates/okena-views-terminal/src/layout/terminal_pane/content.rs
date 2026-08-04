@@ -1,7 +1,7 @@
 //! Terminal content component.
 
 use crate::elements::terminal_element::{
-    LinkKind, SearchMatch, TerminalElement,
+    LinkKind, SearchMatch, TerminalElement, TerminalRenderCache,
     deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id,
 };
 use crate::layout::navigation::register_pane_bounds;
@@ -31,6 +31,7 @@ pub enum TerminalContentEvent {
 pub struct TerminalContent {
     terminal: Option<Arc<Terminal>>,
     resize_viewer_id: u64,
+    render_cache: Arc<parking_lot::Mutex<TerminalRenderCache>>,
     focus_handle: FocusHandle,
     window_activation_subscription: Option<Subscription>,
     url_detector: UrlDetector,
@@ -79,6 +80,7 @@ impl TerminalContent {
         Self {
             terminal: None,
             resize_viewer_id: next_resize_viewer_id(),
+            render_cache: Arc::new(parking_lot::Mutex::new(TerminalRenderCache::default())),
             focus_handle,
             window_activation_subscription: None,
             url_detector: UrlDetector::new(),
@@ -218,6 +220,7 @@ impl TerminalContent {
             }
         }
         self.terminal = terminal.clone();
+        self.render_cache.lock().invalidate();
         self.scrollbar.update(cx, |scrollbar, _| {
             scrollbar.set_terminal(terminal);
         });
@@ -879,6 +882,7 @@ impl Render for TerminalContent {
             .child(
                 div().size_full().p(px(4.0)).bg(rgb(term_bg)).child(
                     TerminalElement::new(terminal_clone, focus_handle, self.resize_viewer_id)
+                        .with_render_cache(self.render_cache.clone())
                         .with_zoom(zoom_level)
                         .with_bg_tint(bg_tint)
                         .with_search(self.search_matches.clone(), self.search_current_index)

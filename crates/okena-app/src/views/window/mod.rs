@@ -79,6 +79,12 @@ pub fn notify_registered_panes<T: 'static>(
     update_registered_panes(registry, terminal_ids, cx, notify_pane_weaks)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContentPaneRepaintStats {
+    pub terminals: usize,
+    pub panes: usize,
+}
+
 /// Request activity repaints from concrete terminal-content panes. Calls are
 /// already limited by the app-wide presentation cadence, so every visible copy
 /// remains live without each stream driving an independent clock.
@@ -86,8 +92,8 @@ pub fn request_registered_content_pane_repaints(
     registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
     terminal_ids: &[String],
     cx: &mut App,
-) -> usize {
-    update_registered_panes(registry, terminal_ids, cx, |weaks, cx| {
+) -> ContentPaneRepaintStats {
+    update_registered_panes_with_stats(registry, terminal_ids, cx, |weaks, cx| {
         update_pane_weaks(weaks, cx, |pane, cx| {
             pane.request_activity_repaint(cx);
         })
@@ -98,14 +104,24 @@ fn update_registered_panes<T: 'static>(
     registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
     terminal_ids: &[String],
     cx: &mut App,
-    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+    update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
 ) -> usize {
-    let mut notified = 0;
+    update_registered_panes_with_stats(registry, terminal_ids, cx, update).terminals
+}
+
+fn update_registered_panes_with_stats<T: 'static>(
+    registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
+    terminal_ids: &[String],
+    cx: &mut App,
+    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+) -> ContentPaneRepaintStats {
+    let mut stats = ContentPaneRepaintStats::default();
     let mut empty = Vec::new();
     for terminal_id in terminal_ids {
         if let Some(weaks) = registry.get_mut(terminal_id) {
             if update(weaks, cx) {
-                notified += 1;
+                stats.terminals = stats.terminals.saturating_add(1);
+                stats.panes = stats.panes.saturating_add(weaks.len());
             }
             if weaks.is_empty() {
                 empty.push(terminal_id.clone());
@@ -115,7 +131,7 @@ fn update_registered_panes<T: 'static>(
     for terminal_id in empty {
         registry.remove(&terminal_id);
     }
-    notified
+    stats
 }
 
 /// Per-window view of the application: one instance per OS window.
@@ -635,6 +651,7 @@ impl WindowView {
     /// Parsing and notifications already ran; this only presents current bell /
     /// idle state at the shared capped cadence.
     pub(crate) fn request_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        okena_core::render_probe::sidebar_activity_invalidation();
         self.sidebar.update(cx, |_, cx| cx.notify());
     }
 
@@ -932,7 +949,7 @@ impl EventEmitter<WindowViewEvent> for WindowView {}
 
 #[cfg(test)]
 mod tests {
-    use super::{notify_pane_weaks, notify_registered_panes};
+    use super::{notify_pane_weaks, notify_registered_panes, update_registered_panes_with_stats};
     use gpui::AppContext as _;
     use std::collections::HashMap;
 
@@ -967,6 +984,32 @@ mod tests {
             assert!(!registry.contains_key("target"), "dead pane key is pruned");
         });
         drop(other);
+    }
+
+    #[gpui::test]
+    fn activity_stats_count_each_live_viewer(cx: &mut gpui::TestAppContext) {
+        let (_a, _b, _other, mut registry) = cx.update(|cx| {
+            let a = cx.new(|_| Stub);
+            let b = cx.new(|_| Stub);
+            let other = cx.new(|_| Stub);
+            let registry = HashMap::from([
+                ("target".to_string(), vec![a.downgrade(), b.downgrade()]),
+                ("other".to_string(), vec![other.downgrade()]),
+            ]);
+            (a, b, other, registry)
+        });
+
+        cx.update(|cx| {
+            let stats = update_registered_panes_with_stats(
+                &mut registry,
+                &["target".to_string()],
+                cx,
+                notify_pane_weaks,
+            );
+            assert_eq!(stats.terminals, 1);
+            assert_eq!(stats.panes, 2);
+            assert_eq!(registry.len(), 2, "unrelated registrations stay intact");
+        });
     }
 
     #[gpui::test]
