@@ -14,6 +14,7 @@
 //! it is ever stored or handed to a resume command.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
 
 /// The agent session running (or last run) in a pane, captured from the
 /// agent-status OSC `lbl=` `agent` / `session_id` / `transcript_path` keys.
@@ -37,6 +38,9 @@ pub struct AgentSession {
     /// Absolute path to the session transcript, when the agent reported one.
     /// Format/location is the harness's concern; here it is just an opaque path
     /// handed to that harness's transcript parser. Drives the stats view.
+    /// Untrusted in-band data — [`is_valid_transcript_path`] gates it on capture
+    /// and again on load, so a harness never opens a traversal or an unbounded
+    /// path. Implementors should still confine it to their own session dir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
 }
@@ -47,6 +51,38 @@ pub struct AgentSession {
 /// session identity out of the map (see [`AgentSession::from_labels`]).
 pub const RESERVED_LABEL_KEYS: [&str; 3] = ["agent", "session_id", "transcript_path"];
 
+/// Bounds on the two free-form session fields. `session_id` needs none — it is
+/// UUID-shaped by [`is_uuid_like`] — but `agent` and `transcript_path` are
+/// arbitrary in-band strings that get **persisted to `workspace.json`**, so
+/// without a bound one pane can rewrite the user's state file with megabytes of
+/// chosen bytes on every autosave. These reject rather than truncate: a cut
+/// harness id or path is not a usable value, and rejecting lets the load-time
+/// prune drop an already-poisoned file.
+pub const MAX_AGENT_ID_LEN: usize = 64;
+pub const MAX_TRANSCRIPT_PATH_LEN: usize = 4096;
+
+/// Whether `s` is a usable harness id — bounded and restricted to the shape an
+/// extension id has (`"claude-code"`, `"codex"`, …).
+pub fn is_valid_agent_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_AGENT_ID_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Whether a reported transcript path is safe to store and later hand to a
+/// harness's parser. The value is fully attacker-chosen, so require it to be
+/// bounded, absolute, and free of `..` traversal rather than trusting the
+/// harness to confine it.
+pub fn is_valid_transcript_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_TRANSCRIPT_PATH_LEN
+        && Path::new(s).is_absolute()
+        && !Path::new(s)
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+}
+
 impl AgentSession {
     /// Extract the session identity from a decoded `lbl=` map, or `None` when
     /// the pane didn't report one.
@@ -56,17 +92,24 @@ impl AgentSession {
     /// [`crate::agent_status::AgentStatus::new_clamped`] bounds it: that clamp
     /// keeps only the lowest [`MAX_LABELS`](crate::agent_status::MAX_LABELS)
     /// keys and truncates values, either of which would silently drop or
-    /// corrupt a valid session.
+    /// corrupt a valid session. Reading pre-clamp means this is the only place
+    /// the session fields get bounded, hence the checks here — they guard the
+    /// one part of an agent status that reaches disk.
     pub fn from_labels(labels: &std::collections::BTreeMap<String, String>) -> Option<Self> {
         let agent = labels.get("agent")?;
         let session_id = labels.get("session_id")?;
-        if agent.is_empty() || !is_uuid_like(session_id) {
+        if !is_valid_agent_id(agent) || !is_uuid_like(session_id) {
             return None;
         }
         Some(Self {
             agent: agent.clone(),
             session_id: session_id.clone(),
-            transcript_path: labels.get("transcript_path").cloned(),
+            // An unusable path is dropped, not a reason to discard the session:
+            // resume only needs `agent` + `session_id`.
+            transcript_path: labels
+                .get("transcript_path")
+                .filter(|p| is_valid_transcript_path(p))
+                .cloned(),
         })
     }
 
@@ -79,10 +122,16 @@ impl AgentSession {
 
     /// Re-validate a session that came from persisted state rather than from
     /// the live parser. `workspace.json` is user-editable and survives across
-    /// versions, so the [`is_uuid_like`] invariant the parser enforces must be
-    /// re-checked before a stored id can reach a resume command.
+    /// versions, so every invariant [`from_labels`](Self::from_labels) enforces
+    /// must be re-checked before a stored id can reach a resume command — and
+    /// so that a file already poisoned by an older build gets pruned on load.
     pub fn is_valid(&self) -> bool {
-        !self.agent.is_empty() && is_uuid_like(&self.session_id)
+        is_valid_agent_id(&self.agent)
+            && is_uuid_like(&self.session_id)
+            && self
+                .transcript_path
+                .as_deref()
+                .is_none_or(is_valid_transcript_path)
     }
 }
 
@@ -164,6 +213,57 @@ mod tests {
         assert_eq!(s.session_id, UUID);
     }
 
+    /// `Path::is_absolute` is platform-dependent, so build a path that is
+    /// genuinely absolute on the host running the test.
+    fn abs(tail: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{tail}")
+        } else {
+            format!("/{tail}")
+        }
+    }
+
+    #[test]
+    fn from_labels_bounds_the_fields_that_reach_disk() {
+        // Without a bound here, one pane rewrites workspace.json with megabytes
+        // of chosen bytes on every autosave — the fields are persisted.
+        let huge = "a".repeat(MAX_AGENT_ID_LEN + 1);
+        assert!(
+            AgentSession::from_labels(&labels(&[("agent", &huge), ("session_id", UUID)])).is_none()
+        );
+        // A harness id is an extension id, not free-form text.
+        assert!(
+            AgentSession::from_labels(&labels(&[("agent", "claude code"), ("session_id", UUID)]))
+                .is_none()
+        );
+        assert!(
+            AgentSession::from_labels(&labels(&[("agent", "a/../b"), ("session_id", UUID)]))
+                .is_none()
+        );
+
+        // An unusable transcript path is dropped, but the session survives —
+        // resume needs only `agent` + `session_id`.
+        let long_path = abs(&"p".repeat(MAX_TRANSCRIPT_PATH_LEN));
+        for bad in [long_path.as_str(), "relative/x.jsonl", &abs("a/../../etc/passwd")] {
+            let s = AgentSession::from_labels(&labels(&[
+                ("agent", "claude-code"),
+                ("session_id", UUID),
+                ("transcript_path", bad),
+            ]))
+            .expect("session survives a bad path");
+            assert_eq!(s.transcript_path, None, "should have dropped {bad:?}");
+        }
+
+        let good = abs("home/u/.claude/projects/p/s.jsonl");
+        let s = AgentSession::from_labels(&labels(&[
+            ("agent", "claude-code"),
+            ("session_id", UUID),
+            ("transcript_path", &good),
+        ]))
+        .expect("session");
+        assert_eq!(s.transcript_path.as_deref(), Some(good.as_str()));
+    }
+
     #[test]
     fn is_valid_rejects_tampered_persisted_state() {
         let good = AgentSession {
@@ -182,6 +282,36 @@ mod tests {
         assert!(
             !AgentSession {
                 agent: String::new(),
+                ..good.clone()
+            }
+            .is_valid()
+        );
+        // A file poisoned by a build that predated the bounds must be pruned on
+        // load, not carried forward.
+        assert!(
+            !AgentSession {
+                agent: "a".repeat(MAX_AGENT_ID_LEN + 1),
+                ..good.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            !AgentSession {
+                transcript_path: Some(abs(&"p".repeat(MAX_TRANSCRIPT_PATH_LEN))),
+                ..good.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            !AgentSession {
+                transcript_path: Some("relative/x.jsonl".to_string()),
+                ..good.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            AgentSession {
+                transcript_path: Some(abs("home/u/s.jsonl")),
                 ..good
             }
             .is_valid()

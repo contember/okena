@@ -1689,3 +1689,198 @@ fn test_agent_session_not_captured_from_a_foreign_pane() {
     assert_eq!(terminal.agent_session(), None);
     assert!(!terminal.take_agent_session_dirty());
 }
+
+#[test]
+fn test_agent_status_accepts_a_tid_matching_the_unprefixed_pane_id() {
+    let transport = Arc::new(NullTransport);
+    // Client-side terminals — including the desktop app's own panes, served by
+    // the local daemon — are keyed `remote:{connection}:{raw}`, while the pane's
+    // `$OKENA_TERMINAL_ID` is the daemon's raw id. A literal comparison rejected
+    // every correctly-stamped status, so nothing the bundled plugin emits landed.
+    let terminal = Terminal::new(
+        "remote:conn-1:3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=working;tid=3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(okena_core::agent_status::AgentLifecycle::Working),
+    );
+
+    // A different raw id is still rejected — the suffix must be whole and
+    // sit on a `:` boundary.
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    terminal.process_output(b"\x1b]9001;st=blocked;tid=0c1d2e3f4a5b\x07");
+    assert_eq!(terminal.agent_status(), None);
+}
+
+#[test]
+fn test_agent_session_captured_on_clear() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // A harness maps session start/end onto `clear` — exactly the two events
+    // that carry the identity. Capture must not sit behind the lifecycle check.
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=clear;lbl={lbl}\x07").as_bytes());
+
+    assert_eq!(terminal.agent_status(), None, "clear still clears");
+    let session = terminal.agent_session().expect("session captured on clear");
+    assert_eq!(session.session_id, uuid);
+    assert!(terminal.take_agent_session_dirty());
+}
+
+#[test]
+fn test_agent_status_strips_reserved_session_keys_from_labels() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // `labels` is serialized to every paired remote / mobile client. The
+    // reserved keys are session identity — the local transcript path and the
+    // session id must not ride out with the display labels.
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let path = if cfg!(windows) {
+        "C:\\Users\\u\\.claude\\projects\\p\\s.jsonl"
+    } else {
+        "/home/u/.claude/projects/p/s.jsonl"
+    };
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"{}","branch":"main"}}"#,
+        path.replace('\\', "\\\\")
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+
+    let status = terminal.agent_status().expect("status");
+    for key in okena_core::agent_session::RESERVED_LABEL_KEYS {
+        assert!(
+            !status.labels.contains_key(key),
+            "reserved key {key:?} leaked into the wire labels: {:?}",
+            status.labels
+        );
+    }
+    assert_eq!(status.labels.get("branch").map(String::as_str), Some("main"));
+
+    // ...but the session itself still captured them.
+    let session = terminal.agent_session().expect("session");
+    assert_eq!(session.session_id, uuid);
+    assert_eq!(session.transcript_path.as_deref(), Some(path));
+}
+
+#[test]
+fn test_agent_session_rejects_unbounded_agent_and_transcript_path() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // These two fields are the part of an agent status that reaches disk, so
+    // an unbounded value would be rewritten into workspace.json on every save.
+    let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    let huge = "a".repeat(okena_core::agent_session::MAX_AGENT_ID_LEN + 1);
+    let lbl = b64(&format!(
+        r#"{{"agent":"{huge}","session_id":"{uuid}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+    assert_eq!(terminal.agent_session(), None);
+
+    let long_path = format!(
+        "{}{}",
+        if cfg!(windows) { "C:\\" } else { "/" },
+        "p".repeat(okena_core::agent_session::MAX_TRANSCRIPT_PATH_LEN)
+    );
+    let lbl = b64(&format!(
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"{long_path}"}}"#
+    ));
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+    let session = terminal.agent_session().expect("session survives a bad path");
+    assert_eq!(session.transcript_path, None);
+}
+
+#[test]
+fn test_agent_status_split_across_reads() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // A PTY read can land anywhere in the sequence; the sidecar parser is
+    // stateful across calls, like the OSC 0 / OSC 7 chunked cases.
+    terminal.process_output(b"\x1b]9001;st=blo");
+    assert_eq!(terminal.agent_status(), None, "incomplete — nothing yet");
+    terminal.process_output(b"cked\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(okena_core::agent_status::AgentLifecycle::Blocked),
+    );
+}
+
+#[test]
+fn test_agent_status_duplicate_keys_take_the_last() {
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // Last-wins is load-bearing for the `tid` guard: a hostile prefix must not
+    // be able to shadow a later, correct value (or vice versa).
+    terminal.process_output(b"\x1b]9001;st=working;st=done\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(okena_core::agent_status::AgentLifecycle::Done),
+    );
+
+    terminal.process_output(b"\x1b]9001;st=clear\x07");
+    terminal.process_output(b"\x1b]9001;st=working;tid=t;tid=elsewhere\x07");
+    assert_eq!(terminal.agent_status(), None, "the last tid decides");
+}
+
+#[test]
+fn test_agent_status_valid_base64_of_invalid_utf8_drops_the_field() {
+    use base64::Engine as _;
+    let transport = Arc::new(NullTransport);
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport,
+        "/tmp".into(),
+    );
+
+    // Decodable base64 whose bytes are not UTF-8 — distinct from the
+    // undecodable-base64 case, and it must not panic or poison the status.
+    let bad = base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe, 0xfd]);
+    terminal.process_output(format!("\x1b]9001;st=done;msg={bad}\x07").as_bytes());
+
+    let status = terminal.agent_status().expect("lifecycle still applied");
+    assert_eq!(status.lifecycle, okena_core::agent_status::AgentLifecycle::Done);
+    assert_eq!(status.custom, None);
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent finished")],
+        "an undecodable msg falls back to the default body",
+    );
+}

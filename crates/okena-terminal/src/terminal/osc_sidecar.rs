@@ -1,6 +1,6 @@
 use alacritty_terminal::vte::Perform;
 use base64::Engine as _;
-use okena_core::agent_session::AgentSession;
+use okena_core::agent_session::{AgentSession, RESERVED_LABEL_KEYS};
 use okena_core::agent_status::{AgentLifecycle, AgentStatus};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -340,7 +340,7 @@ impl SidecarPerform {
         // than showing nothing. `tid` is optional — senders that omit it (and
         // anything predating it) are still accepted.
         if let Some(tid) = tid
-            && tid != self.terminal_id
+            && !self.addresses_this_pane(tid)
         {
             log::debug!(
                 "agent-status[{}]: dropping status addressed to {tid:?}",
@@ -356,6 +356,36 @@ impl SidecarPerform {
             );
             return; // no state field — nothing to do
         };
+
+        // Decode the agent-supplied fields BEFORE taking the lock — base64 of a
+        // hostile multi-MB payload must not run while holding `agent_status`.
+        let mut labels = lbl_b64
+            .and_then(decode_osc_base64)
+            .map(|json| okena_core::agent_status::parse_labels_json(&json))
+            .unwrap_or_default();
+
+        // Durable session capture (resume + transcript stats). The `agent` +
+        // `session_id` labels are the pane's *sticky* session identity, NOT part
+        // of the ephemeral status — record them on a separate field that
+        // survives `st=clear`, so the pane can later offer to resume or show
+        // stats. Read from the RAW label map: `new_clamped` below keeps only the
+        // lowest `MAX_LABELS` keys and truncates values, so reading the reserved
+        // keys after it would let a label flood hide a valid session (and a long
+        // path be silently cut).
+        //
+        // Captured for *any* well-formed sequence carrying it, before the `st`
+        // is interpreted: identity is orthogonal to lifecycle, and the two hook
+        // events that carry it (session start/end) are exactly the ones a
+        // harness maps to `clear`.
+        if let Some(session) = AgentSession::from_labels(&labels) {
+            self.record_agent_session(session);
+        }
+        // The reserved keys are session identity, not display labels. Drop them
+        // so `session_id` and the absolute local `transcript_path` don't ride
+        // `AgentStatus.labels` out to every paired remote / mobile client.
+        for key in RESERVED_LABEL_KEYS {
+            labels.remove(key);
+        }
 
         if st == "clear" {
             let mut slot = self.agent_status.lock();
@@ -379,33 +409,12 @@ impl SidecarPerform {
             return; // unknown state — ignore, leave current status as-is
         };
 
-        // Decode the agent-supplied fields BEFORE taking the lock — base64 of a
-        // hostile multi-MB payload must not run while holding `agent_status`.
         // `new_clamped` bounds the decoded sizes (a pane could otherwise pin
         // unbounded memory we then re-serialize to every remote client) and
         // maps an empty `msg=` to `None` so a notifying state keeps its default
         // body instead of an empty string.
         let custom = msg_b64.and_then(decode_osc_base64);
-        let labels = lbl_b64
-            .and_then(decode_osc_base64)
-            .map(|json| okena_core::agent_status::parse_labels_json(&json))
-            .unwrap_or_default();
-
-        // Durable session capture (resume + transcript stats). The `agent` +
-        // `session_id` labels are the pane's *sticky* session identity, NOT part
-        // of the ephemeral status — record them on a separate field that
-        // survives `st=clear`, so the pane can later offer to resume or show
-        // stats. Read from the RAW label map: `new_clamped` below keeps only the
-        // lowest `MAX_LABELS` keys and truncates values, so reading the reserved
-        // keys after it would let a label flood hide a valid session (and a long
-        // path be silently cut).
-        let reported_session = AgentSession::from_labels(&labels);
-
         let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
-
-        if let Some(session) = reported_session {
-            self.record_agent_session(session);
-        }
 
         // Notify only on a *transition* into a notifying state, so repeated
         // identical reports don't ping. Decide while holding the slot (we need
@@ -442,6 +451,26 @@ impl SidecarPerform {
                 .lock()
                 .push(TerminalNotification { title: None, body });
         }
+    }
+
+    /// Whether an OSC `tid=` addresses *this* pane.
+    ///
+    /// The sender echoes `$OKENA_TERMINAL_ID`, which the daemon exports as the
+    /// **raw** terminal id. A client-side `Terminal` — including the desktop
+    /// app's own panes, which it consumes through the local daemon — is keyed
+    /// `remote:{connection}:{raw}` (`okena_transport::client::id::make_prefixed_id`),
+    /// so a literal comparison rejects every correctly-stamped status. Accept
+    /// the unprefixed suffix too; ids are UUIDs, so this cannot realistically
+    /// collide across connections.
+    fn addresses_this_pane(&self, tid: &str) -> bool {
+        if self.terminal_id == tid {
+            return true;
+        }
+        !tid.is_empty()
+            && self
+                .terminal_id
+                .strip_suffix(tid)
+                .is_some_and(|prefix| prefix.ends_with(':'))
     }
 
     /// Store the session identity a pane just reported, marking the persist
