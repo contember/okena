@@ -769,6 +769,9 @@ impl Render for TerminalContent {
                 match event.touch_phase {
                     TouchPhase::Started => this.in_scroll_inertia = false,
                     TouchPhase::Ended => this.in_scroll_inertia = true,
+                    // Cancelled means the system took the gesture, so no momentum
+                    // tail follows — unwind rather than arm the inertia flag.
+                    TouchPhase::Cancelled => this.in_scroll_inertia = false,
                     TouchPhase::Moved => {}
                 }
 
