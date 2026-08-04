@@ -155,6 +155,11 @@ fn main() -> anyhow::Result<()> {
     if okena_remote_server::local::complete_config_restore_if_requested()? {
         return Ok(());
     }
+    // 1c. Install the agent-harness registry (resume argv per agent id) before
+    //     anything can reach a restore path. This binary owns restore just as
+    //     much as the GUI does, so without it `for_agent()` misses and
+    //     auto-resume silently does nothing here.
+    okena_agent_harnesses::install();
 
     // 2. Optional `--listen <ip>` override. Parsing is intentionally minimal and
     //    dependency-free; the error messages mirror the GUI's `src/main.rs`.
