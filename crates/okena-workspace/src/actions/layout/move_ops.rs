@@ -243,6 +243,9 @@ impl Workspace {
         // Migrate metadata from source to target
         let terminal_name = src_project.terminal_names.remove(source_terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(source_terminal_id);
+        // The agent keeps running in the moved pane, so its session identity
+        // has to follow it — the map is per project.
+        let agent_session = src_project.agent_sessions.remove(source_terminal_id);
 
         // Cleanup orphaned source metadata
         let src_layout_ids: std::collections::HashSet<String> = src_project
@@ -255,6 +258,9 @@ impl Workspace {
             .retain(|id, _| src_layout_ids.contains(id));
         src_project
             .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
@@ -269,6 +275,11 @@ impl Workspace {
             tgt_project
                 .hidden_terminals
                 .insert(source_terminal_id.to_string(), hidden);
+        }
+        if let Some(session) = agent_session {
+            tgt_project
+                .agent_sessions
+                .insert(source_terminal_id.to_string(), session);
         }
 
         tgt_project.layout = Some(inserted_tgt_layout);
@@ -602,6 +613,9 @@ impl Workspace {
         // Migrate metadata
         let terminal_name = src_project.terminal_names.remove(terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(terminal_id);
+        // The agent keeps running in the moved pane, so its session identity
+        // has to follow it — the map is per project.
+        let agent_session = src_project.agent_sessions.remove(terminal_id);
 
         // Cleanup orphaned source metadata
         let src_layout_ids: std::collections::HashSet<String> = src_project
@@ -614,6 +628,9 @@ impl Workspace {
             .retain(|id, _| src_layout_ids.contains(id));
         src_project
             .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
@@ -628,6 +645,11 @@ impl Workspace {
             tgt_project
                 .hidden_terminals
                 .insert(terminal_id.to_string(), hidden);
+        }
+        if let Some(session) = agent_session {
+            tgt_project
+                .agent_sessions
+                .insert(terminal_id.to_string(), session);
         }
 
         tgt_project.layout = Some(inserted_tgt_layout);

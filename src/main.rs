@@ -573,7 +573,6 @@ fn main() {
                                 .settings
                                 .terminal_double_click_selects_in_mouse_mode,
                             option_as_meta: s.settings.terminal_option_as_meta,
-                            auto_resume_agent_sessions: s.settings.auto_resume_agent_sessions,
                         }).ok()
                     }
                     "git" => {

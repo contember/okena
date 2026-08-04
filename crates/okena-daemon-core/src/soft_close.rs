@@ -157,6 +157,7 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
