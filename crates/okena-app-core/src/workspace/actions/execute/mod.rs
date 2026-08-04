@@ -1562,4 +1562,79 @@ mod agent_resume_tests {
         assert_eq!(args, None);
         assert_eq!(ws.agent_session("project", "terminal"), None);
     }
+
+    /// docs/agent-status.md promises the session is dropped on a hard close, a
+    /// finalized soft close, or a shell switch. Only the soft close was covered;
+    /// these three call sites had no test module at all, so dropping any of them
+    /// would leave orphans in workspace.json — and a pane respawned in the same
+    /// slot could inherit a stale id and be handed `claude --resume` for it.
+    fn workspace_with_live_session() -> (
+        crate::workspace::state::Workspace,
+        TerminalsRegistry,
+        RecordingBackend,
+    ) {
+        let mut ws = workspace_with_terminal(ShellType::Default, None, Some("terminal"), Default::default());
+        ws.set_agent_session("project", "terminal", session("test-agent"), &mut TestCx);
+        assert!(ws.agent_session("project", "terminal").is_some());
+        (ws, Arc::new(Default::default()), RecordingBackend::default())
+    }
+
+    #[test]
+    fn closing_a_terminal_forgets_its_agent_session() {
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+        let mut focus = okena_workspace::focus::FocusManager::new();
+
+        super::terminal::close(
+            &mut ws,
+            &mut focus,
+            "project".to_string(),
+            "terminal".to_string(),
+            &backend,
+            &terminals,
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
+
+    #[test]
+    fn closing_many_terminals_forgets_their_agent_sessions() {
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+        let mut focus = okena_workspace::focus::FocusManager::new();
+
+        super::terminal::close_many(
+            &mut ws,
+            &mut focus,
+            "project".to_string(),
+            vec!["terminal".to_string()],
+            &backend,
+            &terminals,
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
+
+    #[test]
+    fn switching_shell_forgets_the_agent_session() {
+        // The pane keeps its slot, but the process behind it is gone — so the
+        // captured session no longer describes what runs there.
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+
+        super::terminal::switch_shell(
+            &mut ws,
+            "project".to_string(),
+            "terminal".to_string(),
+            ShellType::Custom {
+                path: "/bin/zsh".to_string(),
+                args: Vec::new(),
+            },
+            &backend,
+            &terminals,
+            &settings(false),
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
 }

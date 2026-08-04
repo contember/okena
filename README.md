@@ -190,6 +190,7 @@ Settings are stored in the platform's config directory (macOS: `~/Library/Applic
 | Guide | Description |
 |-------|-------------|
 | [Configuration](docs/configuration.md) | Settings, keybindings, custom themes, per-project overrides |
+| [Agent Status](docs/agent-status.md) | OSC 9001 agent lifecycle, the Claude Code plugin, session resume |
 | [Lifecycle Hooks](docs/hooks.md) | Hook terminals, git hooks, environment variables |
 | [Project Services](docs/services.md) | okena.yaml, Docker Compose integration, auto-restart |
 | [Git Worktrees](docs/worktrees.md) | Worktree management, sync watcher, path templates |
