@@ -2145,6 +2145,12 @@ impl Workspace {
         // that no longer holds a terminal and the window would end up with no
         // keyboard focus at all. Modal context is left alone: the modal owns
         // focus and restores its own target when it closes.
+        //
+        // The replacement has to be a terminal too. On a degenerate tree (an
+        // empty container) `find_visible_terminal_path` hands back the
+        // container's own path, which would leave focus just as orphaned and
+        // re-run this on every single sync — each pass paying for a
+        // `bump_activity` notify, a debounced save and a sidebar re-sort.
         if !focus_manager.is_modal()
             && let Some(focused) = focus_manager.focused_terminal_state()
             && let Some(layout) = self
@@ -2156,7 +2162,9 @@ impl Workspace {
             )
         {
             let path = layout.find_visible_terminal_path();
-            self.set_focused_terminal(focus_manager, focused.project_id, path, cx);
+            if matches!(layout.get_at_path(&path), Some(LayoutNode::Terminal { .. })) {
+                self.set_focused_terminal(focus_manager, focused.project_id, path, cx);
+            }
         }
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
@@ -3546,6 +3554,111 @@ mod gpui_tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    /// Project whose layout is a two-pane horizontal split.
+    fn project_with_split(id: &str, terminal_ids: [&str; 2]) -> ProjectData {
+        let mut project = make_project(id);
+        project.layout = Some(LayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: terminal_ids
+                .iter()
+                .map(|tid| LayoutNode::Terminal {
+                    terminal_id: Some((*tid).to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.0,
+                })
+                .collect(),
+        });
+        project
+    }
+
+    /// Run a no-op remote sync (no connections) and report where focus ended up.
+    fn sync_and_read_focus(
+        workspace: &gpui::Entity<Workspace>,
+        fm: &mut crate::focus::FocusManager,
+        cx: &mut gpui::TestAppContext,
+    ) -> Option<Vec<usize>> {
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.apply_remote_snapshot(&[], WindowId::Main, fm, cx);
+        });
+        fm.focused_terminal_state().map(|f| f.layout_path)
+    }
+
+    #[gpui::test]
+    fn sync_re_anchors_focus_orphaned_by_a_close_this_window_did_not_make(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A shell exits on its own (or another window closes the pane): the
+        // split collapses and the focused path stops naming a terminal.
+        let workspace = cx.new(|_cx| {
+            Workspace::new(make_workspace_data(
+                vec![project_with_split("p1", ["t1", "t2"])],
+                vec!["p1"],
+            ))
+        });
+        let mut fm = crate::focus::FocusManager::new();
+        fm.focus_terminal("p1".to_string(), vec![1]);
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.project_mut("p1").unwrap().layout = Some(LayoutNode::Terminal {
+                terminal_id: Some("t1".to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            });
+        });
+
+        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![]));
+    }
+
+    #[gpui::test]
+    fn sync_leaves_a_focus_path_that_still_names_a_terminal_alone(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| {
+            Workspace::new(make_workspace_data(
+                vec![project_with_split("p1", ["t1", "t2"])],
+                vec!["p1"],
+            ))
+        });
+        let mut fm = crate::focus::FocusManager::new();
+        fm.focus_terminal("p1".to_string(), vec![1]);
+
+        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+    }
+
+    #[gpui::test]
+    fn sync_does_not_re_anchor_focus_onto_a_non_terminal(cx: &mut gpui::TestAppContext) {
+        // A degenerate tree has no terminal to offer. Re-anchoring onto the
+        // empty container would leave focus just as orphaned and re-run the
+        // heal — with its notify + debounced save — on every later sync.
+        let workspace = cx.new(|_cx| {
+            Workspace::new(make_workspace_data(
+                vec![project_with_split("p1", ["t1", "t2"])],
+                vec!["p1"],
+            ))
+        });
+        let mut fm = crate::focus::FocusManager::new();
+        fm.focus_terminal("p1".to_string(), vec![1]);
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.project_mut("p1").unwrap().layout = Some(LayoutNode::Split {
+                direction: crate::state::SplitDirection::Horizontal,
+                sizes: Vec::new(),
+                children: Vec::new(),
+            });
+        });
+
+        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+        let version = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
+        // Still inert on the next sync — no repeated activity bumps.
+        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), version);
+        });
     }
 
     #[gpui::test]
