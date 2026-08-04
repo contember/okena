@@ -30,6 +30,16 @@ pub struct RemoteSyncState {
     /// originating window and project ID are recorded here. On that window's
     /// next sync, we detect the new terminal and focus it in the same window.
     pending_focus: HashMap<WindowId, HashMap<String, Vec<String>>>,
+    /// Where each window's focus should land once the daemon confirms a close.
+    ///
+    /// Closing is a daemon round-trip: the client sends the action, the daemon
+    /// mutates the layout, and the new tree arrives in a state sync. The window
+    /// resolves its focus intent here (see
+    /// [`crate::remote_apply::apply_remote_snapshot`]) rather than at dispatch
+    /// time, because until the sync lands the closed pane is still in the tree
+    /// and every surviving path may shift. One entry per window — a newer close
+    /// supersedes an unresolved older one.
+    pending_close_focus: HashMap<WindowId, PendingCloseFocus>,
     /// Per-project remote snapshots keyed by project ID.
     snapshots: HashMap<String, RemoteProjectSnapshot>,
     /// Remote project creates waiting for the created project to appear in a
@@ -46,6 +56,27 @@ pub struct PendingRemoteFocus {
     pub project_id: String,
     pub old_terminal_ids: Vec<String>,
 }
+
+/// A window's focus intent for an in-flight close.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingCloseFocus {
+    /// Project whose layout the close applies to.
+    pub project_id: String,
+    /// Terminals that must be gone from that layout before the intent applies.
+    pub closing_terminal_ids: Vec<String>,
+    /// Terminal to focus afterwards, or `None` when the close empties the
+    /// project and focus should simply stay on the project itself.
+    pub next_terminal_id: Option<String>,
+    /// Syncs this intent has waited through, so a close the daemon never
+    /// applies (rejected, or the terminal was already gone) can't sit around
+    /// waiting to hijack focus later.
+    attempts: u8,
+}
+
+/// Give up on an unresolved close intent after this many syncs. Generous: a
+/// sync fires on every remote-manager notification, not just the one carrying
+/// the close.
+const MAX_CLOSE_FOCUS_ATTEMPTS: u8 = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRemoteProjectVisibility {
@@ -89,6 +120,40 @@ impl RemoteSyncState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    // === pending close focus ===
+
+    pub fn queue_close_focus(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        closing_terminal_ids: Vec<String>,
+        next_terminal_id: Option<String>,
+    ) {
+        self.pending_close_focus.insert(
+            window_id,
+            PendingCloseFocus {
+                project_id: project_id.to_string(),
+                closing_terminal_ids,
+                next_terminal_id,
+                attempts: 0,
+            },
+        );
+    }
+
+    /// Take a window's close-focus intent for resolution against a fresh sync.
+    pub fn take_close_focus(&mut self, window_id: WindowId) -> Option<PendingCloseFocus> {
+        self.pending_close_focus.remove(&window_id)
+    }
+
+    /// Put an intent back because the sync that just landed doesn't reflect the
+    /// close yet. Dropped once it has waited too long.
+    pub fn retry_close_focus(&mut self, window_id: WindowId, mut pending: PendingCloseFocus) {
+        pending.attempts += 1;
+        if pending.attempts < MAX_CLOSE_FOCUS_ATTEMPTS {
+            self.pending_close_focus.insert(window_id, pending);
+        }
     }
 
     // === pending project visibility ===
@@ -201,6 +266,8 @@ impl RemoteSyncState {
         }
         self.pending_focus
             .retain(|_, projects| !projects.is_empty());
+        self.pending_close_focus
+            .retain(|_, pending| pending.project_id != project_id);
     }
 
     /// Drop cached project presentation after a connection disappears or a

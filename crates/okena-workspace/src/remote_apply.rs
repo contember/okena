@@ -381,9 +381,48 @@ pub fn apply_remote_snapshot(
     data.project_order
         .retain(|id| valid_ids.contains(id.as_str()));
 
+    let mut outcome = RemoteSyncOutcome::default();
+
+    // Land the window's focus after a close the daemon has now applied. Resolved
+    // by terminal id rather than path: the removal reshapes the tree (tab groups
+    // dissolve, splits collapse) so every surviving path may have moved.
+    if let Some(pending) = remote_sync.take_close_focus(window_id) {
+        match data.projects.iter().find(|p| p.id == pending.project_id) {
+            // Project gone — nothing to focus, and nothing to wait for.
+            None => {}
+            Some(project) => {
+                let layout = project.layout.as_ref();
+                let closed = layout.is_none_or(|layout| {
+                    let remaining = layout.collect_terminal_ids();
+                    !pending
+                        .closing_terminal_ids
+                        .iter()
+                        .any(|id| remaining.contains(id))
+                });
+                if closed {
+                    // An empty project keeps focus on the project itself (empty
+                    // path matches no pane), so the next action still targets it.
+                    let layout_path = layout.map_or_else(Vec::new, |layout| {
+                        pending
+                            .next_terminal_id
+                            .as_ref()
+                            .and_then(|id| layout.find_terminal_path(id))
+                            .unwrap_or_else(|| layout.find_visible_terminal_path())
+                    });
+                    outcome.focus_targets.push(RemoteFocusTarget {
+                        project_id: pending.project_id,
+                        layout_path,
+                    });
+                } else {
+                    // This sync predates the close — try again on the next one.
+                    remote_sync.retry_close_focus(window_id, pending);
+                }
+            }
+        }
+    }
+
     // Compute focus targets for projects that had a window-scoped pending
     // CreateTerminal and whose layout grew a new terminal during this sync.
-    let mut outcome = RemoteSyncOutcome::default();
     for pending_focus in remote_sync.drain_pending_focus(window_id) {
         let pid = pending_focus.project_id;
         let layout = match data
@@ -410,6 +449,25 @@ pub fn apply_remote_snapshot(
                 project_id: pid.clone(),
                 layout_path: path,
             });
+        }
+    }
+
+    // Selecting a tab is client-owned state (`SetActiveTab` never reaches the
+    // daemon), so `merge_visual_state` keeps the *local* selection whenever the
+    // group is still recognizable — and falls back to the daemon's whenever the
+    // sync reshaped it. Either way the terminal we just resolved can end up
+    // behind an inactive tab: a freshly added tab loses to the tab the user was
+    // on, and a group that absorbed a collapsed split inherits whatever the
+    // daemon had selected. Bring the target to the front so the pane taking
+    // keyboard focus is the one on screen.
+    for target in &outcome.focus_targets {
+        if let Some(layout) = data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == target.project_id)
+            .and_then(|p| p.layout.as_mut())
+        {
+            layout.activate_tabs_along_path(&target.layout_path);
         }
     }
 
@@ -1115,6 +1173,272 @@ mod tests {
 
         assert!(outcome.focus_targets.is_empty());
         assert!(rs.drain_pending_focus(WindowId::Main).is_empty());
+    }
+
+    /// Sync a project layout for connection `c1` and return the outcome.
+    fn sync_layout(
+        data: &mut WorkspaceData,
+        rs: &mut RemoteSyncState,
+        layout: Option<ApiLayoutNode>,
+    ) -> RemoteSyncOutcome {
+        apply_remote_snapshot(
+            data,
+            rs,
+            &[RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![api_project("a", layout)],
+                    vec!["a".into()],
+                    vec![],
+                )),
+            }],
+            WindowId::Main,
+        )
+    }
+
+    fn api_tabs(children: Vec<ApiLayoutNode>, active_tab: usize) -> ApiLayoutNode {
+        ApiLayoutNode::Tabs {
+            children,
+            active_tab,
+        }
+    }
+
+    /// Active tab of the tab group at `path` in the synced project layout.
+    fn active_tab_at(data: &WorkspaceData, path: &[usize]) -> usize {
+        match data
+            .projects
+            .iter()
+            .find(|p| p.id == "remote:c1:a")
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|layout| layout.get_at_path(path))
+        {
+            Some(LayoutNode::Tabs { active_tab, .. }) => *active_tab,
+            other => panic!("expected a tab group at {path:?}, got {other:?}"),
+        }
+    }
+
+    fn split(children: Vec<ApiLayoutNode>) -> ApiLayoutNode {
+        ApiLayoutNode::Split {
+            direction: okena_core::types::SplitDirection::Horizontal,
+            sizes: vec![100.0 / children.len() as f32; children.len()],
+            children,
+        }
+    }
+
+    #[test]
+    fn close_focus_lands_once_the_daemon_applies_the_close() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(split(vec![terminal("t1"), terminal("t2")])),
+        );
+        rs.queue_close_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+            Some("remote:c1:t2".to_string()),
+        );
+
+        // A sync that predates the close leaves the intent queued.
+        let outcome = sync_layout(
+            &mut data,
+            &mut rs,
+            Some(split(vec![terminal("t1"), terminal("t2")])),
+        );
+        assert!(outcome.focus_targets.is_empty());
+
+        // The close lands: t2 is now the whole layout, at the root path.
+        let outcome = sync_layout(&mut data, &mut rs, Some(terminal("t2")));
+        assert_eq!(
+            outcome.focus_targets,
+            vec![RemoteFocusTarget {
+                project_id: "remote:c1:a".to_string(),
+                layout_path: vec![],
+            }]
+        );
+        // Resolved exactly once.
+        assert!(
+            sync_layout(&mut data, &mut rs, Some(terminal("t2")))
+                .focus_targets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn close_focus_falls_back_when_the_intended_terminal_also_went_away() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(split(vec![terminal("t1"), terminal("t2")])),
+        );
+        rs.queue_close_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+            Some("remote:c1:t2".to_string()),
+        );
+
+        // Both panes are gone by the time the sync lands; a third one exists.
+        let outcome = sync_layout(&mut data, &mut rs, Some(terminal("t3")));
+        assert_eq!(
+            outcome.focus_targets,
+            vec![RemoteFocusTarget {
+                project_id: "remote:c1:a".to_string(),
+                layout_path: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn close_focus_on_an_emptied_project_targets_the_project_itself() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(&mut data, &mut rs, Some(terminal("t1")));
+        rs.queue_close_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+            None,
+        );
+
+        // Closing the last terminal drops the layout — focus stays on the
+        // project (empty path matches no pane) so the next action targets it.
+        let outcome = sync_layout(&mut data, &mut rs, None);
+        assert_eq!(
+            outcome.focus_targets,
+            vec![RemoteFocusTarget {
+                project_id: "remote:c1:a".to_string(),
+                layout_path: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn close_focus_is_given_up_on_when_the_close_never_lands() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(split(vec![terminal("t1"), terminal("t2")])),
+        );
+        rs.queue_close_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+            Some("remote:c1:t2".to_string()),
+        );
+
+        // The daemon rejected the close: t1 stays put through many syncs.
+        for _ in 0..60 {
+            assert!(
+                sync_layout(
+                    &mut data,
+                    &mut rs,
+                    Some(split(vec![terminal("t1"), terminal("t2")])),
+                )
+                .focus_targets
+                .is_empty()
+            );
+        }
+
+        // A much later, unrelated close of t1 must not resurrect the intent.
+        assert!(
+            sync_layout(&mut data, &mut rs, Some(terminal("t2")))
+                .focus_targets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_newly_added_tab_is_brought_to_the_front_when_focused() {
+        // Selecting a tab is client-owned, so `merge_visual_state` keeps the
+        // tab the user is on. Without an explicit activation the daemon's new
+        // tab would stay behind it and the focused pane would be off screen —
+        // the reason a second Cmd+T appeared to do nothing.
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(api_tabs(vec![terminal("t1"), terminal("t2")], 1)),
+        );
+        // The user switches back to the first tab (client-local state).
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(api_tabs(vec![terminal("t1"), terminal("t2")], 1)),
+        );
+        match data.projects[0].layout.as_mut().expect("layout") {
+            LayoutNode::Tabs { active_tab, .. } => *active_tab = 0,
+            other => panic!("expected tabs, got {other:?}"),
+        }
+
+        rs.queue_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string(), "remote:c1:t2".to_string()],
+        );
+        let outcome = sync_layout(
+            &mut data,
+            &mut rs,
+            Some(api_tabs(
+                vec![terminal("t1"), terminal("t2"), terminal("t3")],
+                2,
+            )),
+        );
+
+        assert_eq!(
+            outcome.focus_targets,
+            vec![RemoteFocusTarget {
+                project_id: "remote:c1:a".to_string(),
+                layout_path: vec![2],
+            }]
+        );
+        assert_eq!(active_tab_at(&data, &[]), 2);
+    }
+
+    #[test]
+    fn close_focus_brings_its_tab_to_the_front() {
+        // Closing the last pane of a split collapses the tree onto the
+        // neighbouring tab group. The local selection can't survive that
+        // reshape, so the merge falls back to the daemon's active tab — which
+        // is whichever tab was created last, not the one the user was on.
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        sync_layout(
+            &mut data,
+            &mut rs,
+            Some(split(vec![
+                terminal("t1"),
+                api_tabs(vec![terminal("t2"), terminal("t3")], 0),
+            ])),
+        );
+        rs.queue_close_focus(
+            WindowId::Main,
+            "remote:c1:a",
+            vec!["remote:c1:t1".to_string()],
+            Some("remote:c1:t2".to_string()),
+        );
+
+        let outcome = sync_layout(
+            &mut data,
+            &mut rs,
+            Some(api_tabs(vec![terminal("t2"), terminal("t3")], 1)),
+        );
+
+        assert_eq!(
+            outcome.focus_targets,
+            vec![RemoteFocusTarget {
+                project_id: "remote:c1:a".to_string(),
+                layout_path: vec![0],
+            }]
+        );
+        assert_eq!(active_tab_at(&data, &[]), 0);
     }
 
     #[test]

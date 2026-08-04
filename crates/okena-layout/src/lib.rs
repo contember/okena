@@ -280,6 +280,66 @@ impl LayoutNode {
         }
     }
 
+    /// Terminal that should take focus once the node at `path` is closed.
+    ///
+    /// Mirrors what [`Self::remove_at_path`] will do to the tree, one level at
+    /// a time:
+    /// - **Tabs parent** — hand focus to whichever tab becomes active after the
+    ///   removal (the next tab, or the previous one when the last tab closes).
+    /// - **Split parent** — hand focus to the neighbouring pane (previous, or
+    ///   next when closing the first).
+    /// - **Container left with a single child** — it collapses into that child,
+    ///   so the rule re-applies one level up (closing the last tab of a group
+    ///   lands on the neighbouring pane, not inside the dying group).
+    ///
+    /// Returns `None` when the closed node is the whole tree (nothing left to
+    /// focus) or when the resolved terminal has no id yet (still spawning).
+    pub fn terminal_to_focus_after_closing(&self, path: &[usize]) -> Option<String> {
+        let (&child_index, parent_path) = path.split_last()?;
+        let children = match self.get_at_path(parent_path)? {
+            LayoutNode::Terminal { .. } => return None,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children,
+        };
+        if child_index >= children.len() {
+            return None;
+        }
+        if children.len() <= 2 {
+            // The parent collapses into its surviving child, which then sits at
+            // `parent_path`. With exactly one sibling that sibling IS the
+            // target; with none, the whole container disappears and the rule
+            // re-applies one level up.
+            return match children.len() {
+                2 => children[1 - child_index].visible_terminal_id(),
+                _ => self.terminal_to_focus_after_closing(parent_path),
+            };
+        }
+
+        // Index (in the *pre-removal* child list) of the node that ends up
+        // focused once the removal lands.
+        let sibling_index = match self.get_at_path(parent_path)? {
+            LayoutNode::Tabs { active_tab, .. } if *active_tab != child_index => *active_tab,
+            // The active tab is the one going away: the next tab slides into
+            // its index, except for the last tab where `remove_at_path` clamps
+            // `active_tab` back onto the previous one.
+            LayoutNode::Tabs { .. } if child_index + 1 < children.len() => child_index + 1,
+            LayoutNode::Tabs { .. } => child_index - 1,
+            // Splits keep every pane visible — pick the neighbour.
+            _ if child_index > 0 => child_index - 1,
+            _ => 1,
+        };
+        children.get(sibling_index)?.visible_terminal_id()
+    }
+
+    /// Id of the terminal that is visible in this subtree (follows active tabs).
+    /// `None` for a pane whose PTY hasn't been assigned an id yet.
+    pub fn visible_terminal_id(&self) -> Option<String> {
+        let path = self.find_visible_terminal_path();
+        match self.get_at_path(&path)? {
+            LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+            _ => None,
+        }
+    }
+
     /// Find the `Terminal` node with the given id, returning a reference to it.
     /// Unlike `find_terminal_path`, this hands back the node itself so callers
     /// can clone its visual state (shell_type, zoom_level) — used by soft-close
@@ -1291,6 +1351,164 @@ mod tests {
             children,
             active_tab: 0,
         }
+    }
+
+    fn tabs_active(children: Vec<LayoutNode>, active_tab: usize) -> LayoutNode {
+        LayoutNode::Tabs {
+            children,
+            active_tab,
+        }
+    }
+
+    /// For a tab group, `terminal_to_focus_after_closing` must name exactly the
+    /// tab the user will be looking at once the close lands — otherwise the
+    /// client focuses a pane that isn't on screen. Replays the daemon's own
+    /// mutation (`Workspace::close_terminal`: `remove_at_path` plus the
+    /// active-tab fix-up for a tab removed before the active one) and reads
+    /// back what became visible where the group used to be.
+    fn assert_matches_removal(layout: &LayoutNode, path: &[usize]) {
+        let predicted = layout.terminal_to_focus_after_closing(path);
+        let (&child_index, parent_path) = path.split_last().expect("path must name a child");
+
+        let mut after = layout.clone();
+        let prev_active = match after.get_at_path(parent_path) {
+            Some(LayoutNode::Tabs { active_tab, .. }) if child_index < *active_tab => {
+                Some(*active_tab)
+            }
+            Some(LayoutNode::Tabs { .. }) => None,
+            _ => panic!("oracle only models Tabs parents"),
+        };
+        after.remove_at_path(path);
+        if let Some(prev_active) = prev_active
+            && let Some(LayoutNode::Tabs {
+                children,
+                active_tab,
+            }) = after.get_at_path_mut(parent_path)
+        {
+            *active_tab = (prev_active - 1).min(children.len().saturating_sub(1));
+        }
+
+        let surviving = after
+            .get_at_path(parent_path)
+            .expect("the parent slot survives the removal");
+        assert_eq!(
+            predicted,
+            surviving.visible_terminal_id(),
+            "focus prediction disagrees with the post-removal tree for path {path:?}"
+        );
+    }
+
+    #[test]
+    fn focus_after_closing_active_tab_follows_the_next_tab() {
+        let layout = tabs(vec![terminal("t1"), terminal("t2"), terminal("t3")]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[0]),
+            Some("t2".to_string())
+        );
+        assert_matches_removal(&layout, &[0]);
+    }
+
+    #[test]
+    fn focus_after_closing_last_active_tab_falls_back_to_previous() {
+        let layout = tabs_active(vec![terminal("t1"), terminal("t2"), terminal("t3")], 2);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[2]),
+            Some("t2".to_string())
+        );
+        assert_matches_removal(&layout, &[2]);
+    }
+
+    #[test]
+    fn focus_after_closing_background_tab_keeps_the_active_one() {
+        let layout = tabs_active(vec![terminal("t1"), terminal("t2"), terminal("t3")], 1);
+        // Closing a tab before the active one shifts indices but not what the
+        // user is looking at.
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[0]),
+            Some("t2".to_string())
+        );
+        assert_matches_removal(&layout, &[0]);
+        // ...and closing one after it changes nothing at all.
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[2]),
+            Some("t2".to_string())
+        );
+        assert_matches_removal(&layout, &[2]);
+    }
+
+    #[test]
+    fn focus_after_closing_second_to_last_tab_dissolves_onto_the_survivor() {
+        let layout = tabs(vec![terminal("t1"), terminal("t2")]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[0]),
+            Some("t2".to_string())
+        );
+        assert_matches_removal(&layout, &[0]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[1]),
+            Some("t1".to_string())
+        );
+        assert_matches_removal(&layout, &[1]);
+    }
+
+    #[test]
+    fn focus_after_closing_last_tab_of_a_group_leaves_for_the_neighbouring_pane() {
+        // Split[ pane, Tabs[t2, t3] ]: closing t2 stays inside the group,
+        // closing the survivor afterwards hands focus to the sibling pane.
+        let layout = hsplit(vec![
+            terminal("t1"),
+            tabs(vec![terminal("t2"), terminal("t3")]),
+        ]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[1, 0]),
+            Some("t3".to_string())
+        );
+        assert_matches_removal(&layout, &[1, 0]);
+
+        let collapsed = hsplit(vec![terminal("t1"), terminal("t3")]);
+        assert_eq!(
+            collapsed.terminal_to_focus_after_closing(&[1]),
+            Some("t1".to_string())
+        );
+    }
+
+    #[test]
+    fn focus_after_closing_split_pane_prefers_the_previous_neighbour() {
+        let layout = hsplit(vec![terminal("t1"), terminal("t2"), terminal("t3")]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[1]),
+            Some("t1".to_string())
+        );
+        // Closing the first pane has no previous neighbour — take the next.
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[0]),
+            Some("t2".to_string())
+        );
+    }
+
+    #[test]
+    fn focus_after_closing_descends_into_the_neighbours_visible_tab() {
+        let layout = hsplit(vec![
+            tabs_active(vec![terminal("t1"), terminal("t2")], 1),
+            terminal("t3"),
+        ]);
+        assert_eq!(
+            layout.terminal_to_focus_after_closing(&[1]),
+            Some("t2".to_string())
+        );
+    }
+
+    #[test]
+    fn focus_after_closing_the_only_terminal_is_none() {
+        let layout = terminal("t1");
+        assert_eq!(layout.terminal_to_focus_after_closing(&[]), None);
+    }
+
+    #[test]
+    fn focus_after_closing_out_of_range_path_is_none() {
+        let layout = hsplit(vec![terminal("t1"), terminal("t2")]);
+        assert_eq!(layout.terminal_to_focus_after_closing(&[5]), None);
+        assert_eq!(layout.terminal_to_focus_after_closing(&[0, 0]), None);
     }
 
     #[test]
