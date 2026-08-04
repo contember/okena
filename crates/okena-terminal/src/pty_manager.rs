@@ -862,7 +862,38 @@ impl PtyManager {
             pixel_height: 0,
         })?;
 
-        let launch_environment = self.launch_environment(plan);
+        let mut launch_environment = self.launch_environment(plan);
+
+        // Okena's two pane-identity vars must reach the pane's *shell*, not just
+        // the outer command. Under a session backend the spawned command is
+        // `sh -c "tmux new-session …"`, so setting them on the CommandBuilder
+        // after the fact lands them on tmux — and when a tmux server is already
+        // running (the usual case after the first pane) the shell inherits the
+        // server's environment, which predates Okena entirely. Routing them
+        // through `launch_environment` is what renders them as tmux `-e KEY=VAL`;
+        // the loop below still applies them directly for the no-backend path.
+        // Okena owns both names, so drop any inherited value first.
+        launch_environment.retain(|(key, _)| key != "OKENA_TERMINAL_ID" && key != "OKENA_TTY");
+        // Let anything in the pane name the pane it is running in. The
+        // agent-status OSC carries it back as `tid=`, which lets the receiving
+        // terminal reject a status meant for a different pane — the failure
+        // mode when a status is written to a recorded pty path that has since
+        // been recycled.
+        launch_environment.push((
+            "OKENA_TERMINAL_ID".to_string(),
+            Some(terminal_id.to_string()),
+        ));
+        // Expose the pane's slave pty so agent hooks can emit in-band status
+        // updates through `$OKENA_TTY`. This is the device senders should
+        // PREFER: writing to the slave reaches Okena's own reader, whereas a
+        // hook's `/dev/tty` under tmux/screen is the nested pty, which forwards
+        // only a fixed allowlist of OSC numbers that 9001 is not on. The `tid=`
+        // param above covers the risk that motivated the other order — a
+        // recorded path recycled by another pane after a reattach.
+        #[cfg(unix)]
+        if let Some(path) = slave_pty_path(pair.master.as_ref()) {
+            launch_environment.push(("OKENA_TTY".to_string(), Some(path)));
+        }
 
         // Build command based on session backend and shell config
         #[cfg(unix)]
@@ -880,23 +911,6 @@ impl PtyManager {
                 Some(val) => cmd.env(key, val),
                 None => cmd.env_remove(key),
             }
-        }
-
-        // Let anything in the pane name the pane it is running in. The
-        // agent-status OSC carries it back as `tid=`, which lets the receiving
-        // terminal reject a status meant for a different pane — the failure
-        // mode when a status is written to a recorded pty path that has since
-        // been recycled.
-        cmd.env("OKENA_TERMINAL_ID", terminal_id);
-
-        // Expose the pane's slave pty so agent hooks without a controlling
-        // terminal can emit in-band status updates through `$OKENA_TTY`.
-        // Captured once here, so it is only a fallback: a process that has a
-        // controlling terminal should prefer that, since this path goes stale
-        // when the pane later reattaches to a persistent tmux/dtach session.
-        #[cfg(unix)]
-        if let Some(path) = slave_pty_path(pair.master.as_ref()) {
-            cmd.env("OKENA_TTY", path);
         }
 
         // Spawn the process
