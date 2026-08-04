@@ -28,6 +28,28 @@ pub use okena_state::{
     WorkspaceData, WorktreeMetadata,
 };
 
+/// What a window is focused on, captured before a sync reshapes the layout.
+/// See `Workspace::reanchor_focus`.
+struct FocusAnchor {
+    /// The window's focus at capture time, so a focus target applied during
+    /// this sync can be told apart from an untouched window.
+    previous: FocusedTerminalState,
+    /// Terminal the focused path named — the thing to follow.
+    terminal_id: String,
+    /// Where focus goes if that terminal is gone once the sync lands, resolved
+    /// against the tree it still lived in.
+    replacement: Option<String>,
+}
+
+/// The terminal slot at `path`: `Some(None)` for a pane whose PTY is still
+/// spawning, `None` when the path doesn't name a pane at all.
+fn terminal_slot_at<'a>(layout: &'a LayoutNode, path: &[usize]) -> Option<Option<&'a str>> {
+    match layout.get_at_path(path) {
+        Some(LayoutNode::Terminal { terminal_id, .. }) => Some(terminal_id.as_deref()),
+        _ => None,
+    }
+}
+
 /// Diagnostics returned after atomically aborting a vanished before-remove hook.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbortedWorktreeClose {
@@ -2111,6 +2133,10 @@ impl Workspace {
         focus_manager: &mut FocusManager,
         cx: &mut impl WorkspaceCx,
     ) {
+        // Capture what this window is looking at before reconciliation reshapes
+        // the tree — see `reanchor_focus`.
+        let anchor = self.capture_focus_anchor(focus_manager);
+
         let outcome = crate::remote_apply::apply_remote_snapshot(
             &mut self.data,
             &mut self.remote_sync,
@@ -2139,36 +2165,91 @@ impl Workspace {
             self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
         }
 
-        // Focus can also be orphaned by a close this window never asked for —
-        // a shell that exited on its own, or another window closing the pane.
-        // Nothing else re-anchors the path, so it would keep pointing at a slot
-        // that no longer holds a terminal and the window would end up with no
-        // keyboard focus at all. Modal context is left alone: the modal owns
-        // focus and restores its own target when it closes.
-        //
-        // The replacement has to be a terminal too. On a degenerate tree (an
-        // empty container) `find_visible_terminal_path` hands back the
-        // container's own path, which would leave focus just as orphaned and
-        // re-run this on every single sync — each pass paying for a
-        // `bump_activity` notify, a debounced save and a sidebar re-sort.
-        if !focus_manager.is_modal()
-            && let Some(focused) = focus_manager.focused_terminal_state()
-            && let Some(layout) = self
-                .project(&focused.project_id)
-                .and_then(|p| p.layout.as_ref())
-            && !matches!(
-                layout.get_at_path(&focused.layout_path),
-                Some(LayoutNode::Terminal { .. })
-            )
-        {
-            let path = layout.find_visible_terminal_path();
-            if matches!(layout.get_at_path(&path), Some(LayoutNode::Terminal { .. })) {
-                self.set_focused_terminal(focus_manager, focused.project_id, path, cx);
-            }
-        }
+        self.reanchor_focus(focus_manager, anchor.as_ref());
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         self.notify_ui_only(cx);
+    }
+
+    /// Record which terminal a window is focused on, before a sync reshapes the
+    /// layout under it. `None` when the window has no focus, or its path no
+    /// longer names a pane (already orphaned — nothing to follow).
+    fn capture_focus_anchor(&self, focus_manager: &FocusManager) -> Option<FocusAnchor> {
+        let previous = focus_manager.focused_terminal_state()?;
+        let layout = self.project(&previous.project_id)?.layout.as_ref()?;
+        let terminal_id = terminal_slot_at(layout, &previous.layout_path)??.to_string();
+        // Computed on the pre-sync tree, while the focused pane's position is
+        // still known: where focus goes if this sync took that pane away.
+        let replacement = layout.terminal_to_focus_after_closing(&previous.layout_path);
+        Some(FocusAnchor {
+            previous,
+            terminal_id,
+            replacement,
+        })
+    }
+
+    /// Keep a window pointed at the terminal it was on across a sync.
+    ///
+    /// Focus is a layout *path*, and any change to the tree can move it: a pane
+    /// closed in another window, a shell that exited on its own, a daemon-side
+    /// move. The path then silently addresses a different terminal, or nothing
+    /// at all — leaving the window with no keyboard focus. Windows that issued
+    /// the change get an explicit target (`queue_focus_after_close`); this is
+    /// the passive counterpart every window gets for changes it didn't make, so
+    /// it defers to a target that already moved focus this pass.
+    ///
+    /// Ordinary focus changes (clicks, navigation) are not activity in the
+    /// project sense, so this deliberately bypasses `set_focused_terminal`: no
+    /// `bump_activity`, no sidebar re-sort, no debounced save.
+    fn reanchor_focus(&self, focus_manager: &mut FocusManager, anchor: Option<&FocusAnchor>) {
+        // A modal owns focus and restores its own target when it closes.
+        if focus_manager.is_modal() {
+            return;
+        }
+        let Some(current) = focus_manager.focused_terminal_state() else {
+            return;
+        };
+        // An explicit focus target already moved this window — it wins.
+        if anchor.is_some_and(|anchor| anchor.previous != current) {
+            return;
+        }
+        let Some(layout) = self
+            .project(&current.project_id)
+            .and_then(|p| p.layout.as_ref())
+        else {
+            // A project with no layout keeps focus on the project itself.
+            return;
+        };
+
+        let replacement = match anchor {
+            Some(anchor) => {
+                if terminal_slot_at(layout, &current.layout_path)
+                    == Some(Some(anchor.terminal_id.as_str()))
+                {
+                    return; // Still on the same terminal.
+                }
+                // Follow it if it merely moved; otherwise take the neighbour
+                // resolved against the tree it lived in.
+                layout.find_terminal_path(&anchor.terminal_id).or_else(|| {
+                    anchor
+                        .replacement
+                        .as_ref()
+                        .and_then(|id| layout.find_terminal_path(id))
+                })
+            }
+            // Focus was already orphaned before this sync, so there is nothing
+            // to follow — but if the path names a pane again, leave it be.
+            None if terminal_slot_at(layout, &current.layout_path).is_some() => return,
+            None => None,
+        };
+
+        let path = replacement.unwrap_or_else(|| layout.find_visible_terminal_path());
+        // A degenerate tree (an empty container) has no terminal to offer, and
+        // `find_visible_terminal_path` would hand back the container's own path
+        // — leaving focus just as orphaned and re-running this every sync.
+        if path != current.layout_path && terminal_slot_at(layout, &path).is_some() {
+            focus_manager.focus_terminal(current.project_id, path);
+        }
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
@@ -3556,24 +3637,132 @@ mod gpui_tests {
         }
     }
 
+    fn pane(terminal_id: &str) -> LayoutNode {
+        LayoutNode::Terminal {
+            terminal_id: Some(terminal_id.to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        }
+    }
+
+    fn split_of(terminal_ids: &[&str]) -> LayoutNode {
+        LayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: vec![100.0 / terminal_ids.len() as f32; terminal_ids.len()],
+            children: terminal_ids.iter().map(|tid| pane(tid)).collect(),
+        }
+    }
+
+    fn tabs_of(terminal_ids: &[&str], active_tab: usize) -> LayoutNode {
+        LayoutNode::Tabs {
+            children: terminal_ids.iter().map(|tid| pane(tid)).collect(),
+            active_tab,
+        }
+    }
+
     /// Project whose layout is a two-pane horizontal split.
     fn project_with_split(id: &str, terminal_ids: [&str; 2]) -> ProjectData {
         let mut project = make_project(id);
-        project.layout = Some(LayoutNode::Split {
-            direction: crate::state::SplitDirection::Horizontal,
-            sizes: vec![50.0, 50.0],
-            children: terminal_ids
-                .iter()
-                .map(|tid| LayoutNode::Terminal {
-                    terminal_id: Some((*tid).to_string()),
-                    minimized: false,
-                    detached: false,
-                    shell_type: ShellType::Default,
-                    zoom_level: 1.0,
-                })
-                .collect(),
-        });
+        project.layout = Some(split_of(&terminal_ids));
         project
+    }
+
+    /// Focus `path` in `p1`, then replay what a sync brings: capture the anchor,
+    /// swap in the layout the sync produced, resolve. Reports where focus landed
+    /// and which terminal is there.
+    fn reanchor_across(
+        cx: &mut gpui::TestAppContext,
+        before: LayoutNode,
+        focus_path: Vec<usize>,
+        after: LayoutNode,
+    ) -> (Vec<usize>, Option<String>) {
+        let mut project = make_project("p1");
+        project.layout = Some(before);
+        let workspace =
+            cx.new(|_cx| Workspace::new(make_workspace_data(vec![project], vec!["p1"])));
+        let mut fm = crate::focus::FocusManager::new();
+        fm.focus_terminal("p1".to_string(), focus_path);
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            let anchor = ws.capture_focus_anchor(&fm);
+            ws.project_mut("p1").unwrap().layout = Some(after);
+            ws.reanchor_focus(&mut fm, anchor.as_ref());
+        });
+
+        let focused = fm.focused_terminal_state().expect("focus retained");
+        let terminal = workspace.read_with(cx, |ws: &Workspace, _cx| {
+            ws.project("p1")
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|layout| match layout.get_at_path(&focused.layout_path) {
+                    Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
+                    _ => None,
+                })
+        });
+        (focused.layout_path, terminal)
+    }
+
+    #[gpui::test]
+    fn focus_follows_its_terminal_when_another_window_reshapes_the_layout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Focused on t3, the third pane; another window closes t1, shifting
+        // every surviving pane one slot left. Focus has to follow t3 to [1] —
+        // not fall back to whatever is first on screen.
+        let (path, terminal) = reanchor_across(
+            cx,
+            split_of(&["t1", "t2", "t3"]),
+            vec![2],
+            split_of(&["t2", "t3"]),
+        );
+
+        assert_eq!(path, vec![1]);
+        assert_eq!(terminal.as_deref(), Some("t3"));
+    }
+
+    #[gpui::test]
+    fn focus_moves_to_the_neighbour_when_another_window_closes_its_terminal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Focused on t3; another window closes it. The neighbour is resolved
+        // against the tree t3 lived in — the same rule this window's own close
+        // would have used — landing on t2, not on whatever is first on screen.
+        let (path, terminal) = reanchor_across(
+            cx,
+            split_of(&["t1", "t2", "t3"]),
+            vec![2],
+            split_of(&["t1", "t2"]),
+        );
+
+        assert_eq!(path, vec![1]);
+        assert_eq!(terminal.as_deref(), Some("t2"));
+    }
+
+    #[gpui::test]
+    fn reanchoring_defers_to_a_focus_target_applied_this_sync(cx: &mut gpui::TestAppContext) {
+        // Cmd+T: the sync brings a new tab and an explicit target focuses it.
+        // The terminal this window was on is still very much alive, so a
+        // re-anchor that followed it blindly would yank focus straight back
+        // out of the tab the user just opened.
+        let mut project = make_project("p1");
+        project.layout = Some(tabs_of(&["t1", "t2"], 0));
+        let workspace =
+            cx.new(|_cx| Workspace::new(make_workspace_data(vec![project], vec!["p1"])));
+        let mut fm = crate::focus::FocusManager::new();
+        fm.focus_terminal("p1".to_string(), vec![0]);
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            let anchor = ws.capture_focus_anchor(&fm);
+            ws.project_mut("p1").unwrap().layout = Some(tabs_of(&["t1", "t2", "t3"], 2));
+            fm.focus_terminal("p1".to_string(), vec![2]);
+            ws.reanchor_focus(&mut fm, anchor.as_ref());
+        });
+
+        assert_eq!(
+            fm.focused_terminal_state().map(|f| f.layout_path),
+            Some(vec![2])
+        );
     }
 
     /// Run a no-op remote sync (no connections) and report where focus ended up.
