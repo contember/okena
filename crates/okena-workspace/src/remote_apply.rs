@@ -255,6 +255,7 @@ pub fn apply_remote_snapshot(
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
                         agent_sessions: HashMap::new(),
+                        pending_agent_resumes: HashMap::new(),
                         default_shell: api_project.default_shell.clone(),
                         hook_terminals: remote_hook_terminals,
                         pinned: api_project.pinned,

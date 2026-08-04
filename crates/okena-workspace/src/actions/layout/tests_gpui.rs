@@ -31,6 +31,7 @@ fn make_project(id: &str) -> ProjectData {
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: Default::default(),
+        pending_agent_resumes: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -501,6 +502,7 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: Default::default(),
+        pending_agent_resumes: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -1314,5 +1316,93 @@ fn test_move_to_tab_group_cross_project(cx: &mut gpui::TestAppContext) {
             }
             _ => panic!("Expected tabs in p2, got {:?}", p2_layout),
         }
+    });
+}
+
+// === cross-project agent session migration ===
+
+fn agent_session(session_id: &str) -> okena_core::agent_session::AgentSession {
+    okena_core::agent_session::AgentSession {
+        agent: "claude-code".to_string(),
+        session_id: session_id.to_string(),
+        transcript_path: None,
+    }
+}
+
+const SESSION_UUID: &str = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+
+/// Dragging a pane to another project must carry its agent session: the agent
+/// keeps running, but `agent_sessions` is per project, so the identity would
+/// otherwise be stranded in the source project as an orphan.
+#[gpui::test]
+fn move_pane_across_projects_carries_the_agent_session(cx: &mut gpui::TestAppContext) {
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t3",
+            DropZone::Right,
+            cx,
+        );
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.agent_session("p1", "t1"), None, "source keeps no orphan");
+        assert_eq!(
+            ws.agent_session("p2", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "the session follows the pane into its new project"
+        );
+    });
+}
+
+#[gpui::test]
+fn move_to_tab_group_across_projects_carries_the_agent_session(cx: &mut gpui::TestAppContext) {
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout(
+        "p2",
+        LayoutNode::Tabs {
+            children: vec![terminal_node_t("t3"), terminal_node_t("t4")],
+            active_tab: 0,
+        },
+    );
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t1", "p2", &[], Some(1), cx);
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.agent_session("p1", "t1"), None);
+        assert_eq!(
+            ws.agent_session("p2", "t1"),
+            Some(agent_session(SESSION_UUID))
+        );
     });
 }

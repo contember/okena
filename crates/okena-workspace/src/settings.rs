@@ -289,9 +289,12 @@ pub struct AppSettings {
     /// Automatically resume a pane's AI agent session (e.g. `claude --resume
     /// <id>`) on restore, when one was captured before the restart. Opt-in
     /// (default off). When off, the captured session is still persisted and
-    /// shown — just not auto-run. Note: terminal IDs (and thus the captured
-    /// session) only survive a restart when a session backend is configured, so
-    /// this is effectively a no-op with `session_backend = none`.
+    /// re-attached to the restored pane — just not auto-run.
+    ///
+    /// Applies when the pane comes back **without** its process, i.e. under
+    /// `session_backend = none`, where the daemon runs the resume as the pane's
+    /// startup command. With a session backend the pane re-attaches to a live
+    /// session whose agent is (still) running, so nothing is resumed.
     #[serde(default)]
     pub auto_resume_agent_sessions: bool,
 

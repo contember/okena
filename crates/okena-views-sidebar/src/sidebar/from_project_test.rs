@@ -28,6 +28,7 @@ fn make_project(id: &str) -> ProjectData {
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: Default::default(),
+        pending_agent_resumes: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,

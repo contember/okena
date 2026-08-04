@@ -184,6 +184,9 @@ fn prepare_layout_terminals(
                     &settings.default_shell,
                     shell_wrapper,
                     on_create,
+                    // Restoring a saved session builds fresh panes; they carry
+                    // no agent history to resume.
+                    None,
                     env,
                 )
             };
@@ -987,6 +990,7 @@ mod tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals,
             pinned: false,

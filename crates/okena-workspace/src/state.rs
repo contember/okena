@@ -1634,19 +1634,40 @@ impl Workspace {
             .and_then(|p| p.agent_sessions.get(terminal_id).cloned())
     }
 
-    /// Drop a terminal's persisted agent session (the terminal was permanently
-    /// closed), so `workspace.json` doesn't accumulate orphans.
-    pub fn remove_agent_session(
-        &mut self,
-        project_id: &str,
-        terminal_id: &str,
-        cx: &mut impl WorkspaceCx,
-    ) {
-        if let Some(project) = self.project_mut(project_id)
-            && project.agent_sessions.remove(terminal_id).is_some()
-        {
+    /// Drop the persisted agent session for a terminal that is permanently gone
+    /// (hard close, finalized soft close) or that lost its identity (shell
+    /// switch), so `workspace.json` doesn't accumulate orphans and a pane can't
+    /// inherit a stale session.
+    ///
+    /// Scans every project rather than taking a project id: callers reach this
+    /// from paths where the pane is already out of its layout (a finalized soft
+    /// close), and a terminal id maps to at most one session anyway. A
+    /// cross-project *move* must not use this — see the `move_ops` migration,
+    /// which carries the session with the terminal.
+    pub fn forget_agent_session(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
+        let mut removed = false;
+        for project in &mut self.data.projects {
+            removed |= project.agent_sessions.remove(terminal_id).is_some();
+        }
+        if removed {
             self.notify_data(cx);
         }
+    }
+
+    /// Claim the agent session queued for the pane at `layout_path`, if any.
+    ///
+    /// Consuming is the point: the entry is placed by `validate_workspace_data`
+    /// when a restore drops every terminal id, and taking it makes the resume
+    /// exactly-once — a later respawn of the same pane (or a second caller
+    /// racing this one) must not resume the session again.
+    pub fn take_pending_agent_resume(
+        &mut self,
+        project_id: &str,
+        layout_path: &[usize],
+    ) -> Option<okena_core::agent_session::AgentSession> {
+        self.project_mut(project_id)?
+            .pending_agent_resumes
+            .remove(layout_path)
     }
 
     pub fn register_hook_terminal(
@@ -2443,6 +2464,7 @@ mod workspace_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -3352,6 +3374,7 @@ mod gpui_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -254,6 +254,18 @@ pub struct ProjectData {
     /// the session's `agent` field selects which harness resumes it.
     #[serde(default)]
     pub agent_sessions: HashMap<String, okena_core::agent_session::AgentSession>,
+    /// Sessions waiting to be resumed, keyed by the **layout path** of the pane
+    /// they belong to. Load-time only, never persisted.
+    ///
+    /// Without a session backend, restoring the workspace clears every terminal
+    /// id, which orphans [`agent_sessions`](Self::agent_sessions) — its keys are
+    /// exactly the ids being dropped. `validate_workspace_data` therefore
+    /// re-keys the surviving sessions onto their pane's layout path (stable
+    /// across that one load, since only the ids are cleared) and
+    /// `spawn_uninitialized_terminals` consumes each entry exactly once as it
+    /// gives the pane its new terminal id.
+    #[serde(skip)]
+    pub pending_agent_resumes: HashMap<Vec<usize>, okena_core::agent_session::AgentSession>,
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<ShellType>,
@@ -373,6 +385,7 @@ mod tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -82,20 +82,37 @@ restart:
   and kept on the pane as a *sticky* record that survives `st=clear`.
 - **Persisted** per terminal in `workspace.json` (`project.agent_sessions`), so
   it outlives the process.
-- **Resumed** on restore when the **`auto_resume_agent_sessions`** setting is on:
-  Okena types the harness's resume command (for Claude Code, `claude --resume
-  <id>`) into the reconnected pane after a short delay. Off by default — when
-  off, the session is still captured, persisted, and shown, just not auto-run.
+- **Re-keyed** on load. Without a session backend a restore clears every
+  terminal id — exactly the keys the sessions are stored under. Before dropping
+  them, `validate_workspace_data` moves each surviving session onto its pane's
+  *layout path* (`project.pending_agent_resumes`, never persisted), which is the
+  pane identity that does survive that load.
+- **Resumed** by the daemon when the **`auto_resume_agent_sessions`** setting is
+  on: `spawn_uninitialized_terminals` consumes the queued session as it gives
+  the pane its new terminal id, and runs the harness's resume command (for
+  Claude Code, `claude --resume <id>`) as the pane's **startup command**,
+  chained after any `on_create` hook so the pane still ends up at an interactive
+  shell. Off by default — when off, the session is still re-attached to the
+  restored pane and shown, just not auto-run.
+
+Consuming the queued entry makes this **exactly-once**: a pane respawned later
+in the same session does not re-resume. And because it hangs off the *spawn*
+path, a pane that re-attaches to a live backend session (tmux/dtach — where the
+agent is still running) is never touched.
 
 Which command resumes a session is **per-harness** (Claude Code, Codex, …),
 selected by the `agent` id through the harness registry — adding a new agent is
 additive, with no core change.
 
-> **Requires a session backend.** A pane's `terminal_id` (the key the session is
-> stored under) only survives a restart when a session backend (`tmux` / `dtach`
-> / `screen`) is configured. With `session_backend = none`, terminal IDs are
-> regenerated on load, so the persisted session no longer matches and auto-resume
-> is a no-op.
+> **Resume argv must be shell-neutral.** The command is composed into the pane's
+> shell line, so `okena_core::agent_harness::resume_command_line` refuses any
+> argv element containing whitespace, quotes, or metacharacters rather than
+> quote per dialect. A harness needing more should ship a launcher script.
+
+The session follows its pane: it moves with a cross-project drag, survives the
+undo window of a soft close, and is dropped on a hard close, a finalized soft
+close, or a shell switch. Sessions whose pane is gone — or whose stored
+`session_id` no longer looks like a UUID — are pruned on load.
 
 ## Claude Code integration
 
