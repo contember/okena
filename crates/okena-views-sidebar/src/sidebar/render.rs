@@ -708,6 +708,7 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _render_probe = okena_core::render_probe::sidebar_render();
         let t = theme(cx);
 
         // Process pending sidebar requests (drained from Workspace by observer)

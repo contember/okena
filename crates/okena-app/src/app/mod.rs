@@ -12,7 +12,7 @@ use crate::views::window::{
 };
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
-use okena_ui::activity_repaint::ActivityRepaintBatch;
+use okena_ui::activity_repaint::{ActivityRepaintBatch, ActivityRepaintThrottle};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,6 +23,9 @@ use std::time::Duration;
 /// independent TUI animations to drive the same OS window at aggregate rates.
 /// Parsing, notifications, and OSC clipboard replies are intentionally not delayed.
 const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(20);
+/// Sidebar state does not need terminal-scene frame rates. Preserve the first
+/// activity edge, then coalesce sustained and trailing updates to ~4 FPS.
+const SIDEBAR_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
@@ -201,6 +204,9 @@ pub struct Okena {
     /// The idle-to-active edge is presented immediately; sustained activity is
     /// coalesced while parsing and notification handling remain immediate.
     terminal_activity_repaints: ActivityRepaintBatch<String>,
+    /// Independent, lower-frequency presentation stream for sidebar activity
+    /// indicators and activity ordering. Terminal panes retain their 20 ms path.
+    sidebar_activity_repaints: ActivityRepaintThrottle,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
@@ -324,6 +330,7 @@ impl Okena {
             opened_detached_windows: HashSet::new(),
             remote_manager: remote_manager.clone(),
             terminal_activity_repaints: ActivityRepaintBatch::default(),
+            sidebar_activity_repaints: ActivityRepaintThrottle::default(),
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
@@ -724,13 +731,54 @@ impl Okena {
             okena_core::latency_probe::client_repaint_dispatched(terminal_id);
         }
 
-        // Pane and sidebar notifications happen in one app update so GPUI can
-        // present one frame for all windows rather than racing per-view timers.
-        {
+        // Terminal content keeps the ~50 FPS activity cadence for interactive
+        // output. Sidebar activity is queued independently below.
+        let repaint_stats = {
             let mut registry = content_pane_registry().lock();
-            request_registered_content_pane_repaints(&mut registry, terminal_ids, cx);
+            request_registered_content_pane_repaints(&mut registry, terminal_ids, cx)
+        };
+        okena_core::render_probe::terminal_activity_frame(
+            terminal_ids.len(),
+            repaint_stats.terminals,
+            repaint_stats.panes,
+        );
+
+        self.queue_sidebar_activity_repaint(cx);
+    }
+
+    fn queue_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
+        let decision = self.sidebar_activity_repaints.on_activity();
+        if decision.repaint_now {
+            self.present_sidebar_activity_repaint(cx);
+        }
+        if !decision.start_timer {
+            return;
         }
 
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(SIDEBAR_ACTIVITY_REPAINT_INTERVAL)
+                    .await;
+                let keep_scheduled = this
+                    .update(cx, |this, cx| {
+                        if this.sidebar_activity_repaints.timer_tick() {
+                            this.present_sidebar_activity_repaint(cx);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_scheduled {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn present_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
         let mut window_views = Vec::with_capacity(1 + self.extra_windows.len());
         window_views.push(self.main_window.clone());
         window_views.extend(self.extra_windows.values().cloned());

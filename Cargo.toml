@@ -89,6 +89,10 @@ mimalloc = ["dep:mimalloc"]
 # Runtime collection still requires OKENA_TERMINAL_LATENCY_PROBE=1.
 terminal-latency-probe = ["okena-core/terminal-latency-probe"]
 
+# Compile aggregate render-performance counters into the desktop app.
+# Runtime collection still requires OKENA_RENDER_PERF_PROBE=1.
+render-perf-probe = ["okena-core/render-perf-probe"]
+
 # jemalloc: default on Unix. Shares a small fixed set of arenas across all
 # threads (narenas:N in src/main.rs) instead of mimalloc's per-thread heaps, so
 # okena's ~90 threads don't each pin their own segments — cut anon-heap RSS
