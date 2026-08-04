@@ -28,7 +28,7 @@ A **stable contract** other tools depend on (see `docs/agent-status.md`). An AI
 agent reports its own lifecycle by writing to its terminal:
 
 ```
-ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; msg=<b64> ] [ ; lbl=<b64-json> ] ST
+ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; msg=<b64> ] [ ; lbl=<b64-json> ] ST
 ```
 
 - `9001` is a private OSC number (not a standard sequence); keep it stable.
@@ -43,34 +43,56 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; msg=<b64> ] [ ; lbl=<b64-j
 - `lbl=` reserves three keys — `agent`, `session_id`, `transcript_path`. With an
   `agent` id + a UUID-shaped `session_id`, they're captured into a **sticky**
   `okena_core::agent_session::AgentSession` on `Terminal.agent_session` (read via
-  `Terminal::agent_session()`). Unlike `agent_status` it survives `st=clear`
-  (it's the pane's session identity for resume + transcript stats, persisted by
-  the app layer), and a change sets the `agent_session_dirty` edge (drained via
+  `Terminal::agent_session()`). Unlike `agent_status` it survives `st=clear` —
+  and is captured on it, since a harness maps session start/end onto `clear`.
+  It's the pane's session identity for resume + transcript stats, persisted by
+  the app layer, and a change sets the `agent_session_dirty` edge (drained via
   `take_agent_session_dirty`). Per-harness resume/transcript logic is dispatched
   by `agent` id through the gpui-free `okena_core::agent_harness` registry
-  (impls live in the `okena-ext-*` crates). A non-UUID `session_id` is dropped.
+  (impls live in `okena-agent-harnesses` — deliberately NOT the `okena-ext-*`
+  crates, which pull gpui and so cannot be linked by the headless daemon). A
+  non-UUID `session_id` is dropped, and `agent` / `transcript_path` are bounded
+  (see `agent_session.rs`) because they are the only agent-status fields that
+  reach disk. The three reserved keys are **stripped** from the display labels
+  after capture, so session identity never rides the wire to remote clients.
 - A change stores into the shared one-shot `remote_dirty` edge (drained via
   `take_remote_dirty`), which the PTY event loop consumes
-  (`Okena::process_remote_dirty`) to bump the remote `state_version`. This edge
+  (`okena_daemon_core::pty_loop::drain_remote_dirty` — the daemon owns this
+  drain; the GUI mirror does not) to bump the remote `state_version`. This edge
   is **generic**, not agent-specific: any runtime-only signal that remote
   clients should see reuses it rather than adding its own changed-edge +
   per-feature drain. A transition into `blocked`/`done` also queues a
   `TerminalNotification` (reusing the OSC 9 notification path + focus
   suppression).
-- `pty_manager.rs` exports two env vars into the pane at spawn:
+- `pty_manager.rs` exports two env vars into the pane at spawn. Both go through
+  `launch_environment`, **not** `cmd.env()` after the fact: under a session
+  backend the spawned command is `sh -c "tmux new-session …"`, so a late
+  `cmd.env` lands on tmux rather than the pane's shell — and an already-running
+  tmux server's environment predates Okena entirely. `launch_environment` is
+  what gets rendered as tmux `-e KEY=VAL`.
   - `OKENA_TTY` — the pane's slave pty path (portable-pty's `tty_name`, i.e.
     reentrant `ttyname_r`; **not** `libc::ptsname`, whose static buffer races
-    concurrent terminal creation). It exists for processes **without a
-    controlling terminal** — e.g. a Claude Code hook — since writing to the
-    slave reaches Okena's master reader even through a nested dtach/tmux pty.
-    It is a **fallback**: captured once at spawn, it goes stale when the pane
-    reattaches to a persistent session, so senders must prefer `/dev/tty` when
-    they have one (that always names the pane's current pty).
+    concurrent terminal creation). Senders should **prefer** it over
+    `/dev/tty`: writing to the slave reaches Okena's own master reader, whereas
+    a hook's controlling terminal under tmux/screen is the *nested* pty, and
+    those forward only a fixed allowlist of OSC numbers that 9001 is not on.
+    It also covers processes with no controlling terminal at all. It is captured
+    once at spawn, so it can go stale across a reattach — which is what `tid=`
+    below contains.
+
+    **Security note:** unlike an inherited fd, a *path* can be reopened, and
+    Linux recycles `/dev/pts/N` numbers. Any process that outlives its pane (a
+    daemonized dev server, a forking postinstall) keeps a way to write into
+    whatever pane later inherits that number, and writes to a slave surface as
+    terminal *output* — i.e. they are parsed as escape sequences. Same-user, so
+    not a privilege boundary, but treat the var as a capability: `tid=` guards
+    OSC 9001 specifically, nothing else.
   - `OKENA_TERMINAL_ID` — the pane's terminal id, echoed back as the OSC's
     `tid=`. The sidecar drops a status whose `tid` isn't its own, which is what
-    contains the stale-`OKENA_TTY` failure mode: a recorded path can be
-    recycled by another pane, and driving the wrong agent's indicator is worse
-    than dropping the update. Omitted `tid` is accepted.
+    contains the stale-`OKENA_TTY` failure mode above. Note the namespaces
+    differ: this is the daemon's **raw** id, while a client-side `Terminal` is
+    keyed `remote:{connection}:{raw}` — the sidecar matches the unprefixed
+    suffix. Omitted `tid` is accepted.
 
 ## Threading Model
 

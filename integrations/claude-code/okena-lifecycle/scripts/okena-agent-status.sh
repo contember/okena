@@ -11,17 +11,11 @@
 # Designed to be wired up as a Claude Code hook (see docs/agent-status.md), but
 # it's agent-agnostic — anything that can run a command can call it.
 #
-# Output device: prefer the controlling terminal, fall back to `$OKENA_TTY`.
-# `/dev/tty` always resolves to the pane's *current* pty, so it stays correct
-# after the pane reattaches to a persistent session backend (dtach/tmux). But a
-# hook may run as a subprocess with no controlling terminal at all, which is why
-# Okena also exports `OKENA_TTY` (the pane's slave pty path, captured at spawn);
-# writing to the slave reaches Okena's reader even through a nested pty. That
-# path can go stale across a reattach, so it is the fallback, not the default —
-# and the `tid=` param below lets Okena reject a status that lands in the wrong
-# pane because a recorded path was recycled. This drains stdin so a hook feeding
-# event JSON on the pipe never blocks, and is a silent no-op when there's no
-# device to write to — safe to call from anywhere.
+# Output device: prefer `$OKENA_TTY` (Okena's own slave pty for this pane,
+# exported at spawn), fall back to the controlling terminal. See the selection
+# block below for why that order. This drains stdin so a hook feeding event JSON
+# on the pipe never blocks, and is a silent no-op when there's no device to
+# write to — safe to call from anywhere.
 #
 # Debugging: set OKENA_AGENT_STATUS_LOG=/path/to/log to append one line per
 # invocation recording the state, the target device, and whether the write
@@ -39,14 +33,27 @@ agent="${OKENA_AGENT:-}"
 # that reaches the wrong pane. Empty outside Okena — the param is then omitted.
 terminal_id="${OKENA_TERMINAL_ID:-}"
 
-# Opening /dev/tty fails (ENXIO) without a controlling terminal, so probing it
-# both picks the live device and detects the no-tty hook case.
+# Pick the device to write to, preferring Okena's own slave pty.
 #
-# The probe MUST stay in a subshell. POSIX makes a redirection error on a
+# The intuitive order is the other way round — `/dev/tty` always resolves to the
+# pane's *current* pty, so it survives a reattach, whereas `$OKENA_TTY` is
+# captured once at spawn and can go stale. But under a session backend
+# `/dev/tty` names the WRONG pty: with `session_backend = tmux` the pane process
+# is tmux, so a hook's controlling terminal is tmux's pty, and tmux forwards only
+# a fixed allowlist of OSC numbers — 9001 is not on it, and the sequence is
+# dropped before it ever reaches Okena's reader. Screen behaves the same way.
+# `$OKENA_TTY` names Okena's own slave and bypasses the nested pty entirely.
+#
+# The stale-path risk that motivated preferring /dev/tty is already covered by
+# the `tid=` param below: Okena drops a status that lands in a recycled pane.
+#
+# Both probes MUST stay in a subshell. POSIX makes a redirection error on a
 # special built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts this
-# script under dash in exactly the case the fallback below exists for — and
-# since this runs as a PreToolUse hook, a non-zero exit blocks the tool call.
-if (: >/dev/tty) 2>/dev/null; then
+# script under dash in exactly the case the fallback exists for — and since this
+# runs as a PreToolUse hook, a non-zero exit blocks the tool call.
+if [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
+    tty_dev="$OKENA_TTY"
+elif (: >/dev/tty) 2>/dev/null; then
     tty_dev="/dev/tty"
 else
     tty_dev="${OKENA_TTY:-/dev/tty}"
@@ -72,10 +79,42 @@ if [ ! -t 0 ]; then
     event=$(cat 2>/dev/null || true)
 fi
 
-# Print the first string value of JSON key $1 found in $event, or nothing.
+# Reduce $event to just its TOP-LEVEL key/value pairs.
+#
+# The regex below is greedy, so it picks the *last* match on the line — and
+# Claude Code's PreToolUse/PostToolUse payloads embed `tool_input` as nested
+# JSON whose keys are not string-escaped. A tool argument named `session_id` or
+# `transcript_path` (routine for MCP tools) would therefore shadow the real
+# field: the forged value becomes the pane's sticky session, gets persisted, and
+# with auto-resume on becomes the argument to `claude --resume`.
+#
+# Repeatedly collapse the innermost {...} / [...] until only the top level is
+# left. Bounded so a pathological payload can't spin.
+event_top=""
+if [ -n "$event" ]; then
+    event_top=${event#\{}
+    event_top=${event_top%\}}
+    nesting=0
+    while [ "$nesting" -lt 16 ]; do
+        flatter=$(printf '%s' "$event_top" | sed 's/{[^{}]*}/""/g; s/\[[^][]*\]/""/g' 2>/dev/null)
+        [ "$flatter" = "$event_top" ] && break
+        event_top=$flatter
+        nesting=$((nesting + 1))
+    done
+fi
+
+# `jq` gives an exact answer when it's around; the sed path keeps the script
+# dependency-free otherwise.
+has_jq=$(command -v jq 2>/dev/null || true)
+
+# Print the string value of TOP-LEVEL JSON key $1 in $event, or nothing.
 json_str() {
-    printf '%s' "$event" | sed -n \
-        "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n1
+    if [ -n "$has_jq" ]; then
+        printf '%s' "$event" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
+        return 0
+    fi
+    printf '%s' "$event_top" | sed -n \
+        "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" 2>/dev/null | head -n1
 }
 session_id=$(json_str session_id)
 transcript_path=$(json_str transcript_path)
@@ -84,7 +123,11 @@ transcript_path=$(json_str transcript_path)
 # (the durable bit Okena persists). Values are JSON-escaped (\\ then ").
 lbl_json=""
 if [ -n "$session_id" ]; then
-    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    # Okena needs `agent` to know which harness could resume this session, and
+    # drops the whole session without it. Say so rather than emitting a label
+    # object Okena will silently discard.
+    [ -n "$agent" ] || log "skip=no-agent (set OKENA_AGENT to capture the session)"
+    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' 2>/dev/null; }
     add_kv() {
         [ -n "$2" ] || return 0
         ev=$(json_escape "$2")
@@ -105,6 +148,19 @@ if [ -z "$state" ]; then
     exit 0
 fi
 
+# `$state` is spliced straight into the parameter list, so accept only the
+# states Okena knows. Without this a caller passing through a less-trusted value
+# could append `;lbl=<b64>` (planting an arbitrary session Okena would persist
+# and later resume) or `;tid=` to retarget the status at another pane — and a
+# plain typo would be dropped by the receiver while still logging `write=ok`.
+case "$state" in
+    working | blocked | done | idle | clear) ;;
+    *)
+        log "skip=bad-state"
+        exit 0
+        ;;
+esac
+
 # Assemble OSC 9001 params: `st` is required; `msg`/`lbl` are optional and
 # base64-encoded so their values stay ';'/ST-safe (the VTE parser splits OSC
 # params on ';').
@@ -116,14 +172,14 @@ if [ -n "$terminal_id" ]; then
     params="$params;tid=$terminal_id"
 fi
 if [ -n "$message" ]; then
-    msg_b64=$(printf '%s' "$message" | base64 | tr -d '\n')
+    msg_b64=$(printf '%s' "$message" | base64 2>/dev/null | tr -d '\n')
     params="$params;msg=$msg_b64"
     msg_info="msglen=${#message}"
 else
     msg_info="msglen=0"
 fi
 if [ -n "$lbl_json" ]; then
-    lbl_b64=$(printf '{%s}' "$lbl_json" | base64 | tr -d '\n')
+    lbl_b64=$(printf '{%s}' "$lbl_json" | base64 2>/dev/null | tr -d '\n')
     params="$params;lbl=$lbl_b64"
     msg_info="$msg_info sid=$session_id"
 fi
