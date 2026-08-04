@@ -257,15 +257,22 @@ impl FocusManager {
     ///   surfaces that project even past a folder filter or a hidden-set entry.
     /// - **Overview** (no zoom, no fullscreen) → just move terminal focus; the
     ///   target's column is already on screen, so the multi-project overview is
-    ///   left intact.
+    ///   left intact. Unless `project_offscreen` says it isn't: a project in the
+    ///   window's hidden set or behind a folder filter renders nowhere, so
+    ///   focusing it would silently do nothing. Then zoom to it instead —
+    ///   `compute_visible_projects`' focus override surfaces a project past both.
     ///
     /// `terminal_id` is the id of the terminal at `layout_path`; it's required
     /// to retarget fullscreen (which tracks the focused terminal by id).
+    /// `project_offscreen` must be computed against the *calling window*, which
+    /// is why this takes it rather than deciding for itself — a `FocusManager`
+    /// is per-window but doesn't hold the workspace data to check.
     pub fn reveal_terminal(
         &mut self,
         project_id: String,
         layout_path: Vec<usize>,
         terminal_id: String,
+        project_offscreen: bool,
     ) {
         if self.context == FocusContext::Fullscreen {
             // Retarget the single zoomed pane onto the target, following it to
@@ -293,6 +300,13 @@ impl FocusManager {
             .as_deref()
             .is_some_and(|current| current != project_id)
         {
+            self.focused_project_id = Some(project_id.clone());
+            self.focus_project_individual = false;
+        } else if self.focused_project_id.is_none() && project_offscreen {
+            // Overview, but this window isn't rendering the target's column.
+            // Zooming is the narrowest way to make it reachable; leaving the
+            // hidden set / folder filter alone means the user's view returns to
+            // exactly what it was when they zoom back out.
             self.focused_project_id = Some(project_id.clone());
             self.focus_project_individual = false;
         }
@@ -680,7 +694,7 @@ mod tests {
         fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
         let stack_after_enter = fm.focus_stack.len();
 
-        fm.reveal_terminal("proj2".to_string(), vec![1, 0], "term2".to_string());
+        fm.reveal_terminal("proj2".to_string(), vec![1, 0], "term2".to_string(), false);
 
         assert!(fm.has_fullscreen());
         assert!(fm.is_terminal_fullscreened("proj2", "term2"));
@@ -703,7 +717,7 @@ mod tests {
         fm.set_focused_project_id(Some("proj1".to_string()));
         fm.focus_terminal("proj1".to_string(), vec![0]);
 
-        fm.reveal_terminal("proj2".to_string(), vec![2], "term2".to_string());
+        fm.reveal_terminal("proj2".to_string(), vec![2], "term2".to_string(), false);
 
         assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
         assert!(!fm.has_fullscreen());
@@ -720,7 +734,7 @@ mod tests {
         let mut fm = FocusManager::new();
         fm.focus_terminal("proj1".to_string(), vec![0]);
 
-        fm.reveal_terminal("proj2".to_string(), vec![1], "term2".to_string());
+        fm.reveal_terminal("proj2".to_string(), vec![1], "term2".to_string(), false);
 
         assert_eq!(fm.focused_project_id(), None);
         assert!(!fm.has_fullscreen());
@@ -737,7 +751,7 @@ mod tests {
         fm.set_focused_project_id(Some("proj1".to_string()));
         fm.focus_terminal("proj1".to_string(), vec![0]);
 
-        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string());
+        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string(), false);
 
         assert_eq!(fm.focused_project_id(), Some(&"proj1".to_string()));
         let state = fm.focused_terminal_state().unwrap();
@@ -757,14 +771,14 @@ mod tests {
         fm.focus_terminal("proj1".to_string(), vec![0]);
         assert!(fm.is_focus_individual());
 
-        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string());
+        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string(), false);
 
         assert!(fm.is_focus_individual());
         assert_eq!(fm.focused_project_id(), Some(&"proj1".to_string()));
         assert_eq!(fm.focused_terminal_state().unwrap().layout_path, vec![1]);
 
         // ...but switching to a DIFFERENT project still resets individual mode.
-        fm.reveal_terminal("proj2".to_string(), vec![0], "term-c".to_string());
+        fm.reveal_terminal("proj2".to_string(), vec![0], "term-c".to_string(), false);
         assert!(!fm.is_focus_individual());
         assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
     }

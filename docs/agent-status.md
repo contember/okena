@@ -23,6 +23,13 @@ shown verbatim.
   Each row shows the lifecycle dot, the terminal name, its project, and the
   free-form text. Click a row to jump straight to that pane. The section hides
   itself when no agent is active.
+
+  The list is deliberately cross-project, so a row can point at a project the
+  current window isn't showing (hidden set, folder filter). Clicking then zooms
+  to that project so the pane is actually reachable — the jump goes through the
+  same window-aware `focus_terminal_by_id` as sidebar clicks, cursor navigation,
+  notification jumps, and remote focus requests, which also keeps a jump made
+  from a fullscreened pane in fullscreen.
 - **Notification** — entering `blocked` or `done` raises a desktop notification
   (+ sound), suppressed for the pane you're actively looking at. Gated by the
   normal notification settings.

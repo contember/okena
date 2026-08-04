@@ -449,9 +449,10 @@ impl Sidebar {
                 terminal_id,
             } => {
                 let workspace = self.workspace.clone();
+                let window_id = self.window_id;
                 self.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                        ws.focus_terminal_by_id(fm, window_id, &project_id, &terminal_id, cx);
                     });
                     cx.notify();
                 });
@@ -523,9 +524,10 @@ impl Sidebar {
                 terminal_id,
             } => {
                 let workspace = self.workspace.clone();
+                let window_id = self.window_id;
                 self.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                        ws.focus_terminal_by_id(fm, window_id, &project_id, &terminal_id, cx);
                     });
                     cx.notify();
                 });
