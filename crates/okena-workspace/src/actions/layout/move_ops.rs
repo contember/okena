@@ -205,6 +205,15 @@ impl Workspace {
             return;
         }
 
+        // Panes inside a soft-close grace window are out of the layout while
+        // their PTY, registry entry and metadata are deliberately kept alive for
+        // the undo. Collect them before the mutable borrow so the prune below
+        // doesn't delete a pane's metadata just because some *other* pane moved.
+        let src_grace_ids = {
+            let src_project_id = self.data.projects[src_idx].id.clone();
+            self.pending_close_ids_for_project(&src_project_id)
+        };
+
         // --- Extract from source ---
         let src_project = &mut self.data.projects[src_idx];
         if source_path.is_empty() {
@@ -227,12 +236,14 @@ impl Workspace {
         // has to follow it — the map is per project.
         let agent_session = src_project.agent_sessions.remove(source_terminal_id);
 
-        // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project
+        // Cleanup orphaned source metadata. "Orphaned" means not in the layout
+        // AND not waiting out a soft-close grace window.
+        let mut src_layout_ids: std::collections::HashSet<String> = src_project
             .layout
             .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
+        src_layout_ids.extend(src_grace_ids);
         src_project
             .terminal_names
             .retain(|id, _| src_layout_ids.contains(id));
@@ -571,6 +582,13 @@ impl Workspace {
             None => return,
         };
 
+        // See the note in `move_pane_into_project` — a soft-closed pane is out
+        // of the layout but still owns its metadata until the grace window ends.
+        let src_grace_ids = {
+            let src_project_id = self.data.projects[src_idx].id.clone();
+            self.pending_close_ids_for_project(&src_project_id)
+        };
+
         // --- Extract from source ---
         let src_project = &mut self.data.projects[src_idx];
         if source_path.is_empty() {
@@ -592,12 +610,14 @@ impl Workspace {
         // has to follow it — the map is per project.
         let agent_session = src_project.agent_sessions.remove(terminal_id);
 
-        // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project
+        // Cleanup orphaned source metadata. "Orphaned" means not in the layout
+        // AND not waiting out a soft-close grace window.
+        let mut src_layout_ids: std::collections::HashSet<String> = src_project
             .layout
             .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
+        src_layout_ids.extend(src_grace_ids);
         src_project
             .terminal_names
             .retain(|id, _| src_layout_ids.contains(id));

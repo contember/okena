@@ -2339,6 +2339,52 @@ mod tests {
     // === Serialization ===
 
     #[test]
+    fn agent_sessions_round_trip_and_tolerate_an_old_file() {
+        let mut project = make_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        let back: WorkspaceData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.projects[0].agent_sessions.get("tid1"),
+            Some(&agent_session(UUID_A)),
+            "a persisted session must survive the round trip — it is the whole point of storing it"
+        );
+
+        // A workspace.json written before the field existed must still load.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("as value");
+        let mut value = value;
+        value["projects"][0]
+            .as_object_mut()
+            .expect("project object")
+            .remove("agent_sessions");
+        let old: WorkspaceData = serde_json::from_value(value).expect("old file still loads");
+        assert!(old.projects[0].agent_sessions.is_empty());
+    }
+
+    #[test]
+    fn pending_agent_resumes_never_reaches_the_file() {
+        // `Vec<usize>` is not a serializable JSON map key, so this field is only
+        // safe because of `#[serde(skip)]`. Weakening that to `skip_serializing`
+        // would make every workspace save fail — pin it.
+        let mut project = make_project("p1");
+        project
+            .pending_agent_resumes
+            .insert(vec![0, 1], agent_session(UUID_A));
+        let data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        let json = serde_json::to_string(&data).expect("save must not fail");
+        assert!(!json.contains("pending_agent_resumes"));
+        assert!(!json.contains(UUID_A));
+
+        let back: WorkspaceData = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.projects[0].pending_agent_resumes.is_empty());
+    }
+
+    #[test]
     fn default_workspace_round_trips() {
         let data = default_workspace();
         let json = serde_json::to_string(&data).unwrap();

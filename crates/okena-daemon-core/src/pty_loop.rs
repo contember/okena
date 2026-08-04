@@ -501,13 +501,18 @@ fn persist_agent_sessions(
     terminals: &TerminalsRegistry,
     reactor: &PtyLoopReactor,
 ) {
+    // PEEK the edge here, don't consume it. Attribution below can fail — a hook
+    // or service terminal, and any pane inside a soft-close grace window, is not
+    // in a layout tree — and consuming the edge on a miss lost that pane's
+    // session for good: agents re-send the identical `agent` + `session_id` on
+    // every status, so `record_agent_session` never re-arms it.
     let captured: Vec<(String, okena_core::agent_session::AgentSession)> = {
         let registry = terminals.lock();
         dirty_terminal_ids
             .iter()
             .filter_map(|terminal_id| {
                 let terminal = registry.get(terminal_id)?;
-                if !terminal.take_agent_session_dirty() {
+                if !terminal.agent_session_dirty() {
                     return None;
                 }
                 terminal
@@ -520,14 +525,32 @@ fn persist_agent_sessions(
         return;
     }
 
-    let mut cx = reactor.workspace_cx();
-    let mut workspace = reactor.workspace.lock();
-    for (terminal_id, session) in captured {
-        if let Some(project_id) = workspace
-            .find_project_for_terminal(&terminal_id)
-            .map(|project| project.id.clone())
+    let mut persisted = Vec::with_capacity(captured.len());
+    {
+        let mut cx = reactor.workspace_cx();
+        let mut workspace = reactor.workspace.lock();
+        for (terminal_id, session) in captured {
+            match workspace.find_project_id_owning_terminal(&terminal_id) {
+                Some(project_id) => {
+                    workspace.set_agent_session(&project_id, &terminal_id, session.clone(), &mut cx);
+                    persisted.push((terminal_id, session));
+                }
+                None => log::debug!(
+                    "agent-session: no project owns terminal {terminal_id} yet — retrying next batch"
+                ),
+            }
+        }
+    }
+
+    // Clear the edge only for what actually landed, and only while the stored
+    // session is still the one we wrote — the sidecar may have recorded a newer
+    // one since the peek, and that update must survive to the next batch.
+    let registry = terminals.lock();
+    for (terminal_id, session) in persisted {
+        if let Some(terminal) = registry.get(&terminal_id)
+            && terminal.agent_session().as_ref() == Some(&session)
         {
-            workspace.set_agent_session(&project_id, &terminal_id, session, &mut cx);
+            terminal.take_agent_session_dirty();
         }
     }
 }
