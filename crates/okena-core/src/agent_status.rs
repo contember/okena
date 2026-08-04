@@ -29,6 +29,40 @@ pub const MAX_LABEL_KEY_LEN: usize = 128;
 /// Max byte length of a single label value (over-long values are truncated).
 pub const MAX_LABEL_VALUE_LEN: usize = 1024;
 
+/// Max characters of agent-supplied text rendered inline in a tooltip or label.
+pub const MAX_DISPLAY_CHARS: usize = 120;
+
+/// One-line, bounded rendering of agent-supplied free-form text.
+///
+/// [`MAX_CUSTOM_LEN`] bounds what is *retained*, which is a memory question —
+/// it says nothing about what a tooltip can be asked to lay out. The text comes
+/// from any process that can write to the pane, so a 4 KiB single line, or one
+/// full of newlines and control characters, would otherwise be interpolated
+/// whole into an unbounded tooltip element. Collapse whitespace, drop control
+/// characters, and clip.
+pub fn display_snippet(text: &str) -> String {
+    let mut out = String::new();
+    let mut kept = 0usize;
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if kept >= MAX_DISPLAY_CHARS {
+            out.push('…');
+            break;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+        kept += 1;
+    }
+    out
+}
+
 /// Lifecycle state an agent reports about itself.
 ///
 /// The token names match the `st=` values of the agent-status OSC (`clear` is
@@ -79,9 +113,26 @@ impl AgentLifecycle {
         matches!(self, Self::Blocked | Self::Done)
     }
 
+    /// The `st=` wire token for this lifecycle — the inverse of
+    /// [`from_token`](Self::from_token).
+    ///
+    /// Use this, never [`label`](Self::label), anywhere the value crosses a
+    /// protocol boundary (the OSC, the remote API, the mobile FFI). The two
+    /// currently produce the same strings, which is exactly why the distinction
+    /// has to be explicit: making `label` return "Needs input" would otherwise
+    /// silently change a contract with no compile error.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Idle => "idle",
+        }
+    }
+
     /// Short human-readable label for this lifecycle (e.g. a tab tooltip).
-    /// Distinct from the `st=` wire token ([`from_token`]) even though they
-    /// currently coincide — one is for display, the other for the protocol.
+    /// Free to become real display text — see [`token`](Self::token) for the
+    /// protocol-facing value.
     pub fn label(self) -> &'static str {
         match self {
             Self::Working => "working",
@@ -208,6 +259,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn display_snippet_bounds_and_flattens_agent_text() {
+        assert_eq!(display_snippet("running tests 3/5"), "running tests 3/5");
+        // Newlines and control characters must not reach a tooltip.
+        assert_eq!(display_snippet("a\n\nb\tc\r\nd"), "a b c d");
+        assert_eq!(display_snippet("  leading and trailing  "), "leading and trailing");
+        // A 4 KiB single line is within `MAX_CUSTOM_LEN` but must still clip.
+        let long = "x".repeat(4096);
+        let clipped = display_snippet(&long);
+        assert_eq!(clipped.chars().count(), MAX_DISPLAY_CHARS + 1);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(display_snippet(""), "");
+    }
+
+    #[test]
     fn lifecycle_token_roundtrips() {
         for (tok, life) in [
             ("working", AgentLifecycle::Working),
@@ -216,6 +281,10 @@ mod tests {
             ("idle", AgentLifecycle::Idle),
         ] {
             assert_eq!(AgentLifecycle::from_token(tok), Some(life));
+            // Pins the wire values themselves: the mobile FFI and the RN UI
+            // match on these strings, so a rename here is a breaking change and
+            // must not be possible by editing the display label.
+            assert_eq!(life.token(), tok);
         }
         assert_eq!(AgentLifecycle::from_token("clear"), None);
         assert_eq!(AgentLifecycle::from_token("bogus"), None);

@@ -37,11 +37,8 @@ pub struct TerminalNotification {
 const OSC99_MAX_FIELD_LEN: usize = 4096;
 const OSC99_MAX_PENDING: usize = 32;
 
-/// Cap on notifications queued for the host to raise. Both processes drain
-/// these every PTY batch, so this only bites if a drain stops (or a future
-/// caller forgets one) — but an undrained queue is per-terminal and unbounded,
-/// which is exactly how the OSC 52 queues grew in the daemon.
-const MAX_PENDING_NOTIFICATIONS: usize = 64;
+/// Keep the newest notifications if the host stops draining them.
+const MAX_PENDING_NOTIFICATIONS: usize = 32;
 
 /// Reassembly buffer for a chunked `OSC 99` notification keyed by its `i=` id.
 #[derive(Default)]
@@ -130,6 +127,22 @@ struct SidecarPerform {
 }
 
 impl SidecarPerform {
+    /// Queue a desktop notification, bounding the backlog.
+    ///
+    /// Every `OSC 9` / `OSC 777` / `OSC 99` / agent-status notification goes
+    /// through here so the cap lives on the sink rather than on each emitter —
+    /// otherwise every new emitter has to remember it, and the newest one
+    /// (agent status) is also the easiest to drive.
+    fn queue_notification(&self, notification: TerminalNotification) {
+        let mut queue = self.pending_notifications.lock();
+        if queue.len() >= MAX_PENDING_NOTIFICATIONS {
+            // Drop-oldest: a backlog this deep is a flood, and the most recent
+            // state is the one worth showing.
+            queue.remove(0);
+        }
+        queue.push(notification);
+    }
+
     /// Handle the kitty notification protocol: `OSC 99 ; metadata ; payload`.
     ///
     /// `metadata` is colon-separated `key=value` pairs (ASCII). We care about:
@@ -240,16 +253,7 @@ impl SidecarPerform {
         } else {
             return; // nothing to show
         };
-        self.push_notification(notification);
-    }
-
-    /// Queue a notification for the host, dropping the oldest once saturated.
-    fn push_notification(&self, notification: TerminalNotification) {
-        let mut pending = self.pending_notifications.lock();
-        if pending.len() >= MAX_PENDING_NOTIFICATIONS {
-            pending.remove(0);
-        }
-        pending.push(notification);
+        self.queue_notification(notification);
     }
 
     /// Handle the ConEmu / Windows Terminal progress protocol
@@ -462,9 +466,7 @@ impl SidecarPerform {
             self.remote_dirty.store(true, Ordering::Relaxed);
         }
         if let Some(body) = notify_body {
-            self.pending_notifications
-                .lock()
-                .push(TerminalNotification { title: None, body });
+            self.queue_notification(TerminalNotification { title: None, body });
         }
     }
 
@@ -604,7 +606,7 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let message = message.trim();
                 if !message.is_empty() {
-                    self.push_notification(TerminalNotification {
+                    self.queue_notification(TerminalNotification {
                         title: None,
                         body: message.to_string(),
                     });
@@ -633,7 +635,7 @@ impl Perform for SidecarPerform {
                     .join(";");
                 let body = body.trim();
                 if !body.is_empty() {
-                    self.push_notification(TerminalNotification {
+                    self.queue_notification(TerminalNotification {
                         title: (!title.is_empty()).then(|| title.to_string()),
                         body: body.to_string(),
                     });

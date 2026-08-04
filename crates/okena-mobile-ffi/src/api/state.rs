@@ -129,7 +129,9 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                         (
                             terminal_id.clone(),
                             AgentStatusInfo {
-                                lifecycle: status.lifecycle.label().to_string(),
+                                // `token()`, not `label()` — the RN UI matches on
+                                // these strings, so this is a protocol boundary.
+                                lifecycle: status.lifecycle.token().to_string(),
                                 custom: status.custom.clone(),
                             },
                         )

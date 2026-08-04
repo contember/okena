@@ -32,6 +32,11 @@ pub struct RemoteSnapshot {
 
 /// A terminal that should be focused after the sync, identified by the project
 /// it lives in and the layout path to reach it.
+///
+/// Carries the terminal id as well as the path so the caller can go through
+/// `focus_terminal_by_id` — a project created from a phone may be hidden or
+/// outside this window's folder filter, and focusing it by path alone would
+/// apply focus to a pane that renders nowhere.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteFocusTarget {
     pub project_id: String,

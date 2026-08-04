@@ -25,6 +25,23 @@ struct SidebarAgentInfo {
     status: AgentStatus,
 }
 
+/// Order agent rows by attention — blocked, then done, then working, then idle
+/// — breaking ties on display name.
+///
+/// A free function rather than an inline `sort_by`, because this ordering is
+/// the contract `docs/agent-status.md` states, and `collect_agents` around it
+/// needs a GPUI view plus the terminal registry to call. Inverting the
+/// comparator would sink blocked agents to the bottom with nothing to notice.
+fn sort_agents_by_attention(agents: &mut [SidebarAgentInfo]) {
+    agents.sort_by(|a, b| {
+        b.status
+            .lifecycle
+            .priority()
+            .cmp(&a.status.lifecycle.priority())
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+}
+
 impl Sidebar {
     /// Render the AGENTS section (header + one row per active agent), or an
     /// empty element when no agent is reporting a status.
@@ -76,13 +93,7 @@ impl Sidebar {
                 });
             }
         }
-        agents.sort_by(|a, b| {
-            b.status
-                .lifecycle
-                .priority()
-                .cmp(&a.status.lifecycle.priority())
-                .then_with(|| a.display_name.cmp(&b.display_name))
-        });
+        sort_agents_by_attention(&mut agents);
         agents
     }
 
@@ -119,7 +130,14 @@ impl Sidebar {
         let dot_color = rgb(agent.status.lifecycle.theme_color(&t));
         let project_id = agent.project_id.clone();
         let terminal_id = agent.terminal_id.clone();
-        let custom = agent.status.custom.clone().filter(|c| !c.is_empty());
+        // Agent-supplied text: flattened and clipped before it reaches either
+        // line, since the tooltip has no ellipsis to save it.
+        let custom = agent
+            .status
+            .custom
+            .as_deref()
+            .map(okena_core::agent_status::display_snippet)
+            .filter(|c| !c.is_empty());
 
         // Two-line layout: the terminal title (usually the agent's task) on top,
         // the project — plus any free-form status the agent reports — muted
@@ -201,5 +219,52 @@ impl Sidebar {
                     ),
             )
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Specific imports, not `use super::*` — this file has `use gpui::*`, whose
+    // `test` proc macro shadows std's `#[test]` (see okena-app/src/CLAUDE.md).
+    use super::{SidebarAgentInfo, sort_agents_by_attention};
+    use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+
+    fn agent(name: &str, lifecycle: AgentLifecycle) -> SidebarAgentInfo {
+        SidebarAgentInfo {
+            terminal_id: format!("t-{name}"),
+            project_id: "p1".to_string(),
+            display_name: name.to_string(),
+            project_name: "proj".to_string(),
+            status: AgentStatus::new(lifecycle),
+        }
+    }
+
+    #[test]
+    fn agents_sort_by_attention_then_name() {
+        // The documented contract: blocked → done → working → idle. The section
+        // exists to surface what needs the user *now*, so an inverted comparator
+        // would be the exact opposite of useful.
+        let mut agents = vec![
+            agent("zeta", AgentLifecycle::Idle),
+            agent("beta", AgentLifecycle::Working),
+            agent("alpha", AgentLifecycle::Done),
+            agent("delta", AgentLifecycle::Blocked),
+            agent("charlie", AgentLifecycle::Blocked),
+        ];
+        sort_agents_by_attention(&mut agents);
+
+        let order: Vec<&str> = agents.iter().map(|a| a.display_name.as_str()).collect();
+        assert_eq!(order, vec!["charlie", "delta", "alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn agents_sort_is_stable_for_an_empty_or_single_list() {
+        let mut empty: Vec<SidebarAgentInfo> = Vec::new();
+        sort_agents_by_attention(&mut empty);
+        assert!(empty.is_empty());
+
+        let mut one = vec![agent("solo", AgentLifecycle::Working)];
+        sort_agents_by_attention(&mut one);
+        assert_eq!(one[0].display_name, "solo");
     }
 }

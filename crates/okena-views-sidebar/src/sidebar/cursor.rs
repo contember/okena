@@ -523,13 +523,24 @@ impl Sidebar {
                 project_id,
                 terminal_id,
             } => {
-                let workspace = self.workspace.clone();
-                let window_id = self.window_id;
-                self.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(fm, window_id, &project_id, &terminal_id, cx);
-                    });
-                    cx.notify();
+                // Mirror the mouse path: hook terminals live in
+                // `ProjectData::hook_terminals`, outside the layout tree, so
+                // `focus_terminal_by_id` — whose whole body is guarded by
+                // `find_terminal_path` — could never match one and Enter here
+                // did nothing at all. The overlay is what a click opens.
+                self.request_broker.update(cx, |broker, cx| {
+                    broker.push_overlay_request(
+                        okena_workspace::requests::OverlayRequest::Project(
+                            okena_workspace::requests::ProjectOverlay {
+                                project_id: project_id.clone(),
+                                kind:
+                                    okena_workspace::requests::ProjectOverlayKind::ShowHookTerminal {
+                                        terminal_id: terminal_id.clone(),
+                                    },
+                            },
+                        ),
+                        cx,
+                    );
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -627,9 +638,14 @@ impl Sidebar {
     ///
     /// `cursor_index` counts cursor-navigable rows, but the scroll container
     /// also holds non-navigable children (the leading drop zone, the opt-in
-    /// attention section, and — in the activity view — tier headers between
-    /// rows). `cursor_scroll_indices`, populated by the render path, maps the
-    /// cursor index to the actual scroll-child index for the current view.
+    /// attention section, the AGENTS section, the remote section, and — in the
+    /// activity view — tier headers between rows). `cursor_scroll_indices`,
+    /// populated by the render path, maps the cursor index to the actual
+    /// scroll-child index for the current view.
+    ///
+    /// The AGENTS and remote sections are appended *after* every navigable row,
+    /// which is the invariant that keeps this mapping append-only. Inserting a
+    /// non-navigable section anywhere earlier needs the mapping updated too.
     fn scroll_to_cursor(&self) {
         if let Some(idx) = self.cursor_index
             && let Some(&target) = self.cursor_scroll_indices.get(idx)
