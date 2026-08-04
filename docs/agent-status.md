@@ -1,10 +1,20 @@
 # Agent Status
 
-Okena can show what an AI coding agent (Claude Code, Codex, …) is doing in each
-terminal pane: a per-tab indicator, a dedicated **Agents** section in the sidebar
-that lists every active agent across all projects, a matching field in the
-[remote API](remote.md), and a desktop notification when an agent finishes or
-gets blocked.
+Okena can show what an AI coding agent is doing in each terminal pane: a per-tab
+indicator, a dedicated **Agents** section in the sidebar that lists every active
+agent across all projects, a matching field in the [remote API](remote.md), and a
+desktop notification when an agent finishes or gets blocked.
+
+Claude Code is supported out of the box via a [bundled plugin](#claude-code-integration).
+The protocol is agent-agnostic and the resume logic is per-harness, so adding
+another agent is additive — but today Claude Code is the only one that ships
+working glue. Codex has a registered harness that declines to resume, and no
+capture hooks yet.
+
+> **Unix only.** The hook script is `#!/bin/sh` and depends on `/dev/tty`,
+> `base64` and `sed`, and `$OKENA_TTY` is exported only on Unix. On Windows this
+> works inside WSL panes; native `cmd`/PowerShell panes cannot report agent
+> status, and the setup below is a silent no-op there.
 
 The model is **push-based and open**: the agent reports its own state by writing
 a small escape sequence to its terminal. Okena never scrapes the agent's output
@@ -30,22 +40,40 @@ shown verbatim.
   same window-aware `focus_terminal_by_id` as sidebar clicks, cursor navigation,
   notification jumps, and remote focus requests, which also keeps a jump made
   from a fullscreened pane in fullscreen.
+  A pane that is *not* in a tab group (a new project, or any leaf of a plain
+  split) has no tab bar, so its lifecycle shows as a tinted pane border instead
+  — same colors, except `idle`, which is the resting state and draws nothing.
 - **Notification** — entering `blocked` or `done` raises a desktop notification
   (+ sound), suppressed for the pane you're actively looking at. Gated by the
   normal notification settings.
+
+  Raised by the client that **parsed the transition live**. A transition that
+  happens while a client is disconnected is not replayed to it when it
+  reconnects: the snapshot restores the *indicator*, but re-notifying on every
+  reconnect would spam, so it stays silent. Mobile clients get no notification
+  at all today.
 - **Remote** — `GET /v1/state` includes `terminal_agent_status` per project, and
   a status change bumps `state_version` so subscribed clients re-fetch.
 
 Agent status is **runtime-only** — it is never written to `workspace.json` and
-does not survive a restart.
+does not survive a restart. (The *agent session* below is the part that is
+persisted.)
+
+### Stale status
+
+A status is removed only by an explicit `st=clear` or by the pane going away.
+Nothing ties it to the pane's process, so an agent that dies without sending
+`clear` — a crash, `kill -9`, an `exit` that skips its `SessionEnd` hook —
+leaves the tab tinted and the pane listed in AGENTS indefinitely. Closing the
+pane, or having an agent report again in it, clears it.
 
 ## The data model
 
 | Field | Meaning |
 |-------|---------|
 | `lifecycle` | One of `working`, `blocked`, `done`, `idle`. Drives color / sort / notifications. |
-| `custom` | Optional free-form text, e.g. `"running tests 3/5"`. Rendered verbatim. |
-| `labels` | Optional flat `{ "key": "value" }` map of extras. |
+| `custom` | Optional free-form text, e.g. `"running tests 3/5"`. Shown in the tab tooltip and the AGENTS row, flattened to one line and clipped. |
+| `labels` | Optional flat `{ "key": "value" }` map of extras. Carried on the wire; no UI renders them yet. The three reserved session keys are stripped out before this map is built, so session identity never leaves the machine. |
 
 ## The wire format (OSC 9001)
 
@@ -68,9 +96,21 @@ ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base
   Three keys are **reserved**: `agent` (harness id, e.g. `claude-code`),
   `session_id`, and `transcript_path`. When `agent` + a UUID-shaped `session_id`
   are present, Okena captures them into the pane's *agent session* — a sticky
-  record (it survives `st=clear`) that is the basis for resuming the session and
-  showing transcript stats. A non-UUID `session_id` is ignored (it's untrusted
-  in-band data that may reach a resume command). All other keys are free-form.
+  record (it survives, and is captured on, `st=clear`) that is the basis for
+  resuming the session. All other keys are free-form.
+
+  The reserved keys are read from the raw label map and then **removed** from
+  it, so they never reach `labels` on the wire. They are also the only part of
+  an agent status that gets written to disk, so they are validated rather than
+  trusted: `session_id` must be a canonical UUID, `agent` must be ≤64 chars of
+  `[A-Za-z0-9._-]`, and `transcript_path` must be absolute and free of `..` and
+  ≤4096 bytes. Anything else is dropped — a bad `transcript_path` alone doesn't
+  discard the session, a bad `agent` or `session_id` does.
+
+Everything on this sequence is **untrusted**. Any process that can write to a
+pane — including a `cat` of a hostile file, or a remote host over SSH — can emit
+it. That is why the values are bounded and validated, why the resume argv must
+be shell-neutral, and why `tid=` exists.
 
 For example, to report "done" with a message, from inside the pane:
 
@@ -84,20 +124,27 @@ This is the same family of in-band signals Okena already understands
 
 ### Choosing the output device
 
-Write to the **controlling terminal** (`/dev/tty`) whenever there is one: it
-always resolves to the pane's *current* pty, so it keeps working after the pane
-reattaches to a persistent session backend.
-
-Hooks are the exception — an agent may run them with no controlling terminal at
-all, so Okena also exports `$OKENA_TTY`, the pane's slave pty path captured at
-spawn. Writing to the slave reaches Okena's reader even through a nested
-dtach/tmux pty. Use it as the *fallback*:
+Prefer **`$OKENA_TTY`** — the pane's own slave pty, which Okena exports into
+every pane's environment — and fall back to the controlling terminal:
 
 ```sh
-if (: >/dev/tty) 2>/dev/null; then dev=/dev/tty; else dev="${OKENA_TTY:-/dev/tty}"; fi
+if [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
+    dev="$OKENA_TTY"
+elif (: >/dev/tty) 2>/dev/null; then
+    dev=/dev/tty
+fi
 ```
 
-> Keep the probe in a subshell. POSIX makes a redirection error on a special
+The intuitive order is the other way round, since `/dev/tty` always names the
+pane's *current* pty. But under a session backend it names the **wrong** one:
+with `session_backend = tmux` the pane process is tmux, so a hook's controlling
+terminal is tmux's pty — and tmux forwards only a fixed allowlist of OSC numbers,
+which 9001 is not on. The sequence is dropped before it ever reaches Okena.
+Screen behaves the same way. Writing to `$OKENA_TTY` reaches Okena's own reader
+and bypasses the nested pty entirely. It also covers hooks that have no
+controlling terminal at all.
+
+> Keep the probes in a subshell. POSIX makes a redirection error on a special
 > built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts the script in
 > exactly the no-tty case the fallback is for.
 
@@ -105,6 +152,14 @@ if (: >/dev/tty) 2>/dev/null; then dev=/dev/tty; else dev="${OKENA_TTY:-/dev/tty
 belongs to a *different* pane. That is what `tid=` defends against: stamp
 `$OKENA_TERMINAL_ID` on the sequence and a pane that isn't the addressee drops
 it instead of showing another agent's status.
+
+> **`$OKENA_TTY` is a capability, not just a hint.** Unlike an inherited file
+> descriptor, a *path* can be reopened, and Linux recycles `/dev/pts/N` numbers.
+> A process that outlives its pane (a daemonized dev server, a forking
+> postinstall) keeps a way to write into whatever pane later inherits that
+> number — and writes to a slave arrive as terminal *output*, i.e. they are
+> parsed as escape sequences. It is same-user, so not a privilege boundary, but
+> `tid=` guards OSC 9001 only; nothing else on that channel is addressed.
 
 ## Session resume
 
@@ -122,7 +177,8 @@ restart:
   *layout path* (`project.pending_agent_resumes`, never persisted), which is the
   pane identity that does survive that load.
 - **Resumed** by the daemon when the **`auto_resume_agent_sessions`** setting is
-  on: `spawn_uninitialized_terminals` consumes the queued session as it gives
+  on (see [configuration](configuration.md#session-backend)): 
+  `spawn_uninitialized_terminals` consumes the queued session as it gives
   the pane its new terminal id, and runs the harness's resume command (for
   Claude Code, `claude --resume <id>`) as the pane's **startup command**,
   chained after any `on_create` hook so the pane still ends up at an interactive
@@ -133,6 +189,18 @@ Consuming the queued entry makes this **exactly-once**: a pane respawned later
 in the same session does not re-resume. And because it hangs off the *spawn*
 path, a pane that re-attaches to a live backend session (tmux/dtach — where the
 agent is still running) is never touched.
+
+Opening a saved session or importing a workspace also re-keys each pane's
+session onto its new terminal id, so the identity survives — but nothing is
+auto-resumed there. Opening a session is a request to open panes, not to re-run
+whatever agent last lived in each of them.
+
+> **What the resume actually resumes.** The record is "the last agent session
+> this pane ever ran", not "what was running at shutdown". There is no
+> `session ended` signal in the protocol — `st=clear` deliberately keeps the
+> session — so a pane where you finished with Claude an hour ago and then used
+> for something else will still relaunch `claude --resume <that id>` on the next
+> start with auto-resume on. Close the pane to drop the record.
 
 Which command resumes a session is **per-harness** (Claude Code, Codex, …),
 selected by the `agent` id through the harness registry — adding a new agent is
@@ -162,11 +230,15 @@ From a clone of this repo:
 /plugin install okena-lifecycle@okena
 ```
 
-Or enable it non-interactively in `~/.claude/settings.json`:
+Once the marketplace is registered, you can enable the plugin non-interactively
+instead of the second step, in `~/.claude/settings.json`:
 
 ```json
 { "enabledPlugins": { "okena-lifecycle@okena": true } }
 ```
+
+This is *not* an alternative to the first step: `@okena` names the marketplace,
+which has to exist before the plugin can resolve.
 
 Then run `claude` inside an Okena pane and watch the tab + AGENTS section react.
 
@@ -194,16 +266,19 @@ tool runs → `PostToolUse` (working), and hooks are awaited so the writes never
 race — the pane correctly shows `blocked` while you're being asked.
 
 The plugin sets `OKENA_AGENT=claude-code` on each hook command, and the script
-mines the hook's stdin event JSON for `session_id` / `transcript_path` (a small
-`sed` extraction, no `jq` dependency) and forwards them in the reserved `lbl=`
-keys above — that's how Okena learns the pane's Claude session.
+mines the hook's stdin event JSON for `session_id` / `transcript_path` and
+forwards them in the reserved `lbl=` keys above — that's how Okena learns the
+pane's Claude session. It uses `jq` when available and falls back to a `sed`
+extraction otherwise, so there is no hard dependency. Only **top-level** keys are
+read: `PreToolUse` / `PostToolUse` payloads embed `tool_input` as nested JSON,
+and a tool argument called `session_id` must not be able to hijack the pane's
+identity.
 
 It bundles `okena-lifecycle/scripts/okena-agent-status.sh`, invoked via
-`${CLAUDE_PLUGIN_ROOT}`. Hooks run as subprocesses with **no controlling
-terminal**, so `/dev/tty` is unavailable to them — Okena exports `OKENA_TTY`
-(the pane's slave pty path) into the pane environment and the script writes
-there instead (falling back to `/dev/tty` for interactive use). It's a silent
-no-op when there's no device to write to.
+`${CLAUDE_PLUGIN_ROOT}`. The script writes to `$OKENA_TTY` (the pane's own slave
+pty), falling back to `/dev/tty` — see [Choosing the output
+device](#choosing-the-output-device) for why that order. It's a silent no-op
+when there's no device to write to.
 
 > **Caveat — persistent sessions.** `OKENA_TTY` is captured into the shell's
 > environment when the pane is **first launched**, not refreshed per-attach. If
@@ -222,31 +297,33 @@ somewhere on your `PATH`:
 install -m 0755 integrations/claude-code/okena-lifecycle/scripts/okena-agent-status.sh ~/.local/bin/okena-agent-status
 ```
 
-…then add to `~/.claude/settings.json`:
+…then add to `~/.claude/settings.json`. Note the `OKENA_AGENT=` prefix on every
+command: without it Okena has no harness id, so it drops the session entirely —
+you get the indicator, but no persistence and no resume, with no error.
 
 ```json
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status working" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status working" } ] }
     ],
     "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status working" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status working" } ] }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status working" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status working" } ] }
     ],
     "Notification": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status blocked" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status blocked" } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status done" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status done" } ] }
     ],
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status clear" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status clear" } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "okena-agent-status clear" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status clear" } ] }
     ]
   }
 }
@@ -267,7 +344,10 @@ whole path observable from both ends:
   ```
 
   A `write=failed` line means the OSC never reached Okena (wrong/missing
-  `OKENA_TTY`); no line at all means the hook didn't fire.
+  `OKENA_TTY`); `skip=bad-state` means the state argument wasn't one Okena
+  knows; `skip=no-agent` means a `session_id` was found but `OKENA_AGENT` is
+  unset, so the session is being dropped; no line at all means the hook didn't
+  fire — or, on native Windows, that the script can't run at all.
 
 - **The Okena end** — `okena_terminal::terminal::osc_sidecar` logs every parsed
   `OSC 9001` at `debug` level (`agent-status[<terminal-id>]: <prev> -> <new>
@@ -279,4 +359,10 @@ whole path observable from both ends:
 The script is agent-agnostic: anything that can run a command (Codex, a
 Makefile, your own tooling) can call
 `okena-lifecycle/scripts/okena-agent-status.sh <state> [message]` to report into
-Okena.
+Okena. Set `OKENA_AGENT` to your harness id if you also want session capture.
+
+Resuming a captured session needs a harness registered in
+`okena-agent-harnesses`, which maps an `agent` id to the argv that resumes it.
+Claude Code is implemented; Codex is registered but declines to resume until its
+CLI invocation is confirmed, so a Codex session is captured and shown but not
+auto-resumed.
