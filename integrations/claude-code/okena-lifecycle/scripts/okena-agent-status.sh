@@ -11,13 +11,17 @@
 # Designed to be wired up as a Claude Code hook (see docs/agent-status.md), but
 # it's agent-agnostic — anything that can run a command can call it.
 #
-# Output device: a hook runs as a subprocess with NO controlling terminal, so
-# `/dev/tty` is unavailable to it. Okena therefore exports `OKENA_TTY` (the
-# pane's slave pty path) into the pane's environment; we write there. Writing to
-# the slave reaches Okena's reader even through a nested session backend
-# (dtach/tmux). Falls back to `/dev/tty` for the interactive case. It drains
-# stdin so a hook feeding event JSON on the pipe never blocks, and is a silent
-# no-op when there's no device to write to — safe to call from anywhere.
+# Output device: prefer the controlling terminal, fall back to `$OKENA_TTY`.
+# `/dev/tty` always resolves to the pane's *current* pty, so it stays correct
+# after the pane reattaches to a persistent session backend (dtach/tmux). But a
+# hook may run as a subprocess with no controlling terminal at all, which is why
+# Okena also exports `OKENA_TTY` (the pane's slave pty path, captured at spawn);
+# writing to the slave reaches Okena's reader even through a nested pty. That
+# path can go stale across a reattach, so it is the fallback, not the default —
+# and the `tid=` param below lets Okena reject a status that lands in the wrong
+# pane because a recorded path was recycled. This drains stdin so a hook feeding
+# event JSON on the pipe never blocks, and is a silent no-op when there's no
+# device to write to — safe to call from anywhere.
 #
 # Debugging: set OKENA_AGENT_STATUS_LOG=/path/to/log to append one line per
 # invocation recording the state, the target device, and whether the write
@@ -31,7 +35,22 @@ message="${2:-}"
 # only to tag the captured session in the optional lbl= field; empty is fine.
 agent="${OKENA_AGENT:-}"
 
-tty_dev="${OKENA_TTY:-/dev/tty}"
+# Pane this agent runs in, stamped onto the sequence so Okena can drop a status
+# that reaches the wrong pane. Empty outside Okena — the param is then omitted.
+terminal_id="${OKENA_TERMINAL_ID:-}"
+
+# Opening /dev/tty fails (ENXIO) without a controlling terminal, so probing it
+# both picks the live device and detects the no-tty hook case.
+#
+# The probe MUST stay in a subshell. POSIX makes a redirection error on a
+# special built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts this
+# script under dash in exactly the case the fallback below exists for — and
+# since this runs as a PreToolUse hook, a non-zero exit blocks the tool call.
+if (: >/dev/tty) 2>/dev/null; then
+    tty_dev="/dev/tty"
+else
+    tty_dev="${OKENA_TTY:-/dev/tty}"
+fi
 
 # Append a debug line when OKENA_AGENT_STATUS_LOG points somewhere writable;
 # a silent no-op otherwise. Never fails the hook.
@@ -90,6 +109,12 @@ fi
 # base64-encoded so their values stay ';'/ST-safe (the VTE parser splits OSC
 # params on ';').
 params="st=$state"
+# Address the status at our own pane, so Okena can drop it if it lands
+# elsewhere (a recorded $OKENA_TTY path recycled by another pane after a
+# reattach). Omitted outside Okena, where the receiver accepts anything.
+if [ -n "$terminal_id" ]; then
+    params="$params;tid=$terminal_id"
+fi
 if [ -n "$message" ]; then
     msg_b64=$(printf '%s' "$message" | base64 | tr -d '\n')
     params="$params;msg=$msg_b64"

@@ -45,13 +45,16 @@ does not survive a restart.
 An agent reports its state by writing this OSC sequence to its terminal:
 
 ```
-ESC ] 9001 ; st=<state> [ ; msg=<base64> ] [ ; lbl=<base64-json> ] ST
+ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base64-json> ] ST
 ```
 
 - `ESC` is `\033` (0x1B); `ST` is the string terminator `ESC \` (`\033\\`). A
   `BEL` (`\007`) terminator is also accepted.
 - `st=` — `working` | `blocked` | `done` | `idle`, or `clear` to remove any
   status. An unknown/missing `st` leaves the current status untouched.
+- `tid=` — the pane the status is *for*, from `$OKENA_TERMINAL_ID`. A pane drops
+  a sequence addressed to a different id (see "Choosing the output device").
+  Optional: omit it and the receiving pane accepts the status.
 - `msg=` — base64(UTF-8) of the free-form `custom` text. Base64 keeps the value
   `;`/`ST`-safe.
 - `lbl=` — base64(UTF-8) of a flat JSON object, e.g. `{"stage":"verify"}`.
@@ -71,6 +74,30 @@ printf '\033]9001;st=done;msg=%s\033\\' "$(printf 'all tests passed' | base64 | 
 This is the same family of in-band signals Okena already understands
 (`OSC 9;4` progress, `OSC 133` shell integration); see the contract note in
 `crates/okena-terminal/CLAUDE.md`.
+
+### Choosing the output device
+
+Write to the **controlling terminal** (`/dev/tty`) whenever there is one: it
+always resolves to the pane's *current* pty, so it keeps working after the pane
+reattaches to a persistent session backend.
+
+Hooks are the exception — an agent may run them with no controlling terminal at
+all, so Okena also exports `$OKENA_TTY`, the pane's slave pty path captured at
+spawn. Writing to the slave reaches Okena's reader even through a nested
+dtach/tmux pty. Use it as the *fallback*:
+
+```sh
+if (: >/dev/tty) 2>/dev/null; then dev=/dev/tty; else dev="${OKENA_TTY:-/dev/tty}"; fi
+```
+
+> Keep the probe in a subshell. POSIX makes a redirection error on a special
+> built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts the script in
+> exactly the no-tty case the fallback is for.
+
+`$OKENA_TTY` is captured once, so after a reattach it may name a pty that now
+belongs to a *different* pane. That is what `tid=` defends against: stamp
+`$OKENA_TERMINAL_ID` on the sequence and a pane that isn't the addressee drops
+it instead of showing another agent's status.
 
 ## Session resume
 
