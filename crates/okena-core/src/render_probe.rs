@@ -624,7 +624,7 @@ mod imp {
             terminal_activity_frame(3, 2, 4);
             sidebar_activity_invalidation();
             terminal_paint().finish(TerminalPaintStats::default());
-            drop(sidebar_render());
+            let _sidebar_render = sidebar_render();
         }
     }
 }
