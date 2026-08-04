@@ -128,7 +128,12 @@ PAIRS=(
 #                               ordering, sizing, and layout mode locally in
 #                               window-layout.json; daemon ApiWindow must not
 #                               overwrite those choices.
-CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals|hidden_terminals|folder_collapsed|hidden_project_ids|os_bounds|project_layout|project_sort_mode|project_widths|show_attention_section)$'
+# Confirmed client-local / derived, so absent from the wire on purpose:
+#   agent_sessions        — daemon-side durable identity for resume; the wire
+#                           carries the runtime `terminal_agent_status` instead.
+#   pending_agent_resumes — load-time only (`#[serde(skip)]`), consumed during
+#                           restore and never observable by a client.
+CAT2_IGNORE='^(version|service_panel_heights|hook_panel_heights|connection_id|is_remote|service_terminals|hidden_terminals|folder_collapsed|hidden_project_ids|os_bounds|project_layout|project_sort_mode|project_widths|show_attention_section|agent_sessions|pending_agent_resumes)$'
 
 cat2_hits=0
 for pair in "${PAIRS[@]}"; do

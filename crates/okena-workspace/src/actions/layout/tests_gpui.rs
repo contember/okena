@@ -1406,3 +1406,86 @@ fn move_to_tab_group_across_projects_carries_the_agent_session(cx: &mut gpui::Te
         );
     });
 }
+
+#[gpui::test]
+fn close_other_tabs_drops_the_agent_sessions_of_the_panes_it_removed(
+    cx: &mut gpui::TestAppContext,
+) {
+    // A multi-pane close removes several panes at once, and only the explicitly
+    // closed one goes through `forget_agent_session` — the rest are pruned by
+    // `cleanup_orphaned_metadata`, which used to prune the two sibling maps and
+    // leave `agent_sessions` behind. An orphan there is not cosmetic: a later
+    // pane inheriting the id would be handed someone else's session to resume.
+    let layout = LayoutNode::Tabs {
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
+        active_tab: 0,
+    };
+    let mut project = make_project_with_layout("p1", layout);
+    for id in ["t1", "t2", "t3"] {
+        project
+            .agent_sessions
+            .insert(id.to_string(), agent_session(SESSION_UUID));
+    }
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| ws.close_other_tabs("p1", &[], 0, cx));
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        let project = ws.project("p1").expect("project");
+        let mut kept: Vec<&str> = project
+            .agent_sessions
+            .keys()
+            .map(String::as_str)
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec!["t1"], "only the surviving pane keeps a session");
+    });
+}
+
+#[gpui::test]
+fn moving_a_pane_out_spares_a_sibling_inside_its_soft_close_window(
+    cx: &mut gpui::TestAppContext,
+) {
+    // A soft-closed pane is out of the layout while its PTY and metadata are
+    // deliberately kept alive for the undo. The source-side prune after a
+    // cross-project move is keyed on "is it in the layout", so moving ANY other
+    // pane during that window used to delete the soft-closed pane's session —
+    // and undo would then restore the pane without it.
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        let mut focus = FocusManager::new();
+        ws.begin_soft_close(&mut focus, "p1", &[0], "t1", "toast-t1", cx);
+        // t2 is unrelated to the pending close — moving it must not touch t1.
+        ws.move_pane(&mut focus, "p1", "t2", "p2", "t3", DropZone::Right, cx);
+
+        assert_eq!(
+            ws.agent_session("p1", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "the soft-closed pane keeps its session until the close is finalized"
+        );
+        assert!(ws.undo_soft_close(&mut focus, "t1", true, cx));
+        assert_eq!(
+            ws.agent_session("p1", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "and undo brings the pane back with it"
+        );
+    });
+}

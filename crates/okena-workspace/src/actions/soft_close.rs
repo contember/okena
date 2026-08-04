@@ -346,6 +346,21 @@ impl Workspace {
             .retain(|r| r.terminal_id != terminal_id);
     }
 
+    /// Terminal ids in `project_id` that are waiting out a soft-close grace
+    /// window.
+    ///
+    /// They are out of the layout tree while their PTY, registry entry and
+    /// per-terminal metadata (`terminal_names` / `hidden_terminals` /
+    /// `agent_sessions`) are deliberately kept alive for the undo, so any prune
+    /// keyed on "is this id in the layout?" has to count them as present.
+    pub(crate) fn pending_close_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        self.pending_closes
+            .iter()
+            .filter(|pending| pending.project_id == project_id)
+            .map(|pending| pending.terminal_id.clone())
+            .collect()
+    }
+
     /// True if the terminal is currently waiting out its grace period.
     pub fn has_pending_close(&self, terminal_id: &str) -> bool {
         self.pending_closes

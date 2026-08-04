@@ -15,9 +15,23 @@ mod tabs;
 use crate::state::Workspace;
 
 impl Workspace {
-    /// Remove terminal_names/hidden_terminals entries that are no longer in the layout.
+    /// Remove terminal_names/hidden_terminals/agent_sessions entries that are no
+    /// longer in the layout.
     /// Returns the orphaned terminal IDs (for PTY cleanup by callers).
     pub(super) fn cleanup_orphaned_metadata(&mut self, project_id: &str) -> Vec<String> {
+        // A pane on its way out through a *deliberate* close is not orphaned:
+        // a soft close keeps its PTY and metadata alive for the undo, and a hard
+        // close drops its session explicitly via `forget_agent_session`. Both
+        // register a closing owner before the layout removal; a soft close is
+        // only added to `pending_closes` afterwards, so consult both.
+        let mut exempt: std::collections::HashSet<String> = self
+            .closing_terminal_owners
+            .iter()
+            .filter(|(_, owner)| owner.project_id == project_id)
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect();
+        exempt.extend(self.pending_close_ids_for_project(project_id));
+
         let Some(project) = self.project_mut(project_id) else {
             return vec![];
         };
@@ -39,6 +53,15 @@ impl Workspace {
             project.terminal_names.remove(id);
             project.hidden_terminals.remove(id);
         }
+
+        // Prune sessions against the layout, not against `orphaned`. That list
+        // is derived from `terminal_names`, so it only ever names panes the user
+        // renamed — a pane carrying only an agent session (the common case;
+        // almost nobody renames panes) was never cleaned up here, and a later
+        // pane inheriting its id would be handed a stale session to resume.
+        project
+            .agent_sessions
+            .retain(|id, _| layout_ids.contains(id) || exempt.contains(id));
 
         orphaned
     }
