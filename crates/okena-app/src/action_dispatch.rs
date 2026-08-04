@@ -161,6 +161,30 @@ impl ActionDispatcher {
         });
     }
 
+    /// Capture where focus should land once the daemon applies a close.
+    ///
+    /// The close itself still goes to the daemon; only the focus intent is
+    /// resolved here, while the client's layout still holds the pane being
+    /// closed. See `Workspace::queue_focus_after_close`.
+    fn queue_focus_after_close(
+        workspace: &Entity<Workspace>,
+        focus_manager: &Entity<FocusManager>,
+        window_id: WindowId,
+        project_id: &str,
+        closing_terminal_ids: &[String],
+        cx: &mut impl AppContext,
+    ) {
+        let focused = focus_manager.read_with(cx, |fm, _cx| fm.focused_terminal_state());
+        workspace.update(cx, |ws, _cx| {
+            ws.queue_focus_after_close(
+                window_id,
+                project_id,
+                closing_terminal_ids,
+                focused.as_ref(),
+            );
+        });
+    }
+
     /// Dispatch a standard action (split, close, create terminal, service action, etc.).
     pub fn dispatch(&self, action: ActionRequest, cx: &mut impl AppContext) {
         let Self::Remote {
@@ -264,6 +288,34 @@ impl ActionDispatcher {
                     rm.send_action(&cid, action, cx);
                 });
                 return;
+            }
+            ActionRequest::CloseTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                Self::queue_focus_after_close(
+                    workspace,
+                    focus_manager,
+                    *window_id,
+                    project_id,
+                    std::slice::from_ref(terminal_id),
+                    cx,
+                );
+                // Don't return — the daemon still performs the close
+            }
+            ActionRequest::CloseTerminals {
+                project_id,
+                terminal_ids,
+            } => {
+                Self::queue_focus_after_close(
+                    workspace,
+                    focus_manager,
+                    *window_id,
+                    project_id,
+                    terminal_ids,
+                    cx,
+                );
+                // Don't return — the daemon still performs the close
             }
             ActionRequest::CreateTerminal { project_id } => {
                 // Record pending focus — the actual focus will happen when

@@ -1561,6 +1561,72 @@ impl Workspace {
         self.remote_sync.drain_pending_focus(window_id)
     }
 
+    /// Record where a window's focus should land once the daemon applies a
+    /// close, so keyboard focus survives the round-trip.
+    ///
+    /// Closing is not a local mutation: the client sends the action and the new
+    /// layout comes back in a state sync. Nothing re-anchors the window's focus
+    /// path across that sync, so without this a close either strands focus on a
+    /// pane that no longer exists at that path or drops it entirely. The intent
+    /// is captured here — while the pre-close tree is still available to reason
+    /// about — and resolved by terminal id after the sync.
+    ///
+    /// `focused` is the window's current focus. Focus in another project is
+    /// left alone; focus on a terminal that survives the close is re-anchored
+    /// to that same terminal (its path may shift); focus on a closing terminal
+    /// (or no focus at all) moves to the neighbour that takes its place.
+    pub fn queue_focus_after_close(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        closing_terminal_ids: &[String],
+        focused: Option<&FocusedTerminalState>,
+    ) {
+        let Some(layout) = self.project(project_id).and_then(|p| p.layout.as_ref()) else {
+            return;
+        };
+        let closing: HashSet<&str> = closing_terminal_ids.iter().map(String::as_str).collect();
+
+        let focused_id = focused
+            .filter(|f| f.project_id == project_id)
+            .and_then(|f| layout.get_at_path(&f.layout_path))
+            .and_then(|node| match node {
+                LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                _ => None,
+            });
+
+        let next = match focused_id {
+            Some(id) if !closing.contains(id.as_str()) => Some(id),
+            focused_id => {
+                // Focus is on one of the closing terminals, or the window has no
+                // terminal focus at all and this close is its chance to recover.
+                if focused_id.is_none() && focused.is_some_and(|f| f.project_id != project_id) {
+                    return;
+                }
+                let neighbour = focused_id
+                    .or_else(|| closing_terminal_ids.first().cloned())
+                    .and_then(|id| layout.find_terminal_path(&id))
+                    .and_then(|path| layout.terminal_to_focus_after_closing(&path))
+                    .filter(|id| !closing.contains(id.as_str()));
+                // A bulk close (close others / close to the right) can swallow
+                // the neighbour too — fall back to whatever the pruned tree
+                // leaves visible.
+                neighbour.or_else(|| {
+                    let mut remaining = Some(layout.clone());
+                    LayoutNode::remove_terminal_ids(&mut remaining, &closing);
+                    remaining.and_then(|layout| layout.visible_terminal_id())
+                })
+            }
+        };
+
+        self.remote_sync.queue_close_focus(
+            window_id,
+            project_id,
+            closing_terminal_ids.to_vec(),
+            next,
+        );
+    }
+
     pub fn queue_pending_remote_project_visibility(
         &mut self,
         window_id: WindowId,
@@ -2073,6 +2139,26 @@ impl Workspace {
             self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
         }
 
+        // Focus can also be orphaned by a close this window never asked for —
+        // a shell that exited on its own, or another window closing the pane.
+        // Nothing else re-anchors the path, so it would keep pointing at a slot
+        // that no longer holds a terminal and the window would end up with no
+        // keyboard focus at all. Modal context is left alone: the modal owns
+        // focus and restores its own target when it closes.
+        if !focus_manager.is_modal()
+            && let Some(focused) = focus_manager.focused_terminal_state()
+            && let Some(layout) = self
+                .project(&focused.project_id)
+                .and_then(|p| p.layout.as_ref())
+            && !matches!(
+                layout.get_at_path(&focused.layout_path),
+                Some(LayoutNode::Terminal { .. })
+            )
+        {
+            let path = layout.find_visible_terminal_path();
+            self.set_focused_terminal(focus_manager, focused.project_id, path, cx);
+        }
+
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         self.notify_ui_only(cx);
     }
@@ -2419,6 +2505,140 @@ mod workspace_tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    /// Project whose layout is a tab group over `terminal_ids`.
+    fn project_with_tabs(id: &str, terminal_ids: &[&str], active_tab: usize) -> ProjectData {
+        let mut project = make_project(id);
+        project.layout = Some(LayoutNode::Tabs {
+            children: terminal_ids
+                .iter()
+                .map(|tid| LayoutNode::Terminal {
+                    terminal_id: Some((*tid).to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: ShellType::Default,
+                    zoom_level: 1.0,
+                })
+                .collect(),
+            active_tab,
+        });
+        project
+    }
+
+    fn focused(project_id: &str, layout_path: Vec<usize>) -> crate::state::FocusedTerminalState {
+        crate::state::FocusedTerminalState {
+            project_id: project_id.to_string(),
+            layout_path,
+        }
+    }
+
+    /// Queue a close intent and read back the terminal it resolved to.
+    fn close_intent(
+        workspace: &mut Workspace,
+        closing: &[&str],
+        focus: Option<crate::state::FocusedTerminalState>,
+    ) -> Option<String> {
+        let closing: Vec<String> = closing.iter().map(|id| (*id).to_string()).collect();
+        workspace.queue_focus_after_close(WindowId::Main, "p1", &closing, focus.as_ref());
+        workspace
+            .remote_sync
+            .take_close_focus(WindowId::Main)
+            .expect("close intent queued")
+            .next_terminal_id
+    }
+
+    #[test]
+    fn closing_the_focused_tab_hands_focus_to_the_tab_that_becomes_visible() {
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![project_with_tabs("p1", &["t1", "t2", "t3"], 0)],
+            vec!["p1"],
+        ));
+
+        assert_eq!(
+            close_intent(&mut workspace, &["t1"], Some(focused("p1", vec![0]))),
+            Some("t2".to_string())
+        );
+    }
+
+    #[test]
+    fn closing_a_background_tab_re_anchors_focus_onto_the_same_terminal() {
+        // t2 is focused and survives; its path shifts from [1] to [0] when t1
+        // goes away, so the intent must name t2 rather than keep the path.
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![project_with_tabs("p1", &["t1", "t2", "t3"], 1)],
+            vec!["p1"],
+        ));
+
+        assert_eq!(
+            close_intent(&mut workspace, &["t1"], Some(focused("p1", vec![1]))),
+            Some("t2".to_string())
+        );
+    }
+
+    #[test]
+    fn closing_the_last_terminal_leaves_focus_on_the_project() {
+        let mut workspace =
+            Workspace::new(make_workspace_data(vec![make_project("p1")], vec!["p1"]));
+
+        assert_eq!(
+            close_intent(&mut workspace, &["term_p1"], Some(focused("p1", vec![]))),
+            None
+        );
+    }
+
+    #[test]
+    fn bulk_close_that_swallows_the_neighbour_falls_back_to_a_survivor() {
+        // "Close other tabs" from t3: t1 (focused) and t2 both go, so the
+        // neighbouring-tab rule is useless and only t3 is left to focus.
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![project_with_tabs("p1", &["t1", "t2", "t3"], 0)],
+            vec!["p1"],
+        ));
+
+        assert_eq!(
+            close_intent(&mut workspace, &["t1", "t2"], Some(focused("p1", vec![0]))),
+            Some("t3".to_string())
+        );
+    }
+
+    #[test]
+    fn closing_a_terminal_in_another_project_leaves_focus_alone() {
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![
+                project_with_tabs("p1", &["t1", "t2"], 0),
+                make_project("p2"),
+            ],
+            vec!["p1", "p2"],
+        ));
+
+        let closing = vec!["t1".to_string()];
+        workspace.queue_focus_after_close(
+            WindowId::Main,
+            "p1",
+            &closing,
+            Some(&focused("p2", vec![])),
+        );
+
+        assert!(
+            workspace
+                .remote_sync
+                .take_close_focus(WindowId::Main)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn closing_with_nothing_focused_recovers_focus_into_the_project() {
+        let mut workspace = Workspace::new(make_workspace_data(
+            vec![project_with_tabs("p1", &["t1", "t2"], 0)],
+            vec!["p1"],
+        ));
+
+        assert_eq!(
+            close_intent(&mut workspace, &["t1"], None),
+            Some("t2".to_string())
+        );
     }
 
     #[test]
