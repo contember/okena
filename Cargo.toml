@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app", "crates/okena-daemon-core", "crates/okena-daemon", "crates/okena-tui"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app", "crates/okena-daemon-core", "crates/okena-daemon", "crates/okena-tui", "crates/okena-agent-harnesses"]
 resolver = "2"
 
 [workspace.package]
@@ -34,6 +34,10 @@ okena-ui = { path = "crates/okena-ui" }
 # okena-app, so this adds no new linkage — only a direct path to the `local` API.
 okena-remote-server = { path = "crates/okena-remote-server" }
 okena-daemon-core = { path = "crates/okena-daemon-core" }
+
+# Built-in agent harnesses (resume argv per agent id), installed at startup.
+# gpui-free on purpose so the standalone daemon binary links the same ones.
+okena-agent-harnesses = { path = "crates/okena-agent-harnesses" }
 
 # Extension system — registered at startup in main.rs.
 okena-extensions = { path = "crates/okena-extensions" }

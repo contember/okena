@@ -6,10 +6,15 @@
 //! (`"claude-code"`, `"codex"`, …) plus a `session_id` via `OSC 9001` (see
 //! [`crate::agent_session`]). This registry is how Okena turns that id into
 //! actions, without baking any single agent's specifics into the core or app.
-//! Each harness implementation lives in its matching `okena-ext-*` crate and is
-//! registered at startup via [`init`]; an unknown id simply has no entry, so its
-//! session is stored/displayed but not resumable until a harness for it exists.
-//! New harnesses are therefore purely additive.
+//! The implementations live in the gpui-free `okena-agent-harnesses` crate and
+//! are registered at startup via [`init`]; an unknown id simply has no entry, so
+//! its session is stored/displayed but not resumable until a harness for it
+//! exists. New harnesses are therefore purely additive.
+//!
+//! They are kept out of the `okena-ext-*` crates on purpose: those depend on
+//! `gpui`, and the standalone `okena-daemon` binary — which owns restore — is
+//! CI-gated GPUI-free, so it could not link them and every lookup here returned
+//! `None`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,8 +32,8 @@ pub struct TranscriptStats {
 }
 
 /// What one agent harness (Claude Code, Codex, …) knows how to do with its own
-/// sessions. Implemented in the matching `okena-ext-*` crate. Must stay
-/// gpui-free so headless/remote can use it too.
+/// sessions. Implemented in `okena-agent-harnesses`, which must stay gpui-free
+/// so the headless daemon links it too.
 pub trait AgentHarness: Send + Sync {
     /// Harness id; must equal the `agent` id agents report on the wire
     /// (e.g. `"claude-code"`, `"codex"`).
@@ -82,9 +87,15 @@ static REGISTRY: OnceLock<AgentHarnessRegistry> = OnceLock::new();
 
 /// Install the process-wide harness registry. Call once at startup; later calls
 /// are ignored (first wins), so desktop and headless each build their own
-/// before serving requests.
+/// before serving requests. A second call is logged rather than swallowed —
+/// silently keeping an earlier registry is the kind of thing that turns into a
+/// no-op nobody can see.
 pub fn init(registry: AgentHarnessRegistry) {
-    let _ = REGISTRY.set(registry);
+    if REGISTRY.set(registry).is_err() {
+        log::warn!(
+            "agent-harness: registry already installed — ignoring this one (first install wins)"
+        );
+    }
 }
 
 /// Look up the harness for an agent id, if one is registered. Returns `None`
@@ -100,6 +111,10 @@ pub fn for_agent(agent_id: &str) -> Option<&'static Arc<dyn AgentHarness>> {
 /// is only accepted when it is a literal in *every* dialect Okena targets: no
 /// whitespace, quotes, or metacharacters. This is what lets the composition be
 /// a plain join with no dialect-specific quoting.
+///
+/// The composition itself lives in `okena_hooks::terminal_launch_parts` — that
+/// is the crate that knows the dialects. If a new dialect ever makes one of the
+/// bytes allowed here special, this is the function to narrow.
 fn is_shell_neutral(arg: &str) -> bool {
     !arg.is_empty()
         && arg
@@ -123,7 +138,17 @@ pub fn resume_command_line(session: &crate::agent_session::AgentSession, cwd: &P
         );
         return None;
     }
-    let argv = for_agent(&session.agent)?.resume_command(&session.session_id, cwd)?;
+    let Some(harness) = for_agent(&session.agent) else {
+        // Either no harness exists for this id, or nothing called `init` in this
+        // process. Both are silent no-ops without a log, and the second one is a
+        // wiring bug, so say so rather than returning like the branches below.
+        log::warn!(
+            "agent-resume: no harness registered for agent {:?} — not resuming",
+            session.agent
+        );
+        return None;
+    };
+    let argv = harness.resume_command(&session.session_id, cwd)?;
     if argv.is_empty() || !argv.iter().all(|a| is_shell_neutral(a)) {
         log::warn!(
             "agent-resume: harness {:?} returned an argv that is not shell-neutral — not resuming",

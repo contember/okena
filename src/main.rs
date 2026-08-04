@@ -341,17 +341,6 @@ fn run_headless(listen_addr: Option<IpAddr>) -> anyhow::Result<()> {
     okena_daemon_core::DaemonCore::new(params)?.run()
 }
 
-/// Build and install the agent-harness registry — one entry per AI agent
-/// harness, keyed by agent id. Each `okena-ext-*` crate contributes how to
-/// resume its sessions / parse its transcripts; the core/app stay
-/// harness-agnostic and dispatch by the `agent` id captured via OSC 9001.
-fn init_agent_harnesses() {
-    let mut registry = okena_core::agent_harness::AgentHarnessRegistry::new();
-    registry.register(okena_ext_claude::register_harness());
-    registry.register(okena_ext_codex::register_harness());
-    okena_core::agent_harness::init(registry);
-}
-
 fn main() {
     if let Err(error) = okena_remote_server::local::remember_current_executable() {
         eprintln!("Warning: failed to remember executable path: {error}");
@@ -600,8 +589,9 @@ fn main() {
 
     // Install the per-harness agent-session registry (resume command + transcript
     // parsing, dispatched by agent id). gpui-free, so it's shared by BOTH the
-    // desktop and headless paths — do it before the branch below.
-    init_agent_harnesses();
+    // desktop and headless paths — do it before the branch below. The standalone
+    // `okena-daemon` binary makes the same call from its own `main`.
+    okena_agent_harnesses::install();
 
     if headless {
         // Self-restart handoff (single-binary `okena --headless` daemon): a

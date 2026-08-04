@@ -170,8 +170,17 @@ jobs:
       - name: Build web client
         run: cd web && bun install --frozen-lockfile && bun run build
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p okena -p okena-daemon
+      # Two invocations on purpose. Cargo unifies features across every package
+      # selected in ONE invocation, so `-p okena -p okena-daemon` together would
+      # turn on `okena-workspace/gpui` (which `okena` needs) for the daemon's
+      # copy too — linking gpui and its X11/Wayland/Vulkan chain into the very
+      # binary the GPUI-free gate exists to keep clean. The gate runs
+      # `cargo tree -p okena-daemon` alone, so it would not see it.
+      - name: Build app
+        run: cargo build --release --target ${{ matrix.target }} -p okena
+
+      - name: Build daemon (separate resolution — keeps it GPUI-free)
+        run: cargo build --release --target ${{ matrix.target }} -p okena-daemon
 
       - name: Prepare artifact (Linux)
         if: runner.os == 'Linux'
