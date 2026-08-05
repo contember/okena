@@ -64,7 +64,7 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
   per-feature drain. A transition into `blocked`/`done` also queues a
   `TerminalNotification` (reusing the OSC 9 notification path + focus
   suppression).
-- `pty_manager.rs` exports two env vars into the pane at spawn. Both go through
+- `pty_manager.rs` exports three env vars into the pane at spawn. All go through
   `launch_environment`, **not** `cmd.env()` after the fact: under a session
   backend the spawned command is `sh -c "tmux new-session …"`, so a late
   `cmd.env` lands on tmux rather than the pane's shell — and an already-running
@@ -76,9 +76,20 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
     `/dev/tty`: writing to the slave reaches Okena's own master reader, whereas
     a hook's controlling terminal under tmux/screen is the *nested* pty, and
     those forward only a fixed allowlist of OSC numbers that 9001 is not on.
-    It also covers processes with no controlling terminal at all. It is captured
-    once at spawn, so it can go stale across a reattach — which is what `tid=`
-    below contains.
+    It also covers processes with no controlling terminal at all — Claude Code
+    runs its hooks in a new session, so for those `/dev/tty` never resolves. It
+    is captured once at spawn and a pane can outlive the Okena that launched it,
+    so prefer `OKENA_TTY_FILE`; what contains the residual is `tid=` below.
+  - `OKENA_TTY_FILE` — path of a file holding that same device, rewritten by
+    `crate::tty_pointer` on **every** spawn and reattach and keyed by terminal
+    id. A pane's environment can never be updated after launch, so the fix is to
+    make the captured value a *stable path* whose contents move: the terminal id
+    survives a restart under a session backend, `/dev/pts/N` does not. Without
+    it, an agent that outlives an Okena restart writes its status into whichever
+    pane inherited its old pty number, where `tid=` silently drops it — the bug
+    this exists to fix. Published in `create_terminal_with_id`, revoked in
+    `enqueue_session_kill`, and swept at `PtyManager::new` (only pointers whose
+    device is gone, so a throwaway test manager can't disturb a live Okena).
 
     **Security note:** unlike an inherited fd, a *path* can be reopened, and
     Linux recycles `/dev/pts/N` numbers. Any process that outlives its pane (a
