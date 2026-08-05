@@ -518,6 +518,34 @@ mod tests {
         );
     }
 
+    /// A default binding whose action name isn't wired up is not a compile
+    /// error — `create_keybinding` logs a warning and the shortcut is simply
+    /// dead, while a missing description hides it from the command palette and
+    /// the keybindings overlay. Both are silent at runtime, so pin them here.
+    #[test]
+    fn every_default_action_is_bindable_and_described() {
+        let config = KeybindingConfig::defaults();
+        let descriptions = crate::keybindings::get_action_descriptions();
+
+        for (action, entries) in &config.bindings {
+            assert!(
+                descriptions.contains_key(action.as_str()),
+                "{action} has default bindings but no description"
+            );
+            for entry in entries {
+                assert!(
+                    crate::keybindings::create_keybinding(
+                        action,
+                        &entry.keystroke,
+                        entry.context.as_deref(),
+                    )
+                    .is_some(),
+                    "{action} is not wired into create_keybinding — its shortcut would do nothing"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_duplicate_keybinding_detected() {
         let mut config = KeybindingConfig::defaults();
