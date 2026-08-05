@@ -52,8 +52,12 @@ struct ProjectOpenState {
 pub struct ProjectSwitcher {
     focus_handle: FocusHandle,
     state: ListOverlayState<ProjectData>,
-    /// Per-project open state across every window, snapshotted at construction.
-    /// Drives the row's open/closed treatment and the multi-window marker.
+    /// Window the switcher was opened from — visibility is per-window, so this
+    /// is the "here" every row's open state is computed against.
+    window_id: WindowId,
+    /// Per-project open state across every window. Drives the row's open/closed
+    /// treatment and the multi-window marker, and is recomputed on every
+    /// workspace change so a Space toggle shows up immediately.
     open_states: HashMap<String, ProjectOpenState>,
     /// Kept so rows can read the daemon-mirrored git status (branch label).
     workspace: Entity<Workspace>,
@@ -72,21 +76,7 @@ impl ProjectSwitcher {
                 p
             })
             .collect();
-        // Snapshot per-project open state across every window so each row can
-        // distinguish "open here" / "open in another window" / "closed
-        // everywhere". `here` is the window the switcher was opened from.
-        let data = ws.data();
-        let mut windows: Vec<(WindowId, &HashSet<String>)> =
-            vec![(WindowId::Main, &data.main_window.hidden_project_ids)];
-        windows.extend(
-            data.extra_windows
-                .iter()
-                .map(|w| (WindowId::Extra(w.id), &w.hidden_project_ids)),
-        );
-        let open_states = projects
-            .iter()
-            .map(|p| (p.id.clone(), compute_open_state(&p.id, window_id, &windows)))
-            .collect();
+        let open_states = open_states_for(window_id, ws, &projects);
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")
@@ -103,9 +93,22 @@ impl ProjectSwitcher {
         let state = ListOverlayState::new(projects, config, cx);
         let focus_handle = state.focus_handle.clone();
 
+        // Space toggles visibility through the workspace: the row emits an
+        // event that only lands after this frame, so rows have to follow the
+        // workspace rather than the snapshot above — otherwise the toggle
+        // changes the state without changing anything the user can see.
+
+        cx.observe(&workspace, |this, workspace, cx| {
+            this.open_states =
+                open_states_for(this.window_id, workspace.read(cx), &this.state.items);
+            cx.notify();
+        })
+        .detach();
+
         Self {
             focus_handle,
             state,
+            window_id,
             open_states,
             workspace,
         }
@@ -382,6 +385,28 @@ fn ranked_project_filter(items: &[ProjectData], query: &str) -> Vec<FilterResult
 /// A project is "open" in a window iff its id is absent from that window's
 /// hidden set. `open_here` reflects the `here` window; `open_elsewhere` counts
 /// the other windows where it is open.
+/// Project → open state across every window, seen from the window the switcher
+/// was opened from. Lets each row distinguish "open here" / "open in another
+/// window" / "closed everywhere".
+fn open_states_for(
+    here: WindowId,
+    ws: &Workspace,
+    projects: &[ProjectData],
+) -> HashMap<String, ProjectOpenState> {
+    let data = ws.data();
+    let mut windows: Vec<(WindowId, &HashSet<String>)> =
+        vec![(WindowId::Main, &data.main_window.hidden_project_ids)];
+    windows.extend(
+        data.extra_windows
+            .iter()
+            .map(|w| (WindowId::Extra(w.id), &w.hidden_project_ids)),
+    );
+    projects
+        .iter()
+        .map(|p| (p.id.clone(), compute_open_state(&p.id, here, &windows)))
+        .collect()
+}
+
 fn compute_open_state(
     project_id: &str,
     here: WindowId,
@@ -657,6 +682,46 @@ mod tests {
 
         let closed = compute_open_state("p_closed", here, &windows);
         assert!(!closed.open_here && closed.open_elsewhere == 0);
+    }
+
+    /// Space toggles visibility through the workspace, and the event only
+    /// lands after the frame that handled the keypress. If the rows kept the
+    /// snapshot taken when the switcher opened, the toggle would change the
+    /// state while the modal carried on showing the old one.
+    #[gpui::test]
+    fn open_state_follows_the_workspace_after_a_visibility_toggle(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::state::{WindowState, Workspace, WorkspaceData};
+        use gpui::AppContext as _;
+
+        let data = WorkspaceData {
+            version: 1,
+            projects: vec![make_project("p1", "/p1")],
+            project_order: vec!["p1".to_string()],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: Vec::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        };
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let switcher =
+            cx.new(|cx| super::ProjectSwitcher::new(WindowId::Main, workspace.clone(), cx));
+
+        switcher.read_with(cx, |switcher, _cx| {
+            assert!(switcher.open_states["p1"].open_here);
+        });
+
+        workspace.update(cx, |ws, cx| {
+            ws.toggle_hidden(WindowId::Main, "p1", cx);
+        });
+        cx.run_until_parked();
+
+        switcher.read_with(cx, |switcher, _cx| {
+            assert!(
+                !switcher.open_states["p1"].open_here,
+                "row still reports the project as open after it was hidden"
+            );
+        });
     }
 
     #[test]
