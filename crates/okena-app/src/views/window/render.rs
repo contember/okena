@@ -4,8 +4,8 @@ use crate::keybindings::{
     ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
     ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowPairingDialog,
     ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector,
-    StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout, ToggleSidebar,
-    ToggleSidebarAutoHide,
+    StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
+    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
@@ -888,6 +888,40 @@ impl Render for WindowView {
                     ws.toggle_project_layout_mode(window_id, cx);
                 });
             }))
+            // Hide the active project from this window's overview — the
+            // keyboard route to the eye toggle in the project header. Scoped to
+            // this window, like every other visibility toggle. Resolving the
+            // target the same way the branch switcher does keeps it usable in a
+            // project that has no terminal yet.
+            //
+            // Only ever hides in practice: the shortcut acts on the project you
+            // are in, and once it's hidden focus has moved elsewhere. Bringing
+            // one back is the project switcher's job (Cmd+E, Space).
+            .on_action(
+                cx.listener(|this, _: &ToggleProjectVisibility, _window, cx| {
+                    let project_id = {
+                        let fm = this.focus_manager.read(cx);
+                        fm.focused_terminal_state()
+                            .map(|state| state.project_id)
+                            .or_else(|| fm.focused_project_id().map(String::from))
+                    };
+                    if let Some(project_id) = project_id {
+                        let window_id = this.window_id;
+                        let workspace = this.workspace.clone();
+                        this.focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.toggle_project_overview_visibility(
+                                    fm,
+                                    window_id,
+                                    &project_id,
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                        });
+                    }
+                }),
+            )
             // Spawn a new extra window onto the workspace. The data-layer
             // mutation pushes a fresh `WindowState` and bumps `data_version`
             // so the auto-save observer fires; the OS window itself opens

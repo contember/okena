@@ -12,7 +12,8 @@ use super::{
     ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
     ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn,
+    ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -575,6 +576,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Switch the project grid between columns and rows",
             category: "Layout",
             factory: || Box::new(ToggleProjectLayout),
+        },
+    );
+    map.insert(
+        "ToggleProjectVisibility",
+        ActionDescription {
+            name: "Hide Project",
+            description: "Hide the active project from this window's overview (Cmd+E, Space to bring one back)",
+            category: "Layout",
+            factory: || Box::new(ToggleProjectVisibility),
         },
     );
     map.insert(
