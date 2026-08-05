@@ -235,9 +235,15 @@ impl Okena {
 
     /// Focus the first visible terminal of an already-open project, activating
     /// the window it lives in. Prefers `origin` (the window the request came
-    /// from), then main, then any extra. No-op if the project is open nowhere
-    /// or has no terminals — the layout is never changed, this is purely a
-    /// "click into the first terminal" across windows.
+    /// from), then main, then any extra. No-op if the project is open nowhere —
+    /// the layout is never changed, this is purely a "click into the first
+    /// terminal" across windows.
+    ///
+    /// A project with no terminals is still a valid destination: focus lands on
+    /// the project itself (an empty path names no pane), which is what makes it
+    /// the current project for everything that resolves one. Refusing to enter
+    /// it left a bookmark project unreachable by keyboard — the only ways in
+    /// were a click or a project that already had a terminal.
     fn jump_to_project_terminal(
         &mut self,
         origin: WindowId,
@@ -246,13 +252,11 @@ impl Okena {
     ) {
         let workspace = self.workspace.clone();
 
-        // The project must have a layout (i.e. at least one terminal) to enter.
-        let path = match workspace
-            .read(cx)
-            .project(project_id)
-            .and_then(|p| p.layout.as_ref())
-        {
-            Some(layout) => layout.find_visible_terminal_path(),
+        let path = match workspace.read(cx).project(project_id) {
+            Some(project) => project
+                .layout
+                .as_ref()
+                .map_or_else(Vec::new, |layout| layout.find_visible_terminal_path()),
             None => return,
         };
 

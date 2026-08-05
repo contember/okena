@@ -121,14 +121,22 @@ impl Workspace {
     /// Resolve a focusable project and focus its first terminal.
     ///
     /// If the project has no layout (e.g. only worktree children), drills into
-    /// the first worktree child that has a terminal.
+    /// the first worktree child that has a terminal. A project with no terminal
+    /// anywhere still takes focus, anchored on itself with an empty path: it
+    /// names no pane, but it makes the project the current one so whatever the
+    /// user does next targets it. Leaving focus on the *previous* project
+    /// instead is what made a bookmark project impossible to move into.
     pub(crate) fn focus_first_terminal_in(
         &mut self,
         focus_manager: &mut FocusManager,
         project_id: &str,
     ) {
-        if let Some(target) = self.first_terminal_target_in(project_id) {
-            focus_manager.focus_terminal(target.project_id, target.layout_path);
+        match self.first_terminal_target_in(project_id) {
+            Some(target) => focus_manager.focus_terminal(target.project_id, target.layout_path),
+            None if self.project(project_id).is_some() => {
+                focus_manager.focus_terminal(project_id.to_string(), Vec::new());
+            }
+            None => {}
         }
     }
 
@@ -272,6 +280,76 @@ mod gpui_tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    /// A project with no terminals — what a project is before it's opened, and
+    /// what it becomes again when its last terminal closes.
+    fn make_bookmark(id: &str) -> crate::state::ProjectData {
+        crate::state::ProjectData {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: format!("/tmp/{id}"),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        }
+    }
+
+    /// A project with no terminals must still be able to take focus —
+    /// otherwise focus stays on whatever came before and the project can't be
+    /// moved into at all (the project switcher's Tab, folder focus, and
+    /// zooming all route through here).
+    #[gpui::test]
+    fn focusing_a_project_without_terminals_anchors_onto_the_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_bookmark("p1"), make_bookmark("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("p1".to_string(), Vec::new());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_focused_project(&mut fm, Some("p2".to_string()), cx);
+        });
+
+        let focused = fm.focused_terminal_state().expect("focus is anchored");
+        assert_eq!(focused.project_id, "p2");
+        // No pane to name — an empty path matches none, which is the point.
+        assert!(focused.layout_path.is_empty());
+    }
+
+    #[gpui::test]
+    fn focusing_an_unknown_project_leaves_focus_alone(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_bookmark("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("p1".to_string(), Vec::new());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_focused_project(&mut fm, Some("ghost".to_string()), cx);
+        });
+
+        assert_eq!(
+            fm.focused_terminal_state().map(|f| f.project_id),
+            Some("p1".to_string())
+        );
     }
 
     #[gpui::test]
