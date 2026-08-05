@@ -532,7 +532,12 @@ fn persist_agent_sessions(
         for (terminal_id, session) in captured {
             match workspace.find_project_id_owning_terminal(&terminal_id) {
                 Some(project_id) => {
-                    workspace.set_agent_session(&project_id, &terminal_id, session.clone(), &mut cx);
+                    workspace.set_agent_session(
+                        &project_id,
+                        &terminal_id,
+                        session.clone(),
+                        &mut cx,
+                    );
                     persisted.push((terminal_id, session));
                 }
                 None => log::debug!(

@@ -863,14 +863,15 @@ pub fn spawn_uninitialized_terminals(
         // onto the new terminal id below so the pane keeps its identity whether
         // or not we actually resumed.
         let pending_session = ws.take_pending_agent_resume(project_id, &path);
-        let resume_command = pending_session.as_ref().filter(|_| auto_resume).and_then(
-            |session| {
+        let resume_command = pending_session
+            .as_ref()
+            .filter(|_| auto_resume)
+            .and_then(|session| {
                 okena_core::agent_harness::resume_command_line(
                     session,
                     std::path::Path::new(&spawn_cwd),
                 )
-            },
-        );
+            });
         if let Some(ref command) = resume_command {
             log::info!("agent-resume: project={project_id} path={path:?} command={command}");
         }
@@ -1573,10 +1574,19 @@ mod agent_resume_tests {
         TerminalsRegistry,
         RecordingBackend,
     ) {
-        let mut ws = workspace_with_terminal(ShellType::Default, None, Some("terminal"), Default::default());
+        let mut ws = workspace_with_terminal(
+            ShellType::Default,
+            None,
+            Some("terminal"),
+            Default::default(),
+        );
         ws.set_agent_session("project", "terminal", session("test-agent"), &mut TestCx);
         assert!(ws.agent_session("project", "terminal").is_some());
-        (ws, Arc::new(Default::default()), RecordingBackend::default())
+        (
+            ws,
+            Arc::new(Default::default()),
+            RecordingBackend::default(),
+        )
     }
 
     #[test]

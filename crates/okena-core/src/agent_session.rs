@@ -185,8 +185,9 @@ mod tests {
 
     #[test]
     fn from_labels_requires_agent_and_valid_uuid() {
-        let s = AgentSession::from_labels(&labels(&[("agent", "claude-code"), ("session_id", UUID)]))
-            .expect("session");
+        let s =
+            AgentSession::from_labels(&labels(&[("agent", "claude-code"), ("session_id", UUID)]))
+                .expect("session");
         assert_eq!(s.agent, "claude-code");
         assert_eq!(s.session_id, UUID);
         assert_eq!(s.transcript_path, None);
@@ -244,7 +245,11 @@ mod tests {
         // An unusable transcript path is dropped, but the session survives —
         // resume needs only `agent` + `session_id`.
         let long_path = abs(&"p".repeat(MAX_TRANSCRIPT_PATH_LEN));
-        for bad in [long_path.as_str(), "relative/x.jsonl", &abs("a/../../etc/passwd")] {
+        for bad in [
+            long_path.as_str(),
+            "relative/x.jsonl",
+            &abs("a/../../etc/passwd"),
+        ] {
             let s = AgentSession::from_labels(&labels(&[
                 ("agent", "claude-code"),
                 ("session_id", UUID),

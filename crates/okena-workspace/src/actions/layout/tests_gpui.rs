@@ -1433,24 +1433,20 @@ fn close_other_tabs_drops_the_agent_sessions_of_the_panes_it_removed(
     let data = make_workspace_data(vec![project], vec!["p1"]);
     let workspace = cx.new(|_cx| Workspace::new(data));
 
-    workspace.update(cx, |ws: &mut Workspace, cx| ws.close_other_tabs("p1", &[], 0, cx));
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.close_other_tabs("p1", &[], 0, cx)
+    });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
         let project = ws.project("p1").expect("project");
-        let mut kept: Vec<&str> = project
-            .agent_sessions
-            .keys()
-            .map(String::as_str)
-            .collect();
+        let mut kept: Vec<&str> = project.agent_sessions.keys().map(String::as_str).collect();
         kept.sort_unstable();
         assert_eq!(kept, vec!["t1"], "only the surviving pane keeps a session");
     });
 }
 
 #[gpui::test]
-fn moving_a_pane_out_spares_a_sibling_inside_its_soft_close_window(
-    cx: &mut gpui::TestAppContext,
-) {
+fn moving_a_pane_out_spares_a_sibling_inside_its_soft_close_window(cx: &mut gpui::TestAppContext) {
     // A soft-closed pane is out of the layout while its PTY and metadata are
     // deliberately kept alive for the undo. The source-side prune after a
     // cross-project move is keyed on "is it in the layout", so moving ANY other

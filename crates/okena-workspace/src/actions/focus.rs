@@ -450,9 +450,7 @@ mod gpui_tests {
 mod jump_gpui_tests {
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
-    use crate::state::{
-        LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData,
-    };
+    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;

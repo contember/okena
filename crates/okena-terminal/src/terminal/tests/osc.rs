@@ -1587,7 +1587,9 @@ fn test_agent_session_survives_label_flood() {
     let lbl = b64(&format!("{{{}}}", fields.join(",")));
     terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
 
-    let session = terminal.agent_session().expect("session survives the flood");
+    let session = terminal
+        .agent_session()
+        .expect("session survives the flood");
     assert_eq!(session.session_id, uuid);
     // The displayed labels stay bounded regardless.
     let status = terminal.agent_status().expect("status");
@@ -1774,7 +1776,10 @@ fn test_agent_status_strips_reserved_session_keys_from_labels() {
             status.labels
         );
     }
-    assert_eq!(status.labels.get("branch").map(String::as_str), Some("main"));
+    assert_eq!(
+        status.labels.get("branch").map(String::as_str),
+        Some("main")
+    );
 
     // ...but the session itself still captured them.
     let session = terminal.agent_session().expect("session");
@@ -1796,9 +1801,7 @@ fn test_agent_session_rejects_unbounded_agent_and_transcript_path() {
     // an unbounded value would be rewritten into workspace.json on every save.
     let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
     let huge = "a".repeat(okena_core::agent_session::MAX_AGENT_ID_LEN + 1);
-    let lbl = b64(&format!(
-        r#"{{"agent":"{huge}","session_id":"{uuid}"}}"#
-    ));
+    let lbl = b64(&format!(r#"{{"agent":"{huge}","session_id":"{uuid}"}}"#));
     terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
     assert_eq!(terminal.agent_session(), None);
 
@@ -1811,7 +1814,9 @@ fn test_agent_session_rejects_unbounded_agent_and_transcript_path() {
         r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"{long_path}"}}"#
     ));
     terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
-    let session = terminal.agent_session().expect("session survives a bad path");
+    let session = terminal
+        .agent_session()
+        .expect("session survives a bad path");
     assert_eq!(session.transcript_path, None);
 }
 
@@ -1876,7 +1881,10 @@ fn test_agent_status_valid_base64_of_invalid_utf8_drops_the_field() {
     terminal.process_output(format!("\x1b]9001;st=done;msg={bad}\x07").as_bytes());
 
     let status = terminal.agent_status().expect("lifecycle still applied");
-    assert_eq!(status.lifecycle, okena_core::agent_status::AgentLifecycle::Done);
+    assert_eq!(
+        status.lifecycle,
+        okena_core::agent_status::AgentLifecycle::Done
+    );
     assert_eq!(status.custom, None);
     assert_eq!(
         terminal.take_pending_notifications(),

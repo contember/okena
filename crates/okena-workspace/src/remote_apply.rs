@@ -1271,7 +1271,11 @@ mod tests {
             .insert("t1".to_string(), working("running tests"));
         let snap = RemoteSnapshot {
             config: config("c1"),
-            state: Some(state_with(vec![project], vec!["p1".to_string()], Vec::new())),
+            state: Some(state_with(
+                vec![project],
+                vec!["p1".to_string()],
+                Vec::new(),
+            )),
         };
 
         let statuses = snapshot_agent_statuses(&[snap]);
