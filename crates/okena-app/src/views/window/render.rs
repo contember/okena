@@ -1,10 +1,10 @@
 use crate::keybindings::{
-    CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout, FocusActiveProject,
-    FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile, RestartDaemon,
-    ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
-    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowPairingDialog,
-    ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector,
-    StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
+    AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
+    FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
+    RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
+    ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
+    ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
+    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
     ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
@@ -887,6 +887,41 @@ impl Render for WindowView {
                 this.workspace.update(cx, |ws, cx| {
                     ws.toggle_project_layout_mode(window_id, cx);
                 });
+            }))
+            // Start the first terminal in a project that has none — the
+            // keyboard equivalent of the empty state's "Start Terminal" button.
+            //
+            // `AddTab` is normally handled by the focused TerminalPane; this
+            // only runs when the focused project has no pane to handle it,
+            // which is exactly the case the pane-scoped binding cannot reach. A
+            // project WITH a layout falls through untouched, so an open modal
+            // (which owns the keyboard while leaving a project focused) can't
+            // spawn terminals behind itself either.
+            .on_action(cx.listener(|this, _: &AddTab, _window, cx| {
+                if this.focus_manager.read(cx).is_modal() {
+                    return;
+                }
+                let project_id = {
+                    let fm = this.focus_manager.read(cx);
+                    fm.focused_terminal_state()
+                        .map(|state| state.project_id)
+                        .or_else(|| fm.focused_project_id().map(String::from))
+                };
+                let Some(project_id) = project_id else { return };
+                if this
+                    .workspace
+                    .read(cx)
+                    .project(&project_id)
+                    .is_none_or(|p| p.layout.is_some())
+                {
+                    return;
+                }
+                if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
+                    dispatcher.dispatch(
+                        okena_core::api::ActionRequest::CreateTerminal { project_id },
+                        cx,
+                    );
+                }
             }))
             // Hide the active project from this window's overview — the
             // keyboard route to the eye toggle in the project header. Scoped to

@@ -171,11 +171,17 @@ impl KeybindingConfig {
                 KeybindingEntry::new("ctrl-d", Some("TerminalPane")),
             ],
         );
+        // Also bound globally: a project with no terminals has no TerminalPane
+        // to dispatch through, so the pane-scoped binding alone leaves "Start
+        // Terminal" reachable only by mouse. The window-level handler only acts
+        // when there is genuinely no pane to take it (see `render.rs`).
         bindings.insert(
             "AddTab".to_string(),
             vec![
                 KeybindingEntry::new("cmd-t", Some("TerminalPane")),
                 KeybindingEntry::new("ctrl-shift-t", Some("TerminalPane")),
+                KeybindingEntry::new("cmd-t", None),
+                KeybindingEntry::new("ctrl-shift-t", None),
             ],
         );
         bindings.insert(
