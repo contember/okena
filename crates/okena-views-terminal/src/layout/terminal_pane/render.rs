@@ -101,30 +101,17 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 .terminal
                 .as_ref()
                 .is_some_and(|t| t.is_waiting_for_input());
-        // The tab bar carries the agent lifecycle, but a bare
-        // `LayoutNode::Terminal` — which is exactly what a new project is, and
-        // every leaf of a plain split — renders no tab bar at all, so the
-        // common "one project, one pane, running an agent" case showed nothing
-        // in the pane. Tint the border like the bell does. `Idle` is excluded:
-        // it is the resting state and would put a border on every such pane.
-        let agent_lifecycle = self
-            .terminal
-            .as_ref()
-            .and_then(|t| t.agent_status())
-            .map(|status| status.lifecycle)
-            .filter(|lifecycle| *lifecycle != okena_core::agent_status::AgentLifecycle::Idle);
-        let show_border = (is_focused && show_focused_border)
-            || has_bell
-            || has_notification
-            || is_waiting
-            || agent_lifecycle.is_some();
+        // Deliberately no agent-lifecycle border: it sticks until the next
+        // status (no activity clears it, unlike the bell), so it read as a
+        // permanent alarm. The tab indicator and the sidebar AGENTS list carry
+        // the lifecycle instead.
+        let show_border =
+            (is_focused && show_focused_border) || has_bell || has_notification || is_waiting;
         // OSC 9/777 notifications share the bell's attention color.
         let border_color = if is_focused && show_focused_border {
             rgb(t.border_focused)
         } else if has_bell || has_notification {
             rgb(t.border_bell)
-        } else if let Some(lifecycle) = agent_lifecycle {
-            rgb(lifecycle.theme_color(&t))
         } else {
             rgb(t.border_idle)
         };

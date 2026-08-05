@@ -40,9 +40,13 @@ shown verbatim.
   same window-aware `focus_terminal_by_id` as sidebar clicks, cursor navigation,
   notification jumps, and remote focus requests, which also keeps a jump made
   from a fullscreened pane in fullscreen.
-  A pane that is *not* in a tab group (a new project, or any leaf of a plain
-  split) has no tab bar, so its lifecycle shows as a tinted pane border instead
-  — same colors, except `idle`, which is the resting state and draws nothing.
+
+  The pane border deliberately stays out of it. A status is sticky — nothing
+  but the next status clears it — so tinting the border turned a finished turn
+  into a permanent alarm around the pane, and doubled up on the tab indicator
+  for any pane that has a tab bar. A pane *not* in a tab group (a new project,
+  or any leaf of a plain split) therefore shows its agent only in AGENTS and in
+  the notification.
 - **Notification** — entering `blocked` or `done` raises a desktop notification
   (+ sound), suppressed for the pane you're actively looking at. Gated by the
   normal notification settings.
