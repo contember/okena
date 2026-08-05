@@ -20,8 +20,12 @@ use super::terminal_rendering::{BatchedTextRun, LayoutRect, is_default_bg};
 
 type ResizeViewerSizes = HashMap<String, HashMap<u64, TerminalSize>>;
 
+/// (desired, target, current) dims + viewer count + authority + verdict.
+type ResizeGateKey = (u16, u16, u16, u16, u16, u16, usize, bool, bool);
+
 static NEXT_RESIZE_VIEWER_ID: AtomicU64 = AtomicU64::new(1);
 static RESIZE_VIEWER_SIZES: OnceLock<Mutex<ResizeViewerSizes>> = OnceLock::new();
+static RESIZE_GATE_LOGGED: OnceLock<Mutex<HashMap<String, ResizeGateKey>>> = OnceLock::new();
 
 pub(crate) fn next_resize_viewer_id() -> u64 {
     NEXT_RESIZE_VIEWER_ID.fetch_add(1, Ordering::Relaxed)
@@ -93,12 +97,70 @@ pub(crate) fn deregister_resize_viewer(terminal_id: &str, viewer_id: u64) {
         viewers.remove(&viewer_id);
         if viewers.is_empty() {
             sizes.remove(terminal_id);
+            resize_gate_logged().lock().remove(terminal_id);
         }
     }
 }
 
 fn resize_viewer_sizes() -> &'static Mutex<ResizeViewerSizes> {
     RESIZE_VIEWER_SIZES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn resize_gate_logged() -> &'static Mutex<HashMap<String, ResizeGateKey>> {
+    RESIZE_GATE_LOGGED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Diagnostic for resizes the paint gate drops: names which of the two guards
+/// (`is_resize_owner_local` / the multi-viewer minimum) held it back.
+/// Deduplicated per terminal so a pane that stays blocked logs once, not once
+/// per frame.
+#[allow(clippy::too_many_arguments)]
+fn log_resize_gate(
+    terminal_id: &str,
+    viewer_id: u64,
+    viewers: usize,
+    desired: TerminalSize,
+    target: TerminalSize,
+    current: TerminalSize,
+    owner_local: bool,
+    will_send: bool,
+) {
+    let key = (
+        desired.cols,
+        desired.rows,
+        target.cols,
+        target.rows,
+        current.cols,
+        current.rows,
+        viewers,
+        owner_local,
+        will_send,
+    );
+    {
+        let mut seen = resize_gate_logged().lock();
+        if seen.get(terminal_id) == Some(&key) {
+            return;
+        }
+        seen.insert(terminal_id.to_string(), key);
+    }
+
+    let verdict = match (will_send, owner_local) {
+        (true, _) => "SEND",
+        (false, false) => "BLOCKED authority",
+        (false, true) => "BLOCKED clamp",
+    };
+    let line = format!(
+        "resize gate: {verdict} terminal={terminal_id} viewer={viewer_id} viewers={viewers} \
+         desired={}x{} target={}x{} current={}x{} owner_local={owner_local}",
+        desired.cols, desired.rows, target.cols, target.rows, current.cols, current.rows,
+    );
+    // A dropped resize is the rare event we are hunting, so it goes to `info` —
+    // that reaches okena.log on disk and outlives the console's 10k-line ring.
+    if will_send {
+        log::debug!("{line}");
+    } else {
+        log::info!("{line}");
+    }
 }
 
 fn shared_resize_target(
@@ -425,17 +487,39 @@ impl Element for TerminalElement {
         let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
             || (line_height_f - current_size.cell_height).abs() > 0.001;
 
-        if cols_rows_changed && self.terminal.is_resize_owner_local() {
-            // Multi-window resize gate: when the same terminal is rendered in
-            // more than one visible pane, resize to the per-dimension minimum
-            // desired by all live viewers. This avoids ping-pong between
-            // differently shaped windows while still allowing growth once every
-            // visible viewer can fit the larger dimension.
-            let target = if n_viewers <= 1 {
-                desired_size
-            } else {
-                resize_size
-            };
+        // Multi-window resize gate: when the same terminal is rendered in
+        // more than one visible pane, resize to the per-dimension minimum
+        // desired by all live viewers. This avoids ping-pong between
+        // differently shaped windows while still allowing growth once every
+        // visible viewer can fit the larger dimension.
+        let target = if n_viewers <= 1 {
+            desired_size
+        } else {
+            resize_size
+        };
+        // Anything to decide? Keeps the steady-state paint off the authority
+        // lock, as before — the extra check only fires when this pane or a
+        // co-viewer disagrees with the live size.
+        let contested = cols_rows_changed
+            || desired_size.cols != current_size.cols
+            || desired_size.rows != current_size.rows;
+        let owner_local = contested && self.terminal.is_resize_owner_local();
+        let will_send = cols_rows_changed && owner_local;
+
+        if contested {
+            log_resize_gate(
+                &self.terminal.terminal_id,
+                self.resize_viewer_id,
+                n_viewers,
+                desired_size,
+                target,
+                current_size,
+                owner_local,
+                will_send,
+            );
+        }
+
+        if will_send {
             self.terminal.resize(target);
         } else if cell_size_changed {
             let mut rs = self.terminal.resize_state.lock();
