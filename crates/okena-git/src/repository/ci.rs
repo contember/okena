@@ -17,6 +17,42 @@ use super::status::get_pushed_sha;
 /// elapses so one stuck repo can never wedge the git-status loop.
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Outcome of a PR lookup. `RateLimited` is kept distinct from "no PR" so the
+/// poller can park its whole `gh` fan-out instead of hammering a closed door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrFetch {
+    Fetched(Option<crate::PrInfo>),
+    RateLimited,
+}
+
+/// Outcome of a CI lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CiFetch {
+    /// The upstream commit still matches the caller's cached result, so nothing
+    /// was requested and the cached summary stays valid.
+    Unchanged,
+    /// A request ran. `sha` is the upstream commit the summary describes, used
+    /// to skip the next fetch while it holds.
+    Fetched {
+        sha: Option<String>,
+        summary: Option<crate::CiCheckSummary>,
+    },
+    RateLimited,
+}
+
+/// Whether a failed `gh` invocation failed because GitHub is rate-limiting us.
+///
+/// `gh` surfaces both the primary hourly limit ("API rate limit exceeded") and
+/// the secondary abuse limit ("exceeded a secondary rate limit") on stderr; a
+/// plain substring match covers the REST and GraphQL wordings alike.
+fn is_rate_limited(output: &std::process::Output) -> bool {
+    if output.status.success() {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    stderr.contains("rate limit")
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPullRequest {
@@ -108,9 +144,13 @@ pub fn has_github_remote(path: &Path) -> bool {
 /// lives (a fork/upstream split) it reports "no pull requests found" even when
 /// a PR exists. `gh pr list --head` matches by head branch name in the default
 /// repo, which resolves correctly in that setup.
-pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
-    let path_str = path.to_str()?;
-    let branch = super::status::get_current_branch(path)?;
+pub fn fetch_pr_info(path: &Path) -> PrFetch {
+    let Some(path_str) = path.to_str() else {
+        return PrFetch::Fetched(None);
+    };
+    let Some(branch) = super::status::get_current_branch(path) else {
+        return PrFetch::Fetched(None);
+    };
     let current_sha = super::status::get_head_sha(path);
     let pushed_sha = get_pushed_sha(path);
 
@@ -132,15 +172,24 @@ pub fn get_pr_info(path: &Path) -> Option<crate::PrInfo> {
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
-    )
-    .ok()?;
+    );
+    let Ok(output) = output else {
+        return PrFetch::Fetched(None);
+    };
 
+    if is_rate_limited(&output) {
+        return PrFetch::RateLimited;
+    }
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return parse_pr_list_tsv(stdout.trim(), current_sha.as_deref(), pushed_sha.as_deref());
+        return PrFetch::Fetched(parse_pr_list_tsv(
+            stdout.trim(),
+            current_sha.as_deref(),
+            pushed_sha.as_deref(),
+        ));
     }
 
-    None
+    PrFetch::Fetched(None)
 }
 
 /// Parse the single TSV line our `gh pr list --jq ... | @tsv` query emits into a
@@ -326,20 +375,41 @@ pub(crate) fn parse_ci_checks(json_str: &str) -> Option<crate::CiCheckSummary> {
 /// fetching `check-runs` + `status` on the current HEAD commit via `gh api`,
 /// which works for any pushed branch — including default branches without a PR.
 ///
-/// Returns `None` when there are no checks, when `gh` isn't installed /
+/// `unchanged_sha` is the upstream commit a *settled* cached summary describes.
+/// Checks on a given commit only move while something is running, so when the
+/// branch still points at that commit the whole lookup is skipped — no `gh`, no
+/// request. This is what keeps a machine with many projects inside GitHub's
+/// hourly budget: a repo parked on `main` costs one cheap local ref read per
+/// poll instead of two REST calls.
+///
+/// Returns `Fetched(None)` when there are no checks, when `gh` isn't installed /
 /// authenticated, or when the repo has no GitHub remote.
-pub fn get_ci_checks(path: &Path, pr_number: Option<u32>) -> Option<crate::CiCheckSummary> {
+pub fn fetch_ci_checks(
+    path: &Path,
+    pr_number: Option<u32>,
+    unchanged_sha: Option<&str>,
+) -> CiFetch {
+    // Read locally (gix, no network) before deciding to spend a request.
+    let sha = get_pushed_sha(path);
+    if let (Some(sha), Some(cached)) = (sha.as_deref(), unchanged_sha)
+        && sha == cached
+    {
+        return CiFetch::Unchanged;
+    }
+
     match pr_number {
-        Some(number) => get_pr_ci_checks(path, number),
-        None => get_branch_ci_checks(path),
+        Some(number) => get_pr_ci_checks(path, number, sha),
+        None => get_branch_ci_checks(path, sha),
     }
 }
 
-/// Fetch CI checks via `gh pr checks <number>` (PR-scoped — see `get_ci_checks`).
+/// Fetch CI checks via `gh pr checks <number>` (PR-scoped — see `fetch_ci_checks`).
 /// The explicit PR number is passed rather than relying on `gh`'s current-branch
 /// resolution, which (like `gh pr view`) misfires on fork/upstream-split repos.
-fn get_pr_ci_checks(path: &Path, pr_number: u32) -> Option<crate::CiCheckSummary> {
-    let path_str = path.to_str()?;
+fn get_pr_ci_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch {
+    let Some(path_str) = path.to_str() else {
+        return CiFetch::Fetched { sha, summary: None };
+    };
     let number = pr_number.to_string();
 
     let output = safe_output_with_timeout(
@@ -353,15 +423,23 @@ fn get_pr_ci_checks(path: &Path, pr_number: u32) -> Option<crate::CiCheckSummary
             ])
             .current_dir(path_str),
         GH_TIMEOUT,
-    )
-    .ok()?;
+    );
+    let Ok(output) = output else {
+        return CiFetch::Fetched { sha, summary: None };
+    };
 
+    if is_rate_limited(&output) {
+        return CiFetch::RateLimited;
+    }
     if !output.status.success() {
-        return None;
+        return CiFetch::Fetched { sha, summary: None };
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ci_checks(stdout.trim())
+    CiFetch::Fetched {
+        summary: parse_ci_checks(stdout.trim()),
+        sha,
+    }
 }
 
 /// Fetch CI checks for the branch's last *pushed* commit via the REST API.
@@ -370,32 +448,49 @@ fn get_pr_ci_checks(path: &Path, pr_number: u32) -> Option<crate::CiCheckSummary
 /// use) into a single `CiCheckSummary`.
 ///
 /// Uses the upstream (pushed) SHA, not the local HEAD: CI runs on what's on the
-/// remote, so an unpushed local commit has no checks. Returns `None` (skipping
-/// the API calls) when the branch has no upstream — nothing has been pushed.
-fn get_branch_ci_checks(path: &Path) -> Option<crate::CiCheckSummary> {
-    let path_str = path.to_str()?;
-    let sha = get_pushed_sha(path)?;
+/// remote, so an unpushed local commit has no checks. Returns no summary
+/// (skipping the API calls) when the branch has no upstream — nothing has been
+/// pushed.
+fn get_branch_ci_checks(path: &Path, sha: Option<String>) -> CiFetch {
+    let (Some(path_str), Some(sha)) = (path.to_str(), sha) else {
+        return CiFetch::Fetched {
+            sha: None,
+            summary: None,
+        };
+    };
 
     // `gh api` substitutes `{owner}` and `{repo}` from the current repo
     // context, so we don't need to resolve the remote ourselves.
     let check_runs_endpoint = format!("repos/{{owner}}/{{repo}}/commits/{}/check-runs", sha);
     let status_endpoint = format!("repos/{{owner}}/{{repo}}/commits/{}/status", sha);
+    let fetched = |summary| CiFetch::Fetched {
+        sha: Some(sha.clone()),
+        summary,
+    };
 
-    let check_runs_out = safe_output_with_timeout(
+    let Ok(check_runs_out) = safe_output_with_timeout(
         command("gh")
             .args(["api", "--paginate", &check_runs_endpoint])
             .current_dir(path_str),
         GH_TIMEOUT,
-    )
-    .ok()?;
+    ) else {
+        return fetched(None);
+    };
+    if is_rate_limited(&check_runs_out) {
+        return CiFetch::RateLimited;
+    }
 
-    let statuses_out = safe_output_with_timeout(
+    let Ok(statuses_out) = safe_output_with_timeout(
         command("gh")
             .args(["api", &status_endpoint])
             .current_dir(path_str),
         GH_TIMEOUT,
-    )
-    .ok()?;
+    ) else {
+        return fetched(None);
+    };
+    if is_rate_limited(&statuses_out) {
+        return CiFetch::RateLimited;
+    }
 
     let check_runs_json = if check_runs_out.status.success() {
         Some(String::from_utf8_lossy(&check_runs_out.stdout).into_owned())
@@ -409,10 +504,13 @@ fn get_branch_ci_checks(path: &Path) -> Option<crate::CiCheckSummary> {
     };
 
     if check_runs_json.is_none() && statuses_json.is_none() {
-        return None;
+        return fetched(None);
     }
 
-    parse_branch_ci(check_runs_json.as_deref(), statuses_json.as_deref())
+    fetched(parse_branch_ci(
+        check_runs_json.as_deref(),
+        statuses_json.as_deref(),
+    ))
 }
 
 /// Parse the REST `check-runs` + `status` JSON payloads into a unified
@@ -862,5 +960,75 @@ mod tests {
     #[test]
     fn parse_branch_ci_invalid_json_returns_none() {
         assert!(super::parse_branch_ci(Some("not json"), Some("also not json")).is_none());
+    }
+
+    fn output(code: i32, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rate_limit_is_told_apart_from_other_failures() {
+        assert!(super::is_rate_limited(&output(
+            1,
+            "gh: API rate limit exceeded for user ID 1276059."
+        )));
+        assert!(super::is_rate_limited(&output(
+            1,
+            "You have exceeded a secondary rate limit"
+        )));
+        assert!(!super::is_rate_limited(&output(
+            1,
+            "gh: Not Found (HTTP 404)"
+        )));
+        // A successful call is never a rate-limit hit, whatever it printed.
+        assert!(!super::is_rate_limited(&output(0, "rate limit")));
+    }
+
+    #[test]
+    fn unchanged_upstream_commit_skips_the_lookup_entirely() {
+        // A repo whose upstream still points at the cached commit must not
+        // shell out to `gh` at all — this is the skip that keeps the poller
+        // inside GitHub's hourly budget.
+        let (_bare_tmp, bare) = {
+            let tmp = tempfile::tempdir().expect("create temp dir");
+            let path = tmp.path().join("origin.git");
+            std::process::Command::new("git")
+                .args(["init", "--bare", "-b", "main"])
+                .arg(&path)
+                .output()
+                .expect("git init --bare");
+            (tmp, path)
+        };
+        let (_tmp, repo) = super::super::test_support::init_temp_repo();
+        super::super::test_support::git_in(
+            &repo,
+            &["remote", "add", "origin", bare.to_str().expect("path")],
+        );
+        super::super::test_support::git_in(&repo, &["push", "-u", "origin", "main"]);
+
+        let sha = super::get_pushed_sha(&repo).expect("branch has an upstream");
+        assert_eq!(
+            super::fetch_ci_checks(&repo, None, Some(&sha)),
+            super::CiFetch::Unchanged
+        );
+    }
+
+    #[test]
+    fn branch_without_upstream_never_reaches_the_api() {
+        // Nothing is pushed, so there is nothing CI could have run on.
+        let (_tmp, repo) = super::super::test_support::init_temp_repo();
+        assert_eq!(
+            super::fetch_ci_checks(&repo, None, None),
+            super::CiFetch::Fetched {
+                sha: None,
+                summary: None
+            }
+        );
     }
 }

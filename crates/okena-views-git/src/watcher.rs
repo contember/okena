@@ -1,8 +1,9 @@
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
-use okena_core::git_poll::GitPollTrigger;
+use okena_core::git_poll::{GitPollTrigger, GithubPollSchedule};
 use okena_core::process::{Lane, with_lane};
+use okena_git::repository::{CiFetch, PrFetch};
 use okena_git::{self as git, GitStatus};
 use okena_workspace::state::Workspace;
 use std::collections::{HashMap, HashSet};
@@ -32,12 +33,6 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 const GIT_POLL_INTERVAL: u64 = 5;
 /// Cheap HEAD-only cadence used to wake the full status refresh after commits and checkouts.
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// How many git poll cycles between PR URL checks (~60s)
-const PR_POLL_EVERY_N_CYCLES: u64 = 12;
-/// How many git poll cycles between CI check polls when checks are pending (~15s)
-const CI_PENDING_POLL_EVERY_N_CYCLES: u64 = 3;
-/// How many git poll cycles between CI check polls when checks are settled (~60s)
-const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
 
 /// Centralized git status poller.
 ///
@@ -54,8 +49,13 @@ pub struct GitStatusWatcher {
     pr_infos: HashMap<String, Option<okena_git::PrInfo>>,
     /// Cached CI check status keyed by project ID
     ci_checks: HashMap<String, Option<okena_git::CiCheckSummary>>,
-    /// Whether any project has pending CI checks (drives adaptive polling)
-    any_pending_ci: bool,
+    /// Per-project `gh` cadence, commit-level result caching and the
+    /// rate-limit gate. See [`GithubPollSchedule`].
+    schedule: GithubPollSchedule,
+    /// Poll cycle counter (one per `GIT_POLL_INTERVAL` tick). Lives on the
+    /// entity so out-of-band refreshes schedule against the same clock as the
+    /// poll loop.
+    cycle: u64,
     /// Invalidates async results captured before a project's HEAD changed.
     head_generations: HashMap<String, u64>,
     /// Watch channel sender for remote WS push
@@ -76,7 +76,8 @@ impl GitStatusWatcher {
             statuses: HashMap::new(),
             pr_infos: HashMap::new(),
             ci_checks: HashMap::new(),
-            any_pending_ci: false,
+            schedule: GithubPollSchedule::default(),
+            cycle: 0,
             head_generations: HashMap::new(),
             remote_tx,
             remote_subscribed_terminals,
@@ -161,20 +162,18 @@ impl GitStatusWatcher {
                     && this
                         .update(cx, |this, cx| {
                             for (id, reference_changed) in changed {
+                                // Bump the generation so results captured before
+                                // this change are discarded. The cached CI stays:
+                                // checks belong to the last *pushed* commit, which
+                                // a local commit doesn't move — dropping it blanked
+                                // the badge and forced a refetch on every commit.
                                 *this.head_generations.entry(id.clone()).or_default() += 1;
-                                this.ci_checks.remove(&id);
                                 if reference_changed {
                                     this.refresh_project(id, cx);
                                 } else {
                                     this.refresh_visible_project(id, cx);
                                 }
                             }
-                            this.any_pending_ci = this.ci_checks.values().any(|checks| {
-                                checks
-                                    .as_ref()
-                                    .map(|s| s.status.is_pending())
-                                    .unwrap_or(false)
-                            });
                         })
                         .is_err()
                 {
@@ -227,6 +226,50 @@ impl GitStatusWatcher {
         !(self.pr_infos.contains_key(project_id) && self.ci_checks.contains_key(project_id))
     }
 
+    /// Fold one project's `gh` outcome into the caches and its schedule.
+    ///
+    /// A refusal parks *all* `gh` traffic rather than being cached as "no PR /
+    /// no checks" — otherwise an exhausted rate limit would both blank every
+    /// badge and keep the poller hammering a closed door.
+    fn apply_github_fetch(&mut self, project_id: &str, pr: Option<PrFetch>, ci: Option<CiFetch>) {
+        let cycle = self.cycle;
+        let mut rate_limited = false;
+        let mut reached_github = false;
+
+        match pr {
+            Some(PrFetch::Fetched(info)) => {
+                reached_github = true;
+                self.schedule.record_pr(project_id, cycle);
+                self.pr_infos.insert(project_id.to_string(), info);
+            }
+            Some(PrFetch::RateLimited) => rate_limited = true,
+            None => {}
+        }
+        match ci {
+            Some(CiFetch::Unchanged) => self.schedule.record_ci_unchanged(project_id, cycle),
+            Some(CiFetch::Fetched { sha, summary }) => {
+                reached_github = true;
+                let pending = summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.status.is_pending());
+                self.schedule.record_ci(project_id, cycle, pending, sha);
+                self.ci_checks.insert(project_id.to_string(), summary);
+            }
+            Some(CiFetch::RateLimited) => rate_limited = true,
+            None => {}
+        }
+
+        if rate_limited {
+            self.schedule.note_rate_limited(cycle);
+            log::warn!(
+                "GitHub API rate limit hit; PR/CI polling paused for {} cycles",
+                self.schedule.rate_limit_backoff_cycles()
+            );
+        } else if reached_github {
+            self.schedule.note_request_succeeded();
+        }
+    }
+
     /// Trigger an immediate git status refresh for a single project, bypassing
     /// the 5-second polling cadence. Used after explicit user actions like
     /// branch checkout so the UI reflects the new state without waiting for the
@@ -258,28 +301,22 @@ impl GitStatusWatcher {
                 self.refresh_visible_project(project_id, cx);
             }
             // No project id (a client's terminal subscription changed): fetch
-            // `gh` for any newly visible/subscribed project not yet cached.
+            // `gh` for any newly visible project not yet cached.
             None => self.refresh_visible_projects_missing_github(cx),
         }
     }
 
-    /// Refresh every currently visible-or-subscribed non-remote project that has
-    /// no cached PR/CI yet. Mirrors the poll loop's `gh_ids` set so a project
-    /// that just entered view (e.g. a remote client subscribed to its terminal)
-    /// gets its badge immediately instead of on the next `gh` cadence cycle.
+    /// Refresh every currently *visible* non-remote project that has no cached
+    /// PR/CI yet, so a project entering view gets its badge immediately instead
+    /// of on the next `gh` cadence cycle. Mirrors the poll loop's `gh_ids` set —
+    /// subscribed-but-hidden projects deliberately excluded, see there.
     fn refresh_visible_projects_missing_github(&mut self, cx: &mut Context<Self>) {
-        let mut gh_ids = self.workspace.read(cx).all_visible_project_ids();
-        if let Ok(remote_terminals) = self.remote_subscribed_terminals.read() {
-            for terminal_ids in remote_terminals.values() {
-                for tid in terminal_ids {
-                    if let Some(p) = self.workspace.read(cx).find_project_for_terminal(tid)
-                        && !p.is_remote
-                    {
-                        gh_ids.insert(p.id.clone());
-                    }
-                }
-            }
+        // A client's subscription set changes often; without the gate this fans
+        // `gh` out over the whole workspace while GitHub is already refusing us.
+        if self.schedule.is_rate_limited(self.cycle) {
+            return;
         }
+        let gh_ids = self.workspace.read(cx).all_visible_project_ids();
         let stale: Vec<String> = gh_ids
             .into_iter()
             .filter(|id| !self.statuses.contains_key(id) || self.missing_github_stats(id))
@@ -307,10 +344,7 @@ impl GitStatusWatcher {
         if invalidate_github {
             self.pr_infos.remove(&project_id);
             self.ci_checks.remove(&project_id);
-            self.any_pending_ci = self
-                .ci_checks
-                .values()
-                .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+            self.schedule.force(&project_id);
             let mut changed = false;
             if let Some(Some(status)) = self.statuses.get_mut(&project_id)
                 && (status.pr_info.is_some() || status.ci_checks.is_some())
@@ -335,6 +369,8 @@ impl GitStatusWatcher {
                 .and_then(|p| p.base.clone())
         };
         let poll_github = invalidate_github || self.missing_github_stats(&project_id);
+        // Skip the wire when the upstream commit still matches a settled result.
+        let ci_skip_sha = self.schedule.ci_skip_sha(&project_id, self.cycle);
         let head_generation = self
             .head_generations
             .get(&project_id)
@@ -383,16 +419,29 @@ impl GitStatusWatcher {
                 return;
             }
 
-            let (fetched_pr_info, fetched_ci_checks) = smol::unblock(move || {
+            let (fetched_pr_info, fetched_ci) = smol::unblock(move || {
                 with_lane(Lane::Poll, || {
                     let path = Path::new(&path);
                     if !git::repository::has_github_remote(path) {
-                        return (None, None);
+                        return (
+                            PrFetch::Fetched(None),
+                            CiFetch::Fetched {
+                                sha: None,
+                                summary: None,
+                            },
+                        );
                     }
-                    let pr_info = git::repository::get_pr_info(path);
-                    let pr_number = pr_info.as_ref().map(|pr| pr.number);
-                    let ci_checks = git::repository::get_ci_checks(path, pr_number);
-                    (pr_info, ci_checks)
+                    let pr_info = git::repository::fetch_pr_info(path);
+                    let pr_number = match &pr_info {
+                        PrFetch::Fetched(info) => info.as_ref().map(|info| info.number),
+                        PrFetch::RateLimited => None,
+                    };
+                    let ci = if matches!(pr_info, PrFetch::RateLimited) {
+                        CiFetch::RateLimited
+                    } else {
+                        git::repository::fetch_ci_checks(path, pr_number, ci_skip_sha.as_deref())
+                    };
+                    (pr_info, ci)
                 })
             })
             .await;
@@ -407,14 +456,7 @@ impl GitStatusWatcher {
                 {
                     return;
                 }
-                this.pr_infos.insert(project_id.clone(), fetched_pr_info);
-                this.ci_checks.insert(project_id.clone(), fetched_ci_checks);
-                this.any_pending_ci = this.ci_checks.values().any(|checks| {
-                    checks
-                        .as_ref()
-                        .map(|s| s.status.is_pending())
-                        .unwrap_or(false)
-                });
+                this.apply_github_fetch(&project_id, Some(fetched_pr_info), Some(fetched_ci));
 
                 let mut changed = false;
                 if let Some(Some(status)) = this.statuses.get_mut(&project_id) {
@@ -456,23 +498,27 @@ impl GitStatusWatcher {
                 // shown ONLY in an extra window is still polled (per PRD rule
                 // 3b-ii, projects added from window N are hidden elsewhere).
                 //
-                // `gh_ids` is the same set; the expensive `gh` PR/CI fan-out is
-                // gated further by cycle cadence below.
+                // `gh_ids` is deliberately *narrower* — visible projects only.
+                // A client subscribes to every terminal in the workspace, not
+                // just the ones it renders, so folding subscriptions into the
+                // `gh` set puts projects nobody is looking at on the GitHub
+                // cadence and burns the hourly API budget for nothing.
                 let (projects, gh_ids): (Vec<(String, String)>, HashSet<String>) =
                     cx.update(|cx| {
                         let ws = workspace.read(cx);
 
-                        let mut gh_ids = ws.all_visible_project_ids();
+                        let gh_ids = ws.all_visible_project_ids();
+                        let mut status_ids = gh_ids.clone();
 
-                        // Add projects with remotely subscribed terminals — they're
-                        // shown on a remote client, so poll their status + PR/CI too.
+                        // Projects with remotely subscribed terminals are shown on
+                        // a remote client, so keep their local git status fresh.
                         if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
                             for terminal_ids in remote_terminals.values() {
                                 for tid in terminal_ids {
                                     if let Some(p) = ws.find_project_for_terminal(tid)
                                         && !p.is_remote
                                     {
-                                        gh_ids.insert(p.id.clone());
+                                        status_ids.insert(p.id.clone());
                                     }
                                 }
                             }
@@ -484,30 +530,16 @@ impl GitStatusWatcher {
                         let projects = ws
                             .projects()
                             .iter()
-                            .filter(|p| !p.is_remote && gh_ids.contains(&p.id))
+                            .filter(|p| !p.is_remote && status_ids.contains(&p.id))
                             .map(|p| (p.id.clone(), p.path.clone()))
                             .collect();
                         (projects, gh_ids)
                     });
 
-                // Skip the cycle-0 `gh` fan-out: at startup the app is already
-                // busy spawning terminals/hooks, and git status (phase 1, gix)
-                // renders immediately regardless. PR/CI kick in on cycle 1 (+5s)
-                // and then follow their normal cadence — so the badges fill in
-                // shortly after launch without a thundering herd of `gh` at the
-                // worst moment.
-                let ci_poll_interval = if this
-                    .update(cx, |this, _| this.any_pending_ci)
-                    .unwrap_or(false)
-                {
-                    CI_PENDING_POLL_EVERY_N_CYCLES
-                } else {
-                    CI_SETTLED_POLL_EVERY_N_CYCLES
-                };
-                let pr_cadence =
-                    cycle == 1 || (cycle != 0 && cycle.is_multiple_of(PR_POLL_EVERY_N_CYCLES));
-                let ci_cadence =
-                    cycle == 1 || (cycle != 0 && cycle.is_multiple_of(ci_poll_interval));
+                // Cycle 0 is startup: the app is already busy spawning terminals
+                // and hooks, and git status (phase 1, gix) renders without `gh`.
+                // The schedule's own default puts the first fetch on cycle 1.
+                let _ = this.update(cx, |this, _| this.cycle = cycle);
 
                 // Snapshot each project's known PR base branch (from the cached
                 // PR info fetched on prior `check_prs` cycles). Passing it into
@@ -574,7 +606,7 @@ impl GitStatusWatcher {
                 // and the poll loop keeps cycling. Inject whatever PR/CI we
                 // already have cached so we don't blank those mid-cycle.
                 let status_generations = poll_generations.clone();
-                let force_gh_ids = match this.update(cx, |this, cx| {
+                match this.update(cx, |this, cx| {
                     new_statuses.retain(|id, _| {
                         this.head_generations.get(id).copied().unwrap_or_default()
                             == status_generations.get(id).copied().unwrap_or_default()
@@ -587,19 +619,15 @@ impl GitStatusWatcher {
                             (prev.branch != status.branch).then(|| id.clone())
                         })
                         .collect();
-                    if !branch_changes.is_empty() {
-                        for id in &branch_changes {
-                            this.pr_infos.remove(id);
-                            this.ci_checks.remove(id);
-                            if let Some(Some(status)) = new_statuses.get_mut(id) {
-                                status.pr_info = None;
-                                status.ci_checks = None;
-                            }
+                    for id in &branch_changes {
+                        this.pr_infos.remove(id);
+                        this.ci_checks.remove(id);
+                        if let Some(Some(status)) = new_statuses.get_mut(id) {
+                            status.pr_info = None;
+                            status.ci_checks = None;
                         }
-                        this.any_pending_ci = this
-                            .ci_checks
-                            .values()
-                            .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+                        // Cached PR/CI described the branch we just left.
+                        this.schedule.force(id);
                     }
                     for (id, status) in new_statuses.iter_mut() {
                         if let Some(s) = status.as_mut() {
@@ -608,100 +636,60 @@ impl GitStatusWatcher {
                         }
                     }
                     this.commit_statuses(&new_statuses, cx);
-                    branch_changes
                 }) {
-                    Ok(ids) => ids,
+                    Ok(()) => {}
                     Err(_) => break,
                 };
-                let check_prs = pr_cadence || !force_gh_ids.is_empty();
-                let check_ci = ci_cadence || !force_gh_ids.is_empty();
 
-                // Phase 2: Fetch PR info in parallel (slower, network calls) — only on PR poll cycles.
-                // Runs after all statuses are updated so git status isn't delayed by PR checks.
-                let mut new_pr_infos: HashMap<String, Option<okena_git::PrInfo>> = if check_prs {
-                    let pr_futures: Vec<_> = projects
-                        .iter()
-                        .filter(|(id, _)| {
-                            gh_ids.contains(id) && (pr_cadence || force_gh_ids.contains(id))
-                        })
-                        .map(|(id, path)| {
-                            let id = id.clone();
-                            let path = path.clone();
-                            async move {
-                                let pr_info = smol::unblock(move || {
-                                    with_lane(Lane::Poll, || {
-                                        // Skip `gh` entirely for non-GitHub repos.
-                                        if !git::repository::has_github_remote(Path::new(&path)) {
-                                            return None;
-                                        }
-                                        git::repository::get_pr_info(Path::new(&path))
-                                    })
-                                })
-                                .await;
-                                (id, pr_info)
-                            }
-                        })
-                        .collect();
-                    futures::future::join_all(pr_futures)
-                        .await
-                        .into_iter()
-                        .collect()
-                } else {
-                    HashMap::new()
-                };
-
-                // Phase 3: Fetch CI check status — adaptive interval based on pending state.
-                // Runs for every project; uses `gh pr checks` when a PR is known,
-                // falls back to branch-level `check-runs`/`status` otherwise.
-                let mut new_ci_checks: HashMap<String, Option<okena_git::CiCheckSummary>> =
-                    if check_ci {
-                        let pr_infos_snapshot: HashMap<String, Option<okena_git::PrInfo>> =
-                            if check_prs {
-                                // Use freshly fetched PR info
-                                new_pr_infos.clone()
-                            } else {
-                                // Use cached PR info
-                                this.update(cx, |this, _| this.pr_infos.clone())
-                                    .unwrap_or_default()
-                            };
-                        let ci_futures: Vec<_> = projects
+                // Phase 2: `gh` PR/CI, per project and only where due. Each
+                // project's PR and CI calls are paired so the CI lookup can use
+                // the PR number this pass just fetched.
+                let polls: Vec<GithubProjectPoll> = this
+                    .update(cx, |this, cx| {
+                        // Retain across *all* projects, not just the polled set:
+                        // a project scrolling out of view should keep its cached
+                        // commit so coming back doesn't cost a fetch.
+                        let known: HashSet<String> = this
+                            .workspace
+                            .read(cx)
+                            .projects()
                             .iter()
-                            .filter(|(id, _)| {
-                                gh_ids.contains(id) && (ci_cadence || force_gh_ids.contains(id))
-                            })
-                            .map(|(id, path)| {
-                                let id = id.clone();
-                                let path = path.clone();
-                                let pr_number = pr_infos_snapshot
-                                    .get(&id)
-                                    .and_then(|p| p.as_ref())
-                                    .map(|p| p.number);
-                                async move {
-                                    let checks = smol::unblock(move || {
-                                        with_lane(Lane::Poll, || {
-                                            // Skip `gh` entirely for non-GitHub repos.
-                                            if !git::repository::has_github_remote(Path::new(&path))
-                                            {
-                                                return None;
-                                            }
-                                            git::repository::get_ci_checks(
-                                                Path::new(&path),
-                                                pr_number,
-                                            )
-                                        })
-                                    })
-                                    .await;
-                                    (id, checks)
-                                }
-                            })
+                            .map(|p| p.id.clone())
                             .collect();
-                        futures::future::join_all(ci_futures)
-                            .await
-                            .into_iter()
+                        this.schedule.retain(&known);
+                        if this.schedule.is_rate_limited(cycle) {
+                            return Vec::new();
+                        }
+                        projects
+                            .iter()
+                            .filter(|(id, _)| gh_ids.contains(id) || this.schedule.is_urgent(id))
+                            .filter_map(|(id, path)| {
+                                let want_pr = this.schedule.pr_due(id, cycle, true);
+                                let want_ci = this.schedule.ci_due(id, cycle, true);
+                                (want_pr || want_ci).then(|| GithubProjectPoll {
+                                    id: id.clone(),
+                                    path: path.clone(),
+                                    want_pr,
+                                    want_ci,
+                                    ci_skip_sha: this.schedule.ci_skip_sha(id, cycle),
+                                    cached_pr_number: this
+                                        .pr_infos
+                                        .get(id)
+                                        .and_then(|pr| pr.as_ref())
+                                        .map(|pr| pr.number),
+                                })
+                            })
                             .collect()
-                    } else {
-                        HashMap::new()
-                    };
+                    })
+                    .unwrap_or_default();
+
+                let fetched: Vec<(String, Option<PrFetch>, Option<CiFetch>)> =
+                    futures::future::join_all(polls.into_iter().map(|poll| async move {
+                        let id = poll.id.clone();
+                        let (pr, ci) = smol::unblock(move || fetch_project_github(&poll)).await;
+                        (id, pr, ci)
+                    }))
+                    .await;
 
                 // Merge freshly-fetched PR/CI into the caches and re-commit the
                 // statuses with that richer data. `commit_statuses` no-ops when
@@ -713,24 +701,15 @@ impl GitStatusWatcher {
                                 == poll_generations.get(id).copied().unwrap_or_default()
                         };
                         new_statuses.retain(|id, _| is_current(id));
-                        new_pr_infos.retain(|id, _| is_current(id));
-                        new_ci_checks.retain(|id, _| is_current(id));
+                        let fresh: Vec<_> = fetched
+                            .into_iter()
+                            .filter(|(id, _, _)| is_current(id))
+                            .collect();
                         // Merge into caches rather than replace: when fullscreen narrows
                         // the visible set to a single project, the un-polled projects
                         // should keep their last-known values until they're polled again.
-                        if check_prs {
-                            for (id, pr) in new_pr_infos {
-                                this.pr_infos.insert(id, pr);
-                            }
-                        }
-
-                        if check_ci {
-                            for (id, checks) in new_ci_checks {
-                                this.ci_checks.insert(id, checks);
-                            }
-                            this.any_pending_ci = this.ci_checks.values().any(|c| {
-                                c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false)
-                            });
+                        for (id, pr, ci) in fresh {
+                            this.apply_github_fetch(&id, pr, ci);
                         }
 
                         // Inject cached PR info + CI checks into statuses
@@ -756,6 +735,52 @@ impl GitStatusWatcher {
         })
         .detach();
     }
+}
+
+/// One project's slot in a `gh` pass.
+struct GithubProjectPoll {
+    id: String,
+    path: String,
+    want_pr: bool,
+    want_ci: bool,
+    /// Upstream commit whose CI result is already cached; while the branch
+    /// still points at it the CI lookup makes no request at all.
+    ci_skip_sha: Option<String>,
+    /// PR number from a previous pass, used when this pass isn't refetching it.
+    cached_pr_number: Option<u32>,
+}
+
+/// Run one project's PR and CI lookups on a bus worker, paired so the CI call
+/// can use the PR number this pass just fetched.
+fn fetch_project_github(poll: &GithubProjectPoll) -> (Option<PrFetch>, Option<CiFetch>) {
+    with_lane(Lane::Poll, || {
+        let path = Path::new(&poll.path);
+        // Skip `gh` entirely for non-GitHub repos.
+        if !git::repository::has_github_remote(path) {
+            return (
+                poll.want_pr.then_some(PrFetch::Fetched(None)),
+                poll.want_ci.then_some(CiFetch::Fetched {
+                    sha: None,
+                    summary: None,
+                }),
+            );
+        }
+
+        let pr = poll.want_pr.then(|| git::repository::fetch_pr_info(path));
+        let pr_number = match &pr {
+            Some(PrFetch::Fetched(info)) => info.as_ref().map(|info| info.number),
+            _ => poll.cached_pr_number,
+        };
+        // A rate-limited PR call means the CI call would only be refused too.
+        let ci = if matches!(pr, Some(PrFetch::RateLimited)) {
+            None
+        } else {
+            poll.want_ci.then(|| {
+                git::repository::fetch_ci_checks(path, pr_number, poll.ci_skip_sha.as_deref())
+            })
+        };
+        (pr, ci)
+    })
 }
 
 fn update_head_snapshots(
