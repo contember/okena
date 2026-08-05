@@ -2324,11 +2324,9 @@ pub(crate) fn spawn_background_worktree_removal(
                 if let Some((branch, error)) = surviving_branch
                     && let Some(hm) = &hook_monitor
                 {
-                    hm.push_toast(
-                        okena_workspace::actions::worktree::surviving_branch_toast(
-                            &branch, &error,
-                        ),
-                    );
+                    hm.push_toast(okena_workspace::actions::worktree::surviving_branch_toast(
+                        &branch, &error,
+                    ));
                 }
                 match removal {
                     Ok(()) => {

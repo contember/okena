@@ -2376,7 +2376,8 @@ impl Workspace {
         // this window's hidden set or outside its folder filter — in which case
         // focusing by path alone lands on a pane that renders nowhere.
         for target in outcome.focus_targets {
-            let terminal_id = self.project(&target.project_id)
+            let terminal_id = self
+                .project(&target.project_id)
                 .and_then(|project| project.layout.as_ref())
                 .and_then(|layout| layout.get_at_path(&target.layout_path))
                 .and_then(|node| match node {
@@ -2384,7 +2385,13 @@ impl Workspace {
                     _ => None,
                 });
             if let Some(terminal_id) = terminal_id {
-                self.focus_terminal_by_id(focus_manager, window_id, &target.project_id, &terminal_id, cx);
+                self.focus_terminal_by_id(
+                    focus_manager,
+                    window_id,
+                    &target.project_id,
+                    &terminal_id,
+                    cx,
+                );
             } else {
                 self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
             }

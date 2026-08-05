@@ -263,7 +263,10 @@ mod tests {
         assert_eq!(display_snippet("running tests 3/5"), "running tests 3/5");
         // Newlines and control characters must not reach a tooltip.
         assert_eq!(display_snippet("a\n\nb\tc\r\nd"), "a b c d");
-        assert_eq!(display_snippet("  leading and trailing  "), "leading and trailing");
+        assert_eq!(
+            display_snippet("  leading and trailing  "),
+            "leading and trailing"
+        );
         // A 4 KiB single line is within `MAX_CUSTOM_LEN` but must still clip.
         let long = "x".repeat(4096);
         let clipped = display_snippet(&long);

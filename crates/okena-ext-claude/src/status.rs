@@ -393,7 +393,12 @@ impl Render for ClaudeStatus {
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .children(service_status_items(
-                        "Claude Code", label, color, healthy, &t, cx,
+                        "Claude Code",
+                        label,
+                        color,
+                        healthy,
+                        &t,
+                        cx,
                     ))
                     .child(
                         canvas(

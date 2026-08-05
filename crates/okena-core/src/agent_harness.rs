@@ -130,7 +130,10 @@ fn is_shell_neutral(arg: &str) -> bool {
 /// [shell-neutral](is_shell_neutral). Refusing beats quoting: the caller splices
 /// this into a shell command line, and a resume that silently doesn't happen is
 /// strictly better than one that mis-parses.
-pub fn resume_command_line(session: &crate::agent_session::AgentSession, cwd: &Path) -> Option<String> {
+pub fn resume_command_line(
+    session: &crate::agent_session::AgentSession,
+    cwd: &Path,
+) -> Option<String> {
     if !session.is_valid() {
         log::warn!(
             "agent-resume: refusing malformed session for agent {:?}",

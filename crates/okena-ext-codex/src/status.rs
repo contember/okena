@@ -395,9 +395,7 @@ impl Render for CodexStatus {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .children(service_status_items(
-                        "Codex", label, color, healthy, &t, cx,
-                    ))
+                    .children(service_status_items("Codex", label, color, healthy, &t, cx))
                     .child(
                         canvas(
                             move |bounds, _window, app| {

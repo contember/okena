@@ -1492,11 +1492,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod merge_pipeline_tests {
-    use super::{delete_closed_worktree_branch, surviving_branch_toast};
     use super::{
         CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget, close_dirty_state,
         close_worktree_merge_git,
     };
+    use super::{delete_closed_worktree_branch, surviving_branch_toast};
     use crate::hook_monitor::{HookMonitor, HookStatus};
     use crate::settings::{HooksConfig, ProjectHooks, WorktreeHooks};
     use std::path::Path;
@@ -1753,11 +1753,28 @@ mod merge_pipeline_tests {
         std::fs::create_dir(&repo).unwrap();
         git(&["-C", path_str(&repo), "init", "-q"]);
         git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
-        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
-        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&[
+            "-C",
+            path_str(&repo),
+            "config",
+            "user.email",
+            "test@example.com",
+        ]);
+        git(&[
+            "-C",
+            path_str(&repo),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "root",
+        ]);
         git(&["-C", path_str(&repo), "branch", "feature"]);
 
-        assert_eq!(delete_closed_worktree_branch(path_str(&repo), "feature"), Ok(()));
+        assert_eq!(
+            delete_closed_worktree_branch(path_str(&repo), "feature"),
+            Ok(())
+        );
         assert!(!local_branches(&repo).contains("feature"));
     }
 
@@ -1771,10 +1788,32 @@ mod merge_pipeline_tests {
         std::fs::create_dir(&repo).unwrap();
         git(&["-C", path_str(&repo), "init", "-q"]);
         git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
-        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
-        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&[
+            "-C",
+            path_str(&repo),
+            "config",
+            "user.email",
+            "test@example.com",
+        ]);
+        git(&[
+            "-C",
+            path_str(&repo),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "root",
+        ]);
         git(&["-C", path_str(&repo), "branch", "feature"]);
-        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "unmerged"]);
+        git(&[
+            "-C",
+            path_str(&repo),
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "unmerged",
+        ]);
         git(&["-C", path_str(&repo), "branch", "-f", "feature", "HEAD"]);
         git(&["-C", path_str(&repo), "reset", "-q", "--hard", "HEAD~1"]);
 

@@ -302,11 +302,14 @@ impl Okena {
         let pid = project_id.to_string();
         focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
-                let terminal_id = ws.project(&pid)
+                let terminal_id = ws
+                    .project(&pid)
                     .and_then(|project| project.layout.as_ref())
                     .and_then(|layout| layout.get_at_path(&path))
                     .and_then(|node| match node {
-                        crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                        crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => {
+                            terminal_id.clone()
+                        }
                         _ => None,
                     });
                 if let Some(terminal_id) = terminal_id {

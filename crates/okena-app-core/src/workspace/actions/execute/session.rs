@@ -162,10 +162,7 @@ fn prepare_layout_terminals(
         Vec<usize>,
         okena_core::agent_session::AgentSession,
     >,
-    agent_sessions: &mut std::collections::HashMap<
-        String,
-        okena_core::agent_session::AgentSession,
-    >,
+    agent_sessions: &mut std::collections::HashMap<String, okena_core::agent_session::AgentSession>,
     path: &mut Vec<usize>,
     launches: &mut Vec<PreparedTerminalLaunch>,
 ) {
