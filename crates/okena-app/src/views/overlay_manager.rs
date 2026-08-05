@@ -21,7 +21,7 @@ use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderConte
 use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
 use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
-use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent, PairingEndpoint};
+use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
 use crate::views::overlays::remote_connect_dialog::{
     RemoteConnectDialog, RemoteConnectDialogEvent,
@@ -48,6 +48,7 @@ use crate::workspace::requests::{
     ProjectOverlayKind, SidebarRequest,
 };
 use crate::workspace::state::{WindowId, Workspace};
+use okena_remote_server::local::DaemonEndpoint;
 use okena_transport::client::RemoteConnectionConfig;
 use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
 use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
@@ -588,12 +589,16 @@ impl OverlayManager {
     }
 
     /// Toggle settings panel overlay.
-    pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_settings_panel(
+        &mut self,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_modal::<SettingsPanel>() {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
+            let entity = cx.new(|cx| SettingsPanel::new(workspace, daemon_endpoint, cx));
             self.subscribe_settings_panel(&entity, cx);
             self.open_modal(entity, cx);
         }
@@ -630,7 +635,7 @@ impl OverlayManager {
     /// Toggle pairing dialog overlay.
     pub fn toggle_pairing_dialog(
         &mut self,
-        endpoint: Option<PairingEndpoint>,
+        endpoint: Option<DaemonEndpoint>,
         cx: &mut Context<Self>,
     ) {
         if self.is_modal::<PairingDialog>() {
@@ -648,9 +653,15 @@ impl OverlayManager {
     }
 
     /// Show settings panel opened to Hooks category for a specific project.
-    pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+    pub fn show_settings_for_project(
+        &mut self,
+        project_id: String,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
-        let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
+        let entity =
+            cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, daemon_endpoint, cx));
         self.subscribe_settings_panel(&entity, cx);
         self.open_modal(entity, cx);
     }

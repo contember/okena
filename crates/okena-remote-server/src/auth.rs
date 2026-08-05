@@ -426,7 +426,7 @@ impl AuthStore {
 }
 
 /// Information about a stored token, safe to expose to clients.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TokenInfo {
     pub id: String,
     pub created_at: u64,

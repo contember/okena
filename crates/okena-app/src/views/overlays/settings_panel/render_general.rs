@@ -1,4 +1,3 @@
-use crate::remote::GlobalRemoteInfo;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
@@ -74,10 +73,11 @@ impl SettingsPanel {
                 ))
                 .when(s.remote_tls_enabled, |d| {
                     // Show the server cert fingerprint so the user can verify it
-                    // against the value the client pinned during pairing.
-                    let fingerprint = cx
-                        .try_global::<GlobalRemoteInfo>()
-                        .and_then(|info| info.0.cert_fingerprint());
+                    // against the value the client pinned during pairing. Read
+                    // from disk: the server runs in the daemon process.
+                    let fingerprint = crate::remote::tls::read_fingerprint(
+                        &crate::workspace::persistence::config_dir(),
+                    );
                     d.child(
                         div()
                             .px(px(12.0))

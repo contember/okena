@@ -35,6 +35,27 @@ impl WindowView {
         ))
     }
 
+    /// Resolve the local daemon's HTTP endpoint + bearer token, for the views
+    /// that talk to its protected REST API directly (pairing, paired devices).
+    /// `None` while the local daemon connection has not been established.
+    pub(super) fn local_daemon_endpoint(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<okena_remote_server::local::DaemonEndpoint> {
+        let manager = self.remote_manager.as_ref()?.read(cx);
+        let config = manager
+            .connections()
+            .into_iter()
+            .find(|(config, _, _)| config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
+            .map(|(config, _, _)| config)?;
+        Some(okena_remote_server::local::DaemonEndpoint {
+            host: config.host.clone(),
+            port: config.port,
+            token: config.effective_auth_token()?,
+            local_endpoint: config.local_endpoint.clone(),
+        })
+    }
+
     /// Build an ActionDispatcher for the given project. Returns `None` if the
     /// project is unknown or its daemon connection is unavailable.
     pub(super) fn dispatcher_for_project(
@@ -470,8 +491,9 @@ impl WindowView {
                 }
             }
             OverlayManagerEvent::ConfigureHooks { project_id } => {
+                let endpoint = self.local_daemon_endpoint(cx);
                 self.overlay_manager.update(cx, |om, cx| {
-                    om.show_settings_for_project(project_id.clone(), cx);
+                    om.show_settings_for_project(project_id.clone(), endpoint, cx);
                 });
             }
             OverlayManagerEvent::ReloadServices { project_id } => {

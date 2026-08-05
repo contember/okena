@@ -14,7 +14,6 @@ use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{
     DragState, compute_resize, render_project_divider, render_sidebar_divider,
 };
-use crate::views::overlays::pairing_dialog::PairingEndpoint;
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use gpui::prelude::*;
 use gpui::*;
@@ -977,8 +976,9 @@ impl Render for WindowView {
             // Handle show settings panel action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |_this, _: &ShowSettings, _window, cx| {
-                    overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(cx));
+                move |this, _: &ShowSettings, _window, cx| {
+                    let endpoint = this.local_daemon_endpoint(cx);
+                    overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(endpoint, cx));
                 }
             }))
             // Handle show hook log action
@@ -1022,23 +1022,7 @@ impl Render for WindowView {
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
                 move |this, _: &ShowPairingDialog, _window, cx| {
-                    let endpoint = this.remote_manager.as_ref().and_then(|rm| {
-                        let manager = rm.read(cx);
-                        manager
-                            .connections()
-                            .into_iter()
-                            .find(|(config, _, _)| {
-                                config.id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
-                            })
-                            .and_then(|(config, _, _)| {
-                                config.effective_auth_token().map(|token| PairingEndpoint {
-                                    host: config.host.clone(),
-                                    port: config.port,
-                                    token,
-                                    local_endpoint: config.local_endpoint.clone(),
-                                })
-                            })
-                    });
+                    let endpoint = this.local_daemon_endpoint(cx);
                     overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(endpoint, cx));
                 }
             }))

@@ -21,8 +21,8 @@ use categories::SettingsCategory;
 use components::opt_string;
 
 use crate::keybindings::Cancel;
-use crate::remote::GlobalRemoteInfo;
-use crate::remote::auth::{AuthStore, TokenInfo};
+use crate::remote::auth::TokenInfo;
+use crate::remote::local::DaemonEndpoint;
 use crate::settings::settings_entity;
 use crate::terminal::shell_config::{AvailableShell, available_shells};
 use crate::theme::theme;
@@ -33,7 +33,6 @@ use gpui::prelude::*;
 use gpui::*;
 use okena_extensions::ExtensionRegistry;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 // ============================================================================
 // Settings Panel
@@ -92,27 +91,45 @@ pub struct SettingsPanel {
     pub(super) file_opener_input: Entity<SimpleInputState>,
     // Remote listen address input
     pub(super) listen_address_input: Entity<SimpleInputState>,
-    // Paired devices
-    pub(super) paired_devices: Vec<TokenInfo>,
-    pub(super) auth_store: Option<Arc<AuthStore>>,
+    // Paired devices. The remote server lives in the daemon process, so the list
+    // is fetched over its REST API rather than read from an in-process store.
+    pub(super) daemon_endpoint: Option<DaemonEndpoint>,
+    pub(super) paired_devices: PairedDevices,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
 }
 
+/// Load state of the paired-device list. Fetching it is a round trip to the
+/// daemon, so the panel renders progress and failures instead of silently
+/// showing an empty list.
+pub(super) enum PairedDevices {
+    /// No local daemon connection to ask.
+    Unavailable,
+    Loading,
+    Loaded(Vec<TokenInfo>),
+    Failed(String),
+}
+
 impl SettingsPanel {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        Self::new_with_options(workspace, None, None, cx)
+    pub fn new(
+        workspace: Entity<Workspace>,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_options(workspace, None, None, daemon_endpoint, cx)
     }
 
     pub fn new_for_project(
         workspace: Entity<Workspace>,
         project_id: String,
+        daemon_endpoint: Option<DaemonEndpoint>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_options(
             workspace,
             Some(project_id),
             Some(SettingsCategory::Hooks),
+            daemon_endpoint,
             cx,
         )
     }
@@ -121,6 +138,7 @@ impl SettingsPanel {
         workspace: Entity<Workspace>,
         project_id: Option<String>,
         category: Option<SettingsCategory>,
+        daemon_endpoint: Option<DaemonEndpoint>,
         cx: &mut Context<Self>,
     ) -> Self {
         let s = settings_entity(cx).read(cx).settings.clone();
@@ -851,16 +869,7 @@ impl SettingsPanel {
         )
         .detach();
 
-        let (auth_store, paired_devices) = cx
-            .try_global::<GlobalRemoteInfo>()
-            .and_then(|info| info.0.auth_store())
-            .map(|store| {
-                let tokens = store.list_tokens();
-                (Some(store), tokens)
-            })
-            .unwrap_or((None, Vec::new()));
-
-        Self {
+        let mut panel = Self {
             workspace,
             focus_handle: cx.focus_handle(),
             active_category: category.unwrap_or(SettingsCategory::General),
@@ -903,10 +912,62 @@ impl SettingsPanel {
             worktree_dir_suffix_input,
             file_opener_input,
             listen_address_input,
-            paired_devices,
-            auth_store,
+            paired_devices: PairedDevices::Loading,
+            daemon_endpoint,
             extension_views: HashMap::new(),
-        }
+        };
+
+        panel.load_paired_devices(cx);
+        panel
+    }
+
+    /// Fetch the paired-device list from the local daemon (`GET /v1/tokens`).
+    /// Blocking HTTP, so it runs on the background executor.
+    pub(super) fn load_paired_devices(&mut self, cx: &mut Context<Self>) {
+        let Some(endpoint) = self.daemon_endpoint.clone() else {
+            self.paired_devices = PairedDevices::Unavailable;
+            return;
+        };
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { crate::remote::local::list_paired_devices(&endpoint) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.paired_devices = match outcome {
+                    Ok(devices) => PairedDevices::Loaded(devices),
+                    Err(e) => PairedDevices::Failed(e),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Revoke one paired device, then reload the list so the panel reflects
+    /// what the daemon actually holds.
+    pub(super) fn revoke_paired_device(&self, id: String, cx: &mut Context<Self>) {
+        let Some(endpoint) = self.daemon_endpoint.clone() else {
+            return;
+        };
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { crate::remote::local::revoke_paired_device(&endpoint, &id) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => this.load_paired_devices(cx),
+                    Err(e) => this.paired_devices = PairedDevices::Failed(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close(&self, cx: &mut Context<Self>) {

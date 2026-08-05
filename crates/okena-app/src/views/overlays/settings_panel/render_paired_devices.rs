@@ -3,8 +3,8 @@ use crate::ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 use gpui::*;
 use okena_ui::empty_state::empty_state;
 
-use super::SettingsPanel;
 use super::components::*;
+use super::{PairedDevices, SettingsPanel};
 
 impl SettingsPanel {
     pub(super) fn render_paired_devices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -12,16 +12,38 @@ impl SettingsPanel {
 
         let content = div();
 
-        if self.auth_store.is_none() {
-            return content
-                .child(section_header("Paired Devices", &t, cx))
-                .child(
-                    section_container(&t)
-                        .child(empty_state("Remote server is not running", &t, cx).py(px(16.0))),
-                );
-        }
+        let devices =
+            match &self.paired_devices {
+                PairedDevices::Unavailable => {
+                    return content
+                        .child(section_header("Paired Devices", &t, cx))
+                        .child(section_container(&t).child(
+                            empty_state("Local daemon is not connected", &t, cx).py(px(16.0)),
+                        ));
+                }
+                PairedDevices::Loading => {
+                    return content
+                        .child(section_header("Paired Devices", &t, cx))
+                        .child(
+                            section_container(&t)
+                                .child(empty_state("Loading devices...", &t, cx).py(px(16.0))),
+                        );
+                }
+                PairedDevices::Failed(error) => {
+                    return content
+                        .child(section_header("Paired Devices", &t, cx))
+                        .child(
+                            section_container(&t).child(
+                                empty_state(error.clone(), &t, cx)
+                                    .py(px(16.0))
+                                    .text_color(rgb(t.term_red)),
+                            ),
+                        );
+                }
+                PairedDevices::Loaded(devices) => devices,
+            };
 
-        if self.paired_devices.is_empty() {
+        if devices.is_empty() {
             return content
                 .child(section_header("Paired Devices", &t, cx))
                 .child(
@@ -35,9 +57,8 @@ impl SettingsPanel {
             .unwrap_or_default()
             .as_secs();
 
-        let device_count = self.paired_devices.len();
-        let items: Vec<_> = self
-            .paired_devices
+        let device_count = devices.len();
+        let items: Vec<_> = devices
             .iter()
             .enumerate()
             .map(|(i, info)| {
@@ -98,11 +119,7 @@ impl SettingsPanel {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
-                                    if let Some(ref store) = this.auth_store {
-                                        store.revoke_token(&id_str);
-                                        this.paired_devices = store.list_tokens();
-                                        cx.notify();
-                                    }
+                                    this.revoke_paired_device(id_str.clone(), cx);
                                 }),
                             ),
                     );

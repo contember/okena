@@ -6367,7 +6367,6 @@ dependencies = [
  "base64",
  "fs2",
  "futures",
- "gpui",
  "hmac",
  "hyper",
  "hyper-util",

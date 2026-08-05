@@ -4,20 +4,13 @@ use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use gpui::prelude::*;
 use gpui::*;
+use okena_remote_server::local::DaemonEndpoint;
 use okena_transport::client::tls::format_fingerprint;
 use std::time::Instant;
 
-#[derive(Clone)]
-pub struct PairingEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub token: String,
-    pub local_endpoint: Option<okena_transport::client::LocalEndpoint>,
-}
-
 pub struct PairingDialog {
     focus_handle: FocusHandle,
-    endpoint: Option<PairingEndpoint>,
+    endpoint: Option<DaemonEndpoint>,
     code: String,
     code_created_at: Instant,
     remaining_secs: u64,
@@ -32,7 +25,7 @@ pub enum PairingDialogEvent {
 impl EventEmitter<PairingDialogEvent> for PairingDialog {}
 
 impl PairingDialog {
-    pub fn new(endpoint: Option<PairingEndpoint>, cx: &mut Context<Self>) -> Self {
+    pub fn new(endpoint: Option<DaemonEndpoint>, cx: &mut Context<Self>) -> Self {
         // Start countdown timer
         cx.spawn(async move |this: WeakEntity<PairingDialog>, cx| {
             loop {
@@ -86,14 +79,7 @@ impl PairingDialog {
         cx.spawn(async move |this: WeakEntity<PairingDialog>, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move {
-                    okena_remote_server::local::request_pair_code(
-                        &endpoint.host,
-                        endpoint.port,
-                        &endpoint.token,
-                        endpoint.local_endpoint.as_ref(),
-                    )
-                })
+                .spawn(async move { okena_remote_server::local::request_pair_code(&endpoint) })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
@@ -126,12 +112,7 @@ impl PairingDialog {
         cx.spawn(async move |_this: WeakEntity<PairingDialog>, cx| {
             cx.background_executor()
                 .spawn(async move {
-                    okena_remote_server::local::invalidate_pair_code(
-                        &endpoint.host,
-                        endpoint.port,
-                        &endpoint.token,
-                        endpoint.local_endpoint.as_ref(),
-                    );
+                    okena_remote_server::local::invalidate_pair_code(&endpoint);
                 })
                 .await;
         })

@@ -12,7 +12,7 @@
 //! against a temp directory; thin wrappers bind them to
 //! [`okena_workspace::persistence::config_dir`].
 
-use crate::auth::{self, PersistedToken};
+use crate::auth::{self, PersistedToken, TokenInfo};
 use base64::Engine as _;
 pub use okena_core::process::is_process_alive;
 use okena_transport::client::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
@@ -922,27 +922,55 @@ struct PairCodeResponse {
     expires_in: u64,
 }
 
-pub fn request_pair_code(
-    host: &str,
-    port: u16,
-    token: &str,
-    local_endpoint: Option<&LocalEndpoint>,
-) -> Result<LocalPairCode, String> {
-    let (client, url) = blocking_client_and_url(host, port, "/v1/pair-code", local_endpoint);
+#[derive(Deserialize)]
+struct TokenListResponse {
+    tokens: Vec<TokenInfo>,
+}
+
+/// Everything a same-host caller needs to reach the local daemon's *protected*
+/// HTTP API: where to dial plus the bearer token to present.
+///
+/// The desktop is a thin client — the remote server lives in the daemon
+/// process — so device pairing and management are HTTP calls, not in-process
+/// [`crate::auth::AuthStore`] access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonEndpoint {
+    pub host: String,
+    pub port: u16,
+    /// Bearer token; empty for a trusted local transport that needs none.
+    pub token: String,
+    pub local_endpoint: Option<LocalEndpoint>,
+}
+
+impl DaemonEndpoint {
+    fn client_and_url(&self, path: &str) -> (reqwest::blocking::Client, String) {
+        blocking_client_and_url(&self.host, self.port, path, self.local_endpoint.as_ref())
+    }
+}
+
+/// Turn a non-2xx response into an error carrying the status and body.
+fn error_for_status(
+    resp: reqwest::blocking::Response,
+    what: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+    Err(format!("{what} returned {status}: {body}"))
+}
+
+pub fn request_pair_code(endpoint: &DaemonEndpoint) -> Result<LocalPairCode, String> {
+    let (client, url) = endpoint.client_and_url("/v1/pair-code");
     let resp = client
         .post(&url)
-        .bearer_auth(token)
+        .bearer_auth(&endpoint.token)
         .timeout(Duration::from_secs(5))
         .send()
         .map_err(|e| format!("Failed to request pairing code: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("Pairing code request returned {status}: {body}"));
-    }
-
-    let body = resp
+    let body = error_for_status(resp, "Pairing code request")?
         .json::<PairCodeResponse>()
         .map_err(|e| format!("Failed to parse pairing code response: {e}"))?;
     Ok(LocalPairCode {
@@ -951,18 +979,42 @@ pub fn request_pair_code(
     })
 }
 
-pub fn invalidate_pair_code(
-    host: &str,
-    port: u16,
-    token: &str,
-    local_endpoint: Option<&LocalEndpoint>,
-) {
-    let (client, url) = blocking_client_and_url(host, port, "/v1/pair-code", local_endpoint);
+pub fn invalidate_pair_code(endpoint: &DaemonEndpoint) {
+    let (client, url) = endpoint.client_and_url("/v1/pair-code");
     let _ = client
         .delete(&url)
-        .bearer_auth(token)
+        .bearer_auth(&endpoint.token)
         .timeout(Duration::from_secs(5))
         .send();
+}
+
+/// List the devices paired with the local daemon (`GET /v1/tokens`).
+pub fn list_paired_devices(endpoint: &DaemonEndpoint) -> Result<Vec<TokenInfo>, String> {
+    let (client, url) = endpoint.client_and_url("/v1/tokens");
+    let resp = client
+        .get(&url)
+        .bearer_auth(&endpoint.token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .map_err(|e| format!("Failed to list paired devices: {e}"))?;
+
+    let body = error_for_status(resp, "Paired device list")?
+        .json::<TokenListResponse>()
+        .map_err(|e| format!("Failed to parse paired device list: {e}"))?;
+    Ok(body.tokens)
+}
+
+/// Revoke one paired device by token id (`DELETE /v1/tokens/{id}`).
+pub fn revoke_paired_device(endpoint: &DaemonEndpoint, id: &str) -> Result<(), String> {
+    let (client, url) = endpoint.client_and_url(&format!("/v1/tokens/{id}"));
+    let resp = client
+        .delete(&url)
+        .bearer_auth(&endpoint.token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .map_err(|e| format!("Failed to revoke device: {e}"))?;
+
+    error_for_status(resp, "Device revocation").map(|_| ())
 }
 
 fn blocking_client_and_url(
@@ -1121,6 +1173,32 @@ mod tests {
         port
     }
 
+    /// Stub server that answers every request with a fixed status line + JSON
+    /// body, for the device-management helpers (mirrors `spawn_shutdown_server`).
+    fn spawn_json_server(status_line: &'static str, body: &'static str) -> u16 {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((LOCAL_HOST, 0)).expect("bind json server");
+        let port = listener.local_addr().expect("json server addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
     fn tcp_daemon(port: u16) -> LocalDaemon {
         LocalDaemon {
             port,
@@ -1130,6 +1208,62 @@ mod tests {
             ui_owned: true,
             local_endpoint: None,
         }
+    }
+
+    fn tcp_endpoint(port: u16) -> DaemonEndpoint {
+        DaemonEndpoint {
+            host: LOCAL_HOST.to_string(),
+            port,
+            token: "test-token".to_string(),
+            local_endpoint: None,
+        }
+    }
+
+    /// Pins the `/v1/tokens` envelope (`{"tokens": [...]}`) the daemon's
+    /// `routes::tokens::list_tokens` serialises. A drift here silently emptied
+    /// the settings panel's device list.
+    #[test]
+    fn list_paired_devices_parses_the_daemon_envelope() {
+        let port = spawn_json_server(
+            "200 OK",
+            r#"{"tokens":[{"id":"abc","created_at":1,"last_used_at":2,"expires_at":3,"name":"Phone"},
+                          {"id":"def","created_at":4,"last_used_at":5,"expires_at":6,"name":null}]}"#,
+        );
+
+        let devices = list_paired_devices(&tcp_endpoint(port)).expect("list should succeed");
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "abc");
+        assert_eq!(devices[0].name.as_deref(), Some("Phone"));
+        assert_eq!(devices[0].expires_at, 3);
+        assert_eq!(devices[1].name, None, "an unnamed device is still listed");
+    }
+
+    #[test]
+    fn list_paired_devices_surfaces_a_rejected_request() {
+        let port = spawn_json_server("401 Unauthorized", r#"{"error":"unauthorized"}"#);
+
+        let err =
+            list_paired_devices(&tcp_endpoint(port)).expect_err("401 must not parse as a list");
+
+        assert!(err.contains("401"), "error should carry the status: {err}");
+    }
+
+    #[test]
+    fn revoke_paired_device_surfaces_an_unknown_id() {
+        let port = spawn_json_server("404 Not Found", r#"{"error":"token not found"}"#);
+
+        let err = revoke_paired_device(&tcp_endpoint(port), "missing")
+            .expect_err("404 must be reported, not swallowed");
+
+        assert!(err.contains("404"), "error should carry the status: {err}");
+    }
+
+    #[test]
+    fn revoke_paired_device_accepts_a_successful_delete() {
+        let port = spawn_json_server("200 OK", r#"{"revoked":true}"#);
+
+        assert!(revoke_paired_device(&tcp_endpoint(port), "abc").is_ok());
     }
 
     fn remote_settings(
