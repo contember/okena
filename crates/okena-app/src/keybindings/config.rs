@@ -320,6 +320,14 @@ impl KeybindingConfig {
         );
 
         bindings.insert(
+            "ToggleProjectVisibility".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-h", None),
+                KeybindingEntry::new("ctrl-shift-h", None),
+            ],
+        );
+
+        bindings.insert(
             "ShowBranchSwitcher".to_string(),
             vec![
                 KeybindingEntry::new("cmd-alt-b", None),

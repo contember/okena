@@ -50,6 +50,7 @@ actions!(
         ShowLogConsole,
         EqualizeLayout,
         ToggleProjectLayout,
+        ToggleProjectVisibility,
         ShowBranchSwitcher,
         ShowProfileManager,
         NewWindow,
@@ -434,6 +435,9 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
         "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
         "ToggleProjectLayout" => Some(KeyBinding::new(keystroke, ToggleProjectLayout, context)),
+        "ToggleProjectVisibility" => {
+            Some(KeyBinding::new(keystroke, ToggleProjectVisibility, context))
+        }
         "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
         "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
         "ShowLogConsole" => Some(KeyBinding::new(keystroke, ShowLogConsole, context)),
