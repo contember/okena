@@ -11,17 +11,18 @@
 # Designed to be wired up as a Claude Code hook (see docs/agent-status.md), but
 # it's agent-agnostic — anything that can run a command can call it.
 #
-# Output device: prefer `$OKENA_TTY` (Okena's own slave pty for this pane,
-# exported at spawn), fall back to the controlling terminal. See the selection
-# block below for why that order. This drains stdin so a hook feeding event JSON
-# on the pipe never blocks, and is a silent no-op when there's no device to
-# write to — safe to call from anywhere.
+# Output device: prefer the pane's *current* slave pty named by
+# `$OKENA_TTY_FILE`, then the spawn-time `$OKENA_TTY`, then the controlling
+# terminal. See the selection block below for why that order. This drains stdin
+# so a hook feeding event JSON on the pipe never blocks, and is a silent no-op
+# when there's no device to write to — safe to call from anywhere.
 #
 # Debugging: set OKENA_AGENT_STATUS_LOG=/path/to/log to append one line per
-# invocation recording the state, the target device, and whether the write
-# actually succeeded. This makes the whole path observable — pair it with
-# Okena's own `okena_terminal::terminal::osc_sidecar` debug logs (the receiving
-# end) to see where a status update is lost. Unset → zero overhead, no file.
+# invocation recording the state, the target device and where it came from, and
+# whether the write actually succeeded. This makes the whole path observable —
+# pair it with Okena's own `okena_terminal::terminal::osc_sidecar` debug logs
+# (the receiving end) to see where a status update is lost. Unset → zero
+# overhead, no file.
 
 state="${1:-}"
 message="${2:-}"
@@ -33,29 +34,57 @@ agent="${OKENA_AGENT:-}"
 # that reaches the wrong pane. Empty outside Okena — the param is then omitted.
 terminal_id="${OKENA_TERMINAL_ID:-}"
 
-# Pick the device to write to, preferring Okena's own slave pty.
+# Pick the device to write to, preferring Okena's own slave pty for this pane.
 #
-# The intuitive order is the other way round — `/dev/tty` always resolves to the
-# pane's *current* pty, so it survives a reattach, whereas `$OKENA_TTY` is
-# captured once at spawn and can go stale. But under a session backend
-# `/dev/tty` names the WRONG pty: with `session_backend = tmux` the pane process
-# is tmux, so a hook's controlling terminal is tmux's pty, and tmux forwards only
-# a fixed allowlist of OSC numbers — 9001 is not on it, and the sequence is
-# dropped before it ever reaches Okena's reader. Screen behaves the same way.
-# `$OKENA_TTY` names Okena's own slave and bypasses the nested pty entirely.
+# 1. `$OKENA_TTY_FILE` — a stable path whose CONTENTS Okena rewrites on every
+#    spawn and reattach. The only source that stays correct for a pane that
+#    outlives Okena: with a session backend (dtach/tmux/screen) the shell — and
+#    the agent under it — survives a restart, so its environment still holds the
+#    pty of the *previous* run, which Linux has since handed to another pane.
+# 2. `$OKENA_TTY` — the same device, captured once at spawn. Correct until the
+#    pane outlives the Okena that launched it; also the only one an Okena older
+#    than the pointer file exports.
+# 3. `/dev/tty` — last resort. It always resolves to the pane's current pty, but
+#    under a session backend that is the NESTED pty: with `session_backend =
+#    tmux` the pane process is tmux, so a hook's controlling terminal is tmux's
+#    own pty, and tmux forwards only a fixed allowlist of OSC numbers — 9001 is
+#    not on it, so the sequence dies before reaching Okena's reader. Screen
+#    behaves the same way. And a harness that runs its hooks in a new session
+#    (Claude Code does) has no controlling terminal at all.
 #
-# The stale-path risk that motivated preferring /dev/tty is already covered by
-# the `tid=` param below: Okena drops a status that lands in a recycled pane.
+# Writing to a device 1 or 2 named means writing to Okena's own slave, which
+# bypasses any nested pty. When both are stale the `tid=` param below contains
+# the damage: Okena drops a status that lands in a recycled pane rather than
+# driving another agent's indicator.
 #
-# Both probes MUST stay in a subshell. POSIX makes a redirection error on a
+# Every probe MUST stay in a subshell. POSIX makes a redirection error on a
 # special built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts this
 # script under dash in exactly the case the fallback exists for — and since this
 # runs as a PreToolUse hook, a non-zero exit blocks the tool call.
-if [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
+tty_dev=""
+tty_src="none"
+
+if [ -n "${OKENA_TTY_FILE:-}" ] && [ -r "$OKENA_TTY_FILE" ]; then
+    live_tty=$(head -n1 "$OKENA_TTY_FILE" 2>/dev/null | tr -d '\r\n')
+    if [ -n "$live_tty" ] && (: >"$live_tty") 2>/dev/null; then
+        tty_dev="$live_tty"
+        tty_src="file"
+    fi
+fi
+
+if [ -z "$tty_dev" ] && [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
     tty_dev="$OKENA_TTY"
-elif (: >/dev/tty) 2>/dev/null; then
+    tty_src="env"
+fi
+
+if [ -z "$tty_dev" ] && (: >/dev/tty) 2>/dev/null; then
     tty_dev="/dev/tty"
-else
+    tty_src="ctty"
+fi
+
+# Nothing writable: keep a name so the write below fails as `write=failed` in the
+# log rather than against an empty path.
+if [ -z "$tty_dev" ]; then
     tty_dev="${OKENA_TTY:-/dev/tty}"
 fi
 
@@ -64,8 +93,8 @@ fi
 log() {
     [ -n "${OKENA_AGENT_STATUS_LOG:-}" ] || return 0
     ts=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || echo '????')
-    printf '%s pid=%s state=%s tty=%s %s\n' \
-        "$ts" "$$" "${state:-<none>}" "$tty_dev" "$1" \
+    printf '%s pid=%s state=%s tty=%s src=%s %s\n' \
+        "$ts" "$$" "${state:-<none>}" "$tty_dev" "$tty_src" "$1" \
         >>"$OKENA_AGENT_STATUS_LOG" 2>/dev/null || true
 }
 
@@ -166,8 +195,8 @@ esac
 # params on ';').
 params="st=$state"
 # Address the status at our own pane, so Okena can drop it if it lands
-# elsewhere (a recorded $OKENA_TTY path recycled by another pane after a
-# reattach). Omitted outside Okena, where the receiver accepts anything.
+# elsewhere (a stale device path since recycled by another pane). Omitted
+# outside Okena, where the receiver accepts anything.
 if [ -n "$terminal_id" ]; then
     params="$params;tid=$terminal_id"
 fi

@@ -1338,6 +1338,14 @@ fn active_profile_id() -> Option<String> {
         .or_else(|| std::env::var("OKENA_PROFILE").ok())
 }
 
+/// Profile-scoped runtime directory for Okena's per-pane files (dtach sockets,
+/// tty pointers). One directory per profile so two profiles never see each
+/// other's panes.
+#[cfg(unix)]
+pub(crate) fn okena_runtime_dir() -> std::path::PathBuf {
+    get_dtach_socket_dir()
+}
+
 fn get_dtach_socket_dir() -> std::path::PathBuf {
     // Keep the default profile in the legacy root so existing sessions survive
     // the profile migration. Every named profile gets an isolated socket pool.

@@ -532,6 +532,16 @@ impl PtyManager {
             log::warn!("failed to spawn dtach cleanup thread: {e}");
         }
 
+        // Drop tty pointers whose device died with a previous run. Backend-
+        // independent: every pane publishes one.
+        #[cfg(unix)]
+        if let Err(e) = std::thread::Builder::new()
+            .name("tty-pointer-gc".into())
+            .spawn(crate::tty_pointer::sweep_dead)
+        {
+            log::warn!("failed to spawn tty pointer cleanup thread: {e}");
+        }
+
         let teardown_tracker = Arc::new(TeardownTracker::default());
 
         // A distinct fixed pool waits for stubborn children. Unlike the normal
@@ -872,8 +882,10 @@ impl PtyManager {
         // server's environment, which predates Okena entirely. Routing them
         // through `launch_environment` is what renders them as tmux `-e KEY=VAL`;
         // the loop below still applies them directly for the no-backend path.
-        // Okena owns both names, so drop any inherited value first.
-        launch_environment.retain(|(key, _)| key != "OKENA_TERMINAL_ID" && key != "OKENA_TTY");
+        // Okena owns these names, so drop any inherited value first.
+        launch_environment.retain(|(key, _)| {
+            key != "OKENA_TERMINAL_ID" && key != "OKENA_TTY" && key != "OKENA_TTY_FILE"
+        });
         // Let anything in the pane name the pane it is running in. The
         // agent-status OSC carries it back as `tid=`, which lets the receiving
         // terminal reject a status meant for a different pane — the failure
@@ -884,14 +896,29 @@ impl PtyManager {
             Some(terminal_id.to_string()),
         ));
         // Expose the pane's slave pty so agent hooks can emit in-band status
-        // updates through `$OKENA_TTY`. This is the device senders should
-        // PREFER: writing to the slave reaches Okena's own reader, whereas a
-        // hook's `/dev/tty` under tmux/screen is the nested pty, which forwards
-        // only a fixed allowlist of OSC numbers that 9001 is not on. The `tid=`
-        // param above covers the risk that motivated the other order — a
-        // recorded path recycled by another pane after a reattach.
+        // updates to it. That is the device senders must PREFER over
+        // `/dev/tty`: writing to the slave reaches Okena's own reader, whereas a
+        // hook's controlling terminal under tmux/screen is the nested pty, which
+        // forwards only a fixed allowlist of OSC numbers that 9001 is not on —
+        // and a harness that runs hooks in a new session has no controlling
+        // terminal at all.
+        //
+        // Two vars name it. `$OKENA_TTY` is the path itself, frozen in the
+        // pane's environment at first launch, so a pane that outlives Okena
+        // (any session backend) keeps naming the old pty forever.
+        // `$OKENA_TTY_FILE` points at a file holding the same path that is
+        // rewritten here on every spawn: stable enough to capture once, always
+        // current when read. Senders should prefer it; `tid=` above is what
+        // contains the residual, when even that is stale. See
+        // `crate::tty_pointer`.
         #[cfg(unix)]
         if let Some(path) = slave_pty_path(pair.master.as_ref()) {
+            if let Some(pointer) = crate::tty_pointer::publish(terminal_id, &path) {
+                launch_environment.push((
+                    "OKENA_TTY_FILE".to_string(),
+                    Some(pointer.to_string_lossy().into_owned()),
+                ));
+            }
             launch_environment.push(("OKENA_TTY".to_string(), Some(path)));
         }
 
@@ -1512,6 +1539,11 @@ impl PtyManager {
     ) {
         let session_backend = self.session_backend();
         let session_name = session_backend.session_name(terminal_id);
+
+        // The pane is going away for good — its pointer must not outlive it and
+        // name a pty number the next pane inherits.
+        #[cfg(unix)]
+        crate::tty_pointer::revoke(terminal_id);
 
         // Read WSL info before moving the handle
         #[cfg(windows)]
@@ -2782,6 +2814,44 @@ mod tests {
             !socket_path.exists(),
             "dtach session socket must be removed"
         );
+    }
+
+    /// A pane outlives the Okena that launched it, so its `$OKENA_TTY` goes
+    /// stale and an agent hook ends up writing status into whatever pane
+    /// inherited that pty number. The pointer file is what keeps the pane's
+    /// current device findable, so spawning must publish it and a session kill
+    /// must drop it — otherwise it names a number the next pane inherits.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_publishes_and_revokes_its_tty_pointer() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let plan = TerminalLaunchPlan {
+            route: ShellType::Default,
+            initial_command: Some(crate::backend::TerminalLaunchCommand {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 30".to_string()],
+            }),
+            environment: Vec::new(),
+        };
+        let terminal_id = manager
+            .create_terminal_with_plan(&cwd, &plan)
+            .expect("create PTY");
+
+        let pointer = crate::tty_pointer::path_for(&terminal_id).expect("pointer path");
+        let device = std::fs::read_to_string(&pointer).expect("pointer must be published");
+        let device = device.trim();
+        assert!(
+            std::path::Path::new(device).exists(),
+            "pointer must name the pane's live pty, got {device:?}"
+        );
+
+        manager.kill(&terminal_id);
+        assert!(
+            manager.flush_teardown_with_timeout(Duration::from_secs(5), &[]),
+            "teardown must complete"
+        );
+        assert!(!pointer.exists(), "pointer must not outlive the pane");
     }
 
     #[derive(Default)]

@@ -128,42 +128,65 @@ This is the same family of in-band signals Okena already understands
 
 ### Choosing the output device
 
-Prefer **`$OKENA_TTY`** — the pane's own slave pty, which Okena exports into
-every pane's environment — and fall back to the controlling terminal:
+Okena exports two variables naming the pane's own slave pty. Prefer the device
+named **inside `$OKENA_TTY_FILE`**, fall back to **`$OKENA_TTY`**, and only then
+to the controlling terminal:
 
 ```sh
-if [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
+if [ -n "${OKENA_TTY_FILE:-}" ] && [ -r "$OKENA_TTY_FILE" ]; then
+    live=$(head -n1 "$OKENA_TTY_FILE")
+    [ -n "$live" ] && (: >"$live") 2>/dev/null && dev="$live"
+fi
+if [ -z "${dev:-}" ] && [ -n "${OKENA_TTY:-}" ] && (: >"$OKENA_TTY") 2>/dev/null; then
     dev="$OKENA_TTY"
-elif (: >/dev/tty) 2>/dev/null; then
+elif [ -z "${dev:-}" ] && (: >/dev/tty) 2>/dev/null; then
     dev=/dev/tty
 fi
 ```
 
-The intuitive order is the other way round, since `/dev/tty` always names the
-pane's *current* pty. But under a session backend it names the **wrong** one:
-with `session_backend = tmux` the pane process is tmux, so a hook's controlling
-terminal is tmux's pty — and tmux forwards only a fixed allowlist of OSC numbers,
-which 9001 is not on. The sequence is dropped before it ever reaches Okena.
-Screen behaves the same way. Writing to `$OKENA_TTY` reaches Okena's own reader
-and bypasses the nested pty entirely. It also covers hooks that have no
-controlling terminal at all.
+Both point at the same device; they differ in **when they were written**.
 
-> Keep the probes in a subshell. POSIX makes a redirection error on a special
+- `$OKENA_TTY` holds the path itself, captured into the pane's environment when
+  the pane is first launched. A pane that outlives Okena — any session backend —
+  keeps the value forever, so after a restart it names a pty that is gone or,
+  because Linux recycles `/dev/pts/N` numbers, now belongs to a *different*
+  pane.
+- `$OKENA_TTY_FILE` holds a **path to a file** that Okena rewrites on every
+  spawn and reattach, keyed by the pane's terminal id (which does survive a
+  restart under a session backend). The path is stable, so capturing it once is
+  safe; the device it names is always current. This is what keeps a long-running
+  agent reporting across an Okena restart.
+
+`/dev/tty` is last because it is frequently the wrong device or no device at
+all. Under a session backend it names the **nested** pty: with `session_backend
+= tmux` the pane process is tmux, so a hook's controlling terminal is tmux's
+pty — and tmux forwards only a fixed allowlist of OSC numbers, which 9001 is not
+on, so the sequence dies before reaching Okena. Screen behaves the same way. And
+a harness that runs its hooks in a new session has no controlling terminal at
+all: **Claude Code does exactly that**, so for it `/dev/tty` never resolves.
+Writing to the pane's slave reaches Okena's own reader and bypasses any nested
+pty.
+
+> Keep every probe in a subshell. POSIX makes a redirection error on a special
 > built-in (`:`) exit the shell, so a bare `: >/dev/tty` aborts the script in
 > exactly the no-tty case the fallback is for.
 
-`$OKENA_TTY` is captured once, so after a reattach it may name a pty that now
-belongs to a *different* pane. That is what `tid=` defends against: stamp
-`$OKENA_TERMINAL_ID` on the sequence and a pane that isn't the addressee drops
-it instead of showing another agent's status.
+When both paths are stale — an agent still holding the environment of a pane
+Okena has since forgotten — a status can still land in the wrong pane. That is
+what `tid=` defends against: stamp `$OKENA_TERMINAL_ID` on the sequence and a
+pane that isn't the addressee drops it instead of showing another agent's
+status.
 
-> **`$OKENA_TTY` is a capability, not just a hint.** Unlike an inherited file
+> **These are capabilities, not just hints.** Unlike an inherited file
 > descriptor, a *path* can be reopened, and Linux recycles `/dev/pts/N` numbers.
 > A process that outlives its pane (a daemonized dev server, a forking
 > postinstall) keeps a way to write into whatever pane later inherits that
 > number — and writes to a slave arrive as terminal *output*, i.e. they are
 > parsed as escape sequences. It is same-user, so not a privilege boundary, but
-> `tid=` guards OSC 9001 only; nothing else on that channel is addressed.
+> `tid=` guards OSC 9001 only; nothing else on that channel is addressed. The
+> pointer file lives in Okena's owner-only runtime directory and is removed when
+> its pane is closed; a pointer left behind by a crash is swept at startup once
+> the device it names is gone.
 
 ## Session resume
 
@@ -279,18 +302,18 @@ and a tool argument called `session_id` must not be able to hijack the pane's
 identity.
 
 It bundles `okena-lifecycle/scripts/okena-agent-status.sh`, invoked via
-`${CLAUDE_PLUGIN_ROOT}`. The script writes to `$OKENA_TTY` (the pane's own slave
-pty), falling back to `/dev/tty` — see [Choosing the output
+`${CLAUDE_PLUGIN_ROOT}`. The script writes to the pane's own slave pty — the
+device named by `$OKENA_TTY_FILE`, falling back to `$OKENA_TTY` and then
+`/dev/tty` — see [Choosing the output
 device](#choosing-the-output-device) for why that order. It's a silent no-op
 when there's no device to write to.
 
-> **Caveat — persistent sessions.** `OKENA_TTY` is captured into the shell's
-> environment when the pane is **first launched**, not refreshed per-attach. If
-> you *reattach* to a pre-existing `dtach`/`tmux`/`screen` session, the
-> already-running shell keeps the original value while Okena has opened a new
-> pty, so `$OKENA_TTY` points at the old device and the indicator can go silent
-> until the session is restarted. (Known limitation — the env isn't yet
-> refreshed on reattach.)
+> **Caveat — sessions created before the pointer file.** A pane's environment
+> can only be set when the pane is **first launched**, so a `dtach`/`tmux`/
+> `screen` session started by an Okena that predates `$OKENA_TTY_FILE` has no
+> such variable — it still falls back to the frozen `$OKENA_TTY` and can go
+> silent after a restart. Recreating the pane (which starts a new backend
+> session) picks the pointer up; reattaching to the old one does not.
 
 ### Manual (without the plugin)
 
@@ -340,15 +363,18 @@ whole path observable from both ends:
 
 - **The hook end** — set `OKENA_AGENT_STATUS_LOG` to a writable file in the
   pane's environment. The script then appends one line per invocation recording
-  the state, the target device (`$OKENA_TTY`), and whether the write actually
-  succeeded:
+  the state, the target device, where that device came from, and whether the
+  write actually succeeded:
 
   ```
-  2026-06-23T11:30:01+0200 pid=12345 state=working tty=/dev/pts/7 msglen=0 write=ok
+  2026-06-23T11:30:01+0200 pid=12345 state=working tty=/dev/pts/7 src=file msglen=0 write=ok
   ```
 
-  A `write=failed` line means the OSC never reached Okena (wrong/missing
-  `OKENA_TTY`); `skip=bad-state` means the state argument wasn't one Okena
+  `src=` is the device's source: `file` (`$OKENA_TTY_FILE`, always current),
+  `env` (`$OKENA_TTY`, frozen at spawn — expect it to be stale in a pane that
+  outlived an Okena restart), `ctty` (`/dev/tty`), or `none` (nothing was
+  writable). A `write=failed` line means the OSC never reached Okena;
+  `skip=bad-state` means the state argument wasn't one Okena
   knows; `skip=no-agent` means a `session_id` was found but `OKENA_AGENT` is
   unset, so the session is being dropped; no line at all means the hook didn't
   fire — or, on native Windows, that the script can't run at all.
