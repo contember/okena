@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use crate::api::{
     connection::ConnectionStatus as NativeConnectionStatus,
     state::{
-        FolderInfo as NativeFolderInfo, FullscreenInfo as NativeFullscreenInfo,
-        ProjectInfo as NativeProjectInfo, ServiceInfo as NativeServiceInfo,
+        AgentStatusInfo as NativeAgentStatusInfo, FolderInfo as NativeFolderInfo,
+        FullscreenInfo as NativeFullscreenInfo, ProjectInfo as NativeProjectInfo,
+        ServiceInfo as NativeServiceInfo,
     },
     terminal::{
         CellData as NativeCellData, CursorShape as NativeCursorShape,
@@ -171,6 +172,24 @@ impl From<NativeServiceInfo> for ServiceInfo {
     }
 }
 
+/// AI agent status reported by a terminal (`OSC 9001`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AgentStatusInfo {
+    /// `working` | `blocked` | `done` | `idle`.
+    pub lifecycle: String,
+    /// Free-form text the agent set, e.g. "running tests 3/5".
+    pub custom: Option<String>,
+}
+
+impl From<NativeAgentStatusInfo> for AgentStatusInfo {
+    fn from(s: NativeAgentStatusInfo) -> Self {
+        AgentStatusInfo {
+            lifecycle: s.lifecycle,
+            custom: s.custom,
+        }
+    }
+}
+
 /// Flat, FFI-friendly project info.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ProjectInfo {
@@ -185,6 +204,7 @@ pub struct ProjectInfo {
     pub git_lines_removed: u32,
     pub services: Vec<ServiceInfo>,
     pub folder_color: String,
+    pub terminal_agent_status: HashMap<String, AgentStatusInfo>,
 }
 
 impl From<NativeProjectInfo> for ProjectInfo {
@@ -201,6 +221,11 @@ impl From<NativeProjectInfo> for ProjectInfo {
             git_lines_removed: p.git_lines_removed,
             services: p.services.into_iter().map(Into::into).collect(),
             folder_color: p.folder_color,
+            terminal_agent_status: p
+                .terminal_agent_status
+                .into_iter()
+                .map(|(id, status)| (id, status.into()))
+                .collect(),
         }
     }
 }

@@ -247,27 +247,42 @@ impl Okena {
         let workspace = self.workspace.clone();
 
         // The project must have a layout (i.e. at least one terminal) to enter.
-        let path = match workspace
+        let terminal_id = match workspace
             .read(cx)
             .project(project_id)
             .and_then(|p| p.layout.as_ref())
         {
-            Some(layout) => layout.find_visible_terminal_path(),
+            Some(layout) => {
+                let path = layout.find_visible_terminal_path();
+                match layout.get_at_path(&path) {
+                    Some(crate::workspace::state::LayoutNode::Terminal { terminal_id, .. }) => {
+                        match terminal_id.clone() {
+                            Some(id) => id,
+                            None => return,
+                        }
+                    }
+                    _ => return,
+                }
+            }
             None => return,
         };
 
-        // Choose the target window: the first one (origin-first) where the
-        // project is currently visible.
+        // Prefer a window that isn't hiding the project; otherwise fall back to
+        // the origin window and let the reveal below zoom it into view. (This
+        // used to give up here, and to focus by path — which cannot reach a
+        // project the window is currently zoomed or filtered away from.)
         let mut order = vec![origin, WindowId::Main];
         order.extend(self.extra_window_handles.keys().copied());
-        let target = order.into_iter().find(|wid| {
-            workspace
-                .read(cx)
-                .data()
-                .window(*wid)
-                .is_some_and(|w| !w.hidden_project_ids.contains(project_id))
-        });
-        let Some(target) = target else { return };
+        let target = order
+            .into_iter()
+            .find(|wid| {
+                workspace
+                    .read(cx)
+                    .data()
+                    .window(*wid)
+                    .is_some_and(|w| !w.hidden_project_ids.contains(project_id))
+            })
+            .unwrap_or(origin);
 
         // Resolve the target window's view + OS handle.
         let (view, handle) = match target {
@@ -285,12 +300,15 @@ impl Okena {
         // project (arrow/click switches only ensure visibility).
         view.update(cx, |v, _| v.request_center_on_next_navigation());
 
-        // Point that window's FocusManager at the first visible terminal.
+        // Point that window's FocusManager at the first visible terminal, via
+        // the one revealing primitive — so a zoomed or fullscreened window
+        // retargets onto the switch target instead of silently focusing a pane
+        // it isn't rendering.
         let focus_manager = view.read(cx).focus_manager();
         let pid = project_id.to_string();
         focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(fm, pid, path, cx);
+                ws.focus_terminal_by_id(fm, target, &pid, &terminal_id, cx);
             });
             cx.notify();
         });

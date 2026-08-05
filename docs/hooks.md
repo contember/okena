@@ -97,9 +97,26 @@ Available on worktree and merge hooks.
 
 | Variable | Description |
 |----------|-------------|
-| `OKENA_TERMINAL_ID` | Unique ID of the terminal (`terminal.on_close` only) |
+| `OKENA_TERMINAL_ID` | Unique ID of the terminal. Also exported into every pane — see "Pane environment" below. |
 | `OKENA_TERMINAL_NAME` | Custom name of the terminal, if set (`terminal.on_close` only) |
 | `OKENA_EXIT_CODE` | Exit code of the terminal process (`terminal.on_close` only) |
+
+### Pane environment
+
+Three variables are exported into **every** terminal session Okena spawns, not
+just into hook commands. They are a stable contract for third-party tooling —
+the [agent status](agent-status.md) integration is built on them.
+
+| Variable | Description |
+|----------|-------------|
+| `OKENA_TERMINAL_ID` | The pane's terminal id. Echo it back as the `tid=` parameter of an in-band sequence so Okena can drop a status that lands in the wrong pane. |
+| `OKENA_TTY_FILE` | Path of a file naming the pane's **current** slave pty (Unix only). Okena rewrites its contents on every spawn and reattach, so it stays correct for a pane that outlives an Okena restart. Prefer it. |
+| `OKENA_TTY` | The pane's slave pty path as of launch (Unix only). Same device, but frozen — a pane that survives a restart keeps pointing at a pty that now belongs to someone else. Use it only as a fallback. |
+
+Write in-band sequences to the pane's slave pty: it reaches Okena's reader even
+from a process with no controlling terminal, and even through a nested
+tmux/dtach pty. All three are routed through the pane's launch environment, so
+they reach the shell inside a tmux/screen/dtach session as well as a plain one.
 
 ### Conflict variables
 

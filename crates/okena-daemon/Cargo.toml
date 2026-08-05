@@ -25,6 +25,10 @@ okena-workspace = { path = "../okena-workspace", default-features = false }
 # outgoing daemon (`--await-pid`) before this one locks/binds. default-features
 # off keeps the daemon binary 100% GPUI-free (the `gpui` feature is opt-in).
 okena-remote-server = { path = "../okena-remote-server", default-features = false }
+# Built-in agent harnesses. Deliberately its own gpui-free crate: the impls used
+# to live in okena-ext-claude/-codex, which pull gpui, so this binary could not
+# install the registry at all and auto-resume was a silent no-op here.
+okena-agent-harnesses = { path = "../okena-agent-harnesses" }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"

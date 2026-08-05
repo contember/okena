@@ -25,6 +25,21 @@ pub struct ProjectInfo {
     pub git_lines_removed: u32,
     pub services: Vec<ServiceInfo>,
     pub folder_color: String,
+    /// Per-terminal AI agent status, for terminals currently reporting one.
+    /// Mirrors what the desktop shows on the tab and in the sidebar Agents list.
+    pub terminal_agent_status: HashMap<String, AgentStatusInfo>,
+}
+
+/// FFI-friendly agent status.
+///
+/// Flattens [`okena_core::agent_status::AgentStatus`]: `lifecycle` is the wire
+/// token (`working` / `blocked` / `done` / `idle`) so the UI can map it to its
+/// own colors, and `custom` is the agent's free-form text. The `labels` map is
+/// deliberately left out — it is display detail no mobile surface renders yet.
+#[derive(Debug, Clone)]
+pub struct AgentStatusInfo {
+    pub lifecycle: String,
+    pub custom: Option<String>,
 }
 
 /// FFI-friendly service info.
@@ -107,6 +122,21 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                 git_lines_removed,
                 services,
                 folder_color: format!("{:?}", p.folder_color).to_lowercase(),
+                terminal_agent_status: p
+                    .terminal_agent_status
+                    .iter()
+                    .map(|(terminal_id, status)| {
+                        (
+                            terminal_id.clone(),
+                            AgentStatusInfo {
+                                // `token()`, not `label()` — the RN UI matches on
+                                // these strings, so this is a protocol boundary.
+                                lifecycle: status.lifecycle.token().to_string(),
+                                custom: status.custom.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
             }
         })
         .collect()

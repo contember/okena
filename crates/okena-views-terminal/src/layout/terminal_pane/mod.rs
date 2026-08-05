@@ -336,6 +336,12 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             &settings.default_shell,
         );
 
+        // Agent-session resume is NOT done here. The GUI is a thin client whose
+        // workspace mirror never carries `agent_sessions`, and typing a command
+        // into an already-attached PTY would race the shell and whatever is
+        // running in it. The daemon owns it: it resumes exactly once, as a
+        // startup command on the pane's launch plan
+        // (`spawn_uninitialized_terminals`).
         match self
             .backend
             .reconnect_terminal(&terminal_id, &self.project_path, Some(&shell))

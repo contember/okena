@@ -220,6 +220,12 @@ impl FocusManager {
     /// This is the primary method for focusing a terminal. It:
     /// - Updates the current focus target
     /// - Does NOT push to stack (direct user action)
+    ///
+    /// This is the "click an already-visible pane" path: it deliberately
+    /// preserves fullscreen (and then keeps the same fullscreened project,
+    /// only updating the layout path). To *navigate* to a terminal the current
+    /// view might be hiding — a sidebar/agent click, a notification, a remote
+    /// focus request — use [`reveal_terminal`](Self::reveal_terminal) instead.
     pub fn focus_terminal(&mut self, project_id: String, layout_path: Vec<usize>) {
         if self.context == FocusContext::Fullscreen {
             // Preserve fullscreen state — only update layout_path if same project
@@ -227,6 +233,89 @@ impl FocusManager {
                 focus.layout_path = layout_path;
             }
             return;
+        }
+        self.current_focus = Some(FocusTarget::new(project_id, layout_path));
+        self.context = FocusContext::Terminal;
+    }
+
+    /// Reveal **and** focus a terminal as a navigation action — an agent-row or
+    /// sidebar click, a notification jump, a remote focus request.
+    ///
+    /// [`focus_terminal`](Self::focus_terminal) is for clicking a pane that's
+    /// already on screen, so it preserves fullscreen and ignores the requested
+    /// project; that makes it unable to reach a terminal the current view is
+    /// hiding (a different zoomed project, a fullscreened sibling). This instead
+    /// retargets whatever view mode is active onto the target so it actually
+    /// becomes visible, *without* widening the view the user chose:
+    ///
+    /// - **Fullscreen** → stay fullscreen, but on the target terminal and its
+    ///   project (retargeted in place, no stack growth — same as the zoom-header
+    ///   next/prev arrows). A jump from a zoomed terminal lands on the new one
+    ///   instead of being swallowed by the old `layout_path`-only update.
+    /// - **Project zoom** (`focused_project_id` set) → switch the zoom to the
+    ///   target's project. `compute_visible_projects`' focus override then
+    ///   surfaces that project even past a folder filter or a hidden-set entry.
+    /// - **Overview** (no zoom, no fullscreen) → just move terminal focus; the
+    ///   target's column is already on screen, so the multi-project overview is
+    ///   left intact. Unless `project_offscreen` says it isn't: a project in the
+    ///   window's hidden set or behind a folder filter renders nowhere, so
+    ///   focusing it would silently do nothing. Then zoom to it instead —
+    ///   `compute_visible_projects`' focus override surfaces a project past both.
+    ///
+    /// `terminal_id` is the id of the terminal at `layout_path`; it's required
+    /// to retarget fullscreen (which tracks the focused terminal by id).
+    /// `project_offscreen` must be computed against the *calling window*, which
+    /// is why this takes it rather than deciding for itself — a `FocusManager`
+    /// is per-window but doesn't hold the workspace data to check.
+    pub fn reveal_terminal(
+        &mut self,
+        project_id: String,
+        layout_path: Vec<usize>,
+        terminal_id: String,
+        project_offscreen: bool,
+    ) {
+        if self.context == FocusContext::Fullscreen {
+            // Retarget the single zoomed pane onto the target, following it to
+            // its project so the one visible column is the target's. Mirrors the
+            // in-place swap `enter_fullscreen` does when already fullscreen.
+            self.current_focus = Some(FocusTarget::with_terminal(
+                project_id.clone(),
+                layout_path,
+                terminal_id,
+            ));
+            self.focused_project_id = Some(project_id);
+            return;
+        }
+
+        // Not fullscreen. If a project is zoomed, follow the jump so the
+        // target's column is the one shown; leave overview untouched. Only when
+        // switching to a *different* project do we reset individual mode (a
+        // fresh zoom shows the project plus its worktree children) — revealing
+        // another terminal within the already-zoomed project must NOT clear
+        // individual mode, or it would re-expand worktree children the user has
+        // zoomed past. This primitive also backs pre-existing sidebar/cursor
+        // terminal clicks, so that regression would hit them too.
+        if self
+            .focused_project_id
+            .as_deref()
+            .is_some_and(|current| current != project_id)
+        {
+            self.focused_project_id = Some(project_id.clone());
+            self.focus_project_individual = false;
+        } else if self.focused_project_id.is_none() && project_offscreen {
+            // Overview, but this window isn't rendering the target's column.
+            // Zooming is the narrowest way to make it reachable; leaving the
+            // hidden set / folder filter alone means the user's view returns to
+            // exactly what it was when they zoom back out.
+            //
+            // This is a None→Some zoom transition, so it must save the pre-zoom
+            // focus like every other one — otherwise zooming back out leaves
+            // focus stranded on the revealed (now invisible) project: no pane
+            // renders a focus ring, `focused_terminal_state()` lies, and
+            // keystrokes go to whatever GPUI handle was focused before.
+            self.apply_zoom_focus_save_restore(&Some(project_id.clone()));
+            self.focused_project_id = Some(project_id.clone());
+            self.focus_project_individual = false;
         }
         self.current_focus = Some(FocusTarget::new(project_id, layout_path));
         self.context = FocusContext::Terminal;
@@ -600,6 +689,125 @@ mod tests {
         // A single exit must fully leave fullscreen, not unwind through the switches.
         fm.exit_fullscreen();
         assert!(!fm.has_fullscreen());
+    }
+
+    #[test]
+    fn reveal_terminal_retargets_fullscreen_to_other_project() {
+        // A different terminal is fullscreened; revealing the target must follow
+        // it (terminal + project) while staying fullscreen, and must not grow
+        // the stack (so one exit still leaves fullscreen). This is the
+        // "terminal zoomed" half of the focus bug.
+        let mut fm = FocusManager::new();
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+        let stack_after_enter = fm.focus_stack.len();
+
+        fm.reveal_terminal("proj2".to_string(), vec![1, 0], "term2".to_string(), false);
+
+        assert!(fm.has_fullscreen());
+        assert!(fm.is_terminal_fullscreened("proj2", "term2"));
+        assert_eq!(fm.fullscreen_project_id(), Some("proj2"));
+        assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
+        assert_eq!(fm.focused_terminal_state().unwrap().layout_path, vec![1, 0]);
+        assert_eq!(fm.focus_stack.len(), stack_after_enter);
+
+        // A single exit fully leaves fullscreen.
+        fm.exit_fullscreen();
+        assert!(!fm.has_fullscreen());
+    }
+
+    #[test]
+    fn reveal_terminal_switches_zoom_to_target_project() {
+        // Zoomed into proj1; revealing a terminal in proj2 must switch the zoom
+        // to proj2 so its column is the one shown. This is the "different
+        // project zoomed" half of the focus bug.
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("proj1".to_string()));
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.reveal_terminal("proj2".to_string(), vec![2], "term2".to_string(), false);
+
+        assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
+        assert!(!fm.has_fullscreen());
+        assert_eq!(*fm.context(), FocusContext::Terminal);
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj2");
+        assert_eq!(state.layout_path, vec![2]);
+    }
+
+    #[test]
+    fn reveal_terminal_in_overview_keeps_overview() {
+        // In overview (no zoom), revealing must not collapse the view into a
+        // single project — it only moves terminal focus.
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.reveal_terminal("proj2".to_string(), vec![1], "term2".to_string(), false);
+
+        assert_eq!(fm.focused_project_id(), None);
+        assert!(!fm.has_fullscreen());
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj2");
+        assert_eq!(state.layout_path, vec![1]);
+    }
+
+    #[test]
+    fn reveal_terminal_offscreen_from_overview_restores_focus_on_zoom_out() {
+        // Revealing an off-screen project from overview zooms into it. That is a
+        // None→Some zoom transition like any other, so zooming back out must
+        // return focus to where the user was — otherwise focus is stranded on a
+        // project that is no longer rendered.
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.reveal_terminal("proj2".to_string(), vec![1], "term2".to_string(), true);
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("proj2"));
+        assert_eq!(fm.focused_terminal_state().unwrap().project_id, "proj2");
+
+        fm.set_focused_project_id(None);
+        assert_eq!(fm.focused_project_id(), None);
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
+        assert_eq!(state.layout_path, vec![0]);
+    }
+
+    #[test]
+    fn reveal_terminal_zoomed_same_project_updates_focus() {
+        // Revealing another terminal within the already-zoomed project keeps the
+        // zoom on that project and just moves focus.
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("proj1".to_string()));
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string(), false);
+
+        assert_eq!(fm.focused_project_id(), Some(&"proj1".to_string()));
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
+        assert_eq!(state.layout_path, vec![1]);
+    }
+
+    #[test]
+    fn reveal_terminal_within_individual_zoom_preserves_individual_mode() {
+        // Zoomed *individual* into proj1 (worktree children hidden); revealing
+        // another terminal of proj1 must keep individual mode on — it must not
+        // re-expand the hidden children. Regression guard for the
+        // set_focused_terminal -> reveal_terminal swap, which previously cleared
+        // individual mode unconditionally (also hitting sidebar/cursor clicks).
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id_individual(Some("proj1".to_string()));
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        assert!(fm.is_focus_individual());
+
+        fm.reveal_terminal("proj1".to_string(), vec![1], "term-b".to_string(), false);
+
+        assert!(fm.is_focus_individual());
+        assert_eq!(fm.focused_project_id(), Some(&"proj1".to_string()));
+        assert_eq!(fm.focused_terminal_state().unwrap().layout_path, vec![1]);
+
+        // ...but switching to a DIFFERENT project still resets individual mode.
+        fm.reveal_terminal("proj2".to_string(), vec![0], "term-c".to_string(), false);
+        assert!(!fm.is_focus_individual());
+        assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
     }
 
     #[test]

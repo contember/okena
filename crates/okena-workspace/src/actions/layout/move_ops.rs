@@ -205,6 +205,15 @@ impl Workspace {
             return;
         }
 
+        // Panes inside a soft-close grace window are out of the layout while
+        // their PTY, registry entry and metadata are deliberately kept alive for
+        // the undo. Collect them before the mutable borrow so the prune below
+        // doesn't delete a pane's metadata just because some *other* pane moved.
+        let src_grace_ids = {
+            let src_project_id = self.data.projects[src_idx].id.clone();
+            self.pending_close_ids_for_project(&src_project_id)
+        };
+
         // --- Extract from source ---
         let src_project = &mut self.data.projects[src_idx];
         if source_path.is_empty() {
@@ -223,18 +232,26 @@ impl Workspace {
         // Migrate metadata from source to target
         let terminal_name = src_project.terminal_names.remove(source_terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(source_terminal_id);
+        // The agent keeps running in the moved pane, so its session identity
+        // has to follow it — the map is per project.
+        let agent_session = src_project.agent_sessions.remove(source_terminal_id);
 
-        // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project
+        // Cleanup orphaned source metadata. "Orphaned" means not in the layout
+        // AND not waiting out a soft-close grace window.
+        let mut src_layout_ids: std::collections::HashSet<String> = src_project
             .layout
             .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
+        src_layout_ids.extend(src_grace_ids);
         src_project
             .terminal_names
             .retain(|id, _| src_layout_ids.contains(id));
         src_project
             .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
@@ -249,6 +266,11 @@ impl Workspace {
             tgt_project
                 .hidden_terminals
                 .insert(source_terminal_id.to_string(), hidden);
+        }
+        if let Some(session) = agent_session {
+            tgt_project
+                .agent_sessions
+                .insert(source_terminal_id.to_string(), session);
         }
 
         let new_focus_path = if let Some(ref mut tgt_layout) = tgt_project.layout {
@@ -560,6 +582,13 @@ impl Workspace {
             None => return,
         };
 
+        // See the note in `move_pane_into_project` — a soft-closed pane is out
+        // of the layout but still owns its metadata until the grace window ends.
+        let src_grace_ids = {
+            let src_project_id = self.data.projects[src_idx].id.clone();
+            self.pending_close_ids_for_project(&src_project_id)
+        };
+
         // --- Extract from source ---
         let src_project = &mut self.data.projects[src_idx];
         if source_path.is_empty() {
@@ -577,18 +606,26 @@ impl Workspace {
         // Migrate metadata
         let terminal_name = src_project.terminal_names.remove(terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(terminal_id);
+        // The agent keeps running in the moved pane, so its session identity
+        // has to follow it — the map is per project.
+        let agent_session = src_project.agent_sessions.remove(terminal_id);
 
-        // Cleanup orphaned source metadata
-        let src_layout_ids: std::collections::HashSet<String> = src_project
+        // Cleanup orphaned source metadata. "Orphaned" means not in the layout
+        // AND not waiting out a soft-close grace window.
+        let mut src_layout_ids: std::collections::HashSet<String> = src_project
             .layout
             .as_ref()
             .map(|l| l.collect_terminal_ids().into_iter().collect())
             .unwrap_or_default();
+        src_layout_ids.extend(src_grace_ids);
         src_project
             .terminal_names
             .retain(|id, _| src_layout_ids.contains(id));
         src_project
             .hidden_terminals
+            .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
@@ -603,6 +640,11 @@ impl Workspace {
             tgt_project
                 .hidden_terminals
                 .insert(terminal_id.to_string(), hidden);
+        }
+        if let Some(session) = agent_session {
+            tgt_project
+                .agent_sessions
+                .insert(terminal_id.to_string(), session);
         }
 
         let new_focus_path = if let Some(ref mut tgt_layout) = tgt_project.layout {

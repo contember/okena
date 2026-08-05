@@ -78,6 +78,12 @@ Requires `Authorization: Bearer <token>`.
 
 Returns the workspace state with a monotonic `state_version` counter. Clients can detect missed updates by comparing versions.
 
+The example below is a subset of the full project shape. One field worth calling
+out: `terminal_agent_status` maps terminal id → `{ "lifecycle", "custom"?,
+"labels"? }` for panes running an AI agent (see [Agent Status](agent-status.md)).
+It is **runtime-only** — omitted entirely for terminals with no status, and
+absent after a daemon restart — and a change to it bumps `state_version`.
+
 ```json
 {
   "state_version": 42,
@@ -93,7 +99,10 @@ Returns the workspace state with a monotonic `state_version` counter. Clients ca
         "minimized": false,
         "detached": false
       },
-      "terminal_names": {}
+      "terminal_names": {},
+      "terminal_agent_status": {
+        "uuid": { "lifecycle": "working", "custom": "running tests 3/5" }
+      }
     }
   ],
   "focused_project_id": "uuid",

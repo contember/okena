@@ -1,0 +1,13 @@
+[package]
+name = "okena-agent-harnesses"
+version.workspace = true
+edition = "2024"
+license = "MIT"
+
+# Deliberately minimal, and deliberately GPUI-free: this crate is linked by the
+# standalone `okena-daemon` binary, which CI gates against any gpui in its
+# dependency tree. Keep it that way — anything needing a UI belongs in the
+# matching `okena-ext-*` crate instead.
+[dependencies]
+okena-core = { path = "../okena-core" }
+log = "0.4"

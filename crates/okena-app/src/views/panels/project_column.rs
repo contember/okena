@@ -1258,6 +1258,8 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

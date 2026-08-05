@@ -221,12 +221,29 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Focus a terminal by its ID (finds path automatically)
+    /// Focus a terminal by its ID, *revealing* it first (finds path automatically).
     ///
-    /// This is a convenience method that looks up the layout path and calls set_focused_terminal.
+    /// This is the shared "navigate to this terminal" primitive behind agent-row
+    /// / sidebar / notification clicks and remote focus requests. It activates
+    /// the tabs along the path, then calls [`FocusManager::reveal_terminal`] so
+    /// the target becomes visible even when the view is currently zoomed into
+    /// another project or has a different terminal fullscreened — retargeting
+    /// the active view mode onto the target rather than focusing a pane the
+    /// current view is hiding. (Use `set_focused_terminal` for clicks on a pane
+    /// that's already on screen.)
+    /// The one navigation operation behind every "jump to this terminal":
+    /// agent-row and sidebar clicks, cursor navigation, notification jumps,
+    /// remote focus requests.
+    ///
+    /// Window-aware on purpose. Callers used to decide for themselves whether
+    /// the target needed revealing and pre-emptively zoom before calling — which
+    /// both duplicated the rule and broke fullscreen, since changing the focused
+    /// project cancels it *before* the reveal below can retarget it. Deciding
+    /// here keeps the whole jump one step.
     pub fn focus_terminal_by_id(
         &mut self,
         focus_manager: &mut FocusManager,
+        window_id: WindowId,
         project_id: &str,
         terminal_id: &str,
         cx: &mut impl WorkspaceCx,
@@ -235,6 +252,18 @@ impl Workspace {
             && let Some(ref layout) = project.layout
             && let Some(path) = layout.find_terminal_path(terminal_id)
         {
+            // Whether this window renders the target's column at all. A project
+            // in the hidden set or outside the active folder filter does not, so
+            // the reveal has to zoom instead of just moving focus.
+            let project_offscreen = !self
+                .visible_projects(
+                    window_id,
+                    focus_manager.focused_project_id(),
+                    focus_manager.is_focus_individual(),
+                )
+                .iter()
+                .any(|p| p.id == project_id);
+
             // Activate any tabs along the path so the terminal becomes visible
             if let Some(project_mut) = self.project_mut(project_id)
                 && let Some(ref mut layout) = project_mut.layout
@@ -242,8 +271,17 @@ impl Workspace {
                 layout.activate_tabs_along_path(&path);
             }
             self.notify_data(cx);
-            // Focus the terminal without changing which projects are shown
-            self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
+            // Reveal: retarget the active zoom/fullscreen onto the target so it
+            // is actually visible, then focus it.
+            focus_manager.reveal_terminal(
+                project_id.to_string(),
+                path,
+                terminal_id.to_string(),
+                project_offscreen,
+            );
+            self.touch_project(project_id);
+            self.bump_activity(project_id, cx);
+            cx.notify();
         }
     }
 }
@@ -402,5 +440,131 @@ mod gpui_tests {
             assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
             assert!(ws.data_version() >= 1);
         });
+    }
+}
+
+/// Window-aware navigation: `focus_terminal_by_id` is the single entry point for
+/// every "jump to this terminal", so it has to reach panes the calling window
+/// currently renders nowhere.
+#[cfg(all(test, feature = "gpui"))]
+mod jump_gpui_tests {
+    use crate::focus::FocusManager;
+    use crate::settings::HooksConfig;
+    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
+    use okena_core::theme::FolderColor;
+    use okena_terminal::shell_config::ShellType;
+    use std::collections::HashMap;
+
+    fn project(id: &str, terminal_id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {id}"),
+            path: "/tmp/test".to_string(),
+            layout: Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Default,
+                zoom_level: 1.0,
+            }),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        }
+    }
+
+    fn workspace_data(hidden: &[&str]) -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![project("p1", "t1"), project("p2", "t2")],
+            project_order: vec!["p1".to_string(), "p2".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState {
+                hidden_project_ids: hidden.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            extra_windows: Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_hidden_project_zooms_it_into_view(cx: &mut gpui::TestAppContext) {
+        // p2 is in this window's hidden set, so overview renders no column for
+        // it — focusing without revealing would land on an invisible pane.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_data(&["p2"])));
+        let mut fm = FocusManager::new();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p2", "t2", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p2"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let visible = ws.visible_projects(WindowId::Main, fm.focused_project_id(), false);
+            assert!(
+                visible.iter().any(|p| p.id == "p2"),
+                "the jump target must end up on screen"
+            );
+        });
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("p2")
+        );
+    }
+
+    #[gpui::test]
+    fn jumping_within_the_overview_does_not_zoom(cx: &mut gpui::TestAppContext) {
+        // p2 is already on screen, so the multi-project overview stays intact.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_data(&[])));
+        let mut fm = FocusManager::new();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p2", "t2", cx);
+        });
+
+        assert_eq!(fm.focused_project_id(), None, "overview must be preserved");
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("p2")
+        );
+    }
+
+    #[gpui::test]
+    fn jumping_out_of_fullscreen_stays_fullscreen(cx: &mut gpui::TestAppContext) {
+        // The regression this pins: callers used to zoom to the target project
+        // *before* the reveal, and changing the focused project drops the
+        // fullscreen context — so a notification jump dumped the user back into
+        // the overview instead of following them into the target pane.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_data(&["p2"])));
+        let mut fm = FocusManager::new();
+        fm.enter_fullscreen("p1".to_string(), vec![], "t1".to_string());
+        assert!(fm.has_fullscreen());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p2", "t2", cx);
+        });
+
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some(("p2", "t2")),
+            "fullscreen follows the jump onto the target pane"
+        );
     }
 }

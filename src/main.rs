@@ -587,6 +587,12 @@ fn main() {
     let headless =
         explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
+    // Install the per-harness agent-session registry (resume command + transcript
+    // parsing, dispatched by agent id). gpui-free, so it's shared by BOTH the
+    // desktop and headless paths — do it before the branch below. The standalone
+    // `okena-daemon` binary makes the same call from its own `main`.
+    okena_agent_harnesses::install();
+
     if headless {
         // Self-restart handoff (single-binary `okena --headless` daemon): a
         // daemon restarting itself spawns this process with `--await-pid <old>`

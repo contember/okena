@@ -101,6 +101,10 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 .terminal
                 .as_ref()
                 .is_some_and(|t| t.is_waiting_for_input());
+        // Deliberately no agent-lifecycle border: it sticks until the next
+        // status (no activity clears it, unlike the bell), so it read as a
+        // permanent alarm. The tab indicator and the sidebar AGENTS list carry
+        // the lifecycle instead.
         let show_border =
             (is_focused && show_focused_border) || has_bell || has_notification || is_waiting;
         // OSC 9/777 notifications share the bell's attention color.

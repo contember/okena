@@ -1,0 +1,74 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh clear"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh blocked"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh done"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh clear"
+          }
+        ]
+      }
+    ]
+  }
+}

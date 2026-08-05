@@ -5994,6 +5994,7 @@ dependencies = [
  "gpui_platform",
  "log",
  "mimalloc",
+ "okena-agent-harnesses",
  "okena-app",
  "okena-cli",
  "okena-core",
@@ -6014,6 +6015,14 @@ dependencies = [
  "serde_json",
  "tikv-jemallocator",
  "winresource",
+]
+
+[[package]]
+name = "okena-agent-harnesses"
+version = "0.27.0"
+dependencies = [
+ "log",
+ "okena-core",
 ]
 
 [[package]]
@@ -6122,6 +6131,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "log",
+ "okena-agent-harnesses",
  "okena-core",
  "okena-daemon-core",
  "okena-remote-server",

@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod activity_order;
+pub mod agents_list;
 pub mod color_picker;
 pub mod context_menu;
 pub mod drag;

@@ -116,6 +116,9 @@ pub(super) fn switch_shell(
     }
     backend.kill(&terminal_id);
     terminals.lock().remove(&terminal_id);
+    // The pane keeps its slot but the process behind it is gone, so the
+    // captured agent session no longer describes what runs here.
+    ws.forget_agent_session(&terminal_id, cx);
     ws.set_terminal_shell(&project_id, &path, shell, cx);
     ws.clear_terminal_id(&project_id, &path, cx);
     // Shell-switch respawns the pane in place; keep the project path (the old
@@ -140,6 +143,7 @@ pub(super) fn close(
             }
             backend.kill(&terminal_id);
             terminals.lock().remove(&terminal_id);
+            ws.forget_agent_session(&terminal_id, cx);
             ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
             ActionResult::Ok(None)
         }
@@ -166,6 +170,7 @@ pub(super) fn close_many(
                 }
                 backend.kill(terminal_id);
                 terminals.lock().remove(terminal_id);
+                ws.forget_agent_session(terminal_id, cx);
                 ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
             }
             None => {

@@ -630,10 +630,21 @@ fn effective_terminal_launch(
     global_default_shell: &ShellType,
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
+    // Command to run after `on_create`, currently only an agent-session resume.
+    // Composed into the same shell line so the pane still hands off to an
+    // interactive shell once it exits.
+    startup_command: Option<&str>,
     env: &HashMap<String, String>,
 ) -> TerminalLaunchPlan {
     let shell = shell_type.resolve_default(project_default_shell, global_default_shell);
-    hooks::terminal_launch_plan(shell, shell_wrapper, on_create, env)
+    let composed = match (on_create, startup_command) {
+        (Some(hook), Some(command)) => Some(format!(
+            "{hook}{}{command}",
+            hooks::startup_command_separator(&shell)
+        )),
+        (hook, command) => hook.or(command).map(str::to_string),
+    };
+    hooks::terminal_launch_plan(shell, shell_wrapper, composed.as_deref(), env)
 }
 
 /// Reserve IDs and launch plans for runtime-recovery slots without touching the backend.
@@ -695,6 +706,9 @@ pub fn reserve_uninitialized_terminal_launches(
                     &settings.default_shell,
                     shell_wrapper.as_deref(),
                     on_create.as_deref(),
+                    // Recovery re-launches panes that already hold live ids, so
+                    // no restore-time resume is queued for them.
+                    None,
                     &env,
                 ),
             ));
@@ -820,6 +834,7 @@ pub fn spawn_uninitialized_terminals(
 
     let global_default = settings.default_shell.clone();
     let global_hooks = settings.hooks.clone();
+    let auto_resume = settings.auto_resume_agent_sessions;
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper =
@@ -843,18 +858,39 @@ pub fn spawn_uninitialized_terminals(
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
+        // Claim the agent session this pane carried before the restart, if any.
+        // Taking it makes the resume exactly-once; the session is then re-keyed
+        // onto the new terminal id below so the pane keeps its identity whether
+        // or not we actually resumed.
+        let pending_session = ws.take_pending_agent_resume(project_id, &path);
+        let resume_command = pending_session
+            .as_ref()
+            .filter(|_| auto_resume)
+            .and_then(|session| {
+                okena_core::agent_harness::resume_command_line(
+                    session,
+                    std::path::Path::new(&spawn_cwd),
+                )
+            });
+        if let Some(ref command) = resume_command {
+            log::info!("agent-resume: project={project_id} path={path:?} command={command}");
+        }
         let plan = effective_terminal_launch(
             shell_type,
             project_default_shell.as_ref(),
             &global_default,
             shell_wrapper.as_deref(),
             on_create_cmd.as_deref(),
+            resume_command.as_deref(),
             &env,
         );
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
+                if let Some(session) = pending_session {
+                    ws.set_agent_session(project_id, &terminal_id, session, cx);
+                }
                 let terminal = Arc::new(Terminal::new(
                     terminal_id.clone(),
                     TerminalSize::default(),
@@ -1086,10 +1122,10 @@ mod reconnect_shell_tests {
     }
 
     #[derive(Default)]
-    struct RecordingBackend {
+    pub(super) struct RecordingBackend {
         created_shells: Mutex<Vec<Option<ShellType>>>,
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
-        plans: Mutex<Vec<TerminalLaunchPlan>>,
+        pub(super) plans: Mutex<Vec<TerminalLaunchPlan>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1170,7 +1206,7 @@ mod reconnect_shell_tests {
         }
     }
 
-    struct TestCx;
+    pub(super) struct TestCx;
 
     impl WorkspaceCx for TestCx {
         fn notify(&mut self) {}
@@ -1183,10 +1219,13 @@ mod reconnect_shell_tests {
         }
     }
 
-    fn workspace_with_terminal(
+    pub(super) fn workspace_with_terminal(
         shell_type: ShellType,
         default_shell: Option<ShellType>,
         terminal_id: Option<&str>,
+        // Sessions queued for the root pane, as `validate_workspace_data` would
+        // leave them after a restore that cleared terminal ids.
+        pending_agent_resumes: HashMap<Vec<usize>, okena_core::agent_session::AgentSession>,
     ) -> Workspace {
         let project = ProjectData {
             id: "project".into(),
@@ -1208,6 +1247,8 @@ mod reconnect_shell_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
+            pending_agent_resumes,
             default_shell,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1228,7 +1269,7 @@ mod reconnect_shell_tests {
     }
 
     fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
-        workspace_with_terminal(shell_type, default_shell, Some("terminal"))
+        workspace_with_terminal(shell_type, default_shell, Some("terminal"), HashMap::new())
     }
 
     #[test]
@@ -1295,7 +1336,7 @@ mod reconnect_shell_tests {
 
     #[test]
     fn failed_reservation_does_not_clear_a_replacement_terminal_id() {
-        let mut ws = workspace_with_terminal(ShellType::Default, None, None);
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None, HashMap::new());
         let mut cx = TestCx;
         let launches = reserve_uninitialized_terminal_launches(
             &mut ws,
@@ -1326,7 +1367,7 @@ mod reconnect_shell_tests {
         let wsl = ShellType::Wsl {
             distro: Some("Ubuntu".into()),
         };
-        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None);
+        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None, HashMap::new());
         let create_terminals: TerminalsRegistry = Arc::new(Default::default());
         let backend = RecordingBackend::default();
         let mut settings = AppSettings::default();
@@ -1363,5 +1404,247 @@ mod reconnect_shell_tests {
         assert!(plans[0].initial_command.is_some());
         assert_eq!(plans[1].route, wsl);
         assert!(plans[1].initial_command.is_none());
+    }
+}
+
+/// Restore-time agent-session resume.
+///
+/// The daemon owns this: `validate_workspace_data` re-keys a surviving session
+/// onto its pane's layout path, and `spawn_uninitialized_terminals` consumes it
+/// as the pane's startup command while assigning the new terminal id.
+#[cfg(test)]
+mod agent_resume_tests {
+    use super::reconnect_shell_tests::{RecordingBackend, TestCx, workspace_with_terminal};
+    use super::{AppSettings, spawn_uninitialized_terminals};
+    use okena_core::agent_harness::{AgentHarness, AgentHarnessRegistry};
+    use okena_core::agent_session::AgentSession;
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::shell_config::ShellType;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    const UUID: &str = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+
+    struct StubHarness;
+
+    impl AgentHarness for StubHarness {
+        fn id(&self) -> &str {
+            "test-agent"
+        }
+        fn resume_command(&self, session_id: &str, _cwd: &Path) -> Option<Vec<String>> {
+            Some(vec![
+                "test-agent".to_string(),
+                "--resume".to_string(),
+                session_id.to_string(),
+            ])
+        }
+    }
+
+    /// The harness registry is a process-wide `OnceLock` (first write wins), so
+    /// every test in this binary shares this one stub.
+    fn stub_registry() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let mut registry = AgentHarnessRegistry::new();
+            registry.register(Arc::new(StubHarness));
+            okena_core::agent_harness::init(registry);
+        });
+    }
+
+    fn session(agent: &str) -> AgentSession {
+        AgentSession {
+            agent: agent.to_string(),
+            session_id: UUID.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    fn settings(auto_resume: bool) -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.auto_resume_agent_sessions = auto_resume;
+        settings
+    }
+
+    /// Spawn the single root pane and return (startup command args, workspace).
+    fn spawn(
+        pending: Option<AgentSession>,
+        auto_resume: bool,
+    ) -> (Option<Vec<String>>, crate::workspace::state::Workspace) {
+        stub_registry();
+        let pending = pending
+            .map(|s| HashMap::from([(Vec::new(), s)]))
+            .unwrap_or_default();
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None, pending);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+
+        spawn_uninitialized_terminals(
+            &mut ws,
+            "project",
+            &backend,
+            &terminals,
+            &settings(auto_resume),
+            None,
+            &mut TestCx,
+        );
+
+        let plans = backend.plans.lock().expect("plan lock");
+        let args = plans
+            .first()
+            .and_then(|p| p.initial_command.as_ref())
+            .map(|c| c.args.clone());
+        drop(plans);
+        (args, ws)
+    }
+
+    #[test]
+    fn restored_pane_resumes_its_session_as_a_startup_command() {
+        let (args, _ws) = spawn(Some(session("test-agent")), true);
+
+        let args = args.expect("resume must reach the launch plan, not the attached PTY");
+        assert!(
+            args.iter()
+                .any(|a| a.contains(&format!("test-agent --resume {UUID}"))),
+            "resume command missing from {args:?}"
+        );
+        // The pane keeps a shell after the agent exits.
+        assert!(
+            args.iter().any(|a| a.contains("exec")),
+            "startup command must hand off to a shell: {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_session_is_rekeyed_onto_the_new_terminal_id_and_consumed() {
+        let (_, ws) = spawn(Some(session("test-agent")), true);
+
+        assert_eq!(
+            ws.agent_session("project", "terminal"),
+            Some(session("test-agent")),
+            "the restored pane must own the session under its new id"
+        );
+        assert!(
+            ws.project("project")
+                .expect("project")
+                .pending_agent_resumes
+                .is_empty(),
+            "a consumed resume must not fire again"
+        );
+    }
+
+    #[test]
+    fn resume_is_skipped_when_the_setting_is_off_but_the_session_is_kept() {
+        let (args, ws) = spawn(Some(session("test-agent")), false);
+
+        assert_eq!(args, None, "opt-in setting must gate the resume");
+        assert_eq!(
+            ws.agent_session("project", "terminal"),
+            Some(session("test-agent")),
+            "the session identity survives even when we don't auto-run it"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_is_stored_but_not_resumed() {
+        let (args, ws) = spawn(Some(session("no-such-harness")), true);
+
+        assert_eq!(args, None);
+        assert_eq!(
+            ws.agent_session("project", "terminal"),
+            Some(session("no-such-harness"))
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_captured_session_launches_plainly() {
+        let (args, ws) = spawn(None, true);
+
+        assert_eq!(args, None);
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
+
+    /// docs/agent-status.md promises the session is dropped on a hard close, a
+    /// finalized soft close, or a shell switch. Only the soft close was covered;
+    /// these three call sites had no test module at all, so dropping any of them
+    /// would leave orphans in workspace.json — and a pane respawned in the same
+    /// slot could inherit a stale id and be handed `claude --resume` for it.
+    fn workspace_with_live_session() -> (
+        crate::workspace::state::Workspace,
+        TerminalsRegistry,
+        RecordingBackend,
+    ) {
+        let mut ws = workspace_with_terminal(
+            ShellType::Default,
+            None,
+            Some("terminal"),
+            Default::default(),
+        );
+        ws.set_agent_session("project", "terminal", session("test-agent"), &mut TestCx);
+        assert!(ws.agent_session("project", "terminal").is_some());
+        (
+            ws,
+            Arc::new(Default::default()),
+            RecordingBackend::default(),
+        )
+    }
+
+    #[test]
+    fn closing_a_terminal_forgets_its_agent_session() {
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+        let mut focus = okena_workspace::focus::FocusManager::new();
+
+        super::terminal::close(
+            &mut ws,
+            &mut focus,
+            "project".to_string(),
+            "terminal".to_string(),
+            &backend,
+            &terminals,
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
+
+    #[test]
+    fn closing_many_terminals_forgets_their_agent_sessions() {
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+        let mut focus = okena_workspace::focus::FocusManager::new();
+
+        super::terminal::close_many(
+            &mut ws,
+            &mut focus,
+            "project".to_string(),
+            vec!["terminal".to_string()],
+            &backend,
+            &terminals,
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+    }
+
+    #[test]
+    fn switching_shell_forgets_the_agent_session() {
+        // The pane keeps its slot, but the process behind it is gone — so the
+        // captured session no longer describes what runs there.
+        let (mut ws, terminals, backend) = workspace_with_live_session();
+
+        super::terminal::switch_shell(
+            &mut ws,
+            "project".to_string(),
+            "terminal".to_string(),
+            ShellType::Custom {
+                path: "/bin/zsh".to_string(),
+                args: Vec::new(),
+            },
+            &backend,
+            &terminals,
+            &settings(false),
+            &mut TestCx,
+        );
+
+        assert_eq!(ws.agent_session("project", "terminal"), None);
     }
 }

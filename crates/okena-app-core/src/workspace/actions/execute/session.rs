@@ -158,6 +158,11 @@ fn prepare_layout_terminals(
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
     env: &std::collections::HashMap<String, String>,
+    pending_agent_resumes: &mut std::collections::HashMap<
+        Vec<usize>,
+        okena_core::agent_session::AgentSession,
+    >,
+    agent_sessions: &mut std::collections::HashMap<String, okena_core::agent_session::AgentSession>,
     path: &mut Vec<usize>,
     launches: &mut Vec<PreparedTerminalLaunch>,
 ) {
@@ -171,6 +176,18 @@ fn prepare_layout_terminals(
             let id = terminal_id
                 .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
                 .clone();
+            // `validate_workspace_data` parks a surviving agent session under its
+            // pane's LAYOUT PATH, because the restore is about to clear the
+            // terminal id it was keyed by. Only `spawn_uninitialized_terminals`
+            // consumed those, so on this path (load-session / import-workspace)
+            // they were left behind entirely: the pane silently lost its agent
+            // identity, and the orphaned entry stayed in the map where a later
+            // split landing on the same path would inherit it — and, with
+            // auto-resume on, run `claude --resume` for someone else's session.
+            // Re-key it onto the id this pane just got instead.
+            if let Some(session) = pending_agent_resumes.remove(path.as_slice()) {
+                agent_sessions.insert(id.clone(), session);
+            }
             let launch_plan = if persisted {
                 TerminalLaunchPlan::for_shell(
                     shell_type
@@ -184,6 +201,12 @@ fn prepare_layout_terminals(
                     &settings.default_shell,
                     shell_wrapper,
                     on_create,
+                    // Restoring a saved session builds fresh panes: the session
+                    // identity is carried over above so the pane still shows it
+                    // and can be resumed by hand, but nothing is auto-launched
+                    // here — the user asked to open a session, not to re-run
+                    // whatever agent last lived in each pane.
+                    None,
                     env,
                 )
             };
@@ -207,6 +230,8 @@ fn prepare_layout_terminals(
                     shell_wrapper,
                     on_create,
                     env,
+                    pending_agent_resumes,
+                    agent_sessions,
                     path,
                     launches,
                 );
@@ -231,6 +256,9 @@ pub fn prepare_workspace_replacement(
                 .retain(|terminal_id, _| !stale.contains(terminal_id));
             project
                 .hidden_terminals
+                .retain(|terminal_id, _| !stale.contains(terminal_id));
+            project
+                .agent_sessions
                 .retain(|terminal_id, _| !stale.contains(terminal_id));
             project.hook_terminals.clear();
         }
@@ -274,10 +302,16 @@ pub fn prepare_workspace_replacement(
                 shell_wrapper.as_deref(),
                 on_create.as_deref(),
                 &env,
+                &mut project.pending_agent_resumes,
+                &mut project.agent_sessions,
                 &mut Vec::new(),
                 &mut ordinary,
             );
         }
+        // Whatever is left has no pane at its path any more. Dropping it is the
+        // point: a leftover entry would otherwise sit in the live workspace and
+        // be handed to an unrelated pane that later lands on that same path.
+        project.pending_agent_resumes.clear();
         if let Some(prepared) = okena_hooks::prepare_project_open_hook(
             uuid::Uuid::new_v4().to_string(),
             &project.hooks,
@@ -531,6 +565,7 @@ pub fn finish_workspace_replacement(
             if project.hook_terminals.remove(terminal_id).is_some() {
                 project.terminal_names.remove(terminal_id);
                 project.hidden_terminals.remove(terminal_id);
+                project.agent_sessions.remove(terminal_id);
                 break;
             }
         }
@@ -986,6 +1021,8 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
+            pending_agent_resumes: HashMap::new(),
             default_shell: None,
             hook_terminals,
             pinned: false,

@@ -1588,6 +1588,15 @@ pub fn apply_on_create(
     ShellType::for_command(script)
 }
 
+/// Separator that chains two startup commands for `shell` (`; ` for POSIX
+/// shells and PowerShell, ` & ` for cmd). Exposed so callers that need to run
+/// something *after* the user's `on_create` hook — e.g. resuming an agent
+/// session — can compose one command string for [`terminal_launch_plan`]
+/// instead of duplicating the per-dialect separator.
+pub fn startup_command_separator(shell: &ShellType) -> &'static str {
+    terminal_launch_parts(shell).3
+}
+
 /// Compose create-only hooks without losing the shell used for backend routing.
 pub fn terminal_launch_plan(
     shell: ShellType,

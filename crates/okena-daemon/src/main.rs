@@ -152,6 +152,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // 1c. Install the agent-harness registry (resume argv per agent id) before
+    //     anything can reach a restore path. This binary owns restore just as
+    //     much as the GUI does, so without it `for_agent()` misses and
+    //     auto-resume silently does nothing here.
+    okena_agent_harnesses::install();
+
     // 2. Optional `--listen <ip>` override. Parsing is intentionally minimal and
     //    dependency-free; the error messages mirror the GUI's `src/main.rs`.
     let listen_override: Option<IpAddr> = parse_listen_override();

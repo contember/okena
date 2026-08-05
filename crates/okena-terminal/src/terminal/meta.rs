@@ -67,6 +67,83 @@ impl Terminal {
         *self.progress.lock()
     }
 
+    /// Latest agent status reported via the agent-status OSC (`OSC 9001`), or
+    /// `None` when no agent has reported one (or it was cleared). Read each
+    /// render to drive the per-tab indicator and the sidebar "Agents" section.
+    pub fn agent_status(&self) -> Option<okena_core::agent_status::AgentStatus> {
+        self.agent_status.lock().clone()
+    }
+
+    /// Adopt the agent status a remote snapshot reports for this terminal.
+    ///
+    /// A client parses `OSC 9001` from the live byte stream, but a snapshot
+    /// replays a *rendered grid* — the OSC that set the current status was
+    /// consumed long before, so a client that connects (or reconnects) mid-run
+    /// would otherwise show no agent until the next report, or keep showing a
+    /// status the daemon has since cleared.
+    ///
+    /// Deliberately not the parser path: it neither queues a notification nor
+    /// sets `remote_dirty` (this *is* remote state arriving, not local state to
+    /// push back). A snapshot is **replayed** state, so notifying off it would
+    /// re-raise the same bubble on every connect, reconnect, daemon restart and
+    /// sleep/resume. The flip side is a real gap: the desktop notification is
+    /// raised only by the client that parsed the transition live, so a
+    /// transition that happened while disconnected notifies nowhere. Owning that
+    /// edge properly means the daemon publishing an explicit agent-transition
+    /// event over the bridge — which would also give mobile one. Not done here.
+    ///
+    /// Goes through `new_clamped` rather than storing the deserialized value
+    /// directly: the caps are an invariant of the type, not of the parser, and
+    /// this is a second entry point for a value that arrives over the wire.
+    pub fn hydrate_agent_status(&self, status: Option<okena_core::agent_status::AgentStatus>) {
+        *self.agent_status.lock() = status.map(|status| {
+            okena_core::agent_status::AgentStatus::new_clamped(
+                status.lifecycle,
+                status.custom,
+                status.labels,
+            )
+        });
+    }
+
+    /// Consume the one-shot "remote-visible state changed since last drain"
+    /// edge. Returns true if anything marked it since the previous call, then
+    /// resets it. The PTY event loop uses this to bump the remote
+    /// `state_version` so remote / mobile clients re-fetch.
+    pub fn take_remote_dirty(&self) -> bool {
+        self.remote_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The durable agent session captured for this pane (`agent` + `session_id`
+    /// + optional `transcript_path`), or `None` if none has been reported.
+    ///
+    /// Unlike [`agent_status`](Self::agent_status) this is **sticky** — it
+    /// survives `st=clear` — since it's the identity used for resume + transcript
+    /// stats, persisted into `workspace.json` by the app layer.
+    pub fn agent_session(&self) -> Option<okena_core::agent_session::AgentSession> {
+        self.agent_session.lock().clone()
+    }
+
+    /// Whether the "agent session changed since last drain" edge is set, without
+    /// consuming it.
+    ///
+    /// The persist path peeks first and only consumes once the session has
+    /// actually been attributed to a project: attribution can fail (a hook or
+    /// service terminal, or a pane inside a soft-close grace window, is not in
+    /// any layout tree), and consuming there dropped the session permanently —
+    /// agents re-send the same identity on every status, so nothing re-arms it.
+    pub fn agent_session_dirty(&self) -> bool {
+        self.agent_session_dirty
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Consume the one-shot "agent session changed since last drain" edge. The
+    /// PTY event loop uses this to persist the new session into `workspace.json`.
+    pub fn take_agent_session_dirty(&self) -> bool {
+        self.agent_session_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Push the active theme palette so the event listener can answer
     /// OSC 10/11/12/4 color queries with real theme colors. Called from the
     /// render loop on every frame; writes are cheap and uncontested.

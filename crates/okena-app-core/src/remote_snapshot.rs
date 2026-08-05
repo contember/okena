@@ -3,8 +3,8 @@
 //! Both remote command loops answer `RemoteCommand::GetState` by projecting the
 //! same [`WorkspaceData`] onto the same wire DTOs:
 //!
-//! * GUI: `okena-app`'s `app/remote_commands.rs` `remote_command_loop`
-//!   (reads an `Entity<Workspace>` / `Entity<ServiceManager>`).
+//! * GUI: the daemon client command loop (reads an `Entity<Workspace>` /
+//!   `Entity<ServiceManager>`).
 //! * Headless: `okena-daemon-core`'s `command_loop.rs` `daemon_command_loop`
 //!   (reads `Arc<Mutex<Workspace>>` / `Arc<Mutex<ServiceManager>>`).
 //!
@@ -42,12 +42,14 @@ pub fn api_project_visibility(project_id: &str, hidden_project_ids: &HashSet<Str
 ///   caller's `ServiceManager`; absent ⇒ no services).
 /// * `hidden_project_ids` — per-window hidden set driving `show_in_overview`.
 /// * `size_map` — terminal id → `(cols, rows)` for `layout.to_api_with_sizes`.
+/// * `agent_statuses` — terminal id → current runtime-only agent status.
 pub fn build_api_project(
     p: &ProjectData,
     git_statuses: &HashMap<String, ApiGitStatus>,
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_statuses: &HashMap<String, okena_core::agent_status::AgentStatus>,
 ) -> ApiProject {
     ApiProject {
         id: p.id.clone(),
@@ -56,6 +58,21 @@ pub fn build_api_project(
         show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
         layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(size_map)),
         terminal_names: p.terminal_names.clone(),
+        terminal_agent_status: p
+            .layout
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .collect_terminal_ids()
+                    .into_iter()
+                    .filter_map(|terminal_id| {
+                        agent_statuses
+                            .get(&terminal_id)
+                            .map(|status| (terminal_id, status.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         git_status: git_statuses.get(&p.id).cloned(),
         folder_color: p.folder_color,
         services: services_by_project.get(&p.id).cloned().unwrap_or_default(),
@@ -91,6 +108,7 @@ pub fn build_api_projects(
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_statuses: &HashMap<String, okena_core::agent_status::AgentStatus>,
 ) -> Vec<ApiProject> {
     let project_map: HashMap<&str, &ProjectData> =
         data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -105,6 +123,7 @@ pub fn build_api_projects(
             services_by_project,
             hidden_project_ids,
             size_map,
+            agent_statuses,
         ));
     };
 
@@ -162,6 +181,7 @@ pub fn build_state_response(
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_statuses: &HashMap<String, okena_core::agent_status::AgentStatus>,
     windows: Vec<ApiWindow>,
     hooks: Vec<ApiHookExecution>,
 ) -> StateResponse {
@@ -171,6 +191,7 @@ pub fn build_state_response(
         services_by_project,
         hidden_project_ids,
         size_map,
+        agent_statuses,
     );
     let folders = build_folders(&data.folders);
 

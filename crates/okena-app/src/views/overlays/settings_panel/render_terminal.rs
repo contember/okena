@@ -18,6 +18,17 @@ impl SettingsPanel {
             section_container(&t)
                 .child(self.render_shell_dropdown_row(&s.default_shell, cx))
                 .child(self.render_session_backend_dropdown_row(&s.session_backend, cx))
+                // Sits next to the session backend because that is what decides
+                // whether it can ever apply: with a live backend the pane
+                // reattaches to a still-running agent and nothing is resumed.
+                .child(self.render_toggle(
+                    "auto-resume-agent-sessions",
+                    "Auto-Resume Agent Sessions",
+                    s.auto_resume_agent_sessions,
+                    true,
+                    |state, val, cx| state.set_auto_resume_agent_sessions(val, cx),
+                    cx,
+                ))
                 .child(self.render_toggle(
                     "show-shell-selector",
                     "Show Shell Selector",

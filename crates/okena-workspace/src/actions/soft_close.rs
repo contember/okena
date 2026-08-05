@@ -346,6 +346,21 @@ impl Workspace {
             .retain(|r| r.terminal_id != terminal_id);
     }
 
+    /// Terminal ids in `project_id` that are waiting out a soft-close grace
+    /// window.
+    ///
+    /// They are out of the layout tree while their PTY, registry entry and
+    /// per-terminal metadata (`terminal_names` / `hidden_terminals` /
+    /// `agent_sessions`) are deliberately kept alive for the undo, so any prune
+    /// keyed on "is this id in the layout?" has to count them as present.
+    pub(crate) fn pending_close_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        self.pending_closes
+            .iter()
+            .filter(|pending| pending.project_id == project_id)
+            .map(|pending| pending.terminal_id.clone())
+            .collect()
+    }
+
     /// True if the terminal is currently waiting out its grace period.
     pub fn has_pending_close(&self, terminal_id: &str) -> bool {
         self.pending_closes
@@ -369,6 +384,10 @@ impl Workspace {
         if self.take_pending_close(terminal_id).is_none() {
             return false;
         }
+        // The close is now irreversible, so the captured agent session can go.
+        // It deliberately survives the grace period: an undo restores the pane
+        // and must restore its session identity with it.
+        self.forget_agent_session(terminal_id, cx);
         self.queue_terminal_kills([terminal_id.to_string()]);
         // Plain notify (not notify_data): queuing a kill is transient state, it
         // must not bump data_version / trigger an auto-save. The workspace
@@ -610,6 +629,8 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -675,6 +696,41 @@ mod tests {
                 Some("Named terminal")
             );
             assert!(ws.take_closing_terminal_owner("a").is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn agent_session_survives_undo_and_dies_with_the_finalized_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let session = okena_core::agent_session::AgentSession {
+            agent: "claude-code".to_string(),
+            session_id: "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b".to_string(),
+            transcript_path: None,
+        };
+        let mut data = workspace_data(hsplit(vec![term("a"), term("b")]));
+        data.projects[0]
+            .agent_sessions
+            .insert("a".to_string(), session.clone());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut fm = FocusManager::new();
+
+            // The grace period is reversible, so the session must still be there.
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            assert_eq!(ws.agent_session("p1", "a"), Some(session.clone()));
+            assert!(ws.undo_soft_close(&mut fm, "a", true, cx));
+            assert_eq!(
+                ws.agent_session("p1", "a"),
+                Some(session),
+                "an undone close must bring the session back with the pane"
+            );
+
+            // Finalizing makes the close permanent — no orphan left behind.
+            ws.begin_soft_close(&mut fm, "p1", &[0], "a", "toast-a", cx);
+            assert!(ws.finalize_soft_close("a", cx));
+            assert_eq!(ws.agent_session("p1", "a"), None);
         });
     }
 

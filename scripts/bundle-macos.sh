@@ -58,7 +58,12 @@ echo "    Version: $VERSION"
 # Build if not skipping
 if [[ "$SKIP_BUILD" == false ]]; then
     echo "==> Building release binaries..."
-    cargo build --release --target "$TARGET" -p okena -p okena-daemon
+    # Separate invocations: cargo unifies features across all packages selected
+    # in one invocation, so building these together would enable the `gpui`
+    # feature on the daemon's copy of okena-workspace/okena-app-core and link
+    # GPUI into the binary that is gated to stay free of it.
+    cargo build --release --target "$TARGET" -p okena
+    cargo build --release --target "$TARGET" -p okena-daemon
 fi
 
 # Verify binary exists (check target-specific path first, then default)

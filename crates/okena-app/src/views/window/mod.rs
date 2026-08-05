@@ -556,6 +556,7 @@ impl WindowView {
                 &workspace,
                 &focus_manager,
                 &rm,
+                &this.terminals,
                 cx,
             );
             this.sync_project_columns(cx);
@@ -713,6 +714,7 @@ impl WindowView {
         workspace: &Entity<Workspace>,
         focus_manager: &Entity<FocusManager>,
         rm: &Entity<RemoteConnectionManager>,
+        terminals: &TerminalsRegistry,
         cx: &mut Context<Self>,
     ) {
         use okena_workspace::remote_apply::RemoteSnapshot;
@@ -735,6 +737,23 @@ impl WindowView {
                 ws.apply_remote_snapshot(&snapshots, window_id, fm, cx)
             });
         });
+
+        // Agent status is runtime-only, so it rides the snapshot rather than
+        // `WorkspaceData`. A client normally learns it by parsing `OSC 9001`
+        // out of the live stream, but the initial (and every reconnect)
+        // snapshot is a rendered grid with that OSC long since consumed —
+        // without this the tab indicator and the sidebar Agents list stay empty
+        // until the agent happens to report again.
+        {
+            let registry = terminals.lock();
+            for (terminal_id, status) in
+                okena_workspace::remote_apply::snapshot_agent_statuses(&snapshots)
+            {
+                if let Some(terminal) = registry.get(&terminal_id) {
+                    terminal.hydrate_agent_status(status);
+                }
+            }
+        }
 
         // Mirror the local daemon's hook execution history into the client-side
         // `HookMonitor` global so the Hook Log overlay reflects hooks that ran on
