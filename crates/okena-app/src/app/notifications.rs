@@ -32,6 +32,32 @@ pub(crate) struct NotificationJump {
     pub terminal_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NotificationWindowCandidate {
+    id: WindowId,
+    active: bool,
+    terminal_focused: bool,
+    project_visible: bool,
+}
+
+fn choose_notification_window(candidates: &[NotificationWindowCandidate]) -> WindowId {
+    candidates
+        .iter()
+        .find(|candidate| candidate.active)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.terminal_focused)
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.project_visible)
+        })
+        .map(|candidate| candidate.id)
+        .unwrap_or(WindowId::Main)
+}
+
 /// Fire a single native OS notification on a dedicated thread.
 ///
 /// `notify-rust`'s `show()` (and, on XDG, `wait_for_action`) block, so each
@@ -327,7 +353,7 @@ impl Okena {
         false
     }
 
-    /// Focus an exact terminal in the requested window, or the active window.
+    /// Focus an exact terminal in the requested or best matching window.
     pub(super) fn jump_to_terminal(
         &mut self,
         project_id: &str,
@@ -346,12 +372,11 @@ impl Okena {
             }
         };
         let target = requested_window.unwrap_or_else(|| {
-            let active = cx.active_window();
-            self.extra_window_handles
-                .iter()
-                .find(|(_, handle)| Some(**handle) == active)
-                .map(|(id, _)| *id)
-                .unwrap_or(WindowId::Main)
+            choose_notification_window(&self.notification_window_candidates(
+                project_id,
+                terminal_id,
+                cx,
+            ))
         });
 
         let Some((view, handle)) = self.window_view_and_handle(target) else {
@@ -403,6 +428,56 @@ impl Okena {
         }
     }
 
+    fn notification_window_candidates(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        cx: &App,
+    ) -> Vec<NotificationWindowCandidate> {
+        let active_window = cx.active_window();
+        let terminal_path = self
+            .workspace
+            .read(cx)
+            .project(project_id)
+            .and_then(|project| {
+                project
+                    .layout
+                    .as_ref()
+                    .and_then(|layout| layout.find_terminal_path(terminal_id))
+            });
+
+        let mut window_ids = vec![WindowId::Main];
+        window_ids.extend(
+            self.workspace
+                .read(cx)
+                .data()
+                .extra_windows
+                .iter()
+                .map(|window| WindowId::Extra(window.id)),
+        );
+
+        window_ids
+            .into_iter()
+            .filter_map(|id| {
+                let (view, handle) = self.window_view_and_handle(id)?;
+                let project_visible = self.project_visible_in(id, &view, project_id, cx);
+                let terminal_focused = project_visible
+                    && terminal_path.as_ref().is_some_and(|path| {
+                        view.read(cx)
+                            .focus_manager()
+                            .read(cx)
+                            .is_focused(project_id, path)
+                    });
+                Some(NotificationWindowCandidate {
+                    id,
+                    active: Some(handle) == active_window,
+                    terminal_focused,
+                    project_visible,
+                })
+            })
+            .collect()
+    }
+
     /// Whether `project_id` is in `window`'s currently visible set — accounting
     /// for the hidden set, folder filter, and that window's own zoom/focus
     /// state (read from its `FocusManager`).
@@ -423,5 +498,75 @@ impl Okena {
             .visible_projects(window_id, focused.as_ref(), individual)
             .iter()
             .any(|p| p.id == project_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NotificationWindowCandidate, choose_notification_window};
+    use crate::workspace::state::WindowId;
+    use uuid::Uuid;
+
+    fn candidate(
+        id: WindowId,
+        active: bool,
+        terminal_focused: bool,
+        project_visible: bool,
+    ) -> NotificationWindowCandidate {
+        NotificationWindowCandidate {
+            id,
+            active,
+            terminal_focused,
+            project_visible,
+        }
+    }
+
+    #[test]
+    fn active_window_keeps_priority() {
+        let extra = WindowId::Extra(Uuid::new_v4());
+        let candidates = [
+            candidate(WindowId::Main, false, true, true),
+            candidate(extra, true, false, false),
+        ];
+
+        assert_eq!(choose_notification_window(&candidates), extra);
+    }
+
+    #[test]
+    fn focused_terminal_wins_when_app_is_inactive() {
+        let extra = WindowId::Extra(Uuid::new_v4());
+        let candidates = [
+            candidate(WindowId::Main, false, false, false),
+            candidate(extra, false, true, true),
+        ];
+
+        assert_eq!(choose_notification_window(&candidates), extra);
+    }
+
+    #[test]
+    fn visible_project_wins_when_no_window_has_terminal_focus() {
+        let extra = WindowId::Extra(Uuid::new_v4());
+        let candidates = [
+            candidate(WindowId::Main, false, false, false),
+            candidate(extra, false, false, true),
+        ];
+
+        assert_eq!(choose_notification_window(&candidates), extra);
+    }
+
+    #[test]
+    fn focused_terminal_beats_an_earlier_visible_project() {
+        let extra = WindowId::Extra(Uuid::new_v4());
+        let candidates = [
+            candidate(WindowId::Main, false, false, true),
+            candidate(extra, false, true, true),
+        ];
+
+        assert_eq!(choose_notification_window(&candidates), extra);
+    }
+
+    #[test]
+    fn main_is_the_fallback_without_a_matching_window() {
+        assert_eq!(choose_notification_window(&[]), WindowId::Main);
     }
 }
