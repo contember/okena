@@ -12,7 +12,7 @@ Git status, diff parsing, and worktree operations for project directories.
 | `repository/worktree.rs` | Worktree ops — `create_worktree`, `create_worktree_with_start_point`, `remove_worktree`, `remove_worktree_fast`, `list_git_worktrees`, stale-dir cleanup. |
 | `repository/branch.rs` | Branch ops — list/classify (`BranchList`), checkout/create/delete/push, `get_default_branch`, rebase, merge, stash, per-file stage/unstage/discard. |
 | `repository/status.rs` | Working-tree status & diff stats — `StatusFetch`, `get_status`, `has_uncommitted_changes`, `get_current_branch`, `get_head_sha`, diff-stats, ahead/behind & unpushed counts. |
-| `repository/ci.rs` | CI/PR integration — `get_pr_info`, `get_ci_checks`, and the pure, unit-tested parsers `parse_ci_checks` / `parse_branch_ci`. |
+| `repository/ci.rs` | CI/PR integration — `fetch_pr_info`, `fetch_ci_checks`, and the pure, unit-tested parsers `parse_ci_checks` / `parse_branch_ci`. Both return `PrFetch`/`CiFetch` so callers can tell "no PR / no checks" from a rate-limit refusal; `fetch_ci_checks` skips the request entirely while the upstream commit still matches a settled cached result. |
 | `repository/paths.rs` | Path utilities — `get_repo_root`, `normalize_path`, `resolve_git_root_and_subdir`, `project_path_in_worktree`, `compute_target_paths`. |
 | `branch_names.rs` | Branch name utilities and validation. |
 
