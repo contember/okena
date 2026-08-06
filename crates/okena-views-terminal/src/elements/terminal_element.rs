@@ -41,6 +41,7 @@ mod tests {
     use gpui::{Font, FontFeatures, FontStyle, FontWeight};
     use okena_core::theme::{DARK_THEME, LIGHT_THEME};
     use okena_terminal::terminal::TerminalSize;
+    use std::sync::Arc;
 
     fn size(cols: u16, rows: u16) -> TerminalSize {
         TerminalSize {
@@ -127,29 +128,33 @@ mod tests {
     fn render_cache_hits_only_for_an_exact_key_with_layout() {
         let key = cache_key();
         let mut cache = TerminalRenderCache::default();
-        assert!(!cache.matches(&key));
+        assert!(cache.get(&key).is_none());
 
-        cache.store(key.clone(), empty_layout());
-        assert!(cache.matches(&key));
+        let stored = cache.store(key.clone(), empty_layout());
+        let hit = cache.get(&key).expect("exact key hits");
+        assert!(
+            Arc::ptr_eq(&stored, &hit),
+            "the hit reuses the stored layout"
+        );
 
         let mut changed_generation = key.clone();
         changed_generation.content_generation += 1;
-        assert!(!cache.matches(&changed_generation));
+        assert!(cache.get(&changed_generation).is_none());
 
         let mut changed_selection = key.clone();
         changed_selection.selection = Some(((1, 2), (3, 4)));
-        assert!(!cache.matches(&changed_selection));
+        assert!(cache.get(&changed_selection).is_none());
 
         let mut changed_font = key.clone();
         changed_font.font.weight = FontWeight::BOLD;
-        assert!(!cache.matches(&changed_font));
+        assert!(cache.get(&changed_font).is_none());
 
         let mut changed_theme = key;
         changed_theme.theme = LIGHT_THEME;
-        assert!(!cache.matches(&changed_theme));
+        assert!(cache.get(&changed_theme).is_none());
 
         cache.layout = None;
-        assert!(!cache.matches(&cache_key()));
+        assert!(cache.get(&cache_key()).is_none());
     }
 
     #[test]
@@ -160,7 +165,7 @@ mod tests {
 
         cache.invalidate();
 
-        assert!(!cache.matches(&key));
+        assert!(cache.get(&key).is_none());
         assert!(cache.key.is_none());
         assert!(cache.layout.is_none());
     }
@@ -407,6 +412,9 @@ pub struct TerminalElementState {
 struct TerminalRenderCacheKey {
     content_generation: u64,
     selection: Option<((usize, i32), (usize, i32))>,
+    /// Only the regular font: `state.font_bold` / `_italic` / `_bold_italic` are
+    /// derived from it by overriding weight and style, so it alone pins all four.
+    /// A separately configurable bold face would have to be added here too.
     font: Font,
     theme: ThemeColors,
 }
@@ -429,13 +437,22 @@ pub(crate) struct TerminalRenderCache {
 }
 
 impl TerminalRenderCache {
-    fn matches(&self, key: &TerminalRenderCacheKey) -> bool {
-        self.key.as_ref() == Some(key) && self.layout.is_some()
+    fn get(&self, key: &TerminalRenderCacheKey) -> Option<Arc<TerminalGridLayout>> {
+        if self.key.as_ref() != Some(key) {
+            return None;
+        }
+        self.layout.clone()
     }
 
-    fn store(&mut self, key: TerminalRenderCacheKey, layout: TerminalGridLayout) {
+    fn store(
+        &mut self,
+        key: TerminalRenderCacheKey,
+        layout: TerminalGridLayout,
+    ) -> Arc<TerminalGridLayout> {
+        let layout = Arc::new(layout);
         self.key = Some(key);
-        self.layout = Some(Arc::new(layout));
+        self.layout = Some(layout.clone());
+        layout
     }
 
     pub(crate) fn invalidate(&mut self) {
@@ -444,14 +461,20 @@ impl TerminalRenderCache {
     }
 }
 
+/// Builds the grid layout and reports the `content_generation` it was built
+/// from. The generation is sampled inside `with_content`, i.e. under the same
+/// `term` lock that every grid mutation takes — reading it after the lock is
+/// released would let a layout be filed under a generation it never saw, and
+/// that pane would then hold a stale frame until some other input changed.
 fn build_terminal_grid_layout(
     terminal: &Terminal,
     selection: Option<((usize, i32), (usize, i32))>,
     t: &ThemeColors,
     state: &TerminalElementState,
-) -> TerminalGridLayout {
-    let (batched_runs, rects, screen_lines, display_offset, cursor_point, cols) = terminal
-        .with_content(|term| {
+) -> (u64, TerminalGridLayout) {
+    let (content_generation, batched_runs, rects, screen_lines, display_offset, cursor_point, cols) =
+        terminal.with_content(|term| {
+            let content_generation = terminal.content_generation();
             let grid = term.grid();
             let screen_lines = grid.screen_lines();
             let cols = grid.columns();
@@ -652,6 +675,7 @@ fn build_terminal_grid_layout(
             }
 
             (
+                content_generation,
                 batched_runs,
                 rects,
                 screen_lines,
@@ -660,7 +684,7 @@ fn build_terminal_grid_layout(
                 cols,
             )
         });
-    TerminalGridLayout {
+    let layout = TerminalGridLayout {
         batched_runs,
         rects,
         screen_lines,
@@ -668,7 +692,8 @@ fn build_terminal_grid_layout(
         cursor_col: cursor_point.column.0,
         cursor_visual_line: cursor_point.line.0 + display_offset,
         cells_scanned: screen_lines.saturating_mul(cols),
-    }
+    };
+    (content_generation, layout)
 }
 
 impl Element for TerminalElement {
@@ -921,21 +946,21 @@ impl Element for TerminalElement {
             theme: t,
         };
         let mut render_cache = self.render_cache.lock();
-        let grid_cache_hit = render_cache.matches(&cache_key);
-        if !grid_cache_hit {
-            let layout = build_terminal_grid_layout(&self.terminal, selection, &t, state);
-            // `with_content` drains pending remote output before taking the grid
-            // snapshot, so retain the generation that the cached layout actually
-            // represents rather than the value observed before the drain.
-            cache_key.content_generation = self.terminal.content_generation();
-            render_cache.store(cache_key, layout);
-        }
-        let layout = render_cache.layout.as_ref().cloned();
-        drop(render_cache);
-        let Some(layout) = layout else {
-            debug_assert!(false, "terminal render cache missing after initialization");
-            return;
+        let cached_layout = render_cache.get(&cache_key);
+        let grid_cache_hit = cached_layout.is_some();
+        let layout = match cached_layout {
+            Some(layout) => layout,
+            None => {
+                let (content_generation, layout) =
+                    build_terminal_grid_layout(&self.terminal, selection, &t, state);
+                // File the layout under the generation observed while building it:
+                // `with_content` drains pending remote output first, so the value
+                // sampled before the call can already be one behind.
+                cache_key.content_generation = content_generation;
+                render_cache.store(cache_key, layout)
+            }
         };
+        drop(render_cache);
 
         // Phase 2: Paint backgrounds
         for rect in &layout.rects {
