@@ -33,6 +33,29 @@ pub fn icon_button_sized(
     icon_size: f32,
     t: &ThemeColors,
 ) -> Stateful<Div> {
+    icon_button_bare_sized(id, icon, button_size, icon_size, t).hover(|s| s.bg(rgb(t.bg_hover)))
+}
+
+/// Icon button without the built-in hover style, for callers that need to own
+/// `.hover()` themselves — e.g. a button that also reveals itself on hover.
+/// GPUI permits only one hover style per element and `debug_assert!`s on the
+/// second call, so layering another `.hover()` on [`icon_button`] would panic.
+pub fn icon_button_bare(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    icon_button_bare_sized(id, icon, 18.0, 12.0, t)
+}
+
+/// [`icon_button_sized`] without the hover style. See [`icon_button_bare`].
+pub fn icon_button_bare_sized(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    button_size: f32,
+    icon_size: f32,
+    t: &ThemeColors,
+) -> Stateful<Div> {
     div()
         .id(id)
         .flex_shrink_0()
@@ -43,7 +66,6 @@ pub fn icon_button_sized(
         .items_center()
         .justify_center()
         .rounded(px(3.0))
-        .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             svg()
                 .path(icon)
