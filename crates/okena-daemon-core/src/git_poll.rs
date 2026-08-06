@@ -129,8 +129,25 @@ struct ProjectPoll {
 
 /// Projects the user can currently see. The `gh` fan-out is scoped to these:
 /// a badge nobody is looking at is not worth GitHub API budget.
-fn visible_project_ids(workspace: &Workspace) -> HashSet<String> {
-    workspace.all_visible_project_ids()
+///
+/// Two sources, unioned. The workspace's own hidden set covers a daemon driving
+/// its own surface, but for a desktop client it is a stale copy that the client
+/// never writes to — visibility is client-owned presentation state, persisted
+/// client-side in `window-layout.json` under different window ids. So each
+/// connected client declares what it renders (`WsInbound::SetVisibleProjects`),
+/// and that is the authority for its own viewport. A client that declares
+/// nothing (older build, no viewport yet) simply contributes nothing.
+fn visible_project_ids(
+    workspace: &Workspace,
+    remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
+) -> HashSet<String> {
+    let mut visible = workspace.all_visible_project_ids();
+    if let Ok(declared) = remote_visible_projects.read() {
+        for project_ids in declared.values() {
+            visible.extend(project_ids.iter().cloned());
+        }
+    }
+    visible
 }
 
 /// Visible projects plus any owning a terminal a remote client is streaming.
@@ -143,8 +160,9 @@ fn visible_project_ids(workspace: &Workspace) -> HashSet<String> {
 fn streaming_project_ids(
     workspace: &Workspace,
     remote_subscribed_terminals: &RwLock<HashMap<u64, HashSet<String>>>,
+    remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
 ) -> HashSet<String> {
-    let mut relevant = visible_project_ids(workspace);
+    let mut relevant = visible_project_ids(workspace, remote_visible_projects);
     if let Ok(subscribed) = remote_subscribed_terminals.read() {
         for terminal_ids in subscribed.values() {
             for terminal_id in terminal_ids {
@@ -206,6 +224,7 @@ fn merge_status_results(
 pub async fn run_git_head_poll(
     workspace: Arc<Mutex<Workspace>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
 ) {
     let mut previous = HashMap::<String, HeadSnapshot>::new();
@@ -221,7 +240,11 @@ pub async fn run_git_head_poll(
 
         let (projects, relevant_ids): (Vec<(String, String)>, HashSet<String>) = {
             let workspace = workspace.lock();
-            let relevant = streaming_project_ids(&workspace, &remote_subscribed_terminals);
+            let relevant = streaming_project_ids(
+                &workspace,
+                &remote_subscribed_terminals,
+                &remote_visible_projects,
+            );
             let projects = workspace
                 .projects()
                 .iter()
@@ -518,6 +541,7 @@ pub async fn run_git_poll(
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
     state_version: watch::Sender<u64>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     mut trigger_rx: mpsc::UnboundedReceiver<GitPollTrigger>,
 ) {
     // Last-published per-project statuses, kept across cycles so we only
@@ -572,8 +596,12 @@ pub async fn run_git_poll(
         // ── 1. Snapshot relevance and choose this cycle's local work ─────────
         let (projects, visible_ids, streaming_ids) = {
             let workspace = workspace.lock();
-            let visible = visible_project_ids(&workspace);
-            let streaming = streaming_project_ids(&workspace, &remote_subscribed_terminals);
+            let visible = visible_project_ids(&workspace, &remote_visible_projects);
+            let streaming = streaming_project_ids(
+                &workspace,
+                &remote_subscribed_terminals,
+                &remote_visible_projects,
+            );
             let projects: Vec<(String, String)> = workspace
                 .projects()
                 .iter()
@@ -608,12 +636,13 @@ pub async fn run_git_poll(
 
         // Explicit actions steer the `gh` schedule: a branch switch invalidates
         // what we hold, while merely showing a project is only worth a fetch
-        // when it has never been fetched at all.
+        // when we hold no PR/CI result for it yet.
         for id in &trigger_acc.invalidate_gh_ids {
             schedule.force(id);
         }
         for id in &trigger_acc.candidate_gh_ids {
-            schedule.force_if_unfetched(id);
+            let has_cached_result = pr_infos.contains_key(id) && ci_checks.contains_key(id);
+            schedule.force_if_unfetched(id, has_cached_result);
         }
 
         // ── 2. Refresh selected statuses and merge into the published cache ──
@@ -866,12 +895,14 @@ mod tests {
         drop(rx);
 
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
+        let client_visible = Arc::new(RwLock::new(HashMap::new()));
         let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
         run_git_poll(
             workspace,
             git_status_tx.clone(),
             state_version,
             subscribed,
+            client_visible,
             trigger_rx,
         )
         .await;
@@ -1066,6 +1097,63 @@ mod tests {
             HashMap::from([("hidden".to_string(), "new".to_string())]),
         );
         assert_eq!(changed, vec!["hidden".to_string()]);
+    }
+
+    fn workspace_with_hidden_project(id: &str) -> Workspace {
+        let mut data = empty_workspace_data();
+        data.projects.push(okena_state::ProjectData {
+            id: id.to_string(),
+            name: "Project".to_string(),
+            path: "/tmp".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+        });
+        data.project_order.push(id.to_string());
+        data.main_window.hidden_project_ids.insert(id.to_string());
+        Workspace::new(data)
+    }
+
+    /// The regression this whole path exists for: a desktop client keeps its
+    /// own visibility (client-side window ids, `window-layout.json`) and never
+    /// writes to the daemon's copy, so a project hidden here can be the very
+    /// one on screen. The client's declaration has to win.
+    #[test]
+    fn client_declared_projects_enter_the_gh_scope() {
+        let workspace = workspace_with_hidden_project("on-screen");
+
+        let nothing_declared = RwLock::new(HashMap::new());
+        assert!(!visible_project_ids(&workspace, &nothing_declared).contains("on-screen"));
+
+        let declared = RwLock::new(HashMap::from([(
+            7u64,
+            HashSet::from(["on-screen".to_string()]),
+        )]));
+        assert!(visible_project_ids(&workspace, &declared).contains("on-screen"));
+    }
+
+    #[test]
+    fn every_clients_viewport_counts() {
+        let workspace = Workspace::new(empty_workspace_data());
+        let declared = RwLock::new(HashMap::from([
+            (1u64, HashSet::from(["desktop".to_string()])),
+            (2u64, HashSet::from(["phone".to_string()])),
+        ]));
+        let visible = visible_project_ids(&workspace, &declared);
+        assert!(visible.contains("desktop") && visible.contains("phone"));
     }
 
     /// Build an `apply_github_result` fixture: one project, one CI outcome.

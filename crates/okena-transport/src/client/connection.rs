@@ -228,6 +228,11 @@ pub struct RemoteClient<H: ConnectionHandler> {
     ws_abort_handle: Option<tokio::task::AbortHandle>,
     /// Shared token reference so WS reconnect loop can pick up refreshed tokens.
     shared_token: Arc<std::sync::RwLock<Option<String>>>,
+    /// Last declared viewport (unprefixed project ids). Held here rather than
+    /// only pushed down the channel so every reconnect re-declares it — the
+    /// server drops a connection's entry on close, and a client that never
+    /// re-sends would silently fall out of the `gh` PR/CI scope.
+    visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl<H: ConnectionHandler> RemoteClient<H> {
@@ -251,6 +256,23 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             event_tx,
             ws_abort_handle: None,
             shared_token,
+            visible_projects: Arc::new(std::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Declare which of this connection's projects the client currently renders.
+    ///
+    /// Full replacement set of unprefixed ids. Stored for reconnects and pushed
+    /// to the server immediately when a session is up.
+    pub fn set_visible_projects(&self, project_ids: Vec<String>) {
+        if let Ok(mut stored) = self.visible_projects.write() {
+            if *stored == project_ids {
+                return;
+            }
+            stored.clone_from(&project_ids);
+        }
+        if let Some(tx) = self.ws_tx.as_ref() {
+            let _ = tx.try_send(WsClientMessage::SetVisibleProjects { project_ids });
         }
     }
 
@@ -339,6 +361,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         // Create fresh WS message channel
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
+        let visible_projects = self.visible_projects.clone();
 
         let task = self.runtime.spawn(async move {
             let mut config = config;
@@ -498,6 +521,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             ws_rx,
                             handler,
                             shared_token,
+                            visible_projects,
                         )
                         .await;
                         return;
@@ -570,6 +594,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         // Create fresh WS message channel
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
+        let visible_projects = self.visible_projects.clone();
 
         self.status = ConnectionStatus::Connecting;
 
@@ -647,6 +672,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 ws_rx,
                                 handler,
                                 shared_token,
+                                visible_projects,
                             )
                             .await;
                         }
@@ -725,6 +751,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     }
 
     /// Run the main WebSocket loop with reconnection.
+    // Each param is a distinct piece of per-connection state the session needs.
+    #[allow(clippy::too_many_arguments)]
     async fn run_ws_loop(
         config: RemoteConnectionConfig,
         token: String,
@@ -733,14 +761,23 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_rx: async_channel::Receiver<WsClientMessage>,
         handler: Arc<H>,
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
+        visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
     ) {
         let mut reconnect_attempt: u32 = 0;
         let max_reconnect_attempts = ws_reconnect_max_attempts(&config);
         let mut current_token = token;
 
         loop {
-            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler)
-                .await
+            match Self::ws_session(
+                &config,
+                &current_token,
+                &event_tx,
+                &ws_tx,
+                &ws_rx,
+                &handler,
+                &visible_projects,
+            )
+            .await
             {
                 Ok(()) => {
                     // Clean disconnect requested
@@ -826,6 +863,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_tx: &async_channel::Sender<WsClientMessage>,
         ws_rx: &async_channel::Receiver<WsClientMessage>,
         handler: &Arc<H>,
+        visible_projects: &Arc<std::sync::RwLock<Vec<String>>>,
     ) -> Result<(), SessionError> {
         // Shared stream maps: terminal_id -> stream_id (for writer) and reverse (for reader)
         let stream_map: Arc<std::sync::RwLock<HashMap<String, u32>>> =
@@ -1017,6 +1055,28 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             .map_err(|e| SessionError::Transient(format!("Failed to send subscribe: {}", e)))?;
         }
 
+        // Re-declare the viewport: the server drops a connection's entry when
+        // the socket closes, so a reconnect that stayed quiet would leave this
+        // client's projects outside the server's `gh` PR/CI scope.
+        let declared = visible_projects
+            .read()
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        if !declared.is_empty() {
+            let visible_msg = serde_json::json!({
+                "type": "set_visible_projects",
+                "project_ids": declared,
+            });
+            futures::SinkExt::send(
+                &mut ws_write,
+                tungstenite::Message::Text(visible_msg.to_string()),
+            )
+            .await
+            .map_err(|e| {
+                SessionError::Transient(format!("Failed to send visible projects: {}", e))
+            })?;
+        }
+
         // Notify connected
         let _ = event_tx
             .send(ConnectionEvent::StatusChanged {
@@ -1099,6 +1159,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         serde_json::json!({
                             "type": "unsubscribe",
                             "terminal_ids": terminal_ids,
+                        })
+                    }
+                    WsClientMessage::SetVisibleProjects { project_ids } => {
+                        serde_json::json!({
+                            "type": "set_visible_projects",
+                            "project_ids": project_ids,
                         })
                     }
                 };

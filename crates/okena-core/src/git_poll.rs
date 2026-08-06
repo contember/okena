@@ -80,10 +80,17 @@ impl GithubPollSchedule {
         entry.ci_revalidate_cycle = 0;
     }
 
-    /// A project became relevant. Only worth an off-cadence fetch when we have
-    /// never fetched it — otherwise the cached badge is still good.
-    pub fn force_if_unfetched(&mut self, id: &str) {
-        if !self.projects.contains_key(id) {
+    /// A project became relevant. Only worth an off-cadence fetch when the
+    /// caller holds no PR/CI result for it — otherwise the cached badge is
+    /// still good and the cadence will refresh it.
+    ///
+    /// `has_cached_result` is the caller's PR/CI cache, deliberately not this
+    /// schedule's own bookkeeping: a project can carry a schedule entry with no
+    /// result behind it (its fetch was discarded, or it dropped out of the poll
+    /// scope before one landed). Keying off the entry made this a permanent
+    /// no-op for such a project, so nothing could ever unstick its badge.
+    pub fn force_if_unfetched(&mut self, id: &str, has_cached_result: bool) {
+        if !has_cached_result {
             self.force(id);
         }
     }
@@ -401,14 +408,28 @@ mod tests {
     }
 
     #[test]
-    fn relevance_only_forces_projects_never_fetched() {
+    fn relevance_only_forces_projects_with_no_cached_result() {
         let mut schedule = GithubPollSchedule::default();
-        schedule.force_if_unfetched("fresh");
+        schedule.force_if_unfetched("fresh", false);
         assert!(schedule.ci_due("fresh", 0, false));
 
         schedule.record_ci("known", 10, false, Some("abc".into()));
-        schedule.force_if_unfetched("known");
+        schedule.force_if_unfetched("known", true);
         assert!(!schedule.ci_due("known", 11, true));
+    }
+
+    #[test]
+    fn a_schedule_entry_without_a_result_still_forces() {
+        // A project can hold a schedule entry with nothing behind it — its
+        // fetch was discarded, or it left the poll scope before one landed.
+        // Judging "unfetched" by the entry made this a permanent no-op, which
+        // is how a badge could stay stale for as long as the daemon ran.
+        let mut schedule = GithubPollSchedule::default();
+        schedule.pr_dispatched("stalled", 0);
+        assert!(!schedule.pr_due("stalled", 5, true));
+
+        schedule.force_if_unfetched("stalled", false);
+        assert!(schedule.pr_due("stalled", 5, false));
     }
 
     #[test]

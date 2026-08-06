@@ -15,6 +15,17 @@ pub enum WsInbound {
     Unsubscribe {
         terminal_ids: Vec<String>,
     },
+    /// Projects this client currently renders, as a complete replacement set.
+    ///
+    /// Visibility is client-owned presentation state, so the server cannot
+    /// derive it: the desktop keeps its own hidden set in `window-layout.json`,
+    /// with its own window ids. Without this the `gh` PR/CI fan-out scopes
+    /// itself to the server's own stale copy and silently never refreshes a
+    /// project the user is actually looking at. Subscriptions are no substitute
+    /// — clients subscribe to every terminal, not just the ones they render.
+    SetVisibleProjects {
+        project_ids: Vec<String>,
+    },
     SendText {
         terminal_id: String,
         text: String,
@@ -146,6 +157,9 @@ mod tests {
             },
             WsInbound::Unsubscribe {
                 terminal_ids: vec!["t1".into()],
+            },
+            WsInbound::SetVisibleProjects {
+                project_ids: vec!["p1".into(), "p2".into()],
             },
             WsInbound::SendText {
                 terminal_id: "t1".into(),

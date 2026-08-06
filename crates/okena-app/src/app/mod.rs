@@ -606,6 +606,13 @@ impl Okena {
         })
         .detach();
 
+        // Keep the daemon's view of this client's viewport current — it scopes
+        // the `gh` PR/CI fan-out to it. See `publish_visible_projects`.
+        cx.observe(&workspace, |this, _workspace, cx| {
+            this.publish_visible_projects(cx);
+        })
+        .detach();
+
         // Linux starts its platform event loop only after the application
         // startup callback returns. Use the foreground executor so restored
         // Wayland windows are created on the first live event-loop turn, while
@@ -628,6 +635,33 @@ impl Okena {
 }
 
 impl Okena {
+    /// Declare this client's viewport to every connection.
+    ///
+    /// The daemon scopes its `gh` PR/CI fan-out to the projects it believes are
+    /// visible, but visibility is client-owned presentation state — it lives in
+    /// `window-layout.json` under client-side window ids the daemon never sees.
+    /// Without this declaration a project the user is looking at can sit
+    /// outside that scope and keep a stale PR/CI badge indefinitely.
+    ///
+    /// A window's fullscreen project counts as rendered even when hidden in
+    /// that window's overview: fullscreen draws the project's git header too.
+    fn publish_visible_projects(&self, cx: &mut Context<Self>) {
+        let mut visible = self.workspace.read(cx).all_visible_project_ids();
+        let focus_managers: Vec<Entity<crate::workspace::focus::FocusManager>> =
+            std::iter::once(&self.main_window)
+                .chain(self.extra_windows.values())
+                .map(|view| view.read(cx).focus_manager())
+                .collect();
+        for focus_manager in focus_managers {
+            if let Some(project_id) = focus_manager.read(cx).fullscreen_project_id() {
+                visible.insert(project_id.to_string());
+            }
+        }
+        self.remote_manager.update(cx, |manager, _cx| {
+            manager.publish_visible_projects(&visible)
+        });
+    }
+
     fn queue_terminal_activity_repaints(
         &mut self,
         terminal_ids: &[String],
