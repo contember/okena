@@ -320,7 +320,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     fn create_terminal_for_existing_pty(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         let existing = self.terminals.lock().get(&terminal_id).cloned();
         if let Some(terminal) = existing {
-            if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
+            if let Some(pid) = self.backend.get_foreground_shell_pid(&terminal_id) {
                 terminal.set_shell_pid(pid);
             }
             self.terminal = Some(terminal.clone());
