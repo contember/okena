@@ -244,6 +244,11 @@ pub struct DaemonCore {
     /// expensive `gh` PR/CI lookups only for projects a client is viewing.
     remote_subscribed_terminals:
         Arc<std::sync::RwLock<HashMap<u64, std::collections::HashSet<String>>>>,
+    /// Projects each client currently renders (connection id -> project ids),
+    /// shared with the remote server. This — not the daemon's own copy of the
+    /// hidden set — is what tells the `gh` fan-out which badges are on screen.
+    remote_visible_projects:
+        Arc<std::sync::RwLock<HashMap<u64, std::collections::HashSet<String>>>>,
     /// Git poll wake-up sender shared by command handling and the remote server.
     git_poll_trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
     /// Git poll wake-up receiver consumed by [`run`](DaemonCore::run).
@@ -393,6 +398,7 @@ impl DaemonCore {
             Arc::new(tokio::sync::broadcast::channel::<ApiTerminalFocusRequest>(64).0);
         let auth_store = Arc::new(AuthStore::new());
         let remote_subscribed_terminals = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let remote_visible_projects = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let next_connection_id = Arc::new(AtomicU64::new(0));
         // Live-WS-connection count + graceful-shutdown trigger for `/v1/shutdown`.
         let active_connections = Arc::new(AtomicU64::new(0));
@@ -413,6 +419,7 @@ impl DaemonCore {
             toast_tx.clone(),
             terminal_focus_tx,
             remote_subscribed_terminals.clone(),
+            remote_visible_projects.clone(),
             Some(git_poll_trigger_tx.clone()),
             next_connection_id,
             active_connections,
@@ -451,6 +458,7 @@ impl DaemonCore {
             git_status_tx,
             toast_tx,
             remote_subscribed_terminals,
+            remote_visible_projects,
             git_poll_trigger_tx,
             git_poll_trigger_rx,
             settings,
@@ -481,6 +489,7 @@ impl DaemonCore {
             git_status_tx,
             toast_tx,
             remote_subscribed_terminals,
+            remote_visible_projects,
             git_poll_trigger_tx,
             git_poll_trigger_rx,
             settings,
@@ -525,11 +534,13 @@ impl DaemonCore {
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
                 remote_subscribed_terminals.clone(),
+                remote_visible_projects.clone(),
                 git_poll_trigger_rx,
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
                 remote_subscribed_terminals,
+                remote_visible_projects,
                 git_poll_trigger_tx.clone(),
             ));
             // Forward the daemon's HookMonitor toasts to clients. The daemon has

@@ -259,6 +259,20 @@ async fn handle_ws(
                                     }
                                 }
                             }
+                            Ok(WsInbound::SetVisibleProjects { project_ids }) => {
+                                // Full replacement set, so a project leaving the
+                                // client's viewport drops out of the `gh` scope.
+                                if let Ok(mut map) = state.remote_visible_projects.write() {
+                                    if project_ids.is_empty() {
+                                        map.remove(&connection_id);
+                                    } else {
+                                        map.insert(connection_id, project_ids.into_iter().collect());
+                                    }
+                                }
+                                if let Some(tx) = &state.git_poll_trigger_tx {
+                                    let _ = tx.send(GitPollTrigger::visibility_changed());
+                                }
+                            }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
@@ -623,6 +637,10 @@ async fn handle_ws(
 
     // Cleanup: remove this connection's subscribed terminals from shared state
     if let Ok(mut map) = state.remote_subscribed_terminals.write() {
+        map.remove(&connection_id);
+    }
+    // Same for its declared viewport — a gone client renders nothing.
+    if let Ok(mut map) = state.remote_visible_projects.write() {
         map.remove(&connection_id);
     }
 

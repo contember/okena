@@ -12,11 +12,11 @@ use okena_core::soft_close::{
 use okena_transport::client::connection::try_refresh_token;
 use okena_transport::client::{
     ConnectionEvent, ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig,
-    make_prefixed_id,
+    is_remote_terminal, make_prefixed_id, strip_prefix,
 };
 
 use gpui::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 struct QueuedAction {
@@ -521,6 +521,24 @@ impl RemoteConnectionManager {
             }
         }
         cx.notify();
+    }
+
+    /// Tell every connection which of its projects this client renders.
+    ///
+    /// `visible_ids` are client-side (prefixed) project ids; each connection
+    /// receives only its own, unprefixed. A connection with nothing visible is
+    /// told so explicitly, so the server drops it from the `gh` PR/CI scope
+    /// instead of keeping a stale viewport. Sorted for a stable no-op check.
+    pub fn publish_visible_projects(&self, visible_ids: &HashSet<String>) {
+        for (connection_id, connection) in &self.connections {
+            let mut project_ids: Vec<String> = visible_ids
+                .iter()
+                .filter(|id| is_remote_terminal(id, connection_id))
+                .map(|id| strip_prefix(id, connection_id))
+                .collect();
+            project_ids.sort();
+            connection.set_visible_projects(project_ids);
+        }
     }
 
     /// Send an action to a remote server via HTTP POST /v1/actions.

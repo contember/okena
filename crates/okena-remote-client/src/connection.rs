@@ -202,6 +202,10 @@ impl RemoteConnection {
         self.client.set_status(status);
     }
 
+    pub fn set_visible_projects(&self, project_ids: Vec<String>) {
+        self.client.set_visible_projects(project_ids);
+    }
+
     pub fn remote_state(&self) -> Option<&StateResponse> {
         self.client.remote_state()
     }

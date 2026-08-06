@@ -36,6 +36,9 @@ pub enum WsClientMessage {
     Subscribe { terminal_ids: Vec<String> },
     /// Unsubscribe from terminal output streams
     Unsubscribe { terminal_ids: Vec<String> },
+    /// Declare which projects this client renders, as a full replacement set.
+    /// Server-side ids (unprefixed) — scopes the server's `gh` PR/CI fan-out.
+    SetVisibleProjects { project_ids: Vec<String> },
 }
 
 /// Error type distinguishing auth failures from transient network errors.
