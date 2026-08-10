@@ -8,6 +8,8 @@ use gpui::*;
 #[cfg(feature = "gpui-ui")]
 use gpui_component::h_flex;
 #[cfg(feature = "gpui-ui")]
+use gpui_component::tooltip::Tooltip;
+#[cfg(feature = "gpui-ui")]
 use okena_extensions::ThemeColors;
 #[cfg(feature = "gpui-ui")]
 use okena_ui::tokens::ui_text_sm;
@@ -427,6 +429,11 @@ impl Render for UpdateStatusWidget {
                 .text_color(rgb(t.term_green))
                 .text_size(ui_text_sm(cx))
                 .child(format!("Restart into v{version}"))
+                // The daemon restarts too, so every PTY dies — say so before the click.
+                .tooltip(|window, cx| {
+                    Tooltip::new("Restarts Okena and the daemon; active terminal sessions end")
+                        .build(window, cx)
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     if this.restarting {
                         return;

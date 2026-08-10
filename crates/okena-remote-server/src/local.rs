@@ -580,31 +580,34 @@ pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     strip_restart_handoff_args(&mut args);
     let my_pid = std::process::id();
-    if okena_core::profiles::try_current()
-        .is_some_and(|paths| paths.pending_config_restore().is_file())
-    {
+    let paths = okena_core::profiles::try_current();
+    if paths.is_some_and(|paths| paths.pending_config_restore().is_file()) {
         let old_exe = old_binary_path(&exe);
-        if !old_exe.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("revert helper is missing: {}", old_exe.display()),
-            ));
+        if old_exe.is_file() {
+            return std::process::Command::new(old_exe)
+                .args(&args)
+                .arg(AWAIT_PID_FLAG)
+                .arg(my_pid.to_string())
+                .arg(COMPLETE_CONFIG_RESTORE_FLAG)
+                .arg(REVERT_TARGET_EXE_FLAG)
+                .arg(exe)
+                .spawn();
         }
-        std::process::Command::new(old_exe)
-            .args(&args)
-            .arg(AWAIT_PID_FLAG)
-            .arg(my_pid.to_string())
-            .arg(COMPLETE_CONFIG_RESTORE_FLAG)
-            .arg(REVERT_TARGET_EXE_FLAG)
-            .arg(exe)
-            .spawn()
-    } else {
-        std::process::Command::new(exe)
-            .args(&args)
-            .arg(AWAIT_PID_FLAG)
-            .arg(my_pid.to_string())
-            .spawn()
+        // The helper was cleaned up before the restart landed. Drop the request
+        // instead of wedging this and every later restart on a missing binary.
+        log::error!(
+            "Revert helper {} is missing; restarting without the config restore",
+            old_exe.display()
+        );
+        if let Some(paths) = paths {
+            okena_core::profiles::clear_pending_config_restore(paths);
+        }
     }
+    std::process::Command::new(exe)
+        .args(&args)
+        .arg(AWAIT_PID_FLAG)
+        .arg(my_pid.to_string())
+        .spawn()
 }
 
 fn old_binary_path(exe: &Path) -> PathBuf {
@@ -613,6 +616,11 @@ fn old_binary_path(exe: &Path) -> PathBuf {
 
 /// Complete a deferred config restore, then launch the downgraded daemon.
 /// Returns `Ok(false)` during a normal daemon start.
+///
+/// A failed restore must not cost the user their daemon: the binary is already
+/// downgraded, so we log, drop the request so later restarts don't retry it
+/// forever, and boot the target anyway (`restore_pending_config` has already put
+/// the current config back).
 pub fn complete_config_restore_if_requested() -> anyhow::Result<bool> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.iter().any(|arg| arg == COMPLETE_CONFIG_RESTORE_FLAG) {
@@ -622,13 +630,18 @@ pub fn complete_config_restore_if_requested() -> anyhow::Result<bool> {
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("{REVERT_TARGET_EXE_FLAG} is required"))?;
     let paths = okena_core::profiles::current();
-    let restored = okena_core::profiles::restore_pending_config(paths)?
-        .ok_or_else(|| anyhow::anyhow!("pending config restore is missing"))?;
-    log::info!(
-        "Restored config snapshot for v{} from {}",
-        restored.target_version,
-        restored.snapshot.created_at
-    );
+    match okena_core::profiles::restore_pending_config(paths) {
+        Ok(Some(restored)) => log::info!(
+            "Restored config snapshot for v{} from {}",
+            restored.target_version,
+            restored.snapshot.created_at
+        ),
+        Ok(None) => log::warn!("Config restore was requested but no pending request exists"),
+        Err(error) => {
+            log::error!("Config restore failed; starting the reverted daemon anyway: {error:#}");
+            okena_core::profiles::clear_pending_config_restore(paths);
+        }
+    }
 
     let mut target_args = args;
     strip_restart_handoff_args(&mut target_args);

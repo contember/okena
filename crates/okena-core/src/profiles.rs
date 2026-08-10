@@ -578,8 +578,12 @@ const SNAPSHOT_FILES: &[&str] = &[
 /// Config directories copied recursively into every snapshot.
 const SNAPSHOT_DIRS: &[&str] = &["themes", "sessions"];
 
-/// Maximum number of config snapshots to retain per profile.
+/// Maximum number of config snapshots to retain per profile, per bucket.
 const MAX_SNAPSHOTS: usize = 3;
+
+/// Key prefix for the copy of the *current* config taken just before a revert.
+/// These are recovery aids, not revert targets — see [`prune_snapshots`].
+const SAFETY_SNAPSHOT_PREFIX: &str = "before-revert-";
 
 /// Metadata for an exact-version config snapshot that can accompany a downgrade.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -803,7 +807,7 @@ pub fn restore_pending_config(paths: &ProfilePaths) -> Result<Option<PendingConf
     let timestamp = now_iso8601();
     let previous_version = read_app_version_marker(paths).unwrap_or_else(|| "unknown".to_string());
     let safety_key = format!(
-        "before-revert-{}-{}",
+        "{SAFETY_SNAPSHOT_PREFIX}{}-{}",
         sanitize_key(&previous_version),
         timestamp.replace([':', 'T', 'Z'], "-")
     );
@@ -832,6 +836,8 @@ pub fn restore_pending_config(paths: &ProfilePaths) -> Result<Option<PendingConf
 
     record_app_version(paths, &pending.target_version);
     std::fs::remove_file(paths.pending_config_restore())?;
+    // Only now that `source` has been consumed is it safe to prune.
+    prune_safety_snapshots(&paths.config_backups_dir(), MAX_SNAPSHOTS);
     Ok(Some(pending))
 }
 
@@ -970,20 +976,50 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keep the `keep` most recently created snapshots, removing older ones.
+/// Keep the `keep` most recently created snapshots, removing older ones. Revert
+/// targets and pre-revert safety copies are pruned as separate buckets — a burst
+/// of reverts must not evict the version snapshots those reverts need.
 fn prune_snapshots(backups_dir: &Path, keep: usize) {
+    let (targets, safety) = split_snapshot_dirs(backups_dir);
+    prune_oldest(targets, keep);
+    prune_oldest(safety, keep);
+}
+
+/// Prune only the pre-revert safety copies, leaving revert targets untouched.
+fn prune_safety_snapshots(backups_dir: &Path, keep: usize) {
+    prune_oldest(split_snapshot_dirs(backups_dir).1, keep);
+}
+
+type SnapshotDirs = Vec<(std::time::SystemTime, PathBuf)>;
+
+/// Split `config-backups/` into (revert targets, pre-revert safety copies).
+fn split_snapshot_dirs(backups_dir: &Path) -> (SnapshotDirs, SnapshotDirs) {
     let Ok(entries) = std::fs::read_dir(backups_dir) else {
-        return;
+        return (Vec::new(), Vec::new());
     };
-    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
-        .filter_map(|e| {
-            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
-            Some((mtime, e.path()))
-        })
-        .collect();
+    let mut targets = Vec::new();
+    let mut safety = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".tmp") {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if name.starts_with(SAFETY_SNAPSHOT_PREFIX) {
+            safety.push((mtime, entry.path()));
+        } else {
+            targets.push((mtime, entry.path()));
+        }
+    }
+    (targets, safety)
+}
+
+fn prune_oldest(mut dirs: SnapshotDirs, keep: usize) {
     if dirs.len() <= keep {
         return;
     }
@@ -1464,6 +1500,35 @@ mod tests {
                 .unwrap()
                 .contains("current")
         );
+    }
+
+    #[test]
+    fn safety_copies_do_not_evict_revert_targets() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        let backups = paths.config_backups_dir();
+        // Version snapshots first, safety copies second, so the safety copies are
+        // the newest — the exact shape that used to starve the revert targets.
+        for version in ["0.24.0", "0.25.0", "0.26.0", "0.27.0"] {
+            fs::create_dir_all(backups.join(version)).unwrap();
+        }
+        for index in 0..4 {
+            fs::create_dir_all(backups.join(format!("{SAFETY_SNAPSHOT_PREFIX}0.28.0-{index}")))
+                .unwrap();
+        }
+
+        prune_snapshots(&backups, MAX_SNAPSHOTS);
+
+        let names: Vec<String> = fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let (safety, targets): (Vec<_>, Vec<_>) = names
+            .iter()
+            .partition(|name| name.starts_with(SAFETY_SNAPSHOT_PREFIX));
+        assert_eq!(targets.len(), MAX_SNAPSHOTS);
+        assert_eq!(safety.len(), MAX_SNAPSHOTS);
     }
 
     #[test]

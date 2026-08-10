@@ -57,6 +57,7 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
 }
 
 fn list_revert_releases_blocking(app_version: &str) -> Result<ReleaseCatalog> {
+    // One page only: 100 releases back is far beyond any sane revert target.
     let response = fetch_json(
         &format!("{RELEASES_URL}?per_page=100"),
         app_version,
@@ -92,7 +93,8 @@ fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<Releas
     if !is_stable_release(&response) {
         anyhow::bail!("release v{target} is not stable");
     }
-    release_asset(&response, Some(app_version), VersionRelation::Older)?
+    // The direction is already enforced above, so `None` here means one thing only.
+    release_asset(&response, None, VersionRelation::Older)?
         .with_context(|| format!("release v{target} has no asset for this platform"))
 }
 
@@ -143,6 +145,9 @@ fn release_asset(
     }
 
     let (asset_name, asset_url, checksum_url) = platform_asset(release)?;
+    if asset_url.is_none() {
+        log::warn!("Release {remote_version} exists but has no asset named '{asset_name}'");
+    }
     Ok(asset_url.map(|asset_url| ReleaseAsset {
         version: remote_version.to_string(),
         asset_url,
