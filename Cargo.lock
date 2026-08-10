@@ -6090,6 +6090,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "okena-core",
+ "okena-ext-updater",
  "okena-remote-server",
  "okena-transport",
  "okena-workspace",

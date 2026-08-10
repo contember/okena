@@ -602,6 +602,15 @@ fn main() {
             );
         }
 
+        match okena_remote_server::local::complete_config_restore_if_requested() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Failed to complete version revert: {error:#}");
+                std::process::exit(1);
+            }
+        }
+
         if let Err(error) = run_headless(listen_addr) {
             eprintln!("Failed to start headless daemon: {error:#}");
             std::process::exit(1);

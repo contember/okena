@@ -52,6 +52,10 @@ okena key okena:0 ctrl-c               # interrupt
   whole blob back via `theme save <id> -` (reads stdin) — it activates by default.
 - Command palette: `okena command list`, `okena command run <Name>` invokes a GUI
   action (e.g. `ToggleSidebar`, `NewWindow`, `ZoomIn`) — things with no dedicated CLI verb.
+- Versions: `okena update status | list | revert <version>`. Preview a revert with
+  `--dry-run`; apply with `--yes`. Add `--restart` only when ending active terminal
+  sessions is acceptable. The matching config checkpoint is restored by default;
+  `--keep-config` accepts the risk of an incompatible newer config.
 - Raw: `okena state` (full JSON), `okena action '<json>'` (any ActionRequest).
 
 Commands that create things (`term new/split/tab`, `project add`, `worktree add`,

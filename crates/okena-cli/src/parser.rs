@@ -164,6 +164,50 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PaletteCmd,
     },
+    /// Inspect updates or revert to an older stable release
+    Update {
+        #[command(subcommand)]
+        cmd: UpdateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum UpdateCmd {
+    /// Show updater state for the running daemon
+    Status {
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List stable releases older than the running version
+    List {
+        /// Output JSON instead of tab-separated text
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Print only version numbers, one per line
+        #[arg(short, long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Download and install an older stable release
+    Revert {
+        /// Exact release version, without the leading v
+        version: String,
+        /// Keep the current config despite possible incompatibility
+        #[arg(long)]
+        keep_config: bool,
+        /// Preview the binary and config changes without applying them
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply without an interactive confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Restart the daemon after installation; this ends terminal sessions
+        #[arg(long)]
+        restart: bool,
+        /// Output JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -440,7 +484,7 @@ pub fn subcommand_names() -> &'static [&'static str] {
     &[
         "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
         "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
-        "command",
+        "command", "update",
     ]
 }
 
@@ -483,6 +527,20 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "send", "t1", "echo", "hi"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "run", "t1", "ls", "-la"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "key", "t1", "ctrl-c"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "update", "list", "--json"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "okena",
+                "update",
+                "revert",
+                "0.26.0",
+                "--keep-config",
+                "--dry-run",
+                "--restart",
+                "--json",
+            ])
+            .is_ok()
+        );
         // `run --wait` flags precede the trailing command (trailing_var_arg).
         assert!(Cli::try_parse_from(["okena", "run", "--wait", "t1", "make"]).is_ok());
         assert!(

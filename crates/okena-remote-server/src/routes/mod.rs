@@ -204,7 +204,15 @@ pub fn build_router(
         .route("/v1/restart", axum::routing::post(restart::post_restart))
         .route("/v1/shutdown", axum::routing::post(shutdown::post_shutdown))
         .route("/v1/update/status", axum::routing::get(update::get_status))
+        .route(
+            "/v1/update/releases",
+            axum::routing::get(update::get_releases),
+        )
         .route("/v1/update/check", axum::routing::post(update::post_check))
+        .route(
+            "/v1/update/revert",
+            axum::routing::post(update::post_revert),
+        )
         .route(
             "/v1/update/install",
             axum::routing::post(update::post_install),

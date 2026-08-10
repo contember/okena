@@ -113,7 +113,10 @@ pub async fn run_install<F>(
     let result = smol::unblock(move || crate::installer::install_update(&path)).await;
     match result {
         Ok(_) => {
-            info.set_status(UpdateStatus::ReadyToRestart { version });
+            info.set_status(UpdateStatus::ReadyToRestart {
+                version,
+                config_restore: None,
+            });
         }
         Err(e) => {
             log::error!("Install failed: {}", e);

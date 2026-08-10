@@ -152,6 +152,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    if okena_remote_server::local::complete_config_restore_if_requested()? {
+        return Ok(());
+    }
+
     // 2. Optional `--listen <ip>` override. Parsing is intentionally minimal and
     //    dependency-free; the error messages mirror the GUI's `src/main.rs`.
     let listen_override: Option<IpAddr> = parse_listen_override();
