@@ -9,6 +9,8 @@ pub mod manager;
 #[cfg(feature = "gpui-ui")]
 pub mod orchestrator;
 mod process;
+#[cfg(feature = "gpui-ui")]
+mod settings;
 mod status;
 #[cfg(feature = "gpui-ui")]
 mod update_checker;
@@ -21,6 +23,7 @@ use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistrati
 use std::sync::Arc;
 
 // Re-export public types used by the host app
+pub use checker::{ReleaseCatalog, RevertRelease};
 #[cfg(feature = "gpui-ui")]
 pub use installer::restart_app;
 #[cfg(feature = "gpui-ui")]
@@ -46,7 +49,9 @@ pub fn register() -> ExtensionRegistration {
                 status_bar_right_widgets: vec![widget.into()],
             }
         }),
-        settings_view: None,
+        settings_view: Some(Arc::new(|app| {
+            gpui::AnyView::from(app.new(crate::settings::UpdaterSettingsView::new))
+        })),
     }
 }
 

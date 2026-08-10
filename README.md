@@ -125,6 +125,8 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 
 ### Auto-Update
 - **Built-in updater** - Background update checks via GitHub Releases
+- **Version rollback** - Reinstall an older stable release from Settings or `okena update revert`
+- **Config checkpoints** - Restore the matching pre-upgrade config by default, with an explicit keep-current opt-out
 - **SHA256 verification** - Downloaded updates are cryptographically verified
 - **Homebrew-aware** - Skips self-update when installed via Homebrew
 

@@ -66,6 +66,10 @@ impl ProfilePaths {
     pub fn app_version_marker(&self) -> PathBuf {
         self.root.join(".app-version")
     }
+    /// Revert request consumed by the replacement daemon after its predecessor exits.
+    pub fn pending_config_restore(&self) -> PathBuf {
+        self.root.join("pending-config-restore.json")
+    }
 }
 
 /// Initialize the process-wide active profile. Must be called exactly once before
@@ -577,6 +581,20 @@ const SNAPSHOT_DIRS: &[&str] = &["themes", "sessions"];
 /// Maximum number of config snapshots to retain per profile.
 const MAX_SNAPSHOTS: usize = 3;
 
+/// Metadata for an exact-version config snapshot that can accompany a downgrade.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigSnapshot {
+    pub version: String,
+    pub created_at: String,
+}
+
+/// Deferred restore written before replacing the binary and consumed on restart.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingConfigRestore {
+    pub target_version: String,
+    pub snapshot: ConfigSnapshot,
+}
+
 /// Snapshot the profile's config into `config-backups/<key>/` when an app
 /// upgrade or a pending schema migration is detected, so a downgrade can restore
 /// the old-format config the previous binary can read.
@@ -698,6 +716,176 @@ pub fn record_app_version(paths: &ProfilePaths, current_app_version: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&path, current_app_version);
+}
+
+/// Return the exact pre-upgrade snapshot for `version`, if it exists.
+pub fn config_snapshot_for_version(paths: &ProfilePaths, version: &str) -> Option<ConfigSnapshot> {
+    let key = sanitize_key(version);
+    if key != version.trim() || key.is_empty() {
+        return None;
+    }
+    let dir = paths.config_backups_dir().join(&key);
+    if !dir.is_dir() {
+        return None;
+    }
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json")).ok()?).ok()?;
+    if meta
+        .get("from_app_version")
+        .and_then(serde_json::Value::as_str)
+        != Some(version.trim())
+    {
+        return None;
+    }
+    let created_at = meta
+        .get("created_at")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    Some(ConfigSnapshot {
+        version: version.trim().to_string(),
+        created_at,
+    })
+}
+
+/// Schedule an exact config snapshot to be restored after the current daemon exits.
+pub fn schedule_config_restore(
+    paths: &ProfilePaths,
+    target_version: &str,
+) -> Result<PendingConfigRestore> {
+    let snapshot = config_snapshot_for_version(paths, target_version)
+        .with_context(|| format!("no config snapshot exists for version {target_version}"))?;
+    let pending = PendingConfigRestore {
+        target_version: target_version.trim().to_string(),
+        snapshot,
+    };
+    let path = paths.pending_config_restore();
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&pending)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(pending)
+}
+
+pub fn read_pending_config_restore(paths: &ProfilePaths) -> Option<PendingConfigRestore> {
+    let data = std::fs::read(paths.pending_config_restore()).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+pub fn clear_pending_config_restore(paths: &ProfilePaths) {
+    let _ = std::fs::remove_file(paths.pending_config_restore());
+}
+
+/// Restore a scheduled config snapshot after the outgoing daemon has stopped.
+///
+/// The current config is copied to a timestamped safety snapshot first. If the
+/// restore fails, that safety snapshot is reapplied before the error is returned.
+pub fn restore_pending_config(paths: &ProfilePaths) -> Result<Option<PendingConfigRestore>> {
+    let Some(pending) = read_pending_config_restore(paths) else {
+        return Ok(None);
+    };
+    let exact_snapshot = config_snapshot_for_version(paths, &pending.target_version)
+        .with_context(|| format!("invalid config snapshot for {}", pending.target_version))?;
+    if exact_snapshot != pending.snapshot {
+        bail!(
+            "config snapshot metadata changed for version {}",
+            pending.target_version
+        );
+    }
+    let source = paths
+        .config_backups_dir()
+        .join(sanitize_key(&pending.target_version));
+    if !source.is_dir() {
+        bail!(
+            "config snapshot for version {} no longer exists",
+            pending.target_version
+        );
+    }
+
+    let timestamp = now_iso8601();
+    let previous_version = read_app_version_marker(paths).unwrap_or_else(|| "unknown".to_string());
+    let safety_key = format!(
+        "before-revert-{}-{}",
+        sanitize_key(&previous_version),
+        timestamp.replace([':', 'T', 'Z'], "-")
+    );
+    let safety = paths.config_backups_dir().join(safety_key);
+    std::fs::create_dir_all(&safety)?;
+    copy_snapshot_files(&paths.root, &safety)?;
+    std::fs::write(
+        safety.join("meta.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "from_app_version": previous_version,
+            "to_app_version": pending.target_version,
+            "created_at": timestamp,
+            "reason": "before-config-revert"
+        }))?,
+    )?;
+
+    if let Err(error) = replace_config_from_snapshot(paths, &source) {
+        let rollback = replace_config_from_snapshot(paths, &safety);
+        return match rollback {
+            Ok(()) => Err(error.context("config restore failed; current config was recovered")),
+            Err(rollback_error) => Err(error.context(format!(
+                "config restore failed and recovery also failed: {rollback_error}"
+            ))),
+        };
+    }
+
+    record_app_version(paths, &pending.target_version);
+    std::fs::remove_file(paths.pending_config_restore())?;
+    Ok(Some(pending))
+}
+
+fn copy_snapshot_files(from_root: &Path, to_root: &Path) -> Result<()> {
+    for name in SNAPSHOT_FILES {
+        let from = from_root.join(name);
+        if from.is_file() {
+            std::fs::copy(&from, to_root.join(name))
+                .with_context(|| format!("copying {}", from.display()))?;
+        }
+    }
+    for name in SNAPSHOT_DIRS {
+        let from = from_root.join(name);
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to_root.join(name))?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_config_from_snapshot(paths: &ProfilePaths, source: &Path) -> Result<()> {
+    let stage = paths
+        .root
+        .join(format!(".config-restore.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    copy_snapshot_files(source, &stage)?;
+
+    for name in SNAPSHOT_FILES {
+        let current = paths.root.join(name);
+        if current.exists() {
+            std::fs::remove_file(&current)
+                .with_context(|| format!("removing {}", current.display()))?;
+        }
+        let staged = stage.join(name);
+        if staged.exists() {
+            std::fs::rename(&staged, &current)
+                .with_context(|| format!("restoring {}", current.display()))?;
+        }
+    }
+    for name in SNAPSHOT_DIRS {
+        let current = paths.root.join(name);
+        if current.exists() {
+            std::fs::remove_dir_all(&current)
+                .with_context(|| format!("removing {}", current.display()))?;
+        }
+        let staged = stage.join(name);
+        if staged.exists() {
+            std::fs::rename(&staged, &current)
+                .with_context(|| format!("restoring {}", current.display()))?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(stage);
+    Ok(())
 }
 
 fn read_app_version_marker(paths: &ProfilePaths) -> Option<String> {
@@ -1194,6 +1382,131 @@ mod tests {
         // Unparseable on either side → conservative: snapshot iff strings differ.
         assert!(is_upgrade("weird", "other"));
         assert!(!is_upgrade("weird", "weird"));
+    }
+
+    #[test]
+    fn config_snapshot_metadata_is_available_for_exact_version() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2,"state":"old"}"#).unwrap();
+        record_app_version(&paths, "0.27.0");
+        snapshot_configs_before_upgrade(
+            &paths,
+            "0.28.0",
+            &[SchemaVersion {
+                file: "workspace.json",
+                current: 2,
+            }],
+        )
+        .unwrap();
+
+        let snapshot = config_snapshot_for_version(&paths, "0.27.0").unwrap();
+        assert_eq!(snapshot.version, "0.27.0");
+        assert_eq!(snapshot.created_at.len(), 20);
+        assert!(config_snapshot_for_version(&paths, "../0.27.0").is_none());
+        assert!(config_snapshot_for_version(&paths, "0.26.0").is_none());
+    }
+
+    #[test]
+    fn scheduled_restore_replaces_config_and_keeps_current_safety_copy() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2,"state":"old"}"#).unwrap();
+        fs::create_dir_all(paths.themes_dir()).unwrap();
+        fs::write(paths.themes_dir().join("old.json"), "old").unwrap();
+        record_app_version(&paths, "0.27.0");
+        snapshot_configs_before_upgrade(
+            &paths,
+            "0.28.0",
+            &[SchemaVersion {
+                file: "workspace.json",
+                current: 2,
+            }],
+        )
+        .unwrap();
+
+        fs::write(paths.workspace_json(), r#"{"version":3,"state":"current"}"#).unwrap();
+        fs::remove_file(paths.themes_dir().join("old.json")).unwrap();
+        fs::write(paths.themes_dir().join("current.json"), "current").unwrap();
+        record_app_version(&paths, "0.28.0");
+
+        let pending = schedule_config_restore(&paths, "0.27.0").unwrap();
+        assert_eq!(pending.target_version, "0.27.0");
+        assert!(paths.pending_config_restore().exists());
+
+        let restored = restore_pending_config(&paths).unwrap().unwrap();
+        assert_eq!(restored, pending);
+        assert!(
+            fs::read_to_string(paths.workspace_json())
+                .unwrap()
+                .contains("old")
+        );
+        assert!(paths.themes_dir().join("old.json").exists());
+        assert!(!paths.themes_dir().join("current.json").exists());
+        assert!(!paths.pending_config_restore().exists());
+        assert_eq!(
+            fs::read_to_string(paths.app_version_marker()).unwrap(),
+            "0.27.0"
+        );
+
+        let safety = fs::read_dir(paths.config_backups_dir())
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("before-revert-0.28.0-")
+            })
+            .unwrap();
+        assert!(
+            fs::read_to_string(safety.path().join("workspace.json"))
+                .unwrap()
+                .contains("current")
+        );
+    }
+
+    #[test]
+    fn scheduling_restore_requires_an_exact_snapshot() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        let error = schedule_config_restore(&paths, "0.26.0").unwrap_err();
+        assert!(error.to_string().contains("no config snapshot"));
+        assert!(!paths.pending_config_restore().exists());
+    }
+
+    #[test]
+    fn restore_rejects_changed_snapshot_metadata() {
+        let dir = temp_root();
+        let paths = snap_paths(&dir);
+        fs::write(paths.workspace_json(), r#"{"version":2,"state":"old"}"#).unwrap();
+        record_app_version(&paths, "0.27.0");
+        snapshot_configs_before_upgrade(
+            &paths,
+            "0.28.0",
+            &[SchemaVersion {
+                file: "workspace.json",
+                current: 2,
+            }],
+        )
+        .unwrap();
+        fs::write(paths.workspace_json(), r#"{"version":3,"state":"current"}"#).unwrap();
+
+        let mut pending = schedule_config_restore(&paths, "0.27.0").unwrap();
+        pending.snapshot.created_at = "changed".to_string();
+        fs::write(
+            paths.pending_config_restore(),
+            serde_json::to_vec(&pending).unwrap(),
+        )
+        .unwrap();
+
+        let error = restore_pending_config(&paths).unwrap_err();
+        assert!(error.to_string().contains("metadata changed"));
+        assert!(
+            fs::read_to_string(paths.workspace_json())
+                .unwrap()
+                .contains("current")
+        );
     }
 
     fn make_test_index_with_two(dir: &TempDir) -> ProfileIndex {

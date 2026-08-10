@@ -36,6 +36,8 @@ pub enum UpdateStatus {
     },
     ReadyToRestart {
         version: String,
+        #[serde(default)]
+        config_restore: Option<okena_core::profiles::ConfigSnapshot>,
     },
     BrewUpdate {
         version: String,
@@ -231,6 +233,7 @@ fn open_url(url: &str) {
 #[cfg(feature = "gpui-ui")]
 pub struct UpdateStatusWidget {
     _subscription: Option<Subscription>,
+    restarting: bool,
 }
 
 #[cfg(feature = "gpui-ui")]
@@ -251,6 +254,7 @@ impl UpdateStatusWidget {
 
         Self {
             _subscription: subscription,
+            restarting: false,
         }
     }
 }
@@ -350,6 +354,16 @@ impl Render for UpdateStatusWidget {
 
         let t = theme(cx);
 
+        if self.restarting {
+            return div()
+                .px(px(6.0))
+                .py(px(1.0))
+                .text_color(rgb(t.term_yellow))
+                .text_size(ui_text_sm(cx))
+                .child("Restarting Okena…")
+                .into_any_element();
+        }
+
         match info.status() {
             UpdateStatus::Ready { version, .. } => {
                 let release_url = format!(
@@ -405,17 +419,45 @@ impl Render for UpdateStatusWidget {
                 .text_size(ui_text_sm(cx))
                 .child(format!("Installing v{}...", version))
                 .into_any_element(),
-            UpdateStatus::ReadyToRestart { .. } => div()
+            UpdateStatus::ReadyToRestart { version, .. } => div()
                 .id("update-restart")
                 .cursor_pointer()
                 .px(px(6.0))
                 .py(px(1.0))
                 .text_color(rgb(t.term_green))
                 .text_size(ui_text_sm(cx))
-                .child("Restart to update")
-                .on_click(move |_, _, cx| {
-                    crate::installer::restart_app(cx);
-                })
+                .child(format!("Restart into v{version}"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.restarting {
+                        return;
+                    }
+                    this.restarting = true;
+                    cx.notify();
+                    let Some(global) = cx.try_global::<GlobalUpdateInfo>() else {
+                        this.restarting = false;
+                        return;
+                    };
+                    let info = global.0.clone();
+                    cx.spawn(async move |this, cx| {
+                        match smol::unblock(crate::daemon_client::restart_daemon_and_wait).await {
+                            Ok(()) => {
+                                let _ = this.update(cx, |_this, cx| {
+                                    crate::installer::restart_app(cx);
+                                });
+                            }
+                            Err(error) => {
+                                info.set_status(UpdateStatus::Failed {
+                                    error: error.to_string(),
+                                });
+                                let _ = this.update(cx, |this, cx| {
+                                    this.restarting = false;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }))
                 .into_any_element(),
             UpdateStatus::Downloading { version, progress } => h_flex()
                 .gap(px(4.0))

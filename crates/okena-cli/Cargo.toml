@@ -9,6 +9,7 @@ okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["client", "blocking-http"] }
 okena-workspace = { path = "../okena-workspace" }
 okena-remote-server = { path = "../okena-remote-server" }
+okena-ext-updater = { path = "../okena-ext-updater", default-features = false }
 
 # CLI argument parsing (agent-friendly command surface)
 clap = { version = "4", features = ["derive"] }

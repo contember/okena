@@ -9,7 +9,7 @@ use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
     Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, TermCmd,
-    ThemeCmd, WorktreeCmd,
+    ThemeCmd, UpdateCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -193,6 +193,18 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Cmd { cmd } => match cmd {
             PaletteCmd::List { json } => commands::cli_command_list(json),
             PaletteCmd::Run { name } => commands::cli_command_run(&name, window),
+        },
+        Command::Update { cmd } => match cmd {
+            UpdateCmd::Status { json } => commands::cli_update_status(json),
+            UpdateCmd::List { json, quiet } => commands::cli_update_list(json, quiet),
+            UpdateCmd::Revert {
+                version,
+                keep_config,
+                dry_run,
+                yes,
+                restart,
+                json,
+            } => commands::cli_update_revert(&version, keep_config, dry_run, yes, restart, json),
         },
     }
 }

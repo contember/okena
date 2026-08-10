@@ -1755,6 +1755,265 @@ pub fn cli_skill_install(_user: bool, project: bool) -> i32 {
     0
 }
 
+// ── Version updates ─────────────────────────────────────────────────────────
+
+pub fn cli_update_status(json_mode: bool) -> i32 {
+    match okena_ext_updater::daemon_client::fetch_status() {
+        Ok(snapshot) => {
+            if json_mode {
+                match serde_json::to_string_pretty(&snapshot) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        eprintln!("Failed to encode update status: {error}");
+                        return 1;
+                    }
+                }
+            } else {
+                println!(
+                    "{}\t{}",
+                    snapshot.app_version,
+                    update_status_label(&snapshot.status)
+                );
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("Failed to fetch update status: {error}");
+            1
+        }
+    }
+}
+
+pub fn cli_update_list(json_mode: bool, quiet: bool) -> i32 {
+    match okena_ext_updater::daemon_client::fetch_releases() {
+        Ok(catalog) => {
+            if json_mode {
+                match serde_json::to_string_pretty(&catalog) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        eprintln!("Failed to encode release history: {error}");
+                        return 1;
+                    }
+                }
+            } else {
+                for release in catalog.releases {
+                    if quiet {
+                        println!("{}", release.version);
+                    } else {
+                        let snapshot = release
+                            .config_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.created_at.as_str())
+                            .unwrap_or("no-config-snapshot");
+                        println!(
+                            "{}\t{}\t{}",
+                            release.version, release.published_at, snapshot
+                        );
+                    }
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("Failed to fetch release history: {error}");
+            1
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cli_update_revert(
+    version: &str,
+    keep_config: bool,
+    dry_run: bool,
+    yes: bool,
+    restart: bool,
+    json_mode: bool,
+) -> i32 {
+    match okena_ext_updater::daemon_client::fetch_status() {
+        Ok(snapshot) if snapshot.is_homebrew => {
+            eprintln!(
+                "This Okena installation is managed by Homebrew; direct version reverts are disabled."
+            );
+            return 1;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Failed to fetch update status: {error}");
+            return 1;
+        }
+    }
+    let catalog = match okena_ext_updater::daemon_client::fetch_releases() {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            eprintln!("Failed to fetch release history: {error}");
+            return 1;
+        }
+    };
+    let Some(release) = catalog
+        .releases
+        .iter()
+        .find(|release| release.version == version)
+    else {
+        eprintln!("Version v{version} is not an available older stable release.");
+        return 1;
+    };
+    if !keep_config && release.config_snapshot.is_none() {
+        eprintln!(
+            "No config snapshot exists for v{version}. Re-run with --keep-config to accept the compatibility risk."
+        );
+        return 1;
+    }
+
+    let config_action = match &release.config_snapshot {
+        Some(snapshot) if !keep_config => serde_json::json!({
+            "action": "restore",
+            "snapshot_created_at": snapshot.created_at,
+        }),
+        _ => serde_json::json!({
+            "action": "keep-current",
+            "warning": "The current configuration may be incompatible with the target version."
+        }),
+    };
+    let plan = serde_json::json!({
+        "current_version": catalog.current_version,
+        "target_version": release.version,
+        "asset": release.asset_name,
+        "config": config_action,
+        "restart_daemon": restart,
+    });
+
+    if dry_run {
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).unwrap_or_else(|_| plan.to_string())
+            );
+        } else {
+            print_revert_plan(&plan, false);
+        }
+        return 0;
+    }
+    if !yes {
+        print_revert_plan(&plan, true);
+        eprintln!("Re-run with --yes to apply this revert.");
+        return 2;
+    }
+
+    if let Err(error) = okena_ext_updater::daemon_client::request_revert(version, keep_config) {
+        eprintln!("Failed to start version revert: {error}");
+        return 1;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 60);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("Timed out waiting for version revert.");
+            return 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        match okena_ext_updater::daemon_client::fetch_status() {
+            Ok(snapshot) => match &snapshot.status {
+                okena_ext_updater::UpdateStatus::Checking
+                | okena_ext_updater::UpdateStatus::Downloading { .. }
+                | okena_ext_updater::UpdateStatus::Installing { .. } => continue,
+                okena_ext_updater::UpdateStatus::ReadyToRestart {
+                    version: ready_version,
+                    ..
+                } if ready_version == version => break,
+                okena_ext_updater::UpdateStatus::Failed { error } => {
+                    eprintln!("Version revert failed: {error}");
+                    return 1;
+                }
+                status => {
+                    eprintln!(
+                        "Version revert stopped in unexpected state: {}",
+                        update_status_label(status)
+                    );
+                    return 1;
+                }
+            },
+            Err(_) => continue,
+        }
+    }
+
+    if restart {
+        eprintln!("Restarting the daemon; active terminal sessions will end.");
+        if let Err(error) = okena_ext_updater::daemon_client::restart_daemon_and_wait() {
+            eprintln!("Revert installed, but daemon restart failed: {error}");
+            return 1;
+        }
+    }
+
+    if json_mode {
+        let output = serde_json::json!({
+            "status": if restart { "reverted" } else { "ready-to-restart" },
+            "version": version,
+            "config": config_action,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
+        );
+    } else if restart {
+        println!("reverted\t{version}");
+    } else {
+        println!("ready-to-restart\t{version}");
+    }
+    0
+}
+
+fn print_revert_plan(plan: &serde_json::Value, diagnostic: bool) {
+    let current = plan["current_version"].as_str().unwrap_or("unknown");
+    let target = plan["target_version"].as_str().unwrap_or("unknown");
+    let mut lines = vec![format!("Binary: v{current} -> v{target}")];
+    if plan["config"]["action"] == "restore" {
+        lines.push(format!(
+            "Config: restore snapshot from {}",
+            plan["config"]["snapshot_created_at"]
+                .as_str()
+                .unwrap_or("unknown")
+        ));
+    } else {
+        lines.push("Config: keep current configuration (may be incompatible)".to_string());
+    }
+    if plan["restart_daemon"].as_bool().unwrap_or(false) {
+        lines.push("Daemon: restart and end active terminal sessions".to_string());
+    }
+    for line in lines {
+        if diagnostic {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+}
+
+fn update_status_label(status: &okena_ext_updater::UpdateStatus) -> String {
+    match status {
+        okena_ext_updater::UpdateStatus::Idle => "idle".to_string(),
+        okena_ext_updater::UpdateStatus::Checking => "checking".to_string(),
+        okena_ext_updater::UpdateStatus::Available { version, .. } => {
+            format!("available:{version}")
+        }
+        okena_ext_updater::UpdateStatus::Downloading { version, progress } => {
+            format!("downloading:{version}:{progress}%")
+        }
+        okena_ext_updater::UpdateStatus::Ready { version, .. } => {
+            format!("ready:{version}")
+        }
+        okena_ext_updater::UpdateStatus::Installing { version } => {
+            format!("installing:{version}")
+        }
+        okena_ext_updater::UpdateStatus::ReadyToRestart { version, .. } => {
+            format!("ready-to-restart:{version}")
+        }
+        okena_ext_updater::UpdateStatus::BrewUpdate { version } => {
+            format!("brew-update:{version}")
+        }
+        okena_ext_updater::UpdateStatus::Failed { error } => format!("failed:{error}"),
+    }
+}
+
 // ── Settings / theme / command palette ───────────────────────────────────────
 
 /// Authenticate and POST an action body, returning the raw response.
