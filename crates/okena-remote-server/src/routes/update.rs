@@ -96,13 +96,15 @@ pub async fn post_revert(
         return Err(StatusCode::FORBIDDEN);
     }
     let info = state.update_info.clone();
-    if info.try_start_manual() {
-        info.set_status(UpdateStatus::Checking);
-        tokio::spawn(async move {
-            okena_ext_updater::manager::run_revert(info, request.version, !request.keep_config)
-                .await;
-        });
+    // Unlike check/install, a rejected revert must be reported: the caller waits
+    // for a status transition that would otherwise never come.
+    if !info.try_start_manual() {
+        return Err(StatusCode::CONFLICT);
     }
+    info.set_status(UpdateStatus::Checking);
+    tokio::spawn(async move {
+        okena_ext_updater::manager::run_revert(info, request.version, !request.keep_config).await;
+    });
     Ok(Json(state.update_info.snapshot()))
 }
 

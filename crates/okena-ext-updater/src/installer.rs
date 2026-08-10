@@ -86,7 +86,16 @@ pub fn restart_app(cx: &mut gpui::App) {
 }
 
 /// Remove leftover `.old` binary from a previous update.
+///
+/// Kept while a config restore is pending: the `.old` binary is the only one
+/// that understands the revert handoff (see `local::spawn_replacement_daemon`).
 pub fn cleanup_old_binary() {
+    if okena_core::profiles::try_current()
+        .is_some_and(|paths| paths.pending_config_restore().is_file())
+    {
+        log::info!("Keeping the .old binary: a config restore is still pending");
+        return;
+    }
     if let Ok(exe) = std::env::current_exe() {
         let old_path = exe.with_extension(if cfg!(windows) { "exe.old" } else { "old" });
         if old_path.exists() {

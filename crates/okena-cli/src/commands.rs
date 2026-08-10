@@ -1904,35 +1904,48 @@ pub fn cli_update_revert(
         eprintln!("Failed to start version revert: {error}");
         return 1;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 60);
+    // Download + install of a full release, so generous — but a wedged daemon
+    // must not pin the terminal for an hour.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let mut unreachable_for = std::time::Duration::ZERO;
     loop {
         if std::time::Instant::now() >= deadline {
             eprintln!("Timed out waiting for version revert.");
             return 1;
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        let poll_interval = std::time::Duration::from_millis(250);
+        std::thread::sleep(poll_interval);
         match okena_ext_updater::daemon_client::fetch_status() {
-            Ok(snapshot) => match &snapshot.status {
-                okena_ext_updater::UpdateStatus::Checking
-                | okena_ext_updater::UpdateStatus::Downloading { .. }
-                | okena_ext_updater::UpdateStatus::Installing { .. } => continue,
-                okena_ext_updater::UpdateStatus::ReadyToRestart {
-                    version: ready_version,
-                    ..
-                } if ready_version == version => break,
-                okena_ext_updater::UpdateStatus::Failed { error } => {
-                    eprintln!("Version revert failed: {error}");
+            Ok(snapshot) => {
+                unreachable_for = std::time::Duration::ZERO;
+                match &snapshot.status {
+                    okena_ext_updater::UpdateStatus::Checking
+                    | okena_ext_updater::UpdateStatus::Downloading { .. }
+                    | okena_ext_updater::UpdateStatus::Installing { .. } => continue,
+                    okena_ext_updater::UpdateStatus::ReadyToRestart {
+                        version: ready_version,
+                        ..
+                    } if ready_version == version => break,
+                    okena_ext_updater::UpdateStatus::Failed { error } => {
+                        eprintln!("Version revert failed: {error}");
+                        return 1;
+                    }
+                    status => {
+                        eprintln!(
+                            "Version revert stopped in unexpected state: {}",
+                            update_status_label(status)
+                        );
+                        return 1;
+                    }
+                }
+            }
+            Err(error) => {
+                unreachable_for += poll_interval;
+                if unreachable_for >= std::time::Duration::from_secs(15) {
+                    eprintln!("Lost contact with the daemon during the revert: {error}");
                     return 1;
                 }
-                status => {
-                    eprintln!(
-                        "Version revert stopped in unexpected state: {}",
-                        update_status_label(status)
-                    );
-                    return 1;
-                }
-            },
-            Err(_) => continue,
+            }
         }
     }
 
