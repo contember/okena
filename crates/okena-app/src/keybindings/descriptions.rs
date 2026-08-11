@@ -355,11 +355,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     );
 
     // Project actions
+    // Named for the dialog it opens ("Add Project"), not for the action
+    // identifier — the id stays `NewProject` so existing keybindings.json
+    // overrides keep resolving.
     map.insert(
         "NewProject",
         ActionDescription {
-            name: "New Project",
-            description: "Create a new project",
+            name: "Add Project",
+            description: "Add a project to the workspace",
             category: "Project",
             factory: || Box::new(NewProject),
         },
