@@ -342,6 +342,14 @@ impl KeybindingConfig {
         );
 
         bindings.insert(
+            "NewProject".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-n", None),
+                KeybindingEntry::new("ctrl-n", None),
+            ],
+        );
+
+        bindings.insert(
             "NewWindow".to_string(),
             vec![
                 KeybindingEntry::new("cmd-shift-n", None),
