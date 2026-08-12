@@ -516,7 +516,9 @@ mod tests {
         );
     }
 
+    // Synthesizes an `ExitStatus` through the Unix `ExitStatusExt`.
     #[test]
+    #[cfg(unix)]
     fn mock_intercepts_without_spawning() {
         use std::os::unix::process::ExitStatusExt;
         let _g = guard();
