@@ -233,7 +233,7 @@ jobs:
         run: |
           mkdir dist
           copy target\${{ matrix.target }}\release\okena.exe dist\
-          rem Ship the GPUI-free daemon sibling (see Linux step).
+          # Ship the GPUI-free daemon sibling (see Linux step).
           copy target\${{ matrix.target }}\release\okena-daemon.exe dist\
 
       - name: Upload artifact
