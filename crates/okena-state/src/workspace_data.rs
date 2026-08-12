@@ -1010,6 +1010,17 @@ mod tests {
     }
 
     #[test]
+    fn set_project_width_scale_rejects_invalid_values() {
+        let mut data = make_workspace();
+
+        data.set_project_width_scale(WindowId::Main, 16.0);
+        assert_eq!(data.main_window.project_width_scale, Some(16.0));
+
+        data.set_project_width_scale(WindowId::Main, f32::NAN);
+        assert_eq!(data.main_window.project_width_scale, Some(16.0));
+    }
+
+    #[test]
     fn set_project_width_writes_to_targeted_extra() {
         // Mint two extras, set width on one via WindowId::Extra(uuid). The
         // targeted extra's project_widths gains the entry; the sibling extra
@@ -1273,6 +1284,7 @@ mod tests {
         data.main_window
             .project_widths
             .insert("p1".to_string(), 0.42);
+        data.main_window.project_width_scale = Some(16.0);
         data.service_panel_heights.insert("p1".to_string(), 180.0);
         data.hook_panel_heights.insert("p1".to_string(), 220.0);
 
@@ -1280,6 +1292,7 @@ mod tests {
 
         assert!(!data.main_window.hidden_project_ids.contains("p1"));
         assert!(!data.main_window.project_widths.contains_key("p1"));
+        assert_eq!(data.main_window.project_width_scale, None);
         assert!(!data.service_panel_heights.contains_key("p1"));
         assert!(!data.hook_panel_heights.contains_key("p1"));
     }

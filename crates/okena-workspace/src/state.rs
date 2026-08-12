@@ -1398,7 +1398,7 @@ impl Workspace {
     /// present the same project with a different orientation and state syncs
     /// cannot undo the local choice.
     ///
-    /// Percentages in `project_widths` are axis-agnostic, so relative grid
+    /// Weights in `project_widths` are axis-agnostic, so relative grid
     /// sizing is preserved across the flip. Persisted via `notify_data`.
     pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.window(window_id).is_none() {

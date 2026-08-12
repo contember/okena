@@ -5,7 +5,7 @@ use std::rc::Rc;
 const DIVIDER_SIZE: f32 = 1.0;
 const HANDLE_HITBOX_SIZE: f32 = 9.0;
 
-type DragStartCallback = Rc<RefCell<Option<Box<dyn FnOnce(Point<Pixels>, &mut App)>>>>;
+type DragStartCallback = Rc<RefCell<Option<Box<dyn FnOnce(Point<Pixels>, Modifiers, &mut App)>>>>;
 
 /// Thin divider with a larger resize hitbox and the matching resize cursor.
 pub struct ResizeHandle {
@@ -21,6 +21,20 @@ impl ResizeHandle {
         border_color: u32,
         border_active_color: u32,
         on_drag_start: impl FnOnce(Point<Pixels>, &mut App) + 'static,
+    ) -> Self {
+        Self::new_with_modifiers(
+            is_horizontal,
+            border_color,
+            border_active_color,
+            move |position, _modifiers, cx| on_drag_start(position, cx),
+        )
+    }
+
+    pub fn new_with_modifiers(
+        is_horizontal: bool,
+        border_color: u32,
+        border_active_color: u32,
+        on_drag_start: impl FnOnce(Point<Pixels>, Modifiers, &mut App) + 'static,
     ) -> Self {
         Self {
             is_horizontal,
@@ -139,7 +153,7 @@ impl Element for ResizeHandle {
                 && hitbox_id.is_hovered(window)
             {
                 if let Some(cb) = on_drag_start.borrow_mut().take() {
-                    cb(e.position, cx);
+                    cb(e.position, e.modifiers, cx);
                 }
                 cx.stop_propagation();
             }

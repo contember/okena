@@ -1016,6 +1016,21 @@ impl Workspace {
         self.notify_data(cx);
     }
 
+    /// Update project sizes and the pixel scale used to render them.
+    pub fn update_project_widths_with_scale(
+        &mut self,
+        window_id: WindowId,
+        widths: HashMap<String, f32>,
+        scale: f32,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        for (id, width) in widths {
+            self.data.set_project_width(window_id, &id, width);
+        }
+        self.data.set_project_width_scale(window_id, scale);
+        self.notify_data(cx);
+    }
+
     /// Update service panel height for a project
     pub fn update_service_panel_height(
         &mut self,
@@ -1061,6 +1076,14 @@ impl Workspace {
             .window(window_id)
             .and_then(|w| w.project_widths.get(project_id).copied())
             .unwrap_or_else(|| 100.0 / visible_count as f32)
+    }
+
+    /// Return the persisted pixel scale for project-size weights.
+    pub fn get_project_width_scale(&self, window_id: WindowId) -> Option<f32> {
+        self.data
+            .window(window_id)
+            .and_then(|window| window.project_width_scale)
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
     }
 }
 
@@ -1943,6 +1966,23 @@ mod gpui_tests {
                 ws.data().main_window.project_widths.get("p2").copied(),
                 Some(0.40)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_with_scale_persists_both_values(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 31.25);
+            ws.update_project_widths_with_scale(WindowId::Main, widths, 16.0, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.get_project_width(WindowId::Main, "p1", 1), 31.25);
+            assert_eq!(ws.get_project_width_scale(WindowId::Main), Some(16.0));
+            assert_eq!(ws.data_version(), 1);
         });
     }
 

@@ -12,7 +12,7 @@ use crate::theme::theme;
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{
-    DragState, compute_resize, render_project_divider, render_sidebar_divider,
+    DragState, compute_resize, project_pixel_widths, render_project_divider, render_sidebar_divider,
 };
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use gpui::prelude::*;
@@ -21,25 +21,15 @@ use gpui::*;
 use super::WindowView;
 
 impl WindowView {
-    /// Normalize raw project widths to percentages summing to 100%.
-    fn normalize_widths(raw_widths: &[f32]) -> Vec<f32> {
-        let total: f32 = raw_widths.iter().sum();
-        if total > 0.0 {
-            raw_widths.iter().map(|w| w / total * 100.0).collect()
-        } else {
-            let n = raw_widths.len();
-            vec![100.0 / n as f32; n]
-        }
-    }
-
-    /// Convert normalized percentage widths to pixel widths.
-    fn to_pixel_widths(widths: &[f32], container_width: f32, min_col_width: f32) -> Vec<f32> {
+    fn to_pixel_widths(
+        widths: &[f32],
+        container_width: f32,
+        min_col_width: f32,
+        persisted_scale: Option<f32>,
+    ) -> Vec<f32> {
         let num_dividers = widths.len().saturating_sub(1) as f32;
         let available_width = (container_width - num_dividers * 1.0).max(0.0);
-        widths
-            .iter()
-            .map(|w| (available_width * w / 100.0).max(min_col_width))
-            .collect()
+        project_pixel_widths(widths, available_width, min_col_width, persisted_scale)
     }
 
     /// Scroll the projects grid horizontally to ensure the focused project column is visible.
@@ -100,9 +90,13 @@ impl WindowView {
             .iter()
             .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
             .collect();
-        let widths = Self::normalize_widths(&raw_widths);
-        let pixel_widths =
-            Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
+        let persisted_scale = workspace.get_project_width_scale(self.window_id);
+        let pixel_widths = Self::to_pixel_widths(
+            &raw_widths,
+            container_size,
+            settings.min_column_width,
+            persisted_scale,
+        );
 
         // Compute the leading edge (along the grid axis) of the focused project
         let mut col_lead: f32 = 0.0;
@@ -308,24 +302,34 @@ impl WindowView {
             vec![100.0; num_projects]
         } else {
             let workspace = self.workspace.read(cx);
-            let raw_widths: Vec<f32> = visible_projects
+            visible_projects
                 .iter()
                 .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
-                .collect();
-            Self::normalize_widths(&raw_widths)
+                .collect()
         };
 
         // Persistent bounds reference for resize calculation (survives across renders)
         let container_bounds = self.projects_grid_bounds.clone();
 
-        // Compute pixel sizes from percentages, accounting for divider thickness.
+        // Compute pixel sizes from weights, accounting for divider thickness.
         // The relevant axis is width for columns, height for rows.
         let container_size = {
             let b = container_bounds.borrow();
             f32::from(if is_rows { b.size.height } else { b.size.width })
         };
-        let pixel_widths =
-            Self::to_pixel_widths(&widths, container_size, settings.min_column_width);
+        let persisted_scale = (num_projects > 1)
+            .then(|| {
+                self.workspace
+                    .read(cx)
+                    .get_project_width_scale(self.window_id)
+            })
+            .flatten();
+        let pixel_widths = Self::to_pixel_widths(
+            &widths,
+            container_size,
+            settings.min_column_width,
+            persisted_scale,
+        );
 
         // Project currently hovered in the Switch Project overlay (any window).
         // Its panel gets an accent ring here so a hover also reveals where the

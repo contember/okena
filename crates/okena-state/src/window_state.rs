@@ -15,7 +15,7 @@ use uuid::Uuid;
 /// `Columns` (default) lays projects out side by side, each with a width;
 /// `Rows` stacks them vertically, each with a height. Stored per-window so
 /// each window can flip its own orientation independently. The persisted
-/// `project_widths` map holds axis-agnostic percentages, so it carries over
+/// `project_widths` map holds axis-agnostic weights, so it carries over
 /// unchanged when the orientation flips.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,13 +124,16 @@ pub struct WindowState {
     /// Folder filter (folder ID) limiting visible projects in this window.
     #[serde(default)]
     pub folder_filter: Option<String>,
-    /// Project column widths (percentages) scoped to this window.
+    /// Relative project sizes scoped to this window.
     ///
     /// Axis-agnostic: in `ProjectLayoutMode::Columns` these are widths, in
-    /// `Rows` they are heights. The same percentage carries over when the
+    /// `Rows` they are heights. The same weight carries over when the
     /// orientation flips, so a window's relative sizing survives a toggle.
     #[serde(default)]
     pub project_widths: HashMap<String, f32>,
+    /// Persisted pixels per project-width unit after the first resize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_width_scale: Option<f32>,
     /// Orientation of the project grid in this window (columns vs rows).
     #[serde(default)]
     pub project_layout: ProjectLayoutMode,
@@ -166,6 +169,7 @@ impl Default for WindowState {
             hidden_project_ids: HashSet::new(),
             folder_filter: None,
             project_widths: HashMap::new(),
+            project_width_scale: None,
             project_layout: ProjectLayoutMode::default(),
             project_sort_mode: ProjectSortMode::default(),
             show_attention_section: false,
@@ -186,6 +190,7 @@ mod tests {
         assert!(s.hidden_project_ids.is_empty());
         assert!(s.folder_filter.is_none());
         assert!(s.project_widths.is_empty());
+        assert!(s.project_width_scale.is_none());
         assert!(s.folder_collapsed.is_empty());
         assert!(s.os_bounds.is_none());
     }
@@ -207,6 +212,7 @@ mod tests {
             hidden_project_ids: hidden,
             folder_filter: Some("folder-7".to_string()),
             project_widths: widths,
+            project_width_scale: Some(12.5),
             project_layout: ProjectLayoutMode::Rows,
             project_sort_mode: ProjectSortMode::Activity,
             show_attention_section: true,
@@ -227,6 +233,7 @@ mod tests {
         assert_eq!(reloaded.hidden_project_ids, original.hidden_project_ids);
         assert_eq!(reloaded.folder_filter, original.folder_filter);
         assert_eq!(reloaded.project_widths, original.project_widths);
+        assert_eq!(reloaded.project_width_scale, original.project_width_scale);
         assert_eq!(reloaded.project_layout, original.project_layout);
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
         assert_eq!(

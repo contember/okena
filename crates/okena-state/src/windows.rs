@@ -70,6 +70,16 @@ impl WorkspaceData {
         }
     }
 
+    /// Set the pixel scale used by the targeted window's project-size weights.
+    pub fn set_project_width_scale(&mut self, id: WindowId, scale: f32) {
+        if scale.is_finite()
+            && scale > 0.0
+            && let Some(w) = self.window_mut(id)
+        {
+            w.project_width_scale = Some(scale);
+        }
+    }
+
     /// Toggle a project's hidden state in the targeted window.
     ///
     /// If `project_id` is absent from the window's `hidden_project_ids` set, it
@@ -175,9 +185,15 @@ impl WorkspaceData {
     pub fn delete_project_scrub_all_windows(&mut self, project_id: &str) {
         self.main_window.hidden_project_ids.remove(project_id);
         self.main_window.project_widths.remove(project_id);
+        if self.main_window.project_widths.is_empty() {
+            self.main_window.project_width_scale = None;
+        }
         for extra in &mut self.extra_windows {
             extra.hidden_project_ids.remove(project_id);
             extra.project_widths.remove(project_id);
+            if extra.project_widths.is_empty() {
+                extra.project_width_scale = None;
+            }
         }
         self.service_panel_heights.remove(project_id);
         self.hook_panel_heights.remove(project_id);
@@ -308,6 +324,9 @@ impl WorkspaceData {
             window
                 .project_widths
                 .retain(|id, _| valid_projects.contains(id));
+            if window.project_widths.is_empty() {
+                window.project_width_scale = None;
+            }
             window
                 .folder_collapsed
                 .retain(|id, _| valid_folders.contains(id));
