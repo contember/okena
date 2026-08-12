@@ -31,13 +31,35 @@ fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        };
 
-        let metadata = std::fs::metadata(path).ok()?;
-        match (metadata.volume_serial_number(), metadata.file_index()) {
-            (Some(volume), Some(file)) => Some(FilesystemObjectIdentity::Windows { volume, file }),
-            _ => None,
+        // `Metadata::volume_serial_number`/`file_index` are still unstable
+        // (rust-lang/rust#63010), so read the same fields straight from the
+        // handle. Request no access rights and share every mode, so probing a
+        // checkout never blocks the removal that follows; the handle closes at
+        // the end of this scope.
+        let directory = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .ok()?;
+
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // Safety: the handle is open for the duration of the call and `info` is
+        // a live, correctly sized out-parameter.
+        if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut info) } == 0 {
+            return None;
         }
+        Some(FilesystemObjectIdentity::Windows {
+            volume: info.dwVolumeSerialNumber,
+            file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
     }
     #[cfg(not(any(unix, windows)))]
     {

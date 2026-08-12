@@ -15,5 +15,10 @@ uuid = { version = "1.10", features = ["v4"] }
 log = "0.4"
 gix = { version = "0.83", default-features = false, features = ["max-performance-safe", "sha1", "revision", "status", "blame"] }
 
+# Directory identity for the destructive-removal guard: the stable std API has
+# no equivalent of `dev`/`ino` on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3"
