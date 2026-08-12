@@ -222,6 +222,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # A tag with a semver pre-release identifier (v1.0.0-beta.1) must ship as a
+      # GitHub prerelease: the in-app updater and both install scripts read
+      # /releases/latest, which skips prereleases, so this is what keeps a beta
+      # from reaching everyone on the stable channel.
+      - name: Classify release
+        id: meta
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -250,8 +264,10 @@ jobs:
             fi
           done
 
+      # The cask is the stable channel — a prerelease must not overwrite it.
       - name: Generate ContemberBot token
         id: app-token
+        if: steps.meta.outputs.prerelease == 'false'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.CONTEMBER_BOT_APP_ID }}
@@ -260,6 +276,7 @@ jobs:
           repositories: homebrew-okena
 
       - name: Update Homebrew tap
+        if: steps.meta.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -290,6 +307,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           files: |
             *.tar.gz
             *.zip
