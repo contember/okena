@@ -75,6 +75,39 @@ jobs:
       - name: Run tests
         run: cargo test
 
+  # Windows-only `cfg` branches never compile in the Linux `check` job above, so
+  # a platform-specific break used to surface only once a tag started the full
+  # matrix — too late, with the tag already pushed. Compile for Windows on every
+  # push instead. Plain `cargo check`, not clippy: Windows still carries
+  # pre-existing warnings that `-D warnings` would turn into failures.
+  check-windows:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-pc-windows-msvc-check
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      # okena-remote-server embeds web/dist through RustEmbed, so the assets
+      # have to exist before the Rust build.
+      - name: Build web client
+        run: cd web && bun install --frozen-lockfile && bun run build
+
+      - name: Check compilation
+        run: cargo check --workspace --all-targets
+
   # React Native mobile client — TypeScript checks.
   #
   # The native app build (uniffi-bindgen-react-native cross-compiling
