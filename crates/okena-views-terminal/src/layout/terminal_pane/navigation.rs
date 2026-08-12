@@ -199,7 +199,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 && terminal.has_selection()
                 && !terminal.is_mouse_mode()
                 && !terminal.is_alt_screen()
-                && !terminal.has_running_child()
+                && terminal.can_rewrite_shell_input()
                 && terminal.delete_selection()
             {
                 return;

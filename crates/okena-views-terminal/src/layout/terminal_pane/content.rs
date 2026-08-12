@@ -613,7 +613,7 @@ impl TerminalContent {
                     && let Some((col, row)) = self.mouse_down_cell.take()
                     && !terminal.is_mouse_mode()
                     && !terminal.is_alt_screen()
-                    && !terminal.has_running_child()
+                    && terminal.can_rewrite_shell_input()
                 {
                     terminal.move_cursor_to_click(col, row);
                 }

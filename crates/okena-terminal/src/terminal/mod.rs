@@ -251,7 +251,7 @@ pub struct Terminal {
     pub(super) failed_jump_index: Mutex<Option<usize>>,
 
     /// Shell process PID. Set by `set_shell_pid` (called from GPUI thread
-    /// after PTY spawn), read by `shell_pid` and `has_running_child`.
+    /// after PTY spawn), read by `shell_pid` and `can_rewrite_shell_input`.
     /// GPUI thread only.
     pub(super) shell_pid: Mutex<Option<u32>>,
 

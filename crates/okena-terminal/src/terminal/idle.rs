@@ -4,6 +4,10 @@ use std::time::Instant;
 use super::Terminal;
 use super::child_processes::has_child_processes;
 
+fn can_rewrite_shell_input(shell_pid: Option<u32>, has_children: impl FnOnce(u32) -> bool) -> bool {
+    shell_pid.is_some_and(|pid| !has_children(pid))
+}
+
 impl Terminal {
     /// Set the shell process PID (for foreground process checking)
     pub fn set_shell_pid(&self, pid: u32) {
@@ -50,18 +54,16 @@ impl Terminal {
         self.waiting_for_input.store(waiting, Ordering::Relaxed);
     }
 
-    /// Returns true if the shell currently has a child process running.
-    /// Performs a synchronous, low-overhead check (direct `/proc` read on Linux,
-    /// `pgrep -P` fallback elsewhere) and is safe to call from UI event handlers.
+    /// Whether shell-only input rewriting is safe for this terminal.
+    /// Performs a synchronous, low-overhead child check (direct `/proc` read on
+    /// Linux, `pgrep -P` fallback elsewhere). An unknown shell PID is unsafe:
+    /// remote mirrors cannot inspect the daemon's process tree.
     ///
     /// Note: `shell_pid` is expected to be the *real* shell pid, not a session
     /// proxy (dtach / tmux attach client). Session-backend resolution is done
     /// when the terminal is created (see `TerminalBackend::get_foreground_shell_pid`).
-    pub fn has_running_child(&self) -> bool {
-        match *self.shell_pid.lock() {
-            Some(pid) => has_child_processes(pid),
-            None => false,
-        }
+    pub fn can_rewrite_shell_input(&self) -> bool {
+        can_rewrite_shell_input(*self.shell_pid.lock(), has_child_processes)
     }
 
     /// Reset the idle timer to now, clearing the waiting state.
@@ -81,5 +83,27 @@ impl Terminal {
     /// Whether new output has arrived since the user last viewed this terminal.
     pub fn has_unseen_output(&self) -> bool {
         *self.last_output_time.lock() > *self.last_viewed_time.lock()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_rewrite_shell_input;
+
+    #[test]
+    fn unknown_shell_pid_blocks_input_rewriting() {
+        assert!(!can_rewrite_shell_input(None, |_| {
+            panic!("unknown PID must not inspect the client process tree")
+        }));
+    }
+
+    #[test]
+    fn known_plain_shell_allows_input_rewriting() {
+        assert!(can_rewrite_shell_input(Some(42), |_| false));
+    }
+
+    #[test]
+    fn known_shell_with_running_child_blocks_input_rewriting() {
+        assert!(!can_rewrite_shell_input(Some(42), |_| true));
     }
 }
