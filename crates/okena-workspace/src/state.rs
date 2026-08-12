@@ -120,16 +120,47 @@ fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
 
 #[cfg(windows)]
 fn filesystem_object_identity(path: &Path) -> Option<FilesystemObjectIdentity> {
-    use std::os::windows::fs::MetadataExt as _;
-
-    let metadata = std::fs::metadata(path).ok()?;
-    match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(file)) => Some(FilesystemObjectIdentity::Windows { volume, file }),
-        _ => std::fs::canonicalize(path)
+    match windows_object_id(path) {
+        Some((volume, file)) => Some(FilesystemObjectIdentity::Windows { volume, file }),
+        None => std::fs::canonicalize(path)
             .ok()
             .map(normalize_fallback_path)
             .map(FilesystemObjectIdentity::CanonicalPath),
     }
+}
+
+/// Volume serial + file index, read straight from a handle because
+/// `Metadata::volume_serial_number`/`file_index` are still unstable
+/// (rust-lang/rust#63010).
+#[cfg(windows)]
+fn windows_object_id(path: &Path) -> Option<(u32, u64)> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+
+    // No access rights and every share mode, so identifying a path never blocks
+    // what the caller does to it next. Directories need BACKUP_SEMANTICS to open
+    // at all. The handle closes with `object`.
+    let object = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // Safety: the handle is open for the duration of the call and `info` is a
+    // live, correctly sized out-parameter.
+    if unsafe { GetFileInformationByHandle(object.as_raw_handle(), &mut info) } == 0 {
+        return None;
+    }
+    Some((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]

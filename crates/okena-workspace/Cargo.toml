@@ -31,6 +31,11 @@ smol = "2.0"
 libc = "0.2"
 fs2 = "0.4"
 
+# Path identity for the destructive ownership checks: the stable std API has no
+# equivalent of `dev`/`ino` on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 # `gpui` here is the *same* optional dependency declared in `[dependencies]`;
 # this entry only layers on the `test-support` feature so the gpui-gated test
 # modules can use `#[gpui::test]` / `TestAppContext`. As a dev-dependency it is
