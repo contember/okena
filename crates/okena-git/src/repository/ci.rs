@@ -962,6 +962,9 @@ mod tests {
         assert!(super::parse_branch_ci(Some("not json"), Some("also not json")).is_none());
     }
 
+    // Builds an `ExitStatus` from a raw wait status, so it follows its only
+    // caller in being Unix-only.
+    #[cfg(unix)]
     fn output(code: i32, stderr: &str) -> std::process::Output {
         use std::os::unix::process::ExitStatusExt;
         std::process::Output {
