@@ -71,6 +71,13 @@ pub enum ProjectOverlayKind {
     FileViewer {
         relative_path: String,
     },
+    /// Resolve a terminal-emitted path on the daemon that owns the terminal.
+    TerminalPathViewer {
+        terminal_id: String,
+        path: String,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
     ColorPicker {
         position: gpui::Point<gpui::Pixels>,
     },

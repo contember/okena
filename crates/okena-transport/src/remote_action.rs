@@ -1,7 +1,7 @@
 //! Shared async and blocking clients for actions sent to an Okena daemon.
 
 use crate::RemoteConnectionConfig;
-use okena_core::api::ActionRequest;
+use okena_core::api::{ActionRequest, FileDownloadRequest};
 #[cfg(feature = "blocking-http")]
 use std::sync::{Arc, OnceLock};
 
@@ -26,6 +26,7 @@ const SEARCH_TIMEOUT_SECS: u64 = 90;
 const LONG_MUTATION_TIMEOUT_SECS: u64 = 11 * 60;
 
 const ACTIONS_PATH: &str = "/v1/actions";
+const DOWNLOAD_PATH: &str = "/v1/files/download";
 
 /// Hard ceiling on response body size accepted by the remote bridge. Cuts
 /// off arbitrarily large or runaway responses before they're buffered into
@@ -44,8 +45,12 @@ enum ActionClientKind {
 
 fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
     match action {
-        ActionRequest::ReadFileBytes { .. } => ActionClientKind::Bytes,
-        ActionRequest::SearchContent { .. } => ActionClientKind::Search,
+        ActionRequest::ReadFileBytes { .. }
+        | ActionRequest::ReadTerminalFileBytes { .. }
+        | ActionRequest::ReadPathFileBytes { .. } => ActionClientKind::Bytes,
+        ActionRequest::SearchContent { .. } | ActionRequest::SearchPathContent { .. } => {
+            ActionClientKind::Search
+        }
         ActionRequest::RemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
         _ => ActionClientKind::Fast,
@@ -79,6 +84,7 @@ struct RemoteActionClientInner {
     bytes: OnceLock<Result<ClientAndUrl, String>>,
     search: OnceLock<Result<ClientAndUrl, String>>,
     long_mutation: OnceLock<Result<ClientAndUrl, String>>,
+    download: OnceLock<Result<ClientAndUrl, String>>,
     #[cfg(feature = "cancellable-http")]
     async_search: OnceLock<Result<AsyncClientAndUrl, String>>,
 }
@@ -103,6 +109,7 @@ impl RemoteActionClient {
                 bytes: OnceLock::new(),
                 search: OnceLock::new(),
                 long_mutation: OnceLock::new(),
+                download: OnceLock::new(),
                 #[cfg(feature = "cancellable-http")]
                 async_search: OnceLock::new(),
             }),
@@ -126,6 +133,53 @@ impl RemoteActionClient {
             Err(error) => return Err(error.clone()),
         };
         post_action_inner(client, url, &self.inner.token, action)
+    }
+
+    pub fn connection_id(&self) -> &str {
+        &self.inner.config.id
+    }
+
+    pub fn connection_name(&self) -> &str {
+        &self.inner.config.name
+    }
+
+    pub fn is_local_daemon(&self) -> bool {
+        self.inner.config.id == crate::LOCAL_DAEMON_CONNECTION_ID
+    }
+
+    /// Stream a daemon-side file directly into a local writer.
+    pub fn download_file(
+        &self,
+        request: &FileDownloadRequest,
+        writer: &mut dyn std::io::Write,
+    ) -> Result<(), String> {
+        let client_and_url = self.inner.download.get_or_init(|| {
+            crate::remote_http::blocking_client_and_url(
+                &self.inner.config,
+                DOWNLOAD_PATH,
+                std::time::Duration::from_secs(30 * 60),
+            )
+        });
+        let (client, url) = match client_and_url {
+            Ok(client_and_url) => client_and_url,
+            Err(error) => return Err(error.clone()),
+        };
+        let mut response = client
+            .post(url)
+            .bearer_auth(&self.inner.token)
+            .json(request)
+            .send()
+            .map_err(|error| format!("Download request failed: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let message = response
+                .text()
+                .unwrap_or_else(|_| "download failed".to_string());
+            return Err(format!("Download failed ({status}): {message}"));
+        }
+        std::io::copy(&mut response, writer)
+            .map(|_| ())
+            .map_err(|error| format!("Cannot save downloaded file: {error}"))
     }
 
     /// Post a content search while observing the request-local cancellation flag.
@@ -471,6 +525,20 @@ mod tests {
             client_kind_for(&ActionRequest::ReadFileBytes {
                 project_id: "project".to_string(),
                 relative_path: "image.png".to_string(),
+            }),
+            ActionClientKind::Bytes
+        );
+        assert_eq!(
+            client_kind_for(&ActionRequest::ReadTerminalFileBytes {
+                terminal_id: "terminal-1".into(),
+                path: "/tmp/image.png".into(),
+            }),
+            ActionClientKind::Bytes
+        );
+        assert_eq!(
+            client_kind_for(&ActionRequest::ReadPathFileBytes {
+                root: "/tmp".into(),
+                relative_path: "image.png".into(),
             }),
             ActionClientKind::Bytes
         );

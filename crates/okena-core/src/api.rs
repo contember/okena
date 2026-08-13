@@ -566,6 +566,54 @@ pub struct ApiFullscreen {
     pub terminal_id: String,
 }
 
+/// The kind of a path resolved on the daemon filesystem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedPathKind {
+    File,
+    Directory,
+}
+
+/// One daemon-native ancestor used by the file browser breadcrumb.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathBreadcrumb {
+    pub canonical_path: String,
+    pub label: String,
+}
+
+/// A path resolved on the daemon that owns the filesystem.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPath {
+    pub canonical_path: String,
+    pub name: String,
+    pub kind: ResolvedPathKind,
+    pub size: u64,
+    pub modified_at_millis: Option<u64>,
+    /// Set when the path is inside a known project on this daemon.
+    pub project_id: Option<String>,
+    pub relative_path: Option<String>,
+    /// Ordered from the filesystem root through this path.
+    pub breadcrumbs: Vec<PathBreadcrumb>,
+}
+
+/// Identifies a daemon-side file for streaming downloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileDownloadRequest {
+    Project {
+        project_id: String,
+        relative_path: String,
+    },
+    Terminal {
+        terminal_id: String,
+        path: String,
+    },
+    Path {
+        root: String,
+        relative_path: String,
+    },
+}
+
 /// POST /v1/actions request body (tagged enum)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -860,6 +908,82 @@ pub enum ActionRequest {
     ReadFileBytes {
         project_id: String,
         relative_path: String,
+    },
+    ResolveProjectPath {
+        project_id: String,
+        relative_path: String,
+    },
+    ResolveTerminalPath {
+        terminal_id: String,
+        path: String,
+    },
+    ResolvePath {
+        path: String,
+    },
+    ResolvePathInScope {
+        root: String,
+        relative_path: String,
+    },
+    ListPathFiles {
+        root: String,
+        #[serde(default)]
+        show_ignored: bool,
+    },
+    ListPathDirectory {
+        root: String,
+        #[serde(default)]
+        relative_path: String,
+        #[serde(default)]
+        show_ignored: bool,
+    },
+    ReadPathFile {
+        root: String,
+        relative_path: String,
+    },
+    ReadPathFileBytes {
+        root: String,
+        relative_path: String,
+    },
+    PathFileSize {
+        root: String,
+        relative_path: String,
+    },
+    SearchPathContent {
+        root: String,
+        query: String,
+        #[serde(default)]
+        case_sensitive: bool,
+        #[serde(default = "default_search_mode")]
+        mode: String,
+        #[serde(default = "default_max_results")]
+        max_results: usize,
+        #[serde(default)]
+        file_glob: Option<String>,
+        #[serde(default)]
+        context_lines: usize,
+        #[serde(default)]
+        show_ignored: bool,
+    },
+    RenamePath {
+        root: String,
+        relative_path: String,
+        new_name: String,
+    },
+    DeletePath {
+        root: String,
+        relative_path: String,
+    },
+    ReadTerminalFile {
+        terminal_id: String,
+        path: String,
+    },
+    ReadTerminalFileBytes {
+        terminal_id: String,
+        path: String,
+    },
+    TerminalFileSize {
+        terminal_id: String,
+        path: String,
     },
     FileSize {
         project_id: String,
@@ -1574,6 +1698,27 @@ mod tests {
             },
             ActionRequest::ReloadServices {
                 project_id: "p1".into(),
+            },
+            ActionRequest::ResolveTerminalPath {
+                terminal_id: "t1".into(),
+                path: "../notes".into(),
+            },
+            ActionRequest::ResolvePath {
+                path: "/srv/apps".into(),
+            },
+            ActionRequest::ListPathDirectory {
+                root: "/srv/apps".into(),
+                relative_path: "demo".into(),
+                show_ignored: false,
+            },
+            ActionRequest::ReadPathFile {
+                root: "/srv/apps".into(),
+                relative_path: "demo/README.md".into(),
+            },
+            ActionRequest::RenamePath {
+                root: "/srv/apps".into(),
+                relative_path: "demo/old.txt".into(),
+                new_name: "new.txt".into(),
             },
             ActionRequest::RenameFile {
                 project_id: "p1".into(),

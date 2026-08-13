@@ -5,7 +5,6 @@ use crate::elements::terminal_element::{
     deregister_resize_viewer as deregister_shared_resize_viewer, next_resize_viewer_id,
 };
 use crate::layout::navigation::register_pane_bounds;
-use crate::terminal_view_settings;
 use gpui::*;
 use okena_files::theme::theme;
 use okena_terminal::terminal::Terminal;
@@ -353,24 +352,37 @@ impl TerminalContent {
         }
     }
 
-    /// Best-effort project-relative path for opening a clicked terminal path in
-    /// the file viewer. Strips any trailing :line:col, then makes it relative to
-    /// the project root (the daemon-side project path). Returns None for absolute
-    /// paths outside the project or `~`-prefixed paths we can't resolve.
-    fn project_relative_path(&self, raw: &str, cx: &App) -> Option<String> {
-        let clean = super::url_detector::strip_line_col_suffix(raw);
-        let project_path = self
-            .workspace
-            .read(cx)
-            .project(&self.project_id)?
-            .path
-            .clone();
-        let cwd = self
+    fn request_file_viewer(
+        &self,
+        path: &str,
+        line: Option<u32>,
+        column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal_id) = self
             .terminal
             .as_ref()
-            .map(|terminal| terminal.current_cwd())
-            .unwrap_or_else(|| project_path.clone());
-        remote_project_relative_path(clean, &project_path, &cwd)
+            .map(|terminal| terminal.terminal_id.clone())
+        else {
+            return;
+        };
+        let path = terminal_file_request_path(path, line);
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Project(
+                    okena_workspace::requests::ProjectOverlay {
+                        project_id: self.project_id.clone(),
+                        kind: okena_workspace::requests::ProjectOverlayKind::TerminalPathViewer {
+                            terminal_id,
+                            path,
+                            line,
+                            column,
+                        },
+                    },
+                ),
+                cx,
+            );
+        });
     }
 
     fn handle_mouse_down(
@@ -392,38 +404,25 @@ impl TerminalContent {
                 .as_ref()
                 .and_then(|t| t.hyperlink_at(col, row))
             {
-                UrlDetector::open_url(&uri);
+                if uri.starts_with("file://") {
+                    self.request_file_viewer(&uri, None, None, cx);
+                } else {
+                    UrlDetector::open_url(&uri);
+                }
                 self.mouse_down_cell = None;
                 return;
             }
             if let Some(url_match) = self.url_detector.find_at(col, row) {
                 match &url_match.kind {
                     LinkKind::Url => {
-                        UrlDetector::open_url(&url_match.url);
+                        if url_match.url.starts_with("file://") {
+                            self.request_file_viewer(&url_match.url, None, None, cx);
+                        } else {
+                            UrlDetector::open_url(&url_match.url);
+                        }
                     }
                     LinkKind::FilePath { line, col } => {
-                        if self
-                            .workspace
-                            .read(cx)
-                            .is_local_daemon_project(&self.project_id)
-                        {
-                            let file_opener = terminal_view_settings(cx).file_opener.clone();
-                            UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
-                        } else if let Some(relative_path) =
-                            self.project_relative_path(&url_match.url, cx)
-                        {
-                            self.request_broker.update(cx, |broker, cx| {
-                                broker.push_overlay_request(
-                                    okena_workspace::requests::OverlayRequest::Project(
-                                        okena_workspace::requests::ProjectOverlay {
-                                            project_id: self.project_id.clone(),
-                                            kind: okena_workspace::requests::ProjectOverlayKind::FileViewer { relative_path },
-                                        },
-                                    ),
-                                    cx,
-                                );
-                            });
-                        }
+                        self.request_file_viewer(&url_match.url, *line, *col, cx);
                     }
                 }
                 self.mouse_down_cell = None;
@@ -908,63 +907,13 @@ impl Drop for TerminalContent {
 
 impl EventEmitter<TerminalContentEvent> for TerminalContent {}
 
-fn remote_project_relative_path(raw: &str, project_path: &str, cwd: &str) -> Option<String> {
-    if raw.starts_with('~') {
-        return None;
-    }
-
-    let raw = raw.replace('\\', "/");
-    let project_path = project_path.replace('\\', "/");
-    let cwd = cwd.replace('\\', "/");
-    let raw_is_absolute = is_absolute_path(&raw);
-    let candidate = if raw_is_absolute {
-        raw
-    } else if cwd.is_empty() {
-        format!("{project_path}/{raw}")
+fn terminal_file_request_path(path: &str, line: Option<u32>) -> String {
+    if line.is_some() {
+        super::url_detector::strip_line_col_suffix(path)
     } else {
-        format!("{cwd}/{raw}")
-    };
-
-    let project_parts = normalize_path_parts(&project_path)?;
-    let candidate_parts = normalize_path_parts(&candidate)?;
-    let windows_path =
-        project_path.as_bytes().get(1) == Some(&b':') || project_path.starts_with("//");
-    if candidate_parts.len() <= project_parts.len()
-        || !candidate_parts
-            .iter()
-            .zip(&project_parts)
-            .all(|(candidate, project)| {
-                if windows_path {
-                    candidate.eq_ignore_ascii_case(project)
-                } else {
-                    candidate == project
-                }
-            })
-    {
-        return None;
+        path
     }
-
-    Some(candidate_parts[project_parts.len()..].join("/"))
-}
-
-fn is_absolute_path(path: &str) -> bool {
-    path.starts_with('/')
-        || path.starts_with("//")
-        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes().get(2) == Some(&b'/'))
-}
-
-fn normalize_path_parts(path: &str) -> Option<Vec<&str>> {
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            _ => parts.push(part),
-        }
-    }
-    Some(parts)
+    .to_string()
 }
 
 /// Lines to scroll for drag-selection auto-scroll, given the pointer's `y` and
@@ -990,7 +939,7 @@ fn autoscroll_lines(y: f32, top: f32, bottom: f32, cell_height: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{autoscroll_lines, remote_project_relative_path};
+    use super::{autoscroll_lines, terminal_file_request_path};
 
     const CELL: f32 = 16.0;
     const TOP: f32 = 100.0;
@@ -1031,46 +980,18 @@ mod tests {
     }
 
     #[test]
-    fn remote_absolute_path_is_made_project_relative() {
+    fn detected_source_position_is_removed_from_request_path() {
         assert_eq!(
-            remote_project_relative_path(
-                "/srv/project/src/main.rs",
-                "/srv/project",
-                "/srv/project"
-            ),
-            Some("src/main.rs".to_string())
+            terminal_file_request_path("src/main.rs:42:7", Some(42)),
+            "src/main.rs"
         );
     }
 
     #[test]
-    fn remote_relative_path_uses_terminal_cwd() {
+    fn file_uri_without_detected_position_keeps_numeric_filename() {
         assert_eq!(
-            remote_project_relative_path("../shared.rs", "/srv/project", "/srv/project/src/bin"),
-            Some("src/shared.rs".to_string())
-        );
-    }
-
-    #[test]
-    fn remote_windows_paths_are_normalized_without_client_path_rules() {
-        assert_eq!(
-            remote_project_relative_path(
-                r"C:\work\project\src\main.rs",
-                r"c:\work\project",
-                r"C:\work\project"
-            ),
-            Some("src/main.rs".to_string())
-        );
-    }
-
-    #[test]
-    fn remote_path_outside_project_is_rejected() {
-        assert_eq!(
-            remote_project_relative_path("/etc/passwd", "/srv/project", "/srv/project"),
-            None
-        );
-        assert_eq!(
-            remote_project_relative_path("../../../etc/passwd", "/srv/project", "/srv/project"),
-            None
+            terminal_file_request_path("file:///tmp/release:42", None),
+            "file:///tmp/release:42"
         );
     }
 }

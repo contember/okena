@@ -326,6 +326,7 @@ impl FileViewer {
             let updated = old.replacen(&old_rel, &new_rel, 1);
             self.expanded_folders.insert(updated);
         }
+        self.invalidate_visible_tree_rows();
     }
 
     // ========================================================================

@@ -44,7 +44,7 @@ fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
     div()
         .flex()
         .items_center()
-        .h(px(22.0))
+        .h(px(26.0))
         .pl(px(indent + 8.0 + 18.0))
         .pr(px(12.0))
         .text_size(ui_text(12.0, cx))
@@ -71,6 +71,15 @@ impl FileViewer {
 
         let mut bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
         bg_ranges.extend(self.search_bg_ranges_for_line(line_number, t));
+        if tab.target_line == Some(line_number + 1)
+            && let Some(column) = tab.target_column
+        {
+            let char_index = column.saturating_sub(1);
+            if let Some((start, character)) = line.plain_text.char_indices().nth(char_index) {
+                let end = start + character.len_utf8();
+                bg_ranges.push((start..end, rgba(t.selection_bg, 0.8).into()));
+            }
+        }
 
         let plain_text = line.plain_text.clone();
         let line_len = line.plain_text.len();
@@ -83,6 +92,9 @@ impl FileViewer {
             .w_full()
             .flex()
             .h(px(line_height))
+            .when(tab.target_line == Some(line_number + 1), |d| {
+                d.bg(rgba(t.bg_selection, 0.55))
+            })
             .text_size(ui_text(font_size, cx))
             .font_family("monospace")
             .on_mouse_down(MouseButton::Left, {
@@ -196,7 +208,7 @@ impl FileViewer {
     pub(super) fn render_sidebar(
         &self,
         t: &ThemeColors,
-        tree_elements: Vec<AnyElement>,
+        tree_rows: Arc<Vec<FileTreeRow<String>>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active_count = self.show_ignored as u8;
@@ -242,12 +254,19 @@ impl FileViewer {
                 )
             });
 
-        let tree = div()
-            .id("file-viewer-tree")
+        let row_count = tree_rows.len();
+        let rows_for_render = tree_rows;
+        let view = cx.entity().clone();
+        let tree_theme = Arc::new(*t);
+        let tree_scrollbar_geometry = get_scrollbar_geometry(&self.tree_scroll_handle);
+        let tree_scrollbar_is_dragging = self.tree_scrollbar_drag.is_some();
+        let tree_is_measured = self.tree_scroll_handle.0.borrow().last_item_size.is_some();
+        if row_count > 0 && !tree_is_measured {
+            cx.notify();
+        }
+        let tree = v_flex()
             .flex_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.tree_scroll_handle)
-            .py(px(6.0))
+            .min_h_0()
             .when_some(self.tree_error_message.clone(), |d, error| {
                 d.child(
                     div()
@@ -258,7 +277,37 @@ impl FileViewer {
                         .child(error),
                 )
             })
-            .children(tree_elements);
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list("file-viewer-tree", row_count, move |range, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.render_file_tree_range(
+                                    &rows_for_render[range],
+                                    &tree_theme,
+                                    cx,
+                                )
+                            })
+                        })
+                        .size_full()
+                        .track_scroll(&self.tree_scroll_handle),
+                    )
+                    .when_some(
+                        tree_scrollbar_geometry,
+                        |d, (_, _, thumb_y, thumb_height)| {
+                            d.child(self.render_tree_scrollbar(
+                                t,
+                                thumb_y,
+                                thumb_height,
+                                tree_scrollbar_is_dragging,
+                                cx,
+                            ))
+                        },
+                    ),
+            );
 
         let entity = cx.entity().downgrade();
         let entity_for_end = entity.clone();
@@ -283,13 +332,14 @@ impl FileViewer {
         )
     }
 
-    /// Render the canonical visible file-tree rows.
-    pub(super) fn render_file_tree(
+    /// Render only the file-tree rows requested by the virtualized list.
+    fn render_file_tree_range(
         &self,
+        rows: &[FileTreeRow<String>],
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut elements: Vec<AnyElement> = Vec::new();
+        let mut elements: Vec<AnyElement> = Vec::with_capacity(rows.len());
         let active_relative = self.active_tab().relative_path.clone();
         let open_relatives: std::collections::HashSet<String> = self
             .tabs
@@ -298,25 +348,25 @@ impl FileViewer {
             .map(|t| t.relative_path.clone())
             .collect();
 
-        for row in self.file_tree_rows(false) {
+        for row in rows {
             match row {
                 FileTreeRow::Folder {
                     path, name, depth, ..
                 } => {
-                    self.render_folder_row(&mut elements, &name, &path, depth, t, cx);
+                    self.render_folder_row(&mut elements, name, path, *depth, t, cx);
                 }
                 FileTreeRow::File {
                     item: file_relative,
                     depth,
                 } => {
-                    let filename = file_relative.rsplit('/').next().unwrap_or(&file_relative);
-                    let is_active = active_relative == file_relative;
-                    let is_open = open_relatives.contains(&file_relative);
+                    let filename = file_relative.rsplit('/').next().unwrap_or(file_relative);
+                    let is_active = active_relative == file_relative.as_str();
+                    let is_open = open_relatives.contains(file_relative);
                     self.render_file_row(
                         &mut elements,
                         filename,
-                        &file_relative,
-                        depth,
+                        file_relative,
+                        *depth,
                         is_active,
                         is_open,
                         t,
@@ -324,7 +374,7 @@ impl FileViewer {
                     );
                 }
                 FileTreeRow::Loading { depth } => {
-                    elements.push(loading_row(depth, t, cx).into_any_element());
+                    elements.push(loading_row(*depth, t, cx).into_any_element());
                 }
             }
         }
@@ -545,6 +595,58 @@ impl FileViewer {
             )
     }
 
+    fn render_tree_scrollbar(
+        &self,
+        t: &ThemeColors,
+        thumb_y: f32,
+        thumb_height: f32,
+        is_dragging: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("file-tree-scrollbar-track")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(12.0))
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let y = f32::from(event.position.y);
+                    if get_scrollbar_geometry(&this.tree_scroll_handle).is_some() {
+                        this.start_tree_scrollbar_drag(y, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.tree_scrollbar_drag.is_some() {
+                    let y = f32::from(event.position.y);
+                    this.update_tree_scrollbar_drag(y, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| this.end_tree_scrollbar_drag(cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(thumb_y))
+                    .right(px(3.0))
+                    .w(px(6.0))
+                    .h(px(thumb_height))
+                    .rounded(px(3.0))
+                    .bg(rgb(if is_dragging {
+                        t.scrollbar_hover
+                    } else {
+                        t.scrollbar
+                    }))
+                    .hover(|s| s.bg(rgb(t.scrollbar_hover))),
+            )
+    }
+
     /// Render the tab bar (styled like terminal tabs).
     fn render_tab_bar(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let mut tab_elements: Vec<AnyElement> = Vec::new();
@@ -712,6 +814,99 @@ impl FileViewer {
                             }))
                             .opacity(if can_forward { 1.0 } else { 0.4 }),
                     ),
+            )
+    }
+
+    fn render_scope_navigation(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Div {
+        let can_go_up = self
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.breadcrumbs.len() > 1)
+            && !self.scope_navigation_in_flight;
+        let mut breadcrumbs = Vec::new();
+        if let Some(scope) = &self.scope {
+            let last = scope.breadcrumbs.len().saturating_sub(1);
+            for (index, breadcrumb) in scope.breadcrumbs.iter().enumerate() {
+                if index > 0 {
+                    breadcrumbs.push(
+                        svg()
+                            .path("icons/chevron-right.svg")
+                            .size(px(10.0))
+                            .text_color(rgb(t.text_muted))
+                            .into_any_element(),
+                    );
+                }
+                let path = breadcrumb.canonical_path.clone();
+                let is_current = index == last;
+                breadcrumbs.push(
+                    div()
+                        .id(ElementId::Name(format!("scope-breadcrumb-{index}").into()))
+                        .px(px(3.0))
+                        .py(px(1.0))
+                        .rounded(px(3.0))
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(if is_current {
+                            t.text_secondary
+                        } else {
+                            t.text_muted
+                        }))
+                        .when(!is_current, |d| {
+                            d.cursor_pointer()
+                                .hover(|style| style.bg(rgb(t.bg_hover)))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.navigate_to_scope(path.clone(), cx);
+                                }))
+                        })
+                        .child(breadcrumb.label.clone())
+                        .into_any_element(),
+                );
+            }
+        }
+
+        h_flex()
+            .min_w_0()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .id("scope-up")
+                    .flex_shrink_0()
+                    .cursor(if can_go_up {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::Arrow
+                    })
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .when(can_go_up, |d| d.hover(|style| style.bg(rgb(t.bg_hover))))
+                    .on_click(cx.listener(|this, _, _window, cx| this.navigate_up(cx)))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Parent directory").build(window, cx)
+                    })
+                    .child(
+                        svg()
+                            .path("icons/chevron-up.svg")
+                            .size(px(13.0))
+                            .text_color(rgb(t.text_muted))
+                            .opacity(if can_go_up { 1.0 } else { 0.4 }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("{}:", self.project_fs.owner_label())),
+                    )
+                    .children(breadcrumbs),
             )
     }
 
@@ -1140,6 +1335,7 @@ impl Render for FileViewer {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let tab = self.active_tab();
+        let has_file = !tab.is_empty();
         let tab_loading = tab.loading;
         let has_error = tab.error_message.is_some();
         let error_message = tab.error_message.clone();
@@ -1166,17 +1362,26 @@ impl Render for FileViewer {
         let sidebar_visible = self.sidebar_visible;
         let show_tabs = self.tabs.len() > 1;
 
-        let filename = tab
-            .file_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "File".to_string());
-
-        let relative_path = if !tab.relative_path.is_empty() {
-            tab.relative_path.clone()
+        let filename = if has_file {
+            tab.file_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "File".to_string())
         } else {
-            tab.file_path.to_string_lossy().to_string()
+            self.project_fs.project_name()
         };
+        let source_action = self.project_fs.source_action();
+        let source_action_label = match source_action {
+            crate::project_fs::FileSourceAction::OpenExternally => "Open externally",
+            crate::project_fs::FileSourceAction::Download => {
+                if self.transfer_in_progress {
+                    "Downloading…"
+                } else {
+                    "Download"
+                }
+            }
+        };
+        let transfer_status = self.transfer_status.clone();
 
         // Measure actual monospace character width from font metrics
         let font = Font {
@@ -1201,11 +1406,12 @@ impl Render for FileViewer {
         let scrollbar_geometry = get_scrollbar_geometry(&tab.source_scroll_handle);
         let is_dragging_scrollbar = tab.scrollbar_drag.is_some();
 
-        // Pre-render tree elements for sidebar
-        let tree_elements = if sidebar_visible {
-            self.render_file_tree(&t, cx)
+        // Flatten the tree only when its structure changes. The sidebar list
+        // renders just the visible range from these cached rows.
+        let tree_rows = if sidebar_visible {
+            self.visible_file_tree_rows()
         } else {
-            Vec::new()
+            Arc::new(Vec::new())
         };
 
         // Markdown preview uses a virtualized list (built below) so only the
@@ -1392,12 +1598,19 @@ impl Render for FileViewer {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
                 }
+                if this.tree_scrollbar_drag.is_some() {
+                    let y = f32::from(event.position.y);
+                    this.update_tree_scrollbar_drag(y, cx);
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
                     if this.active_tab().scrollbar_drag.is_some() {
                         this.end_scrollbar_drag(cx);
+                    }
+                    if this.tree_scrollbar_drag.is_some() {
+                        this.end_tree_scrollbar_drag(cx);
                     }
                 }),
             )
@@ -1458,32 +1671,22 @@ impl Render for FileViewer {
                                             .overflow_hidden()
                                             .child(filename),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(ui_text_sm(cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .text_ellipsis()
-                                            .overflow_hidden()
-                                            .min_w_0()
-                                            .child(relative_path),
-                                    )
+                                    .child(self.render_scope_navigation(&t, cx))
                                     .into_any_element()
                             } else {
                                 v_flex()
                                     .gap(px(2.0))
+                                    .min_w_0()
                                     .child(
                                         div()
                                             .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(rgb(t.text_primary))
+                                            .text_ellipsis()
+                                            .overflow_hidden()
                                             .child(filename),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(ui_text_ms(cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child(relative_path),
-                                    )
+                                    .child(self.render_scope_navigation(&t, cx))
                                     .into_any_element()
                             }),
                     )
@@ -1492,6 +1695,40 @@ impl Render for FileViewer {
                     .child(
                         h_flex()
                             .gap(px(12.0))
+                            .when_some(transfer_status, |d, status| {
+                                d.child(
+                                    div()
+                                        .max_w(px(260.0))
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(status),
+                                )
+                            })
+                            .when(has_file, |d| d.child(
+                                div()
+                                    .id("file-source-action")
+                                    .cursor_pointer()
+                                    .h(px(28.0))
+                                    .px(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(4.0))
+                                    .bg(rgb(t.bg_secondary))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .when(self.transfer_in_progress, |d| d.opacity(0.6))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request_source_action(window, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_secondary))
+                                            .child(source_action_label),
+                                    ),
+                            ))
                             .when(self.blame_provider.is_some() && !is_image && !is_font, |d| {
                                 let on = self.blame_visible;
                                 d.child(
@@ -1604,7 +1841,7 @@ impl Render for FileViewer {
                     .flex_1()
                     .min_h_0()
                     .when(sidebar_visible, |d| {
-                        d.child(self.render_sidebar(&t, tree_elements, cx))
+                        d.child(self.render_sidebar(&t, tree_rows, cx))
                     })
                     .child(
                         v_flex()
@@ -2090,10 +2327,7 @@ impl Render for FileViewer {
                                                 cx,
                                             ))
                                             .child(self.render_hint(
-                                                "Alt+\u{2190}/\u{2192}",
-                                                "back/fwd",
-                                                &t,
-                                                cx,
+                                                "Alt+\u{2190}/\u{2192}", "back/fwd", &t, cx,
                                             ))
                                             .child(self.render_hint("Esc", "close", &t, cx)),
                                     )
