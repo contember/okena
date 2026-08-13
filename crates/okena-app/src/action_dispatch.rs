@@ -966,6 +966,109 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             relative_path,
         },
+        ActionRequest::ResolveProjectPath {
+            project_id,
+            relative_path,
+        } => ActionRequest::ResolveProjectPath {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::ResolveTerminalPath { terminal_id, path } => {
+            ActionRequest::ResolveTerminalPath {
+                terminal_id: s(&terminal_id),
+                path,
+            }
+        }
+        ActionRequest::ResolvePath { path } => ActionRequest::ResolvePath { path },
+        ActionRequest::ResolvePathInScope {
+            root,
+            relative_path,
+        } => ActionRequest::ResolvePathInScope {
+            root,
+            relative_path,
+        },
+        ActionRequest::ListPathFiles { root, show_ignored } => {
+            ActionRequest::ListPathFiles { root, show_ignored }
+        }
+        ActionRequest::ListPathDirectory {
+            root,
+            relative_path,
+            show_ignored,
+        } => ActionRequest::ListPathDirectory {
+            root,
+            relative_path,
+            show_ignored,
+        },
+        ActionRequest::ReadPathFile {
+            root,
+            relative_path,
+        } => ActionRequest::ReadPathFile {
+            root,
+            relative_path,
+        },
+        ActionRequest::ReadPathFileBytes {
+            root,
+            relative_path,
+        } => ActionRequest::ReadPathFileBytes {
+            root,
+            relative_path,
+        },
+        ActionRequest::PathFileSize {
+            root,
+            relative_path,
+        } => ActionRequest::PathFileSize {
+            root,
+            relative_path,
+        },
+        ActionRequest::SearchPathContent {
+            root,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        } => ActionRequest::SearchPathContent {
+            root,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        },
+        ActionRequest::RenamePath {
+            root,
+            relative_path,
+            new_name,
+        } => ActionRequest::RenamePath {
+            root,
+            relative_path,
+            new_name,
+        },
+        ActionRequest::DeletePath {
+            root,
+            relative_path,
+        } => ActionRequest::DeletePath {
+            root,
+            relative_path,
+        },
+        ActionRequest::ReadTerminalFile { terminal_id, path } => ActionRequest::ReadTerminalFile {
+            terminal_id: s(&terminal_id),
+            path,
+        },
+        ActionRequest::ReadTerminalFileBytes { terminal_id, path } => {
+            ActionRequest::ReadTerminalFileBytes {
+                terminal_id: s(&terminal_id),
+                path,
+            }
+        }
+        ActionRequest::TerminalFileSize { terminal_id, path } => ActionRequest::TerminalFileSize {
+            terminal_id: s(&terminal_id),
+            path,
+        },
         ActionRequest::FileSize {
             project_id,
             relative_path,

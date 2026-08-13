@@ -369,6 +369,75 @@ pub fn execute_action(
             project_id,
             relative_path,
         } => files::read_file_bytes(ws, project_id, relative_path),
+        ActionRequest::ResolveProjectPath {
+            project_id,
+            relative_path,
+        } => files::resolve_project_path_action(ws, project_id, relative_path),
+        ActionRequest::ResolveTerminalPath { terminal_id, path } => {
+            files::resolve_terminal_path_action(ws, terminals, terminal_id, path)
+        }
+        ActionRequest::ResolvePath { path } => files::resolve_path_action(ws, path),
+        ActionRequest::ResolvePathInScope {
+            root,
+            relative_path,
+        } => files::resolve_path_in_scope_action(ws, root, relative_path),
+        ActionRequest::ListPathFiles { root, show_ignored } => {
+            files::list_path_files(root, show_ignored)
+        }
+        ActionRequest::ListPathDirectory {
+            root,
+            relative_path,
+            show_ignored,
+        } => files::list_path_directory(root, relative_path, show_ignored),
+        ActionRequest::ReadPathFile {
+            root,
+            relative_path,
+        } => files::read_path_file(root, relative_path),
+        ActionRequest::ReadPathFileBytes {
+            root,
+            relative_path,
+        } => files::read_path_file_bytes(root, relative_path),
+        ActionRequest::PathFileSize {
+            root,
+            relative_path,
+        } => files::path_file_size(root, relative_path),
+        ActionRequest::SearchPathContent {
+            root,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        } => files::search_path_content(
+            root,
+            query,
+            case_sensitive,
+            mode,
+            max_results,
+            file_glob,
+            context_lines,
+            show_ignored,
+        ),
+        ActionRequest::RenamePath {
+            root,
+            relative_path,
+            new_name,
+        } => files::rename_path(root, relative_path, new_name),
+        ActionRequest::DeletePath {
+            root,
+            relative_path,
+        } => files::delete_path(root, relative_path),
+        ActionRequest::ReadTerminalFile { terminal_id, path } => {
+            files::read_terminal_file(ws, terminals, terminal_id, path)
+        }
+        ActionRequest::ReadTerminalFileBytes { terminal_id, path } => {
+            files::read_terminal_file_bytes(ws, terminals, terminal_id, path)
+        }
+        ActionRequest::TerminalFileSize { terminal_id, path } => {
+            files::terminal_file_size(ws, terminals, terminal_id, path)
+        }
         ActionRequest::FileSize {
             project_id,
             relative_path,

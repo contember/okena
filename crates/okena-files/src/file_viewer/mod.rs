@@ -14,6 +14,7 @@ mod tree;
 
 use crate::blame::{BlameError, BlameLine, BlameProvider};
 use crate::code_view::ScrollbarDrag;
+use crate::file_tree::FileTreeRow;
 use crate::list_directory::DirEntry;
 use crate::selection::SelectionState;
 use crate::syntax::{HighlightedLine, load_syntax_set};
@@ -21,6 +22,7 @@ use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, Tab
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -238,6 +240,9 @@ pub(super) struct FileViewerTab {
     /// not on the tab) so the preview pane can render sample text in the
     /// font.
     pub font_data: Option<Arc<FontData>>,
+    /// One-based source position requested by the link that opened this tab.
+    pub target_line: Option<usize>,
+    pub target_column: Option<usize>,
 }
 
 /// Decoded image payload. Raster formats let GPUI's asset cache handle the
@@ -394,6 +399,8 @@ impl FileViewerTab {
             image_view: ImageViewState::default(),
             is_font: false,
             font_data: None,
+            target_line: None,
+            target_column: None,
         }
     }
 
@@ -436,6 +443,8 @@ impl FileViewerTab {
             image_view: ImageViewState::default(),
             is_font,
             font_data: None,
+            target_line: None,
+            target_column: None,
         }
     }
 
@@ -544,8 +553,12 @@ pub struct FileViewer {
     pub(super) tree_error_message: Option<String>,
     /// Which folder paths are currently expanded
     expanded_folders: HashSet<String>,
-    /// Scroll handle for the file tree sidebar
-    tree_scroll_handle: ScrollHandle,
+    /// Cached flattened rows for the currently visible file tree.
+    pub(super) visible_tree_rows: RefCell<Option<Arc<Vec<FileTreeRow<String>>>>>,
+    /// Scroll handle for the virtualized file tree sidebar.
+    tree_scroll_handle: UniformListScrollHandle,
+    /// Active drag gesture for the file tree scrollbar.
+    tree_scrollbar_drag: Option<ScrollbarDrag>,
     /// Whether the sidebar is visible
     sidebar_visible: bool,
     /// Width and active resize gesture for the file tree sidebar.
@@ -593,6 +606,12 @@ pub struct FileViewer {
     /// applies its result if the tab's recorded generation still matches,
     /// so a slow earlier load can't overwrite a faster later one.
     next_load_generation: u64,
+    /// Canonical daemon scope and its breadcrumb ancestry.
+    pub(super) scope: Option<okena_core::api::ResolvedPath>,
+    pub(super) scope_navigation_in_flight: bool,
+    scope_generation: u64,
+    pub(super) transfer_in_progress: bool,
+    pub(super) transfer_status: Option<String>,
 }
 
 impl FileViewer {
@@ -602,6 +621,74 @@ impl FileViewer {
         relative_path: &str,
     ) -> PathBuf {
         PathBuf::from(fs.project_id()).join(relative_path)
+    }
+
+    pub fn is_scope(&self, fs: &std::sync::Arc<dyn crate::project_fs::ProjectFs>) -> bool {
+        self.project_fs.scope_path() == fs.scope_path()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebind_scope(
+        &mut self,
+        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        blame_visible: bool,
+        relative_path: Option<String>,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        for tab in &mut self.tabs {
+            if let Some(decoded) = tab.image_data.take() {
+                release_image_assets(decoded, cx);
+            }
+        }
+        self.project_fs = project_fs;
+        self.scope = None;
+        self.scope_generation = self.scope_generation.wrapping_add(1);
+        self.scope_navigation_in_flight = false;
+        self.loaded_dirs.clear();
+        self.loading_dirs.clear();
+        self.tree_error_message = None;
+        self.expanded_folders = relative_path
+            .as_deref()
+            .map(Self::compute_expanded_for_relative)
+            .unwrap_or_default();
+        self.invalidate_visible_tree_rows();
+        self.tree_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.tree_scrollbar_drag = None;
+        self.tabs = vec![match &relative_path {
+            Some(relative_path) => {
+                let mut tab = FileViewerTab::new_loading(
+                    relative_path.clone(),
+                    Self::tree_path(&self.project_fs, relative_path),
+                );
+                tab.target_line = line;
+                tab.target_column = column;
+                if line.is_some() {
+                    tab.display_mode = DisplayMode::Source;
+                }
+                tab
+            }
+            None => FileViewerTab::new_empty(),
+        }];
+        self.active_tab = 0;
+        self.history = NavigationHistory::new();
+        self.loading = true;
+        self.freshness_check_in_flight = false;
+        self.sidebar_visible = true;
+        self.blame_provider = blame_provider;
+        self.blame_visible = blame_visible;
+        self.fetch_scope_info(cx);
+        self.fetch_initial_dirs(cx);
+        if let Some(relative_path) = relative_path {
+            self.spawn_tab_load(relative_path, cx);
+            if self.blame_visible {
+                self.spawn_blame_load_for_active(cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Create a new file viewer with `relative_path` (project-relative) opened
@@ -615,12 +702,43 @@ impl FileViewer {
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_at(
+            relative_path,
+            project_fs,
+            blame_provider,
+            blame_visible,
+            font_size,
+            is_dark,
+            None,
+            None,
+            cx,
+        )
+    }
+
+    /// Create a project file viewer and focus an optional one-based position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_at(
+        relative_path: String,
+        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        blame_visible: bool,
+        font_size: f32,
+        is_dark: bool,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let expanded_folders = Self::compute_expanded_for_relative(&relative_path);
         let syntax_set = load_syntax_set();
 
         let file_path = Self::tree_path(&project_fs, &relative_path);
-        let tab = FileViewerTab::new_loading(relative_path.clone(), file_path.clone());
+        let mut tab = FileViewerTab::new_loading(relative_path.clone(), file_path.clone());
+        tab.target_line = line;
+        tab.target_column = column;
+        if line.is_some() {
+            tab.display_mode = DisplayMode::Source;
+        }
 
         let mut viewer = Self {
             focus_handle,
@@ -634,7 +752,9 @@ impl FileViewer {
             loading_dirs: HashSet::new(),
             tree_error_message: None,
             expanded_folders,
-            tree_scroll_handle: ScrollHandle::new(),
+            visible_tree_rows: RefCell::new(None),
+            tree_scroll_handle: UniformListScrollHandle::new(),
+            tree_scrollbar_drag: None,
             sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),
             tabs: vec![tab],
@@ -655,10 +775,16 @@ impl FileViewer {
             blame_visible,
             selection_context_menu: None,
             next_load_generation: 0,
+            scope: None,
+            scope_navigation_in_flight: false,
+            scope_generation: 0,
+            transfer_in_progress: false,
+            transfer_status: None,
         };
 
         // Kick off the root directory listing and any expanded ancestors so
         // the tree fills in around the opened file.
+        viewer.fetch_scope_info(cx);
         viewer.fetch_initial_dirs(cx);
         viewer.spawn_tab_load(relative_path, cx);
         if viewer.blame_visible {
@@ -692,7 +818,9 @@ impl FileViewer {
             loading_dirs: HashSet::new(),
             tree_error_message: None,
             expanded_folders: HashSet::new(),
-            tree_scroll_handle: ScrollHandle::new(),
+            visible_tree_rows: RefCell::new(None),
+            tree_scroll_handle: UniformListScrollHandle::new(),
+            tree_scrollbar_drag: None,
             sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),
             tabs: vec![FileViewerTab::new_empty()],
@@ -713,7 +841,13 @@ impl FileViewer {
             blame_visible,
             selection_context_menu: None,
             next_load_generation: 0,
+            scope: None,
+            scope_navigation_in_flight: false,
+            scope_generation: 0,
+            transfer_in_progress: false,
+            transfer_status: None,
         };
+        viewer.fetch_scope_info(cx);
         viewer.fetch_initial_dirs(cx);
         viewer
     }
@@ -735,6 +869,96 @@ impl FileViewer {
     /// Request to detach the viewer into a separate OS window.
     pub(super) fn request_detach(&self, cx: &mut Context<Self>) {
         cx.emit(FileViewerEvent::Detach);
+    }
+
+    pub(super) fn request_source_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::project_fs::FileSourceAction;
+        let tab = self.active_tab();
+        match self.project_fs.source_action() {
+            FileSourceAction::OpenExternally => {
+                let Some(path) = self.project_fs.absolute_path(&tab.relative_path) else {
+                    self.transfer_status = Some("The daemon did not provide a local path".into());
+                    cx.notify();
+                    return;
+                };
+                cx.emit(FileViewerEvent::OpenExternally {
+                    path,
+                    line: tab.target_line,
+                    column: tab.target_column,
+                });
+            }
+            FileSourceAction::Download => {
+                if self.transfer_in_progress {
+                    return;
+                }
+                let initial_dir = dirs::download_dir()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(std::env::temp_dir);
+                let filename = tab.filename();
+                let relative_path = tab.relative_path.clone();
+                let provider = self.project_fs.clone();
+                let receiver = cx.prompt_for_new_path(&initial_dir, Some(&filename));
+                self.transfer_status = None;
+                cx.spawn_in(window, async move |entity: WeakEntity<Self>, cx| {
+                    let destination = match receiver.await {
+                        Ok(Ok(Some(destination))) => destination,
+                        Ok(Ok(None)) => return,
+                        Ok(Err(error)) => {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.transfer_status =
+                                    Some(format!("Cannot open save dialog: {error}"));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.transfer_status =
+                                    Some(format!("Save dialog closed unexpectedly: {error}"));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+                    let _ = entity.update(cx, |this, cx| {
+                        this.transfer_in_progress = true;
+                        this.transfer_status = Some("Downloading…".to_string());
+                        cx.notify();
+                    });
+                    let saved_path = destination.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            use std::io::Write as _;
+                            let parent = destination.parent().ok_or_else(|| {
+                                "Selected path has no parent directory".to_string()
+                            })?;
+                            let mut temporary =
+                                tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+                                    format!("Cannot create temporary file: {error}")
+                                })?;
+                            provider.download_file(&relative_path, temporary.as_file_mut())?;
+                            temporary.as_file_mut().flush().map_err(|error| {
+                                format!("Cannot flush downloaded file: {error}")
+                            })?;
+                            temporary.persist(&destination).map_err(|error| {
+                                format!("Cannot save downloaded file: {}", error.error)
+                            })?;
+                            Ok::<(), String>(())
+                        })
+                        .await;
+                    let _ = entity.update(cx, |this, cx| {
+                        this.transfer_in_progress = false;
+                        this.transfer_status = Some(match result {
+                            Ok(()) => format!("Saved to {}", saved_path.display()),
+                            Err(error) => error,
+                        });
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     /// Update configuration (font size and dark mode) from the host app.
@@ -770,6 +994,7 @@ impl FileViewer {
         self.loaded_dirs.clear();
         self.loading_dirs.clear();
         self.tree_error_message = None;
+        self.invalidate_visible_tree_rows();
         for path in to_refetch {
             self.fetch_directory(path, cx);
         }
@@ -794,6 +1019,7 @@ impl FileViewer {
             self.loaded_dirs.remove(path);
             self.loading_dirs.remove(path);
         }
+        self.invalidate_visible_tree_rows();
         // Always re-fetch the target dir even if it wasn't loaded before — the
         // caller asked us to refresh it.
         self.fetch_directory(relative_path.to_string(), cx);
@@ -802,6 +1028,129 @@ impl FileViewer {
                 self.fetch_directory(path, cx);
             }
         }
+    }
+
+    fn fetch_scope_info(&mut self, cx: &mut Context<Self>) {
+        let fs = self.project_fs.clone();
+        let path = fs.scope_path();
+        let generation = self.scope_generation;
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { fs.resolve_path(&path) })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                if this.scope_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(scope) if scope.kind == okena_core::api::ResolvedPathKind::Directory => {
+                        this.scope = Some(scope);
+                    }
+                    Ok(_) => {
+                        this.tree_error_message =
+                            Some("Browser scope is not a directory".to_string());
+                    }
+                    Err(error) => this.tree_error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn navigate_up(&mut self, cx: &mut Context<Self>) {
+        let Some(parent) = self
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.breadcrumbs.iter().rev().nth(1))
+        else {
+            return;
+        };
+        self.navigate_to_scope(parent.canonical_path.clone(), cx);
+    }
+
+    pub(super) fn navigate_to_scope(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.scope_navigation_in_flight
+            || self
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.canonical_path == path)
+        {
+            return;
+        }
+        let old_fs = self.project_fs.clone();
+        let old_scope_path = self
+            .scope
+            .as_ref()
+            .map(|scope| scope.canonical_path.clone())
+            .unwrap_or_else(|| old_fs.scope_path());
+        let absolute_tabs: Vec<Option<String>> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                (!tab.is_empty()).then(|| {
+                    crate::project_fs::join_daemon_path(&old_scope_path, &tab.relative_path)
+                })
+            })
+            .collect();
+        self.scope_navigation_in_flight = true;
+        self.transfer_status = None;
+        cx.notify();
+
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let scope = old_fs.resolve_path(&path)?;
+                    if scope.kind != okena_core::api::ResolvedPathKind::Directory {
+                        return Err("Browser scope is not a directory".to_string());
+                    }
+                    let fs = old_fs.scoped_to(scope.clone());
+                    Ok((scope, fs))
+                })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.scope_navigation_in_flight = false;
+                match result {
+                    Ok((scope, fs)) => {
+                        for (tab, absolute_path) in this.tabs.iter_mut().zip(absolute_tabs) {
+                            let Some(absolute_path) = absolute_path else {
+                                continue;
+                            };
+                            let Some(relative_path) = fs.relative_path(&absolute_path) else {
+                                continue;
+                            };
+                            tab.relative_path = relative_path.clone();
+                            tab.file_path = Self::tree_path(&fs, &relative_path);
+                        }
+                        this.project_fs = fs;
+                        this.scope = Some(scope);
+                        this.scope_generation = this.scope_generation.wrapping_add(1);
+                        this.loaded_dirs.clear();
+                        this.loading_dirs.clear();
+                        this.expanded_folders.clear();
+                        this.tree_error_message = None;
+                        this.invalidate_visible_tree_rows();
+                        this.tree_scroll_handle
+                            .scroll_to_item(0, ScrollStrategy::Top);
+                        this.tree_scrollbar_drag = None;
+                        this.loading = true;
+                        this.freshness_check_in_flight = false;
+                        this.sidebar_visible = true;
+                        this.history = NavigationHistory::new();
+                        this.blame_provider = None;
+                        for tab in &mut this.tabs {
+                            tab.blame = BlameLoadState::NotLoaded;
+                        }
+                        this.fetch_initial_dirs(cx);
+                    }
+                    Err(error) => this.tree_error_message = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Fetch the initial directory listings: the project root plus any
@@ -823,15 +1172,20 @@ impl FileViewer {
         {
             return;
         }
+        self.invalidate_visible_tree_rows();
         let fs = self.project_fs.clone();
         let show_ignored = self.show_ignored;
         let path_for_task = relative_path.clone();
+        let generation = self.scope_generation;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result: Result<Vec<DirEntry>, String> = cx
                 .background_executor()
                 .spawn(async move { fs.list_directory(&path_for_task, show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
+                if this.scope_generation != generation {
+                    return;
+                }
                 this.loading_dirs.remove(&relative_path);
                 match result {
                     Ok(entries) => {
@@ -867,6 +1221,7 @@ impl FileViewer {
                 if relative_path.is_empty() {
                     this.loading = false;
                 }
+                this.invalidate_visible_tree_rows();
                 cx.notify();
             });
         })
@@ -891,6 +1246,7 @@ impl FileViewer {
         let old_mtime = tab.modified_at;
         let fs = self.project_fs.clone();
         let path_for_request = relative_path.clone();
+        let generation = self.scope_generation;
 
         self.freshness_check_in_flight = true;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
@@ -899,6 +1255,9 @@ impl FileViewer {
                 .spawn(async move { fs.file_metadata(&path_for_request) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
+                if this.scope_generation != generation {
+                    return;
+                }
                 this.freshness_check_in_flight = false;
                 match result {
                     Ok(metadata) if metadata.modified_at_millis != old_mtime => {
@@ -1177,6 +1536,25 @@ impl FileViewer {
         cx.notify();
     }
 
+    pub fn open_file_in_tab_at(
+        &mut self,
+        relative_path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file_in_tab(relative_path, cx);
+        let tab = self.active_tab_mut();
+        tab.target_line = line;
+        tab.target_column = column;
+        if let Some(line) = line {
+            tab.display_mode = DisplayMode::Source;
+            tab.source_scroll_handle
+                .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
     /// Insert `new_tab` directly after the active tab and return
     /// `(new_active_index, evicted_tab)`. When already at `MAX_TABS`, the
     /// oldest tab is evicted first to make room — never the active tab,
@@ -1213,6 +1591,7 @@ impl FileViewer {
             self.fetch_directory(path.clone(), cx);
         }
         self.expanded_folders.extend(expanded);
+        self.invalidate_visible_tree_rows();
     }
 
     /// Close a tab by index.
@@ -1417,6 +1796,7 @@ impl FileViewer {
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 let mut old_image: Option<DecodedImage> = None;
+                let mut target_line: Option<usize> = None;
                 if let Some(tab) = this
                     .tabs
                     .iter_mut()
@@ -1453,8 +1833,14 @@ impl FileViewer {
                         &this.syntax_set,
                         this.is_dark,
                     );
+                    target_line = tab.target_line;
                     tab.blame = BlameLoadState::NotLoaded;
                     cx.notify();
+                }
+                if let Some(line) = target_line {
+                    this.active_tab()
+                        .source_scroll_handle
+                        .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
                 }
                 if let Some(decoded) = old_image {
                     release_image_assets(decoded, cx);
@@ -1498,6 +1884,12 @@ pub enum FileViewerEvent {
     /// User clicked "Send to terminal" on a selection. Carries the structured
     /// payload; the host formats it (relative to terminal CWD) before pasting.
     SendToTerminal(okena_core::send_payload::SendPayload),
+    /// Open the daemon-side path with a same-host external application.
+    OpenExternally {
+        path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
 }
 
 /// Release the GPU-side cache entries backing a `DecodedImage` before the

@@ -185,7 +185,7 @@ impl WindowView {
         }
     }
 
-    /// Build a ProjectFs provider for the given project (served by the local daemon).
+    /// Build a daemon filesystem provider rooted at the project's path.
     fn build_project_fs(
         &self,
         project_id: &str,
@@ -194,15 +194,139 @@ impl WindowView {
         let ws = self.workspace.read(cx);
         let project = ws.project(project_id)?;
         let conn_id = project.connection_id.as_ref()?;
-        let (client, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        let (client, _) = self.remote_params(project_id, conn_id, cx)?;
         Some(std::sync::Arc::new(
-            okena_files::project_fs::RemoteProjectFs::new(
+            okena_files::project_fs::RemotePathFs::new_unresolved(
                 client,
-                actual_id,
                 project.name.clone(),
                 project.path.clone(),
             ),
         ))
+    }
+
+    fn open_terminal_path(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        path: String,
+        line: Option<u32>,
+        column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection_id) = self
+            .workspace
+            .read(cx)
+            .project(project_id)
+            .and_then(|project| project.connection_id.clone())
+        else {
+            okena_workspace::toast::ToastManager::error(
+                "The file's daemon connection is unavailable",
+                cx,
+            );
+            return;
+        };
+        let Some((client, actual_project_id)) = self.remote_params(project_id, &connection_id, cx)
+        else {
+            okena_workspace::toast::ToastManager::error(
+                "The file's daemon connection is unavailable",
+                cx,
+            );
+            return;
+        };
+        let Some(project_fs) = self.build_project_fs(project_id, cx) else {
+            okena_workspace::toast::ToastManager::error(
+                "Cannot create the project file provider",
+                cx,
+            );
+            return;
+        };
+        let blame = self.build_blame_provider(project_id, cx);
+        let actual_terminal_id = okena_transport::client::strip_prefix(terminal_id, &connection_id);
+        let overlay_manager = self.overlay_manager.clone();
+        let line = line.and_then(|value| usize::try_from(value).ok());
+        let column = column.and_then(|value| usize::try_from(value).ok());
+        cx.spawn(async move |_this, cx| {
+            let request_path = path.clone();
+            let action_client = client.clone();
+            let action_terminal_id = actual_terminal_id.clone();
+            let action_project_id = actual_project_id.clone();
+            let result: Result<
+                (
+                    okena_core::api::ResolvedPath,
+                    Option<okena_core::api::ResolvedPath>,
+                ),
+                String,
+            > = cx
+                .background_executor()
+                .spawn(async move {
+                    let value = action_client
+                        .post_action(ActionRequest::ResolveTerminalPath {
+                            terminal_id: action_terminal_id,
+                            path: request_path,
+                        })?
+                        .ok_or_else(|| "Missing resolved path response".to_string())?;
+                    let path = serde_json::from_value::<okena_core::api::ResolvedPath>(value)
+                        .map_err(|error| format!("Invalid resolved path response: {error}"))?;
+                    if path.kind == okena_core::api::ResolvedPathKind::File
+                        && path.project_id.as_deref() == Some(action_project_id.as_str())
+                        && path.relative_path.is_some()
+                    {
+                        return Ok((path, None));
+                    }
+                    if path.kind == okena_core::api::ResolvedPathKind::Directory {
+                        return Ok((path.clone(), Some(path)));
+                    }
+                    let parent = path
+                        .breadcrumbs
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .ok_or_else(|| "Resolved file has no parent directory".to_string())?;
+                    let value = action_client
+                        .post_action(ActionRequest::ResolvePath {
+                            path: parent.canonical_path.clone(),
+                        })?
+                        .ok_or_else(|| "Missing parent directory response".to_string())?;
+                    let scope = serde_json::from_value::<okena_core::api::ResolvedPath>(value)
+                        .map_err(|error| format!("Invalid parent directory response: {error}"))?;
+                    Ok((path, Some(scope)))
+                })
+                .await;
+            match result {
+                Ok((path, None)) => {
+                    let relative_path = path.relative_path.unwrap_or_default();
+                    overlay_manager.update(cx, |manager, cx| {
+                        manager.show_file_viewer_at(
+                            relative_path,
+                            project_fs,
+                            blame,
+                            line,
+                            column,
+                            cx,
+                        );
+                    });
+                }
+                Ok((path, Some(scope))) => {
+                    let relative_path =
+                        (path.kind == okena_core::api::ResolvedPathKind::File).then_some(path.name);
+                    let fs = std::sync::Arc::new(okena_files::project_fs::RemotePathFs::new(
+                        client, scope,
+                    ));
+                    overlay_manager.update(cx, |manager, cx| {
+                        manager.show_path_browser(relative_path, fs, line, column, cx);
+                    });
+                }
+                Err(error) => {
+                    cx.update(|cx| {
+                        okena_workspace::toast::ToastManager::error(
+                            format!("Cannot open path: {error}"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     /// Evict cached file viewers for projects that no longer exist.
@@ -783,6 +907,35 @@ impl WindowView {
                     });
                 }
             }
+            OverlayManagerEvent::OpenFileExternally { path, line, column } => {
+                let path = path.clone();
+                let line = line.and_then(|value| u32::try_from(value).ok());
+                let column = column.and_then(|value| u32::try_from(value).ok());
+                let opener = crate::settings::settings_entity(cx)
+                    .read(cx)
+                    .settings
+                    .file_opener
+                    .clone();
+                cx.spawn(async move |_this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            okena_views_terminal::layout::terminal_pane::url_detector::UrlDetector::open_file(
+                                &path, line, column, &opener,
+                            )
+                        })
+                        .await;
+                    if let Err(error) = result {
+                        cx.update(|cx| {
+                            crate::workspace::toast::ToastManager::error(
+                                format!("Cannot open file: {error}"),
+                                cx,
+                            );
+                        });
+                    }
+                })
+                .detach();
+            }
             OverlayManagerEvent::SwitchProfile(id) => {
                 self.handle_switch_profile(id.clone(), cx);
             }
@@ -1104,6 +1257,14 @@ impl WindowView {
                                 om.show_file_viewer(relative_path, fs, blame, cx);
                             });
                         }
+                    }
+                    ProjectOverlayKind::TerminalPathViewer {
+                        terminal_id,
+                        path,
+                        line,
+                        column,
+                    } => {
+                        self.open_terminal_path(&project_id, &terminal_id, path, line, column, cx);
                     }
                     ProjectOverlayKind::ColorPicker { position } => {
                         self.overlay_manager.update(cx, |om, cx| {

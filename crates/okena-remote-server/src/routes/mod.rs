@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod auth_reload;
+pub mod download;
 pub mod health;
 pub mod pair;
 pub mod paste_image;
@@ -159,6 +160,10 @@ pub fn build_router(
     let protected = Router::new()
         .route("/v1/state", axum::routing::get(state::get_state))
         .route("/v1/actions", axum::routing::post(actions::post_actions))
+        .route(
+            "/v1/files/download",
+            axum::routing::post(download::post_download),
+        )
         .route(
             "/v1/terminals/{terminal_id}/paste-image",
             axum::routing::post(paste_image::post_paste_image)

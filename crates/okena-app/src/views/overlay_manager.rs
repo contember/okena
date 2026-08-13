@@ -284,6 +284,12 @@ pub enum OverlayManagerEvent {
     /// File viewer blame click: open the named commit in the diff viewer.
     OpenCommitFromBlame { project_id: String, hash: String },
 
+    OpenFileExternally {
+        path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+
     /// Profile manager: switch to a different profile (triggers relaunch)
     SwitchProfile(String),
 }
@@ -1684,7 +1690,11 @@ impl OverlayManager {
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
             viewer.update(cx, |v, cx| {
                 v.update_config(font_size, is_dark, cx);
-                v.set_blame_visible(blame_visible, cx);
+                if v.is_scope(&fs) {
+                    v.set_blame_visible(blame_visible, cx);
+                } else {
+                    v.rebind_scope(fs, blame_provider, blame_visible, None, None, None, cx);
+                }
             });
             self.open_file_viewer_modal(viewer.clone(), cx);
             return;
@@ -1720,8 +1730,20 @@ impl OverlayManager {
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
             viewer.update(cx, |v, cx| {
                 v.update_config(font_size, is_dark, cx);
-                v.set_blame_visible(blame_visible, cx);
-                v.open_file_in_tab(relative_path.clone(), cx);
+                if v.is_scope(&fs) {
+                    v.set_blame_visible(blame_visible, cx);
+                    v.open_file_in_tab(relative_path.clone(), cx);
+                } else {
+                    v.rebind_scope(
+                        fs,
+                        blame_provider,
+                        blame_visible,
+                        Some(relative_path.clone()),
+                        None,
+                        None,
+                        cx,
+                    );
+                }
             });
             self.open_file_viewer_modal(viewer.clone(), cx);
             return;
@@ -1741,6 +1763,91 @@ impl OverlayManager {
 
         self.subscribe_file_viewer(&viewer, cx);
         self.cached_file_viewers.insert(cache_key, viewer.clone());
+        self.open_file_viewer_modal(viewer, cx);
+    }
+
+    pub fn show_file_viewer_at(
+        &mut self,
+        relative_path: String,
+        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
+        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .clone();
+        let is_dark = crate::theme::theme(cx).is_dark();
+        let cache_key = fs.project_id();
+        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
+            viewer.update(cx, |viewer, cx| {
+                viewer.update_config(settings.file_font_size, is_dark, cx);
+                if viewer.is_scope(&fs) {
+                    viewer.set_blame_visible(settings.blame_visible, cx);
+                    viewer.open_file_in_tab_at(relative_path.clone(), line, column, cx);
+                } else {
+                    viewer.rebind_scope(
+                        fs,
+                        blame_provider,
+                        settings.blame_visible,
+                        Some(relative_path.clone()),
+                        line,
+                        column,
+                        cx,
+                    );
+                }
+            });
+            self.open_file_viewer_modal(viewer.clone(), cx);
+            return;
+        }
+        let viewer = cx.new(|cx| {
+            FileViewer::new_at(
+                relative_path,
+                fs,
+                blame_provider,
+                settings.blame_visible,
+                settings.file_font_size,
+                is_dark,
+                line,
+                column,
+                cx,
+            )
+        });
+        self.subscribe_file_viewer(&viewer, cx);
+        self.cached_file_viewers.insert(cache_key, viewer.clone());
+        self.open_file_viewer_modal(viewer, cx);
+    }
+
+    pub fn show_path_browser(
+        &mut self,
+        relative_path: Option<String>,
+        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .clone();
+        let is_dark = crate::theme::theme(cx).is_dark();
+        let viewer = cx.new(|cx| match relative_path {
+            Some(relative_path) => FileViewer::new_at(
+                relative_path,
+                fs,
+                None,
+                false,
+                settings.file_font_size,
+                is_dark,
+                line,
+                column,
+                cx,
+            ),
+            None => FileViewer::new_browse(fs, None, false, settings.file_font_size, is_dark, cx),
+        });
+        self.subscribe_file_viewer(&viewer, cx);
         self.open_file_viewer_modal(viewer, cx);
     }
 
@@ -1819,6 +1926,13 @@ impl OverlayManager {
                     FileViewerEvent::SendToTerminal(payload) => {
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_send_to_terminal(payload.clone(), cx);
+                        });
+                    }
+                    FileViewerEvent::OpenExternally { path, line, column } => {
+                        cx.emit(OverlayManagerEvent::OpenFileExternally {
+                            path: path.clone(),
+                            line: *line,
+                            column: *column,
                         });
                     }
                 }

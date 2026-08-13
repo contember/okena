@@ -5,6 +5,7 @@ use crate::file_tree::{FileTreeNavigationDirection, FileTreeRow, adjacent_file_t
 use crate::list_directory::DirEntry;
 use gpui::Context;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 fn collect_file_tree_rows(
     parent_path: &str,
@@ -55,7 +56,7 @@ fn collect_file_tree_rows(
 }
 
 impl FileViewer {
-    pub(super) fn file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<String>> {
+    fn collect_file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<String>> {
         let mut rows = Vec::new();
         collect_file_tree_rows(
             "",
@@ -69,17 +70,39 @@ impl FileViewer {
         rows
     }
 
+    pub(super) fn invalidate_visible_tree_rows(&mut self) {
+        *self.visible_tree_rows.get_mut() = None;
+        self.tree_scroll_handle.0.borrow_mut().last_item_size = None;
+    }
+
+    pub(super) fn visible_file_tree_rows(&self) -> Arc<Vec<FileTreeRow<String>>> {
+        if let Some(rows) = self.visible_tree_rows.borrow().as_ref() {
+            return rows.clone();
+        }
+
+        let rows = Arc::new(self.collect_file_tree_rows(false));
+        *self.visible_tree_rows.borrow_mut() = Some(rows.clone());
+        rows
+    }
+
     fn navigate_file_tree(
         &mut self,
         direction: FileTreeNavigationDirection,
         cx: &mut Context<Self>,
     ) {
-        let visible = self.file_tree_rows(false);
-        let all = self.file_tree_rows(true);
+        let visible = self.visible_file_tree_rows();
+        let all = self.collect_file_tree_rows(true);
         let active_path = &self.active_tab().relative_path;
         let selected = (!active_path.is_empty()).then_some(active_path);
 
         if let Some(path) = adjacent_file_tree_item(&visible, &all, selected, direction) {
+            if let Some(index) = visible
+                .iter()
+                .position(|row| matches!(row, FileTreeRow::File { item, .. } if item == &path))
+            {
+                self.tree_scroll_handle
+                    .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+            }
             self.navigate_to_file_no_history(path, cx);
         }
     }

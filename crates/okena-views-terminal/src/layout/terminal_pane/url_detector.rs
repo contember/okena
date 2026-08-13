@@ -237,7 +237,12 @@ impl UrlDetector {
     /// `file_line` and `file_col` are the parsed line/col numbers.
     /// `opener` is the editor command (e.g. "code", "cursor", "zed", "subl", "vim").
     /// If empty, falls back to the system default opener.
-    pub fn open_file(path: &str, file_line: Option<u32>, file_col: Option<u32>, opener: &str) {
+    pub fn open_file(
+        path: &str,
+        file_line: Option<u32>,
+        file_col: Option<u32>,
+        opener: &str,
+    ) -> Result<(), String> {
         // Strip any :line:col suffix from the path for the actual file path
         let clean_path = strip_line_col_suffix(path);
 
@@ -264,26 +269,40 @@ impl UrlDetector {
         );
 
         if opener.is_empty() {
-            // Use system default
-            #[cfg(target_os = "linux")]
-            {
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command("xdg-open").arg(clean_path),
-                );
+            let output = {
+                #[cfg(target_os = "linux")]
+                {
+                    okena_core::process::safe_output_with_timeout(
+                        okena_core::process::command("xdg-open").arg(clean_path),
+                        std::time::Duration::from_secs(15),
+                    )
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    okena_core::process::safe_output_with_timeout(
+                        okena_core::process::command("open").arg(clean_path),
+                        std::time::Duration::from_secs(15),
+                    )
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    okena_core::process::safe_output_with_timeout(
+                        okena_core::process::command("cmd").args(["/C", "start", "", clean_path]),
+                        std::time::Duration::from_secs(15),
+                    )
+                }
+            };
+            let output =
+                output.map_err(|error| format!("Cannot start the system file opener: {error}"))?;
+            if output.status.success() {
+                return Ok(());
             }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command("open").arg(clean_path),
-                );
-            }
-            #[cfg(target_os = "windows")]
-            {
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command("cmd").args(["/C", "start", "", clean_path]),
-                );
-            }
-            return;
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                format!("System file opener exited with {}", output.status)
+            } else {
+                message
+            });
         }
 
         // Build editor-specific arguments
@@ -299,9 +318,10 @@ impl UrlDetector {
                     }
                 }
                 args.push(loc);
-                let _ = okena_core::process::spawn_and_reap(
+                okena_core::process::spawn_and_reap(
                     okena_core::process::command(opener).args(&args),
-                );
+                )
+                .map_err(|error| format!("Cannot start {opener}: {error}"))?;
             }
             "zed" => {
                 // Zed: file:line
@@ -312,9 +332,8 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command("zed").arg(&loc),
-                );
+                okena_core::process::spawn_and_reap(okena_core::process::command("zed").arg(&loc))
+                    .map_err(|error| format!("Cannot start zed: {error}"))?;
             }
             "subl" | "sublime" => {
                 // Sublime Text: file:line:col
@@ -325,9 +344,8 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command("subl").arg(&loc),
-                );
+                okena_core::process::spawn_and_reap(okena_core::process::command("subl").arg(&loc))
+                    .map_err(|error| format!("Cannot start subl: {error}"))?;
             }
             "vim" | "nvim" => {
                 // vim/nvim: +line file
@@ -336,9 +354,10 @@ impl UrlDetector {
                     args.push(format!("+{}", line));
                 }
                 args.push(clean_path.to_string());
-                let _ = okena_core::process::spawn_and_reap(
+                okena_core::process::spawn_and_reap(
                     okena_core::process::command(opener).args(&args),
-                );
+                )
+                .map_err(|error| format!("Cannot start {opener}: {error}"))?;
             }
             _ => {
                 // Generic: try editor file:line:col pattern
@@ -349,11 +368,11 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::spawn_and_reap(
-                    okena_core::process::command(opener).arg(&loc),
-                );
+                okena_core::process::spawn_and_reap(okena_core::process::command(opener).arg(&loc))
+                    .map_err(|error| format!("Cannot start {opener}: {error}"))?;
             }
         }
+        Ok(())
     }
 }
 

@@ -149,6 +149,7 @@ impl FileViewer {
             self.expanded_folders.insert(folder_path.to_string());
             self.fetch_directory(folder_path.to_string(), cx);
         }
+        self.invalidate_visible_tree_rows();
         cx.notify();
     }
 
@@ -213,6 +214,25 @@ impl FileViewer {
 
     pub(super) fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
         self.active_tab_mut().scrollbar_drag = None;
+        cx.notify();
+    }
+
+    pub(super) fn start_tree_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        let mut drag = start_scrollbar_drag(&self.tree_scroll_handle);
+        drag.start_y = y;
+        self.tree_scrollbar_drag = Some(drag);
+        cx.notify();
+    }
+
+    pub(super) fn update_tree_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        if let Some(drag) = self.tree_scrollbar_drag {
+            update_scrollbar_drag(&self.tree_scroll_handle, drag, y);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn end_tree_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
+        self.tree_scrollbar_drag = None;
         cx.notify();
     }
 

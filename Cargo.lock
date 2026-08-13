@@ -6077,8 +6077,10 @@ dependencies = [
  "okena-terminal",
  "okena-theme",
  "okena-workspace",
+ "percent-encoding",
  "serde_json",
  "smol",
+ "url",
  "uuid",
 ]
 
@@ -6245,6 +6247,7 @@ name = "okena-files"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "grep-matcher",
@@ -6393,6 +6396,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower-service",
  "uuid",
 ]

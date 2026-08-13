@@ -52,6 +52,8 @@ base64 = "0.22"
 usvg = { version = "0.45", default-features = false, optional = true }
 ttf-parser = { version = "0.25", optional = true }
 image = { version = "0.25", default-features = false, optional = true }
+dirs = "5"
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
