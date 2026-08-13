@@ -70,6 +70,20 @@ impl WorkspaceData {
         }
     }
 
+    /// Drop the targeted window's custom project sizes.
+    ///
+    /// Clears the weights *and* the pixel scale together: a weight map without
+    /// its scale renders at the old pixels-per-unit, so the equal weights an
+    /// empty map falls back to (`100 / n` each) would sum to whatever
+    /// `100 * scale` happens to be instead of the viewport. Same invariant
+    /// `scrub_orphan_window_state` keeps — no scale without weights.
+    pub fn clear_project_sizes(&mut self, id: WindowId) {
+        if let Some(w) = self.window_mut(id) {
+            w.project_widths.clear();
+            w.project_width_scale = None;
+        }
+    }
+
     /// Set the pixel scale used by the targeted window's project-size weights.
     pub fn set_project_width_scale(&mut self, id: WindowId, scale: f32) {
         if scale.is_finite()

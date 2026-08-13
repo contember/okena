@@ -1021,6 +1021,34 @@ mod tests {
     }
 
     #[test]
+    fn clear_project_sizes_drops_weights_and_scale_of_one_window() {
+        // Equalize clears the window's sizes. Leaving the scale behind would
+        // render the fallback weights (100 / n each) at the old pixels-per-unit,
+        // so the grid would sum to 100 * scale instead of the viewport — the
+        // stacked-rows overflow this test pins shut.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        for id in [WindowId::Main, WindowId::Extra(extra_id)] {
+            data.set_project_width(id, "p1", 23.5);
+            data.set_project_width_scale(id, 35.4);
+        }
+
+        data.clear_project_sizes(WindowId::Extra(extra_id));
+
+        assert!(data.extra_windows[0].project_widths.is_empty());
+        assert_eq!(data.extra_windows[0].project_width_scale, None);
+        // Scoped to the targeted window.
+        assert_eq!(
+            data.main_window.project_widths.get("p1").copied(),
+            Some(23.5)
+        );
+        assert_eq!(data.main_window.project_width_scale, Some(35.4));
+    }
+
+    #[test]
     fn set_project_width_writes_to_targeted_extra() {
         // Mint two extras, set width on one via WindowId::Extra(uuid). The
         // targeted extra's project_widths gains the entry; the sibling extra

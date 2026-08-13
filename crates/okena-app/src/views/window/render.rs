@@ -875,10 +875,9 @@ impl Render for WindowView {
                 let fm = this.focus_manager.read(cx).clone();
                 let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {
-                    // Clear custom column widths in THIS window → equal distribution.
-                    if let Some(window_state) = ws.data.window_mut(window_id) {
-                        window_state.project_widths.clear();
-                    }
+                    // Clear custom column sizes in THIS window → equal distribution
+                    // across the current viewport (weights *and* pixel scale).
+                    ws.data.clear_project_sizes(window_id);
                     // Equalize pane sizes in the focused terminal's parent split
                     ws.equalize_focused_split(&fm, cx);
                 });

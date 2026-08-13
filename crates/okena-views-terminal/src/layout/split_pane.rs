@@ -498,6 +498,27 @@ mod tests {
     }
 
     #[test]
+    fn equal_weights_refit_the_viewport_only_once_the_stale_scale_is_dropped() {
+        // Dragged weights stop summing to 100, so the persisted scale is
+        // pixels-per-unit for *that* sum. Equalize falls back to `100 / n`
+        // weights: keeping the scale renders `100 * scale` (an overflowing
+        // grid — worst in stacked rows, where it overflows the height),
+        // dropping it refits them to the viewport.
+        let viewport = 3_016.0;
+        let equal = [100.0 / 3.0; 3];
+
+        let stale: f32 = project_pixel_widths(&equal, viewport, 0.0, Some(35.4))
+            .iter()
+            .sum();
+        assert!(stale > viewport + 500.0, "{stale} should overflow");
+
+        let refitted: f32 = project_pixel_widths(&equal, viewport, 0.0, None)
+            .iter()
+            .sum();
+        assert!((refitted - viewport).abs() < 0.01, "{refitted}");
+    }
+
+    #[test]
     fn fitting_resize_transfers_space_until_neighbor_reaches_minimum() {
         let (left, right) =
             resize_project_pair_px(500.0, 500.0, 300.0, 400.0, 1_000.0, 1_000.0, false);

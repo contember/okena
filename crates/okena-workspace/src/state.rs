@@ -1430,7 +1430,9 @@ impl Workspace {
     /// cannot undo the local choice.
     ///
     /// Weights in `project_widths` are axis-agnostic, so relative grid
-    /// sizing is preserved across the flip. Persisted via `notify_data`.
+    /// sizing is preserved across the flip. The pixel scale is not — it is
+    /// pixels per weight unit along the *current* axis, so it is dropped and
+    /// recomputed from the new axis' viewport. Persisted via `notify_data`.
     pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.window(window_id).is_none() {
             return;
@@ -1438,6 +1440,7 @@ impl Workspace {
 
         if let Some(w) = self.data.window_mut(window_id) {
             w.project_layout = w.project_layout.toggled();
+            w.project_width_scale = None;
         }
         self.notify_data(cx);
     }
@@ -4509,6 +4512,27 @@ mod gpui_tests {
                 ProjectLayoutMode::Columns
             );
             assert_eq!(ws.data_version(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_layout_mode_keeps_weights_but_drops_scale(cx: &mut gpui::TestAppContext) {
+        // Weights are axis-agnostic and survive the flip; the pixel scale is
+        // pixels per unit along the old axis, so carrying it over would size
+        // stacked rows by the grid's *width*.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 23.5);
+            ws.update_project_widths_with_scale(WindowId::Main, widths, 35.4, cx);
+            ws.toggle_project_layout_mode(WindowId::Main, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.get_project_width(WindowId::Main, "p1", 1), 23.5);
+            assert_eq!(ws.get_project_width_scale(WindowId::Main), None);
         });
     }
 
