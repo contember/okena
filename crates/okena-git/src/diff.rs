@@ -362,6 +362,16 @@ fn parse_hunk_header(header: &str) -> (usize, usize) {
     (old_start, new_start)
 }
 
+/// Whether `base` and `head` have a common ancestor, i.e. whether a three-dot
+/// range between them resolves at all. False in a shallow clone whose grafted
+/// history no longer reaches the fork point, and for unrelated histories.
+///
+/// Callers must have validated both refs — this feeds them to git verbatim.
+fn has_merge_base(repo_path: &str, base: &str, head: &str) -> bool {
+    safe_output(command("git").args(["-C", repo_path, "merge-base", base, head]))
+        .is_ok_and(|output| output.status.success())
+}
+
 /// Get diff for a repository path.
 #[allow(dead_code)]
 pub fn get_diff(path: &Path, mode: DiffMode) -> crate::GitResult<DiffResult> {
@@ -412,8 +422,15 @@ pub fn get_diff_with_options(
         DiffMode::BranchCompare { ref base, ref head } => {
             crate::validate_git_ref(base)?;
             crate::validate_git_ref(head)?;
-            // Three-dot diff: changes on head since it diverged from base
-            range_str = format!("{}...{}", base, head);
+            // Three-dot diff: changes on head since it diverged from base.
+            // Without a merge base git refuses the range outright, so fall back
+            // to the two-dot diff (see `has_merge_base`).
+            range_str = if has_merge_base(path_str, base, head) {
+                format!("{}...{}", base, head)
+            } else {
+                log::debug!("no merge base for {base}...{head}, diffing {base}..{head} instead");
+                format!("{}..{}", base, head)
+            };
             vec![
                 "-C",
                 path_str,
@@ -714,6 +731,42 @@ mod tests {
 
         // Missing path resolves to nothing rather than erroring.
         assert!(get_file_from_git(&repo, "HEAD", "nope.txt").is_none());
+    }
+
+    #[test]
+    fn branch_compare_falls_back_to_two_dot_without_a_merge_base() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // Two roots that share no history — the same shape a shallow clone has
+        // once its grafted history no longer reaches the fork point.
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["checkout", "--orphan", "other"]);
+        git_in(&repo, &["rm", "-f", "--cached", "file.txt"]);
+        std::fs::write(repo.join("other.txt"), "y").unwrap();
+        git_in(&repo, &["add", "other.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "orphan"],
+        );
+
+        assert!(!has_merge_base(repo.to_str().unwrap(), "main", "other"));
+
+        let result = get_diff_with_options(
+            &repo,
+            DiffMode::BranchCompare {
+                base: "main".to_string(),
+                head: "other".to_string(),
+            },
+            false,
+        )
+        .expect("branch compare without a merge base still diffs");
+
+        let paths: Vec<_> = result
+            .files
+            .iter()
+            .map(|f| f.new_path.clone().or_else(|| f.old_path.clone()))
+            .collect();
+        assert!(paths.contains(&Some("other.txt".to_string())), "{paths:?}");
     }
 
     #[test]
