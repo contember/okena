@@ -920,11 +920,74 @@ fn orphaned_dtach_session_names<'a>(
     orphaned
 }
 
+/// Whether a filename is a daemon control socket (`<16 hex>.sock`), the shape
+/// produced by `okena_remote_server::local::default_unix_socket_path`. Those
+/// live alongside `tm-*.sock` in the runtime dir and identify a daemon that
+/// shares this socket pool.
+#[cfg(unix)]
+fn is_daemon_control_socket(name: &str) -> bool {
+    name.strip_suffix(".sock")
+        .is_some_and(|key| key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The first control socket held by a process other than us — i.e. a daemon
+/// whose sessions we do not own. Pure so the PID filtering is unit-testable.
+#[cfg(unix)]
+fn foreign_control_socket<'a>(
+    control_sockets: &'a [std::path::PathBuf],
+    holders: &std::collections::HashMap<std::path::PathBuf, Vec<u32>>,
+    my_pid: u32,
+) -> Option<&'a std::path::PathBuf> {
+    control_sockets.iter().find(|path| {
+        holders
+            .get(*path)
+            .is_some_and(|pids| pids.iter().any(|pid| *pid != my_pid))
+    })
+}
+
+/// Find a live foreign daemon sharing this machine's dtach socket pool.
+///
+/// The pool is keyed by `XDG_RUNTIME_DIR` + profile id only, so an instance
+/// started with a different `XDG_CONFIG_HOME` — an E2E harness, a second
+/// checkout — lands in the same directory while its workspace knows none of the
+/// sessions already there. The single-writer lock guarding reconciliation is
+/// scoped to the *config* dir, so that instance holds its own lock and believes
+/// it owns the pool. Control sockets left by a crashed daemon have no holder and
+/// are correctly ignored. Scans the base dir because control sockets for every
+/// profile live there, while `tm-*.sock` for named profiles are nested below it.
+#[cfg(unix)]
+fn live_foreign_daemon() -> Option<std::path::PathBuf> {
+    let dir = dtach_socket_base_dir();
+    let control_sockets: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_daemon_control_socket)
+        })
+        .collect();
+    if control_sockets.is_empty() {
+        return None;
+    }
+    let holders = crate::pty_manager::find_pids_for_unix_sockets(&control_sockets);
+    foreign_control_socket(&control_sockets, &holders, std::process::id()).cloned()
+}
+
 /// Reconcile live dtach sessions against the workspace that owns this profile.
 /// Sessions absent from authoritative state are leftovers from an interrupted or
 /// incomplete close and must not survive another daemon start.
 #[cfg(unix)]
 pub fn reconcile_dtach_sessions(retained_terminal_ids: &std::collections::HashSet<String>) {
+    // Reconciliation kills every session it does not recognise, and a shared
+    // pool makes "unrecognised" mean "someone else's" — see `live_foreign_daemon`.
+    if let Some(socket) = live_foreign_daemon() {
+        log::warn!(
+            "Skipping dtach reconciliation: another Okena daemon is live on {socket:?} and shares this session pool"
+        );
+        return;
+    }
     // Always reconcile dtach artifacts, even when the newly selected backend is
     // tmux/screen/none or Auto now resolves differently.
     let backend = ResolvedBackend::Dtach;
@@ -1861,6 +1924,45 @@ mod tests {
         assert!(!is_stale_gc_candidate("tm-x.txt"));
         assert!(!is_stale_gc_candidate("okena.lock"));
         assert!(!is_stale_gc_candidate("remote.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_control_socket_matches_only_the_hashed_key_shape() {
+        assert!(is_daemon_control_socket("b7253cd8ed7892af.sock"));
+        assert!(is_daemon_control_socket("0000000000000000.sock"));
+        // Session sockets, short/long keys and non-hex names are not control sockets.
+        assert!(!is_daemon_control_socket("tm-01736dcb.sock"));
+        assert!(!is_daemon_control_socket("b7253cd8ed7892a.sock"));
+        assert!(!is_daemon_control_socket("b7253cd8ed7892af0.sock"));
+        assert!(!is_daemon_control_socket("z7253cd8ed7892af.sock"));
+        assert!(!is_daemon_control_socket("b7253cd8ed7892af.lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreign_daemon_detected_only_when_another_process_holds_a_control_socket() {
+        let mine = std::path::PathBuf::from("/runtime/aaaaaaaaaaaaaaaa.sock");
+        let theirs = std::path::PathBuf::from("/runtime/bbbbbbbbbbbbbbbb.sock");
+        let crashed = std::path::PathBuf::from("/runtime/cccccccccccccccc.sock");
+        let sockets = [mine.clone(), crashed.clone(), theirs.clone()];
+
+        // Held by us, plus a crashed daemon's leftover file with no holder.
+        let holders = std::collections::HashMap::from([
+            (mine.clone(), vec![42_u32]),
+            (crashed.clone(), Vec::new()),
+        ]);
+        assert_eq!(foreign_control_socket(&sockets, &holders, 42), None);
+
+        // A live daemon we do not own blocks reconciliation.
+        let holders = std::collections::HashMap::from([
+            (mine.clone(), vec![42_u32]),
+            (theirs.clone(), vec![99_u32]),
+        ]);
+        assert_eq!(
+            foreign_control_socket(&sockets, &holders, 42),
+            Some(&theirs)
+        );
     }
 
     #[cfg(unix)]
