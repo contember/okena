@@ -926,6 +926,44 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_visible_set_drops_the_scale_but_keeps_the_weights() {
+        // Both legs of the toggle, and the folder filter, change which
+        // projects the grid renders. The scale was captured over the previous
+        // set, so keeping it would leave the survivors at their old pixels
+        // and an empty strip where the hidden project used to be. Weights stay
+        // — relative sizing survives the refit.
+        fn sized() -> WorkspaceData {
+            let mut data = make_workspace();
+            data.set_project_width(WindowId::Main, "p2", 12.5);
+            data.set_project_width_scale(WindowId::Main, 33.5);
+            data
+        }
+        fn assert_refits(data: &WorkspaceData) {
+            assert_eq!(data.main_window.project_width_scale, None);
+            assert_eq!(
+                data.main_window.project_widths.get("p2").copied(),
+                Some(12.5)
+            );
+        }
+
+        let mut hiding = sized();
+        hiding.toggle_hidden(WindowId::Main, "p1");
+        assert_refits(&hiding);
+
+        let mut unhiding = sized();
+        unhiding
+            .main_window
+            .hidden_project_ids
+            .insert("p1".to_string());
+        unhiding.toggle_hidden(WindowId::Main, "p1");
+        assert_refits(&unhiding);
+
+        let mut filtering = sized();
+        filtering.set_folder_filter(WindowId::Main, Some("f1".to_string()));
+        assert_refits(&filtering);
+    }
+
+    #[test]
     fn toggle_hidden_writes_to_targeted_extra() {
         // Mint two extras, toggle on one via WindowId::Extra(uuid). The
         // targeted extra's hidden set gains the project; the sibling extra

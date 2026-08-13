@@ -50,9 +50,12 @@ impl WorkspaceData {
     /// targets the matching extra by id; if no such extra exists (e.g. the
     /// caller raced a close), the call is a silent no-op rather than an error.
     /// This matches the `window_mut` lookup contract.
+    /// Changing the filter changes which projects the grid renders, so the
+    /// pixel scale is dropped — see `toggle_hidden`.
     pub fn set_folder_filter(&mut self, id: WindowId, filter: Option<String>) {
         if let Some(w) = self.window_mut(id) {
             w.folder_filter = filter;
+            w.project_width_scale = None;
         }
     }
 
@@ -86,11 +89,18 @@ impl WorkspaceData {
     /// is inserted (project becomes hidden). If present, it is removed (project
     /// becomes visible). Unknown extra ids are a silent no-op, matching the
     /// `window_mut` lookup contract.
+    ///
+    /// Drops `project_width_scale`: it is pixels per weight unit captured
+    /// while dragging over the *previous* visible set, so keeping it would
+    /// leave the surviving projects at their old pixel sizes and a gap where
+    /// the hidden one was. The weights stay, so relative sizing survives —
+    /// they just refit to the viewport, as they did before the scale existed.
     pub fn toggle_hidden(&mut self, id: WindowId, project_id: &str) {
-        if let Some(w) = self.window_mut(id)
-            && !w.hidden_project_ids.remove(project_id)
-        {
-            w.hidden_project_ids.insert(project_id.to_string());
+        if let Some(w) = self.window_mut(id) {
+            if !w.hidden_project_ids.remove(project_id) {
+                w.hidden_project_ids.insert(project_id.to_string());
+            }
+            w.project_width_scale = None;
         }
     }
 
