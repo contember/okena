@@ -170,6 +170,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
+        "AnnotateSelection",
+        ActionDescription {
+            name: "AnnotateSelection",
+            description: "Annotate the selection and send it to this terminal",
+            category: "Terminal",
+            factory: || Box::new(okena_views_terminal::actions::AnnotateSelection),
+        },
+    );
+    map.insert(
         "Paste",
         ActionDescription {
             name: "Paste",

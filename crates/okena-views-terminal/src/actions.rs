@@ -37,5 +37,6 @@ gpui::actions!(
         JumpToNextPrompt,
         JumpToPreviousFailedCommand,
         JumpToNextFailedCommand,
+        AnnotateSelection,
     ]
 );

@@ -67,6 +67,43 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
     }
 
+    /// Open the annotate composer over the current selection. The keyboard path
+    /// to the same thing the context menu offers — and the only one that works
+    /// while an app holds the mouse grabbed.
+    pub(super) fn handle_annotate_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal_id) = self.terminal_id.clone() else {
+            return;
+        };
+        let has_selection = self
+            .terminal
+            .as_ref()
+            .and_then(|t| t.get_selected_text())
+            .is_some_and(|text| !text.trim().is_empty());
+        if !has_selection {
+            return;
+        }
+        let position = self
+            .content
+            .read(cx)
+            .selection_anchor()
+            .unwrap_or_else(|| gpui::point(gpui::px(120.0), gpui::px(120.0)));
+        let project_id = self.project_id.clone();
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Project(
+                    okena_workspace::requests::ProjectOverlay {
+                        project_id,
+                        kind: okena_workspace::requests::ProjectOverlayKind::AnnotateSelection {
+                            terminal_id,
+                            position,
+                        },
+                    },
+                ),
+                cx,
+            );
+        });
+    }
+
     pub(super) fn handle_paste(&mut self, cx: &mut Context<Self>) {
         let Some(terminal) = self.terminal.clone() else {
             return;

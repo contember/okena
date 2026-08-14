@@ -399,6 +399,11 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ClearFocus" => Some(KeyBinding::new(keystroke, ClearFocus, context)),
         "FocusActiveProject" => Some(KeyBinding::new(keystroke, FocusActiveProject, context)),
         "Copy" => Some(KeyBinding::new(keystroke, Copy, context)),
+        "AnnotateSelection" => Some(KeyBinding::new(
+            keystroke,
+            okena_views_terminal::actions::AnnotateSelection,
+            context,
+        )),
         "Paste" => Some(KeyBinding::new(keystroke, Paste, context)),
         "ScrollUp" => Some(KeyBinding::new(keystroke, ScrollUp, context)),
         "ScrollDown" => Some(KeyBinding::new(keystroke, ScrollDown, context)),

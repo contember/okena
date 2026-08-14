@@ -785,23 +785,7 @@ impl WindowView {
                 terminal_id,
                 position,
             } => {
-                // Alacritty already drops grid padding and rejoins wrapped
-                // lines; only the trailing blank line needs to go, or it would
-                // sit inside the fence.
-                let quoted = {
-                    let terminals = self.terminals.lock();
-                    terminals
-                        .get(terminal_id)
-                        .and_then(|terminal| terminal.get_selected_text())
-                        .map(|text| text.trim_end().to_string())
-                };
-                if let Some(quoted) = quoted.filter(|q| !q.is_empty()) {
-                    let terminal_id = terminal_id.clone();
-                    let position = *position;
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_send_composer(terminal_id, quoted, position, cx);
-                    });
-                }
+                self.open_send_composer(terminal_id, *position, cx);
             }
             OverlayManagerEvent::TerminalPaste { terminal_id } => {
                 let text = cx
@@ -1228,6 +1212,12 @@ impl WindowView {
                             );
                         });
                     }
+                    ProjectOverlayKind::AnnotateSelection {
+                        terminal_id,
+                        position,
+                    } => {
+                        self.open_send_composer(&terminal_id, position, cx);
+                    }
                     ProjectOverlayKind::TabContextMenu {
                         tab_index,
                         num_tabs,
@@ -1383,6 +1373,33 @@ impl WindowView {
                 }
             }
         }
+    }
+
+    /// Snapshot a terminal's selection and open the annotate composer over it.
+    /// Shared by the context-menu item and the keyboard action.
+    ///
+    /// Alacritty already drops grid padding and rejoins wrapped lines; only the
+    /// trailing blank line needs to go, or it would sit inside the fence.
+    fn open_send_composer(
+        &mut self,
+        terminal_id: &str,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let quoted = {
+            let terminals = self.terminals.lock();
+            terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.get_selected_text())
+                .map(|text| text.trim_end().to_string())
+        };
+        let Some(quoted) = quoted.filter(|q| !q.is_empty()) else {
+            return;
+        };
+        let terminal_id = terminal_id.to_string();
+        self.overlay_manager.update(cx, |om, cx| {
+            om.show_send_composer(terminal_id, quoted, position, cx);
+        });
     }
 
     /// Drain the broker's "send to terminal" queue and paste each payload into
