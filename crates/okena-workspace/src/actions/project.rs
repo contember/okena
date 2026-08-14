@@ -192,11 +192,10 @@ pub fn resolve_clone_target(
     if directory.is_empty() {
         return Err("Directory name is required".to_string());
     }
-    if directory == "."
-        || directory == ".."
-        || directory.contains(['/', '\\'])
-        || std::path::Path::new(directory).components().count() != 1
-    {
+    let mut components = std::path::Path::new(directory).components();
+    let is_plain_name = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if directory.contains(['/', '\\']) || !is_plain_name {
         return Err(format!(
             "'{directory}' is not a valid directory name — it must be a single folder name"
         ));
@@ -3790,6 +3789,8 @@ mod gpui_tests {
             );
         }
         assert!(super::resolve_clone_target("", "okena").is_err());
+        #[cfg(windows)]
+        assert!(super::resolve_clone_target(r"C:\parent", "D:").is_err());
     }
 
     #[test]

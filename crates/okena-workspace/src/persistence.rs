@@ -956,11 +956,11 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
     data
 }
 
-/// Remove stale worktree projects whose directories no longer exist on disk.
+/// Remove stale worktrees and interrupted pending projects whose directories
+/// do not exist on disk.
 ///
-/// Worktrees are only added as projects explicitly by the user (via the worktree
-/// list popover or the create worktree dialog). This function only cleans up
-/// worktree projects that have become stale.
+/// Ordinary projects remain untouched unless their persisted `is_creating`
+/// marker proves that their creation was interrupted.
 #[cfg(test)]
 pub(crate) fn sync_worktrees(data: &mut WorkspaceData) -> Vec<TerminalSessionTeardown> {
     sync_worktrees_with_backend_and_shell(data, SessionBackend::None, &ShellType::Default)
@@ -974,8 +974,13 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
     let stale_ids: Vec<String> = data
         .projects
         .iter()
-        .filter(|p| p.worktree_info.is_some())
-        .filter(|p| !worktree_checkout_path(p).exists())
+        .filter(|project| {
+            if project.worktree_info.is_some() {
+                !worktree_checkout_path(project).exists()
+            } else {
+                project.is_creating && !Path::new(&project.path).exists()
+            }
+        })
         .map(|p| p.id.clone())
         .collect();
 
@@ -1019,6 +1024,9 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
             parent.worktree_ids.retain(|pid| pid != id);
         }
     }
+    if !stale_ids.is_empty() {
+        data.scrub_orphan_window_state();
+    }
 
     let retained_terminal_ids: std::collections::HashSet<String> = data
         .projects
@@ -1035,30 +1043,30 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
         .collect();
     stale_terminal_ids.retain(|session| !retained_terminal_ids.contains(&session.terminal_id));
 
-    // Self-heal a worktree left mid-create by a daemon kill: optimistic create
-    // registers the row with layout:None before the git checkout, and the
-    // finalize (which seeds the layout + spawns the PTY) may not have persisted.
-    // If the checkout dir now EXISTS (so it isn't stale above), seed a terminal
-    // so it opens a shell instead of hanging on the "Setting up worktree…"
-    // placeholder forever.
+    // Self-heal a project left mid-create by a daemon kill: optimistic create
+    // registers the row with layout:None before the checkout, and the finalize
+    // (which seeds the layout + spawns the PTY) may not have persisted. If the
+    // checkout now exists, seed a terminal and clear the stale marker so startup
+    // materialization can finish it.
     //
-    // Gated on the persisted `is_creating` marker so we only touch worktrees
-    // genuinely interrupted mid-create. A worktree the user deliberately emptied
-    // (closed its last terminal -> layout:None bookmark) has is_creating == false
-    // and is left untouched — seeding a shell there would silently un-bookmark it
-    // and resurrect a shell on every restart.
+    // Gated on the persisted `is_creating` marker so a deliberate layout:None
+    // bookmark remains untouched.
     for p in data.projects.iter_mut() {
-        if p.is_creating
-            && p.worktree_info.is_some()
-            && p.layout.is_none()
-            && Path::new(&p.path).exists()
-        {
-            p.layout = Some(LayoutNode::new_terminal());
-            // Checkout exists and the layout is now seeded — the create is
-            // effectively finalized, so clear the marker (materialize spawns the
-            // PTY and the row renders as a normal worktree, not "creating").
-            p.is_creating = false;
+        if !p.is_creating {
+            continue;
         }
+        let checkout_exists = if p.worktree_info.is_some() {
+            worktree_checkout_path(p).exists()
+        } else {
+            Path::new(&p.path).exists()
+        };
+        if !checkout_exists {
+            continue;
+        }
+        if p.layout.is_none() {
+            p.layout = Some(LayoutNode::new_terminal());
+        }
+        p.is_creating = false;
     }
 
     stale_terminal_ids
@@ -2480,6 +2488,76 @@ mod tests {
             !wt.is_creating,
             "the mid-create marker is cleared once the layout is seeded"
         );
+    }
+
+    #[test]
+    fn sync_worktrees_finishes_mid_create_clone_when_target_exists() {
+        let checkout = std::env::temp_dir().join(format!(
+            "okena-clone-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&checkout).expect("create clone target");
+        let mut clone = make_project("clone1");
+        clone.path = checkout.to_string_lossy().into_owned();
+        clone.layout = None;
+        clone.is_creating = true;
+
+        let mut data = make_workspace(vec![clone], vec!["clone1"], vec![]);
+        sync_worktrees(&mut data);
+
+        let clone = data
+            .projects
+            .iter()
+            .find(|project| project.id == "clone1")
+            .expect("completed clone kept");
+        assert!(
+            clone.layout.is_some(),
+            "completed clone gets a terminal slot"
+        );
+        assert!(
+            !clone.is_creating,
+            "completed clone clears its stale marker"
+        );
+        std::fs::remove_dir(checkout).expect("remove clone target");
+    }
+
+    #[test]
+    fn sync_worktrees_removes_mid_create_clone_when_target_is_missing() {
+        let missing = std::env::temp_dir().join(format!(
+            "okena-missing-clone-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut clone = make_project("clone1");
+        clone.path = missing.to_string_lossy().into_owned();
+        clone.layout = None;
+        clone.is_creating = true;
+
+        let mut data = make_workspace(vec![clone], vec!["clone1"], vec![]);
+        data.main_window
+            .hidden_project_ids
+            .insert("clone1".to_string());
+        sync_worktrees(&mut data);
+
+        assert!(data.projects.is_empty());
+        assert!(data.project_order.is_empty());
+        assert!(!data.main_window.hidden_project_ids.contains("clone1"));
+    }
+
+    #[test]
+    fn sync_worktrees_preserves_missing_plain_project_not_being_created() {
+        let missing = std::env::temp_dir().join(format!(
+            "okena-missing-bookmark-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut project = make_project("bookmark");
+        project.path = missing.to_string_lossy().into_owned();
+        project.layout = None;
+        project.is_creating = false;
+
+        let mut data = make_workspace(vec![project], vec!["bookmark"], vec![]);
+        sync_worktrees(&mut data);
+
+        assert!(data.projects.iter().any(|project| project.id == "bookmark"));
     }
 
     #[test]

@@ -327,6 +327,22 @@ pub struct CommandHandle {
     ctl: Arc<JobControl>,
 }
 
+/// Cloneable cancellation capability for a submitted command.
+///
+/// Keep this outside a blocking waiter when the caller must still be able to
+/// stop the child process during async task cancellation or application
+/// shutdown.
+#[derive(Clone)]
+pub struct CommandCancellation {
+    ctl: Arc<JobControl>,
+}
+
+impl CommandCancellation {
+    pub fn cancel(&self) {
+        self.ctl.cancel();
+    }
+}
+
 impl CommandHandle {
     /// Block until the command finishes, returning its captured output. Returns
     /// an `Other` error if the bus worker died, or `Interrupted` if cancelled.
@@ -341,6 +357,13 @@ impl CommandHandle {
     /// prevents it from starting if still queued.
     pub fn cancel(&self) {
         self.ctl.cancel();
+    }
+
+    /// Return a cancellation capability that can outlive this waiting handle.
+    pub fn cancellation(&self) -> CommandCancellation {
+        CommandCancellation {
+            ctl: self.ctl.clone(),
+        }
     }
 }
 

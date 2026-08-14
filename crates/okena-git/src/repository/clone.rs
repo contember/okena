@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use okena_core::process::{CommandSpec, Lane, command, run};
+use okena_core::process::{CommandBus, CommandHandle, CommandSpec, Lane, command};
 
 use super::{path_str, require_success};
 use crate::error::{GitError, GitResult};
@@ -70,11 +70,11 @@ fn require_absent_clone_target(target_path: &Path) -> GitResult<()> {
     Ok(())
 }
 
-/// `git clone <url> <target_path>`.
+/// Submit `git clone <url> <target_path>` to the process bus.
 ///
 /// Runs on [`Lane::Long`]: a clone is network-bound and unbounded in duration,
 /// so it must never occupy an interactive or poller slot.
-pub fn clone_repository(url: &str, target_path: &Path) -> GitResult<()> {
+pub fn start_clone_repository(url: &str, target_path: &Path) -> GitResult<CommandHandle> {
     let url = validate_clone_url(url)?;
     require_absent_clone_target(target_path)?;
 
@@ -85,10 +85,21 @@ pub fn clone_repository(url: &str, target_path: &Path) -> GitResult<()> {
 
     let mut cmd = command("git");
     cmd.args(["clone", "--", url, target_str]);
-    let output = run(CommandSpec::from_command(&cmd)
-        .lane(Lane::Long)
-        .label("git clone"))?;
-    require_success(output)
+    Ok(CommandBus::global().submit(
+        CommandSpec::from_command(&cmd)
+            .lane(Lane::Long)
+            .label("git clone"),
+    ))
+}
+
+/// Wait for a clone submitted by [`start_clone_repository`].
+pub fn finish_clone_repository(handle: CommandHandle) -> GitResult<()> {
+    require_success(handle.wait()?)
+}
+
+/// Submit and synchronously wait for `git clone <url> <target_path>`.
+pub fn clone_repository(url: &str, target_path: &Path) -> GitResult<()> {
+    finish_clone_repository(start_clone_repository(url, target_path)?)
 }
 
 #[cfg(test)]
