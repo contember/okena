@@ -16,16 +16,17 @@ pub use diff::{
 };
 pub use error::{GitError, GitResult};
 pub use repository::{
-    BranchList, HeadSnapshot, VerifiedWorktree, checkout_local_branch, checkout_remote_branch,
-    compute_target_paths, count_ahead_behind, count_unpushed_commits, create_and_checkout_branch,
-    create_worktree, create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
-    discard_file_changes, fetch_all, fetch_and_fast_forward, get_available_branches_for_worktree,
-    get_current_branch, get_default_branch, get_head_snapshot, get_repo_common_dir, get_repo_root,
+    BranchList, HeadSnapshot, OrphanedWorktree, VerifiedWorktree, checkout_local_branch,
+    checkout_remote_branch, compute_target_paths, count_ahead_behind, count_unpushed_commits,
+    create_and_checkout_branch, create_worktree, create_worktree_with_start_point,
+    delete_local_branch, delete_remote_branch, discard_file_changes, fetch_all,
+    fetch_and_fast_forward, get_available_branches_for_worktree, get_current_branch,
+    get_default_branch, get_head_snapshot, get_repo_common_dir, get_repo_root,
     has_uncommitted_changes, list_branches, list_branches_classified, list_linked_worktree_paths,
     list_pull_requests, merge_branch, move_worktree, project_path_in_worktree, push_branch,
-    rebase_onto, remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir,
-    resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
-    verify_linked_worktree_fresh,
+    rebase_onto, remove_orphaned_worktree, remove_worktree, remove_worktree_fast,
+    resolve_git_root_and_subdir, resolve_review_base, stage_file, stash_changes, stash_pop,
+    unstage_file, verify_linked_worktree_fresh, verify_orphaned_worktree,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look

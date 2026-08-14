@@ -173,6 +173,149 @@ fn revalidate_verified_worktree(verified: &VerifiedWorktree) -> GitResult<()> {
     Ok(())
 }
 
+/// A checkout Git no longer tracks: its `.git` file still points at
+/// `<parent common dir>/worktrees/<name>`, but that metadata entry was pruned
+/// while the checkout survived on disk. Git then refuses `worktree remove`, and
+/// [`verify_linked_worktree_fresh`] refuses to vouch for it, so the checkout
+/// cannot be cleaned up through [`VerifiedWorktree`] at all.
+///
+/// This token is the only way to delete a checkout Git does not vouch for, so
+/// its verification is deliberately narrow — see [`verify_orphaned_worktree`].
+#[derive(Clone, Debug)]
+pub struct OrphanedWorktree {
+    parent_path: PathBuf,
+    checkout_path: PathBuf,
+    /// The pruned `<parent common dir>/worktrees/<name>` the `.git` file names.
+    gitdir: PathBuf,
+    identity: FilesystemObjectIdentity,
+}
+
+impl OrphanedWorktree {
+    pub fn checkout_path(&self) -> &Path {
+        &self.checkout_path
+    }
+
+    pub fn parent_path(&self) -> &Path {
+        &self.parent_path
+    }
+}
+
+/// Verify that `checkout_path` is an orphaned linked worktree of `parent_path`.
+///
+/// Every condition must hold, because success authorizes deleting a directory
+/// Git will not vouch for:
+/// - the parent is a healthy repository;
+/// - `<checkout_path>/.git` is a regular file (a directory means a standalone
+///   repository, which is never ours to delete);
+/// - it names a gitdir under that parent's own `worktrees/` directory — this is
+///   what proves the checkout belonged to *this* repo;
+/// - that gitdir is **missing**, which is exactly what orphaned it. A live entry
+///   means the checkout is healthy and must go through the standard path.
+///
+/// `checkout_path` must be the checkout root recorded for the worktree; this
+/// never searches for one, so a wrong path fails instead of resolving to a
+/// neighbouring repository.
+pub fn verify_orphaned_worktree(
+    parent_path: &Path,
+    checkout_path: &Path,
+) -> GitResult<OrphanedWorktree> {
+    let parent_repo = fresh_repo(parent_path)?;
+
+    let pointer_path = checkout_path.join(".git");
+    let pointer_metadata = std::fs::symlink_metadata(&pointer_path).map_err(|error| {
+        unsafe_worktree(checkout_path, format!("`.git` is unreadable: {error}"))
+    })?;
+    if !pointer_metadata.is_file() {
+        return Err(unsafe_worktree(
+            checkout_path,
+            "`.git` is not a linked worktree pointer file",
+        ));
+    }
+    let pointer = std::fs::read_to_string(&pointer_path).map_err(|error| {
+        unsafe_worktree(
+            checkout_path,
+            format!("`.git` pointer is unreadable: {error}"),
+        )
+    })?;
+    let recorded = pointer
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|recorded| !recorded.is_empty())
+        .ok_or_else(|| unsafe_worktree(checkout_path, "`.git` pointer names no gitdir"))?;
+    let recorded = Path::new(recorded);
+    let gitdir = if recorded.is_absolute() {
+        crate::repository::normalize_path(recorded)
+    } else {
+        crate::repository::normalize_path(&checkout_path.join(recorded))
+    };
+
+    if gitdir.exists() {
+        return Err(unsafe_worktree(
+            checkout_path,
+            "checkout is still registered with Git; remove it the standard way",
+        ));
+    }
+
+    let worktrees_dir = gitdir
+        .parent()
+        .filter(|dir| dir.file_name() == Some(std::ffi::OsStr::new("worktrees")))
+        .ok_or_else(|| {
+            unsafe_worktree(
+                checkout_path,
+                "`.git` pointer names no linked worktree entry",
+            )
+        })?;
+    let common_dir = worktrees_dir
+        .parent()
+        .ok_or_else(|| unsafe_worktree(checkout_path, "`.git` pointer names no Git directory"))?;
+    if path_identity(common_dir) != path_identity(parent_repo.common_dir()) {
+        return Err(unsafe_worktree(
+            checkout_path,
+            "checkout does not belong to the parent repository",
+        ));
+    }
+
+    let identity = filesystem_object_identity(checkout_path).ok_or_else(|| {
+        unsafe_worktree(checkout_path, "checkout filesystem identity is unavailable")
+    })?;
+
+    Ok(OrphanedWorktree {
+        parent_path: parent_path.to_path_buf(),
+        checkout_path: checkout_path.to_path_buf(),
+        gitdir,
+        identity,
+    })
+}
+
+fn revalidate_orphaned_worktree(orphaned: &OrphanedWorktree) -> GitResult<()> {
+    let current = verify_orphaned_worktree(&orphaned.parent_path, &orphaned.checkout_path)?;
+    if current.identity != orphaned.identity || current.gitdir != orphaned.gitdir {
+        return Err(unsafe_worktree(
+            &orphaned.checkout_path,
+            "orphaned checkout changed since it was verified",
+        ));
+    }
+    Ok(())
+}
+
+/// Delete an orphaned checkout Git refuses to remove, then prune stale metadata.
+///
+/// This is the fallback for a worktree the standard path cannot reach, so it
+/// runs no dirty-state check — Git cannot run one on a checkout it does not
+/// track. Callers must treat it as destructive and user-confirmed. The deletion
+/// itself is as guarded as the verified path: same quarantine rename and same
+/// identity recheck before anything is removed.
+pub fn remove_orphaned_worktree(orphaned: &OrphanedWorktree) -> GitResult<()> {
+    revalidate_orphaned_worktree(orphaned)?;
+    quarantine_and_delete(
+        &orphaned.checkout_path,
+        &orphaned.identity,
+        &orphaned.parent_path,
+        |path| std::fs::remove_dir_all(path),
+    )
+}
+
 /// Remove only a directory that is absent, empty, or contains regular
 /// `.DS_Store` files. This handles Finder metadata recreated after the verified
 /// checkout was quarantined without ever deleting a replacement directory.
@@ -380,18 +523,36 @@ fn remove_worktree_fast_with(
     remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> GitResult<()> {
     revalidate_verified_worktree(verified)?;
-    let worktree_path = &verified.checkout_path;
+    quarantine_and_delete(
+        &verified.checkout_path,
+        &verified.identity,
+        &verified.parent_path,
+        remove_dir_all,
+    )
+}
+
+/// Rename the checkout aside, re-prove it is still the directory whose
+/// `identity` was verified, delete it, then prune the parent's stale worktree
+/// metadata. Shared by the verified and orphaned removal paths so both get the
+/// same guarantees; the caller is responsible for the verification that
+/// authorizes the deletion in the first place.
+fn quarantine_and_delete(
+    worktree_path: &Path,
+    identity: &FilesystemObjectIdentity,
+    parent_path: &Path,
+    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> GitResult<()> {
     let parent = worktree_path
         .parent()
         .ok_or_else(|| unsafe_worktree(worktree_path, "checkout directory has no parent"))?;
     let quarantine = parent.join(format!(".okena-removing-{}", uuid::Uuid::new_v4()));
     std::fs::rename(worktree_path, &quarantine).map_err(|source| GitError::RemoveFailed {
-        path: worktree_path.clone(),
+        path: worktree_path.to_path_buf(),
         source,
     })?;
 
     let quarantined_identity = filesystem_object_identity(&quarantine);
-    if quarantined_identity.as_ref() != Some(&verified.identity) {
+    if quarantined_identity.as_ref() != Some(identity) {
         let restore = if !worktree_path.exists() {
             std::fs::rename(&quarantine, worktree_path)
         } else {
@@ -444,7 +605,7 @@ fn remove_worktree_fast_with(
     cleanup_benign_residual(worktree_path)?;
 
     // Prune stale worktree entries from the main repo
-    let main_str = path_str(&verified.parent_path)?;
+    let main_str = path_str(parent_path)?;
     let output = safe_output(command("git").args(["-C", main_str, "worktree", "prune"]))?;
 
     if !output.status.success() {
@@ -731,6 +892,91 @@ mod tests {
         std::fs::write(&sentinel, "independent data").expect("write sentinel");
 
         assert!(remove_worktree_fast(&verified).is_err());
+        assert!(moved_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("replacement survives"),
+            "independent data"
+        );
+    }
+
+    /// Orphan a worktree the way `git worktree prune` does: drop the main
+    /// repo's metadata entry and leave the checkout on disk with a dangling
+    /// `.git` pointer.
+    fn orphaned_worktree_fixture() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
+        let (tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        std::fs::remove_dir_all(repo.join(".git").join("worktrees").join("wt-feat"))
+            .expect("prune the worktree metadata entry");
+        (tmp, repo, wt_tmp, wt_path)
+    }
+
+    #[test]
+    fn orphaned_worktree_is_removable_when_git_refuses() {
+        let (_tmp, repo, _wt_tmp, wt_path) = orphaned_worktree_fixture();
+
+        // The status-128 failure users hit: neither git nor the verified path
+        // can touch a checkout the repo no longer registers.
+        assert!(verify_linked_worktree_fresh(&repo, &wt_path).is_err());
+
+        let orphaned = verify_orphaned_worktree(&repo, &wt_path).expect("verify orphaned checkout");
+        assert_eq!(orphaned.checkout_path(), wt_path);
+        remove_orphaned_worktree(&orphaned).expect("remove orphaned checkout");
+        assert!(!wt_path.exists());
+    }
+
+    #[test]
+    fn orphan_verification_rejects_a_healthy_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+
+        assert!(verify_orphaned_worktree(&repo, &wt_path).is_err());
+        assert!(wt_path.exists());
+    }
+
+    #[test]
+    fn orphan_verification_rejects_a_standalone_repository() {
+        let (_tmp, repo) = init_temp_repo();
+        let (_other_tmp, other_repo) = init_temp_repo();
+
+        // A repo with its own `.git` directory is never a pruned worktree of
+        // ours, whichever path the caller hands us.
+        assert!(verify_orphaned_worktree(&repo, &other_repo).is_err());
+        assert!(other_repo.join(".git").exists());
+    }
+
+    #[test]
+    fn orphan_verification_rejects_a_foreign_parent() {
+        let (_tmp, _repo, _wt_tmp, wt_path) = orphaned_worktree_fixture();
+        let (_other_tmp, other_repo) = init_temp_repo();
+
+        // The pointer names a `worktrees/` entry, but under a different repo —
+        // this is the check that stops one project deleting another's checkout.
+        assert!(verify_orphaned_worktree(&other_repo, &wt_path).is_err());
+        assert!(wt_path.exists());
+    }
+
+    #[test]
+    fn orphan_removal_rejects_a_checkout_replaced_after_verification() {
+        let (_tmp, repo, wt_tmp, wt_path) = orphaned_worktree_fixture();
+        let orphaned = verify_orphaned_worktree(&repo, &wt_path).expect("verify orphaned checkout");
+
+        let moved_path = wt_tmp.path().join("moved-feat");
+        std::fs::rename(&wt_path, &moved_path).expect("move original checkout");
+        std::fs::create_dir(&wt_path).expect("create replacement directory");
+        let sentinel = wt_path.join("must-survive.txt");
+        std::fs::write(&sentinel, "independent data").expect("write sentinel");
+
+        assert!(remove_orphaned_worktree(&orphaned).is_err());
         assert!(moved_path.exists());
         assert_eq!(
             std::fs::read_to_string(sentinel).expect("replacement survives"),
