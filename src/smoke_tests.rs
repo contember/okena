@@ -56,6 +56,10 @@ mod tests {
                                 ctrl_c_copies_selection: s
                                     .settings
                                     .terminal_ctrl_c_copies_selection,
+                                right_click_opens_menu: s.settings.terminal_right_click_opens_menu,
+                                drag_selects_in_mouse_mode: s
+                                    .settings
+                                    .terminal_drag_selects_in_mouse_mode,
                             })
                             .ok()
                         }

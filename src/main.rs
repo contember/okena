@@ -688,6 +688,10 @@ fn main() {
                             default_shell: s.settings.default_shell.clone(),
                             hooks: s.settings.hooks.clone(),
                             ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
+                            right_click_opens_menu: s.settings.terminal_right_click_opens_menu,
+                            drag_selects_in_mouse_mode: s
+                                .settings
+                                .terminal_drag_selects_in_mouse_mode,
                         }).ok()
                     }
                     "git" => {
@@ -722,6 +726,8 @@ fn main() {
                                 state.settings.default_shell = tvs.default_shell;
                                 state.settings.hooks = tvs.hooks;
                                 state.settings.terminal_ctrl_c_copies_selection = tvs.ctrl_c_copies_selection;
+                                state.settings.terminal_right_click_opens_menu = tvs.right_click_opens_menu;
+                                state.settings.terminal_drag_selects_in_mouse_mode = tvs.drag_selects_in_mouse_mode;
                                 state.save_and_notify(cx);
                             });
                         }

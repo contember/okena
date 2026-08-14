@@ -151,6 +151,16 @@ impl SettingsState {
         terminal_ctrl_c_copies_selection,
         bool
     );
+    setting_setter!(
+        set_terminal_right_click_opens_menu,
+        terminal_right_click_opens_menu,
+        bool
+    );
+    setting_setter!(
+        set_terminal_drag_selects_in_mouse_mode,
+        terminal_drag_selects_in_mouse_mode,
+        bool
+    );
     setting_setter!(set_blame_visible, blame_visible, bool);
 
     /// Master switch for native desktop notifications (opt-in).

@@ -54,6 +54,22 @@ impl SettingsPanel {
                     cx,
                 ))
                 .child(self.render_toggle(
+                    "right-click-menu",
+                    "Right Click Opens Menu",
+                    s.terminal_right_click_opens_menu,
+                    true,
+                    |state, val, cx| state.set_terminal_right_click_opens_menu(val, cx),
+                    cx,
+                ))
+                .child(self.render_toggle(
+                    "drag-selects",
+                    "Drag Selects in Mouse Apps",
+                    s.terminal_drag_selects_in_mouse_mode,
+                    true,
+                    |state, val, cx| state.set_terminal_drag_selects_in_mouse_mode(val, cx),
+                    cx,
+                ))
+                .child(self.render_toggle(
                     "idle-detection",
                     "Idle Detection",
                     s.idle_timeout_secs > 0,
