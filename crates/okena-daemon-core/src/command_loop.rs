@@ -1409,6 +1409,62 @@ where
             (Ok(_), None) => return CommandResult::Err(format!("project not found: {project_id}")),
         }
     };
+    run_worktree_removal_plan(
+        plan,
+        project_path,
+        force,
+        global_hooks,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        focus_manager,
+        backend,
+        terminals,
+        settings,
+        service_manager,
+        service_tick,
+        deadlines,
+        runtime,
+        inspect_compose_containers,
+        remove,
+    )
+    .await
+}
+
+/// Everything a worktree removal does once its plan exists: preflight, quiesce
+/// the project's runtimes, run the close hooks and the deletion off the reactor,
+/// then finalize state — restoring the quiesced runtimes on any failure.
+///
+/// Split out of [`remove_worktree_project_off_reactor_with`] so the force-remove
+/// path, whose plan comes from `begin_orphaned_worktree_removal` instead, gets
+/// the same teardown and recovery rather than a parallel copy of it.
+#[allow(clippy::too_many_arguments)]
+async fn run_worktree_removal_plan<Inspect, Remove>(
+    plan: WorktreeRemovalPlan,
+    project_path: String,
+    force: bool,
+    global_hooks: okena_workspace::persistence::HooksConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    focus_manager: &mut FocusManager,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    deadlines: &SoftCloseDeadlines,
+    runtime: &tokio::runtime::Handle,
+    inspect_compose_containers: Inspect,
+    remove: Remove,
+) -> CommandResult
+where
+    Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
+    Remove: FnOnce(&WorktreeRemovalPlan, bool) -> Result<(), String> + Send + 'static,
+{
+    let project_id = plan.project_id.clone();
     let preflight_plan = plan.clone();
     match runtime
         .spawn_blocking(move || preflight_plan.preflight_remove(force))
@@ -3207,6 +3263,58 @@ pub async fn daemon_command_loop(
                         .await;
                         send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
                         result
+                    }
+
+                    // ── Force-remove a checkout Git no longer tracks ──
+                    // Same teardown/recovery pipeline as the standard removal;
+                    // only the plan differs, because no Git operation can reach
+                    // an orphaned checkout.
+                    ActionRequest::ForceRemoveWorktreeProject { project_id } => {
+                        let planned = {
+                            let mut workspace = workspace.lock();
+                            let project_path = workspace
+                                .project(&project_id)
+                                .map(|project| project.path.clone());
+                            match (
+                                workspace.begin_orphaned_worktree_removal(&project_id),
+                                project_path,
+                            ) {
+                                (Ok(plan), Some(project_path)) => Ok((plan, project_path)),
+                                (Err(error), _) => Err(error),
+                                (Ok(_), None) => Err(format!("project not found: {project_id}")),
+                            }
+                        };
+                        match planned {
+                            Err(error) => CommandResult::Err(error),
+                            Ok((plan, project_path)) => {
+                                let global_hooks = settings.lock().hooks.clone();
+                                let app_settings = settings.lock().clone();
+                                run_worktree_removal_plan(
+                                    plan,
+                                    project_path,
+                                    true,
+                                    global_hooks,
+                                    &workspace,
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                    &mut focus_manager,
+                                    &backend,
+                                    &terminals,
+                                    &app_settings,
+                                    &service_manager,
+                                    &service_tick,
+                                    &deadlines,
+                                    &runtime,
+                                    |roots| {
+                                        okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
+                                            .map_err(|error| error.to_string())
+                                    },
+                                    |plan, force| plan.remove(force),
+                                )
+                                .await
+                            }
+                        }
                     }
 
                     ActionRequest::RenameProjectDirectory {

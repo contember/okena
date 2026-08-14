@@ -1160,6 +1160,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
                 force,
             }
         }
+        ActionRequest::ForceRemoveWorktreeProject { project_id } => {
+            ActionRequest::ForceRemoveWorktreeProject {
+                project_id: s(&project_id),
+            }
+        }
         ActionRequest::CloseWorktree {
             project_id,
             merge,
