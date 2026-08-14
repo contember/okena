@@ -17,6 +17,7 @@ use crate::error::{GitError, GitResult};
 
 pub mod branch;
 pub mod ci;
+pub mod clone;
 pub mod paths;
 pub mod status;
 pub mod worktree;
@@ -31,6 +32,7 @@ pub use branch::{
 pub use ci::{
     CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info, has_github_remote, list_pull_requests,
 };
+pub use clone::{clone_dir_name, clone_repository, validate_clone_url};
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
     project_path_in_worktree, resolve_git_root_and_subdir,

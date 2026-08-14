@@ -35,6 +35,14 @@ pub enum GitError {
     #[error("invalid git ref: {0}")]
     InvalidRef(String),
 
+    /// A clone URL is empty or looks like a CLI flag.
+    #[error("invalid repository URL: {0}")]
+    InvalidUrl(String),
+
+    /// Clone target directory already exists and is not empty.
+    #[error("directory '{path}' already exists and is not empty")]
+    CloneTargetExists { path: PathBuf },
+
     /// Failed to parse structured output (JSON, etc.).
     #[error("parse error: {0}")]
     ParseError(String),
