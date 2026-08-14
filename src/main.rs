@@ -692,6 +692,9 @@ fn main() {
                             drag_selects_in_mouse_mode: s
                                 .settings
                                 .terminal_drag_selects_in_mouse_mode,
+                            double_click_selects_in_mouse_mode: s
+                                .settings
+                                .terminal_double_click_selects_in_mouse_mode,
                         }).ok()
                     }
                     "git" => {
@@ -728,6 +731,7 @@ fn main() {
                                 state.settings.terminal_ctrl_c_copies_selection = tvs.ctrl_c_copies_selection;
                                 state.settings.terminal_right_click_opens_menu = tvs.right_click_opens_menu;
                                 state.settings.terminal_drag_selects_in_mouse_mode = tvs.drag_selects_in_mouse_mode;
+                                state.settings.terminal_double_click_selects_in_mouse_mode = tvs.double_click_selects_in_mouse_mode;
                                 state.save_and_notify(cx);
                             });
                         }

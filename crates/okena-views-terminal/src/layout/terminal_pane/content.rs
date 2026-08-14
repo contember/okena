@@ -185,6 +185,12 @@ impl TerminalContent {
         if button_code == 2 && settings.right_click_opens_menu {
             return false;
         }
+        // The second and third click of a gesture select a word/line here rather
+        // than reaching the app, which already got the first click.
+        if button_code == 0 && self.click_count >= 2 && settings.double_click_selects_in_mouse_mode
+        {
+            return false;
+        }
         let Some((col, row, _)) = self.pixel_to_cell(event_position) else {
             return false;
         };
@@ -465,11 +471,10 @@ impl TerminalContent {
             }
         }
 
-        if self.try_forward_mouse_press(0, event.position, &event.modifiers, cx) {
-            cx.notify();
-            return;
-        }
-
+        // Count the click before the forward gate. A forwarded press used to
+        // return early, leaving `last_click` untouched — so in a mouse-grabbing
+        // app every click looked like the first and a double-click could never
+        // register.
         let now = Instant::now();
 
         let click_count = if let Some((last_time, last_col, last_row)) = self.last_click {
@@ -491,6 +496,11 @@ impl TerminalContent {
 
         self.last_click = Some((now, col, row));
         self.click_count = click_count;
+
+        if self.try_forward_mouse_press(0, event.position, &event.modifiers, cx) {
+            cx.notify();
+            return;
+        }
 
         let Some(terminal) = self.terminal.as_ref() else {
             return;
