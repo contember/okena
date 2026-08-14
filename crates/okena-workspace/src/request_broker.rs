@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 pub struct RequestBroker {
     overlay_requests: VecDeque<OverlayRequest>,
     sidebar_requests: VecDeque<SidebarRequest>,
-    send_to_terminal: VecDeque<SendPayload>,
+    send_to_terminal: VecDeque<(SendPayload, Option<String>)>,
 }
 
 impl Default for RequestBroker {
@@ -39,10 +39,27 @@ impl RequestBroker {
         cx.notify();
     }
 
-    /// Queue a "Send to Terminal" payload. The host drains this on observation,
-    /// resolves the focused terminal's CWD, and formats + pastes the result.
+    /// Queue a "Send to Terminal" payload for the focused terminal. The host
+    /// drains this on observation, resolves that terminal's CWD, and formats +
+    /// pastes the result.
     pub fn push_send_to_terminal(&mut self, payload: SendPayload, cx: &mut Context<Self>) {
-        self.send_to_terminal.push_back(payload);
+        self.send_to_terminal.push_back((payload, None));
+        cx.notify();
+    }
+
+    /// Queue a payload for one specific terminal, regardless of focus.
+    ///
+    /// Annotating a terminal's own output sends it back to that same terminal,
+    /// and by then the composer overlay holds focus — so the target can't be
+    /// inferred the way `push_send_to_terminal` does it.
+    pub fn push_send_to_terminal_targeted(
+        &mut self,
+        payload: SendPayload,
+        terminal_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_to_terminal
+            .push_back((payload, Some(terminal_id)));
         cx.notify();
     }
 
@@ -54,7 +71,7 @@ impl RequestBroker {
         self.sidebar_requests.drain(..).collect()
     }
 
-    pub fn drain_send_to_terminal(&mut self) -> Vec<SendPayload> {
+    pub fn drain_send_to_terminal(&mut self) -> Vec<(SendPayload, Option<String>)> {
         self.send_to_terminal.drain(..).collect()
     }
 

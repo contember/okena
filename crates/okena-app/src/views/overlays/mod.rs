@@ -35,6 +35,7 @@ pub mod remote_connect_dialog;
 pub mod remote_context_menu;
 pub mod remote_pair_dialog;
 pub mod rename_directory_dialog;
+pub mod send_composer;
 pub mod session_manager;
 pub mod settings_panel;
 pub mod shell_selector_overlay;

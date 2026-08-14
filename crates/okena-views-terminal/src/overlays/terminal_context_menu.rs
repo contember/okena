@@ -15,6 +15,11 @@ pub enum TerminalContextMenuEvent {
     Copy {
         terminal_id: String,
     },
+    /// Annotate the selection and send it back into this terminal.
+    AnnotateSelection {
+        terminal_id: String,
+        position: Point<Pixels>,
+    },
     Paste {
         terminal_id: String,
     },
@@ -161,6 +166,24 @@ impl Render for TerminalContextMenu {
                                 el.on_click(cx.listener(|this, _, _window, cx| {
                                     cx.emit(TerminalContextMenuEvent::Copy {
                                         terminal_id: this.terminal_id.clone(),
+                                    });
+                                }))
+                            }),
+                        )
+                        // Send to Terminal (conditional - requires selection)
+                        .child(
+                            menu_item_conditional(
+                                "ctx-annotate",
+                                "icons/terminal.svg",
+                                "Send to Terminal…",
+                                has_selection,
+                                &t,
+                            )
+                            .when(has_selection, |el| {
+                                el.on_click(cx.listener(move |this, _, _window, cx| {
+                                    cx.emit(TerminalContextMenuEvent::AnnotateSelection {
+                                        terminal_id: this.terminal_id.clone(),
+                                        position: this.position,
                                     });
                                 }))
                             }),
