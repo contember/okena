@@ -65,6 +65,7 @@ fn command_uses_window(cmd: &Command) -> bool {
         Command::Project { cmd } => matches!(
             cmd,
             ProjectCmd::Add { .. }
+                | ProjectCmd::Clone { .. }
                 | ProjectCmd::Show { .. }
                 | ProjectCmd::Hide { .. }
                 | ProjectCmd::Focus { .. }
@@ -82,7 +83,7 @@ fn dispatch(cli: Cli) -> i32 {
     let window = cli.window.as_deref();
     if cli.window.is_some() && !command_uses_window(&cli.command) {
         eprintln!(
-            "Warning: --window is ignored by this command. Only `project add/show/hide/focus` and `term focus/fullscreen` honor it."
+            "Warning: --window is ignored by this command. Only `project add/clone/show/hide/focus` and `term focus/fullscreen` honor it."
         );
     }
     match cli.command {
@@ -120,6 +121,22 @@ fn dispatch(cli: Cli) -> i32 {
             } => {
                 commands::cli_project_add(&path, name.as_deref(), hidden, folder.as_deref(), window)
             }
+            ProjectCmd::Clone {
+                url,
+                into,
+                dir,
+                name,
+                hidden,
+                folder,
+            } => commands::cli_project_clone(
+                &url,
+                into.as_deref(),
+                dir.as_deref(),
+                name.as_deref(),
+                hidden,
+                folder.as_deref(),
+                window,
+            ),
             ProjectCmd::Rm { project } => commands::cli_project_rm(&project),
             ProjectCmd::Show { project } => commands::cli_project_show(&project, true, window),
             ProjectCmd::Hide { project } => commands::cli_project_show(&project, false, window),
