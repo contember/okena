@@ -10,6 +10,38 @@ use crate::state::{LayoutNode, ProjectData, WindowId, Workspace};
 use okena_core::theme::FolderColor;
 use std::collections::{HashMap, HashSet};
 
+/// A fresh, unparented project row — the one place the full `ProjectData`
+/// shape is spelled out for newly created projects.
+fn new_project_row(
+    id: String,
+    name: String,
+    path: String,
+    layout: Option<LayoutNode>,
+    default_shell: Option<okena_terminal::shell_config::ShellType>,
+) -> ProjectData {
+    ProjectData {
+        id,
+        name,
+        path,
+        layout,
+        terminal_names: HashMap::new(),
+        hidden_terminals: HashMap::new(),
+        worktree_info: None,
+        worktree_ids: Vec::new(),
+        folder_color: FolderColor::default(),
+        hooks: HooksConfig::default(),
+        is_remote: false,
+        connection_id: None,
+        service_terminals: HashMap::new(),
+        default_shell,
+        hook_terminals: HashMap::new(),
+        pinned: false,
+        last_activity_at: None,
+        is_creating: false,
+        is_closing: false,
+    }
+}
+
 #[derive(Clone)]
 pub struct ProjectDirectoryRenamePlan {
     project_id: String,
@@ -140,6 +172,47 @@ fn expand_tilde(path: &str) -> String {
         return format!("{}{}", home.display(), rest);
     }
     path.to_string()
+}
+
+/// Resolve a clone request's `parent_dir` + `directory` into one absolute path.
+///
+/// `directory` is a NAME, not a path: separators and `..` are rejected so the
+/// checkout cannot land outside the parent directory the user actually picked.
+/// Runs on the host that will do the cloning, so `~` and the path separator are
+/// resolved with that host's conventions — not the calling client's.
+pub fn resolve_clone_target(
+    parent_dir: &str,
+    directory: &str,
+) -> Result<std::path::PathBuf, String> {
+    let parent = expand_tilde(parent_dir.trim());
+    if parent.is_empty() {
+        return Err("Parent directory is required".to_string());
+    }
+    let directory = directory.trim();
+    if directory.is_empty() {
+        return Err("Directory name is required".to_string());
+    }
+    if directory == "."
+        || directory == ".."
+        || directory.contains(['/', '\\'])
+        || std::path::Path::new(directory).components().count() != 1
+    {
+        return Err(format!(
+            "'{directory}' is not a valid directory name — it must be a single folder name"
+        ));
+    }
+    Ok(std::path::PathBuf::from(parent).join(directory))
+}
+
+/// Display name for a cloned project: the caller's, or the directory name when
+/// the caller left it blank (`okena project clone` without `--name`).
+pub fn clone_project_name(name: &str, directory: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        directory.trim().to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 impl Workspace {
@@ -285,56 +358,111 @@ impl Workspace {
         let default_shell: Option<okena_terminal::shell_config::ShellType> = None;
 
         let id = uuid::Uuid::new_v4().to_string();
-        let project = ProjectData {
-            id: id.clone(),
-            name: name.clone(),
-            path: path.clone(),
-            layout: if with_terminal {
-                Some(LayoutNode::new_terminal())
-            } else {
-                None
-            },
-            terminal_names: HashMap::new(),
-            hidden_terminals: HashMap::new(),
-            worktree_info: None,
-            worktree_ids: Vec::new(),
-            folder_color: FolderColor::default(),
-            hooks: HooksConfig::default(),
-            is_remote: false,
-            connection_id: None,
-            service_terminals: HashMap::new(),
-            default_shell,
-            hook_terminals: HashMap::new(),
-            pinned: false,
-            last_activity_at: None,
-            is_creating: false,
-            is_closing: false,
-        };
-        let project_hooks = project.hooks.clone();
-        self.data.projects.push(project);
+        let layout = with_terminal.then(LayoutNode::new_terminal);
+        self.data
+            .projects
+            .push(new_project_row(id.clone(), name, path, layout, default_shell));
         self.data.project_order.push(id.clone());
         self.data.add_project_hide_in_other_windows(&id, window_id);
         self.notify_data(cx);
 
-        let folder = self.folder_for_project_or_parent(&id);
-        let folder_id = folder.map(|f| f.id.as_str());
-        let folder_name = folder.map(|f| f.name.as_str());
-        let runner = cx.hook_runner();
-        let monitor = cx.hook_monitor();
-        let hook_results = hooks::fire_on_project_open(
-            &project_hooks,
-            &id,
-            &name,
-            &path,
-            folder_id,
-            folder_name,
-            global_hooks,
-            runner.as_ref(),
-            monitor.as_ref(),
-        );
-        self.register_hook_results(hook_results, cx);
+        self.fire_project_open_hooks(&id, global_hooks, cx);
         Ok(id)
     }
+
+    /// Register a project row whose directory does NOT exist on disk yet.
+    ///
+    /// The clone counterpart of `register_worktree_project_deferred_hooks`:
+    /// the row appears immediately (so the user sees the project while the
+    /// clone runs) but gets no layout and fires no hooks, because both would
+    /// cd into a directory that is not there. The caller marks it creating,
+    /// runs the checkout, then calls `finish_pending_project` — or
+    /// `remove_pending_project` when the checkout fails.
+    pub fn register_pending_project(
+        &mut self,
+        name: String,
+        path: String,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<String, String> {
+        let path = expand_tilde(&path);
+        self.ensure_project_path_claim_allowed(std::path::Path::new(&path))?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        // No layout: `column_content` renders the creating placeholder, and
+        // `spawn_uninitialized_terminals` has nothing to spawn into yet. The
+        // shell is detected in `finish_pending_project`, once the path is real.
+        self.data
+            .projects
+            .push(new_project_row(id.clone(), name, path, None, None));
+        self.data.project_order.push(id.clone());
+        self.data.add_project_hide_in_other_windows(&id, window_id);
+        self.notify_data(cx);
+        Ok(id)
+    }
+
+    /// Materialize a pending project once its directory exists: seed the
+    /// terminal layout and fire the deferred `on_project_open` hooks.
+    ///
+    /// Leaves an existing layout alone — a restored session may already carry
+    /// one, and re-seeding would drop its terminals.
+    pub fn finish_pending_project(
+        &mut self,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) else {
+            return;
+        };
+        if project.layout.is_none() {
+            project.layout = Some(LayoutNode::new_terminal());
+        }
+        // Detect the WSL shell now that the path is real (`add_project` does
+        // this up-front from the path string; the check is the same either way).
+        #[cfg(windows)]
+        {
+            if project.default_shell.is_none() {
+                project.default_shell =
+                    okena_terminal::shell_config::parse_wsl_unc_path(&project.path).map(
+                        |(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
+                            distro: Some(distro),
+                        },
+                    );
+            }
+        }
+        self.notify_data(cx);
+        self.fire_project_open_hooks(project_id, global_hooks, cx);
+    }
+
+    /// Roll back a pending project row whose creation never completed.
+    ///
+    /// Mirrors `remove_stale_worktree` for plain (non-worktree) projects and
+    /// carries the same guard: a row still marked creating or closing belongs
+    /// to an in-flight operation and is left alone. Caller calls `notify_data`.
+    pub fn remove_pending_project(&mut self, project_id: &str) {
+        if self.lifecycle.is_closing(project_id) || self.lifecycle.is_creating(project_id) {
+            return;
+        }
+        // Worktree rows roll back through `remove_stale_worktree`, which also
+        // scrubs the parent's `worktree_ids`.
+        let is_plain_project = self
+            .data
+            .projects
+            .iter()
+            .any(|p| p.id == project_id && p.worktree_info.is_none());
+        if !is_plain_project {
+            return;
+        }
+
+        self.data.projects.retain(|p| p.id != project_id);
+        self.data.project_order.retain(|id| id != project_id);
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+        self.data.delete_project_scrub_all_windows(project_id);
+    }
+
 
     /// Remove hook terminal state restored without a matching live PTY.
     ///
@@ -3640,5 +3768,141 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.is_creating_project("wt1"), "creating flag cleared");
         });
+    }
+
+    #[test]
+    fn clone_target_joins_the_parent_and_the_directory() {
+        let target = super::resolve_clone_target("/home/user/projects", "okena").unwrap();
+        assert_eq!(target, Path::new("/home/user/projects/okena"));
+        // Surrounding whitespace is the user's, not part of the path.
+        let target = super::resolve_clone_target("  /home/user/projects ", " okena ").unwrap();
+        assert_eq!(target, Path::new("/home/user/projects/okena"));
+    }
+
+    #[test]
+    fn clone_target_rejects_a_directory_that_is_not_a_plain_name() {
+        // A separator or `..` would put the checkout outside the parent the
+        // user picked.
+        for directory in ["../escape", "nested/dir", "a\\b", ".", "..", "", "   "] {
+            assert!(
+                super::resolve_clone_target("/home/user", directory).is_err(),
+                "expected rejection for {directory:?}"
+            );
+        }
+        assert!(super::resolve_clone_target("", "okena").is_err());
+    }
+
+    #[test]
+    fn clone_name_falls_back_to_the_directory() {
+        assert_eq!(super::clone_project_name("My Repo", "okena"), "My Repo");
+        assert_eq!(super::clone_project_name("   ", "okena"), "okena");
+        assert_eq!(super::clone_project_name("", " okena "), "okena");
+    }
+
+    #[gpui::test]
+    fn pending_project_gets_no_layout_until_it_is_finished(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        let id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            let id = ws
+                .register_pending_project(
+                    "Okena".to_string(),
+                    "/tmp/okena-clone-target".to_string(),
+                    WindowId::Main,
+                    cx,
+                )
+                .expect("registers");
+            ws.mark_creating_project(&id);
+            id
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let project = ws.project(&id).expect("project exists");
+            assert!(project.layout.is_none(), "no layout while the clone runs");
+            assert!(project.is_creating, "creating flag mirrored onto the row");
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.finish_pending_project(&id, &HooksConfig::default(), cx);
+            ws.finish_creating_project(&id);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let project = ws.project(&id).expect("project exists");
+            assert!(project.layout.is_some(), "layout seeded once the dir exists");
+            assert!(!project.is_creating);
+        });
+    }
+
+    #[gpui::test]
+    fn rolling_back_a_pending_project_drops_it_everywhere(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.folders = vec![crate::state::FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            let id = ws
+                .register_pending_project(
+                    "Okena".to_string(),
+                    "/tmp/okena-clone-rollback".to_string(),
+                    WindowId::Main,
+                    cx,
+                )
+                .expect("registers");
+            ws.mark_creating_project(&id);
+            ws.move_project_to_folder(&id, "f1", None, cx);
+            id
+        });
+
+        // Still creating: the row belongs to an in-flight clone and stays put.
+        workspace.update(cx, |ws: &mut Workspace, _cx| ws.remove_pending_project(&id));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project(&id).is_some(), "creating rows are not removed");
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.finish_creating_project(&id);
+            ws.remove_pending_project(&id);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project(&id).is_none());
+            assert!(!ws.data().project_order.contains(&id));
+            assert!(ws.data().folders[0].project_ids.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn a_pending_project_cannot_claim_a_path_reserved_by_a_worktree_create(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A clone must inherit the same path-claim guard as any other project:
+        // a checkout that is still being created owns its root, so a clone
+        // cannot land inside it and race the checkout on the same directory.
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.mark_creating_project("wt1");
+            ws.register_pending_project(
+                "Clash".to_string(),
+                "/tmp/worktrees/wt1/nested".to_string(),
+                WindowId::Main,
+                cx,
+            )
+        });
+
+        assert!(
+            result.is_err(),
+            "clone target inside an in-flight worktree must be rejected"
+        );
     }
 }
