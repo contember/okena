@@ -32,6 +32,8 @@ pub struct SimpleInputState {
     icon: Option<SharedString>,
     highlight_vars: bool,
     multiline: bool,
+    /// Multiline only: plain Enter bubbles to the parent, Shift+Enter breaks the line.
+    submit_on_enter: bool,
     input_bounds: Option<Bounds<Pixels>>,
     /// Per-line TextLayouts for accurate click-to-cursor mapping via index_for_position().
     text_layouts: Vec<TextLayout>,
@@ -72,6 +74,7 @@ impl SimpleInputState {
             icon: None,
             highlight_vars: false,
             multiline: false,
+            submit_on_enter: false,
             input_bounds: None,
             text_layouts: Vec::new(),
             is_selecting: false,
@@ -104,6 +107,14 @@ impl SimpleInputState {
     /// Enable highlighting of `{var}` template variables in a distinct color.
     pub fn highlight_vars(mut self) -> Self {
         self.highlight_vars = true;
+        self
+    }
+
+    /// In multiline mode, hand plain Enter to the parent (to submit) and move
+    /// newline insertion onto Shift+Enter. No effect on single-line inputs,
+    /// which already bubble Enter.
+    pub fn submit_on_enter(mut self) -> Self {
+        self.submit_on_enter = true;
         self
     }
 
@@ -699,7 +710,7 @@ impl SimpleInputState {
                 return KeyHandled::NotHandled;
             }
             "enter" => {
-                if self.multiline {
+                if self.multiline && (!self.submit_on_enter || modifiers.shift) {
                     self.insert_text("\n", cx);
                     return KeyHandled::Handled;
                 }

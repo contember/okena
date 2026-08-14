@@ -618,6 +618,7 @@ impl Render for WindowView {
         let has_remote_context_menu = om.has_remote_context_menu();
         let has_terminal_context_menu = om.has_terminal_context_menu();
         let has_tab_context_menu = om.has_tab_context_menu();
+        let has_send_composer = om.has_send_composer();
         let has_worktree_list = om.has_worktree_list();
         let has_color_picker = om.has_color_picker();
 
@@ -1480,6 +1481,10 @@ impl Render for WindowView {
             // Tab context menu overlay (positioned popup)
             .when(has_tab_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_tab_context_menu())
+            })
+            // Send composer (positioned popup over the terminal selection)
+            .when(has_send_composer, |d| {
+                d.children(self.overlay_manager.read(cx).render_send_composer())
             })
             // Single active modal overlay (renders on top of everything)
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {

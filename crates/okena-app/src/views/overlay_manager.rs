@@ -31,6 +31,7 @@ use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDia
 use crate::views::overlays::rename_directory_dialog::{
     RenameDirectoryDialog, RenameDirectoryDialogEvent,
 };
+use crate::views::overlays::send_composer::{SendComposer, SendComposerEvent};
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
@@ -244,6 +245,12 @@ pub enum OverlayManagerEvent {
 
     /// Terminal context menu: copy
     TerminalCopy { terminal_id: String },
+    /// Terminal context menu: annotate the selection and send it back.
+    /// The host owns the terminals, so only it can snapshot the selected text.
+    TerminalAnnotate {
+        terminal_id: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
     /// Terminal context menu: paste
     TerminalPaste { terminal_id: String },
     /// Terminal context menu: clear
@@ -336,6 +343,7 @@ pub struct OverlayManager {
     remote_context_menu: OverlaySlot<RemoteContextMenu>,
     terminal_context_menu: OverlaySlot<TerminalContextMenu>,
     tab_context_menu: OverlaySlot<TabContextMenu>,
+    send_composer: OverlaySlot<SendComposer>,
 
     // Positioned popovers (like context menus, rendered at WindowView level)
     worktree_list: OverlaySlot<WorktreeListPopover>,
@@ -367,6 +375,7 @@ impl OverlayManager {
             remote_context_menu: OverlaySlot::new(),
             terminal_context_menu: OverlaySlot::new(),
             tab_context_menu: OverlaySlot::new(),
+            send_composer: OverlaySlot::new(),
             worktree_list: OverlaySlot::new(),
             color_picker: OverlaySlot::new(),
         }
@@ -420,6 +429,7 @@ impl OverlayManager {
     ///
     /// Automatically clears terminal focus so keyboard input goes to the modal.
     fn open_modal<T: Render + 'static>(&mut self, entity: Entity<T>, cx: &mut Context<Self>) {
+        self.hide_send_composer(cx);
         self.close_modal(cx);
         self.active_modal = Some(entity.into());
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
@@ -504,7 +514,7 @@ impl OverlayManager {
     // ========================================================================
 
     /// Close all context menu slots (mutual exclusion).
-    fn close_all_context_menus(&mut self) {
+    fn close_all_context_menus(&mut self, cx: &mut Context<Self>) {
         self.context_menu.close();
         self.folder_context_menu.close();
         self.remote_context_menu.close();
@@ -512,6 +522,9 @@ impl OverlayManager {
         self.tab_context_menu.close();
         self.worktree_list.close();
         self.color_picker.close();
+        // Not a plain slot close: the composer holds the modal focus context
+        // and has to hand it back.
+        self.hide_send_composer(cx);
     }
 
     /// Check if context menu is open.
@@ -532,6 +545,11 @@ impl OverlayManager {
     /// Check if tab context menu is open.
     pub fn has_tab_context_menu(&self) -> bool {
         self.tab_context_menu.is_open()
+    }
+
+    /// Check if the send composer is open.
+    pub fn has_send_composer(&self) -> bool {
+        self.send_composer.is_open()
     }
 
     // ========================================================================
@@ -922,7 +940,7 @@ impl OverlayManager {
     /// Show context menu for a project.
     pub fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
         self.close_modal(cx);
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let workspace = self.workspace.clone();
         let window_id = self.window_id;
@@ -1082,7 +1100,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let workspace = self.workspace.clone();
         let window_id = self.window_id;
@@ -1161,7 +1179,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let conn_name = connection_name.clone();
         let menu = cx.new(|cx| {
@@ -1244,7 +1262,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let menu = cx.new(|cx| {
             TerminalContextMenu::new(
@@ -1268,6 +1286,16 @@ impl OverlayManager {
                     this.hide_terminal_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TerminalCopy {
                         terminal_id: terminal_id.clone(),
+                    });
+                }
+                TerminalContextMenuEvent::AnnotateSelection {
+                    terminal_id,
+                    position,
+                } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalAnnotate {
+                        terminal_id: terminal_id.clone(),
+                        position: *position,
                     });
                 }
                 TerminalContextMenuEvent::Paste { terminal_id } => {
@@ -1338,6 +1366,83 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Send composer (positioned popup)
+    // ========================================================================
+
+    /// Open the annotate-and-send composer over `quoted`, a snapshot of the
+    /// terminal's selection taken by the caller (only it can reach the PTY).
+    pub fn show_send_composer(
+        &mut self,
+        terminal_id: String,
+        quoted: String,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_all_context_menus(cx);
+
+        // Enter modal focus context, or the terminal pane grabs focus back on
+        // its next render (see terminal_pane::render) — which for a streaming
+        // agent is the next frame, mid-sentence.
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+            cx.notify();
+        });
+
+        let composer = cx.new(|cx| SendComposer::new(terminal_id, quoted, position, cx));
+
+        cx.subscribe(&composer, |this, _, event: &SendComposerEvent, cx| {
+            match event {
+                SendComposerEvent::Close => this.hide_send_composer(cx),
+                SendComposerEvent::Send {
+                    terminal_id,
+                    quoted,
+                    note,
+                } => {
+                    let payload = okena_core::send_payload::SendPayload::output(
+                        okena_core::send_payload::OutputBlock {
+                            text: quoted.clone(),
+                            // Source and target are the same pane — naming it
+                            // back to itself would only be noise.
+                            source_label: None,
+                        },
+                    )
+                    .with_note(note.clone());
+                    let terminal_id = terminal_id.clone();
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal_targeted(payload, terminal_id, cx);
+                    });
+                    this.hide_send_composer(cx);
+                }
+            }
+        })
+        .detach();
+
+        self.send_composer.set(composer);
+        cx.notify();
+    }
+
+    /// Hide the send composer, handing focus back to the terminal so the user
+    /// can review the pasted prompt and hit Enter.
+    pub fn hide_send_composer(&mut self, cx: &mut Context<Self>) {
+        if !self.send_composer.is_open() {
+            return;
+        }
+        self.send_composer.close();
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Get send composer entity for rendering.
+    pub fn render_send_composer(&self) -> Option<Entity<SendComposer>> {
+        self.send_composer.render()
+    }
+
+    // ========================================================================
     // Tab context menu (positioned popup)
     // ========================================================================
 
@@ -1352,7 +1457,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let menu = cx.new(|cx| {
             TabContextMenu::new(tab_index, num_tabs, project_id, layout_path, position, cx)
@@ -1436,7 +1541,7 @@ impl OverlayManager {
         params: (okena_transport::remote_action::RemoteActionClient, String),
         cx: &mut Context<Self>,
     ) {
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let (client, daemon_id) = params;
         let workspace = self.workspace.clone();
@@ -1503,7 +1608,7 @@ impl OverlayManager {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.close_all_context_menus();
+        self.close_all_context_menus(cx);
 
         let workspace = self.workspace.clone();
         let popover = cx.new(|cx| ColorPickerPopover::new(workspace, target, position, cx));
@@ -2097,3 +2202,150 @@ impl OverlayManager {
 }
 
 impl EventEmitter<OverlayManagerEvent> for OverlayManager {}
+
+#[cfg(test)]
+mod send_composer_tests {
+    use super::OverlayManager;
+    use crate::workspace::focus::{FocusContext, FocusManager};
+    use crate::workspace::request_broker::RequestBroker;
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
+    use gpui::{Entity, TestAppContext};
+
+    struct Harness {
+        overlay: Entity<OverlayManager>,
+        focus: Entity<FocusManager>,
+        broker: Entity<RequestBroker>,
+    }
+
+    fn harness(cx: &mut TestAppContext) -> Harness {
+        cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let focus = cx.new(|_| FocusManager::new());
+            let broker = cx.new(|_| RequestBroker::new());
+            let overlay = cx.new(|_| {
+                OverlayManager::new(
+                    WindowId::Main,
+                    workspace.clone(),
+                    focus.clone(),
+                    broker.clone(),
+                )
+            });
+            Harness {
+                overlay,
+                focus,
+                broker,
+            }
+        })
+    }
+
+    fn open(h: &Harness, quoted: &str, cx: &mut TestAppContext) {
+        h.overlay.update(cx, |om, cx| {
+            om.show_send_composer(
+                "term-1".into(),
+                quoted.into(),
+                gpui::point(gpui::px(10.0), gpui::px(20.0)),
+                cx,
+            );
+        });
+    }
+
+    /// The pane re-grabs focus on every render unless the focus context is
+    /// Modal, so an unbalanced enter/exit here means typing lands in the PTY.
+    #[gpui::test]
+    fn open_enters_modal_focus_and_close_leaves_it(cx: &mut TestAppContext) {
+        let h = harness(cx);
+        open(&h, "boom", cx);
+
+        assert!(h.overlay.read_with(cx, |om, _| om.has_send_composer()));
+        assert_eq!(
+            h.focus.read_with(cx, |fm, _| fm.context().clone()),
+            FocusContext::Modal
+        );
+
+        h.overlay.update(cx, |om, cx| om.hide_send_composer(cx));
+
+        assert!(!h.overlay.read_with(cx, |om, _| om.has_send_composer()));
+        assert_eq!(
+            h.focus.read_with(cx, |fm, _| fm.context().clone()),
+            FocusContext::Terminal
+        );
+    }
+
+    /// Reopening must not stack a second modal entry on the focus stack.
+    #[gpui::test]
+    fn reopening_does_not_leak_a_modal_entry(cx: &mut TestAppContext) {
+        let h = harness(cx);
+        open(&h, "first", cx);
+        open(&h, "second", cx);
+
+        h.overlay.update(cx, |om, cx| om.hide_send_composer(cx));
+
+        assert_eq!(
+            h.focus.read_with(cx, |fm, _| fm.context().clone()),
+            FocusContext::Terminal,
+            "one close should be enough to leave modal focus"
+        );
+    }
+
+    /// Closing a composer that was never open must not pop the focus stack.
+    #[gpui::test]
+    fn hiding_a_closed_composer_is_a_noop(cx: &mut TestAppContext) {
+        let h = harness(cx);
+        h.overlay.update(cx, |om, cx| om.hide_send_composer(cx));
+
+        assert_eq!(
+            h.focus.read_with(cx, |fm, _| fm.context().clone()),
+            FocusContext::Terminal
+        );
+    }
+
+    #[gpui::test]
+    fn send_queues_the_quote_and_note_for_the_source_terminal(cx: &mut TestAppContext) {
+        let h = harness(cx);
+        open(&h, "error: boom", cx);
+
+        let composer = h
+            .overlay
+            .read_with(cx, |om, _| om.render_send_composer())
+            .expect("composer is open");
+        composer.update(cx, |c, cx| {
+            c.set_note("fix it", cx);
+            c.send(cx);
+        });
+
+        let queued = h
+            .broker
+            .update(cx, |broker, _| broker.drain_send_to_terminal());
+        assert_eq!(queued.len(), 1);
+        let (payload, target) = &queued[0];
+        assert_eq!(
+            target.as_deref(),
+            Some("term-1"),
+            "annotation goes back to the terminal it came from, not to whatever has focus"
+        );
+        assert_eq!(payload.format(None), "```\nerror: boom\n```\n\nfix it");
+
+        assert!(
+            !h.overlay.read_with(cx, |om, _| om.has_send_composer()),
+            "sending closes the composer"
+        );
+    }
+
+    #[gpui::test]
+    fn send_without_a_note_queues_the_bare_quote(cx: &mut TestAppContext) {
+        let h = harness(cx);
+        open(&h, "error: boom", cx);
+
+        let composer = h
+            .overlay
+            .read_with(cx, |om, _| om.render_send_composer())
+            .expect("composer is open");
+        composer.update(cx, |c, cx| c.send(cx));
+
+        let queued = h
+            .broker
+            .update(cx, |broker, _| broker.drain_send_to_terminal());
+        assert_eq!(queued[0].0.format(None), "```\nerror: boom\n```");
+    }
+}

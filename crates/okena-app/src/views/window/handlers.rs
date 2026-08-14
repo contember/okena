@@ -154,25 +154,33 @@ impl WindowView {
         }
     }
 
-    /// Paste a "Send to Terminal" payload into the currently focused terminal.
+    /// Paste a "Send to Terminal" payload into `target` — or, when the sender
+    /// named no target, into the currently focused terminal.
     ///
-    /// Resolves the focused terminal's working directory (OSC 7-reported, else
+    /// Resolves the receiving terminal's working directory (OSC 7-reported, else
     /// the PTY's initial cwd) and formats the payload relative to it before
     /// sending. Always wrapped in bracketed-paste sequences — see
     /// `Terminal::send_paste_force_bracketed` for rationale on why we don't
     /// trust the tracked DECSET 2004 mode flag. Toasts a warning if no
     /// terminal is focused.
-    fn send_payload_to_active_terminal(
+    fn send_payload_to_terminal(
         &self,
         payload: okena_core::send_payload::SendPayload,
+        target: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some((_project_id, terminal_id)) = self.focused_terminal_id(cx) else {
-            okena_workspace::toast::ToastManager::warning(
-                "No active terminal to send selection to",
-                cx,
-            );
-            return;
+        let terminal_id = match target {
+            Some(id) => id,
+            None => {
+                let Some((_project_id, id)) = self.focused_terminal_id(cx) else {
+                    okena_workspace::toast::ToastManager::warning(
+                        "No active terminal to send selection to",
+                        cx,
+                    );
+                    return;
+                };
+                id
+            }
         };
         let terminals = self.terminals.lock();
         if let Some(terminal) = terminals.get(&terminal_id) {
@@ -773,6 +781,28 @@ impl WindowView {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
+            OverlayManagerEvent::TerminalAnnotate {
+                terminal_id,
+                position,
+            } => {
+                // Alacritty already drops grid padding and rejoins wrapped
+                // lines; only the trailing blank line needs to go, or it would
+                // sit inside the fence.
+                let quoted = {
+                    let terminals = self.terminals.lock();
+                    terminals
+                        .get(terminal_id)
+                        .and_then(|terminal| terminal.get_selected_text())
+                        .map(|text| text.trim_end().to_string())
+                };
+                if let Some(quoted) = quoted.filter(|q| !q.is_empty()) {
+                    let terminal_id = terminal_id.clone();
+                    let position = *position;
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_send_composer(terminal_id, quoted, position, cx);
+                    });
+                }
+            }
             OverlayManagerEvent::TerminalPaste { terminal_id } => {
                 let text = cx
                     .read_from_clipboard()
@@ -1362,8 +1392,8 @@ impl WindowView {
         let payloads = self
             .request_broker
             .update(cx, |broker, _cx| broker.drain_send_to_terminal());
-        for payload in payloads {
-            self.send_payload_to_active_terminal(payload, cx);
+        for (payload, target) in payloads {
+            self.send_payload_to_terminal(payload, target, cx);
         }
     }
 
