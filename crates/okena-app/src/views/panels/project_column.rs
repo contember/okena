@@ -930,9 +930,23 @@ impl ProjectColumn {
             )
     }
 
-    /// Render empty state for bookmark projects (no terminal)
-    fn render_creating_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Placeholder shown while the daemon is still materializing the project's
+    /// directory — a worktree checkout, or a clone of a remote repository.
+    fn render_creating_state(&self, is_worktree: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let (icon, title, detail) = if is_worktree {
+            (
+                "icons/git-branch.svg",
+                "Setting up worktree\u{2026}",
+                "Fetching latest changes and creating the branch. Terminals will start automatically.",
+            )
+        } else {
+            (
+                "icons/refresh.svg",
+                "Cloning repository\u{2026}",
+                "Fetching the repository. Terminals will start automatically once the clone finishes.",
+            )
+        };
         v_flex()
             .items_center()
             .justify_center()
@@ -941,15 +955,15 @@ impl ProjectColumn {
             .bg(rgb(t.bg_primary))
             .child(
                 svg()
-                    .path("icons/git-branch.svg")
+                    .path(icon)
                     .size(px(48.0))
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(t.text_muted)),
             )
             .child(
                 div()
                     .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_secondary))
-                    .child("Setting up worktree\u{2026}")
+                    .child(title),
             )
             .child(
                 div()
@@ -957,7 +971,7 @@ impl ProjectColumn {
                     .text_color(rgb(t.text_muted))
                     .max_w(px(240.0))
                     .text_center()
-                    .child("Fetching latest changes and creating the branch. Terminals will start automatically.")
+                    .child(detail),
             )
     }
 
@@ -1157,7 +1171,9 @@ impl Render for ProjectColumn {
                             .into_any_element()
                     }
                     ColumnContent::Closing => self.render_closing_state(cx).into_any_element(),
-                    ColumnContent::Creating => self.render_creating_state(cx).into_any_element(),
+                    ColumnContent::Creating => self
+                        .render_creating_state(project.worktree_info.is_some(), cx)
+                        .into_any_element(),
                     ColumnContent::Empty => self.render_empty_state(cx).into_any_element(),
                 };
 
