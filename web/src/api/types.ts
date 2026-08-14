@@ -307,6 +307,7 @@ export type ActionRequest =
   | { action: "git_discard_file"; project_id: string; file_path: string }
   | { action: "git_blame"; project_id: string; relative_path: string }
   | { action: "add_project"; name: string; path: string }
+  | { action: "clone_project"; url: string; parent_dir: string; directory: string; name: string }
   | { action: "reorder_project_in_folder"; folder_id: string; project_id: string; new_index: number }
   | { action: "set_project_color"; project_id: string; color: FolderColor }
   | { action: "set_folder_color"; folder_id: string; color: FolderColor }

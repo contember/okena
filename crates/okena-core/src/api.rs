@@ -829,6 +829,16 @@ pub enum ActionRequest {
         name: String,
         path: String,
     },
+    /// Clone `url` into `parent_dir`/`directory` and add the checkout as a
+    /// project. The parent and the directory name travel separately so the
+    /// receiving host joins them with ITS own separator — a remote daemon may
+    /// not share the caller's path conventions.
+    CloneProject {
+        url: String,
+        parent_dir: String,
+        directory: String,
+        name: String,
+    },
     ReorderProjectInFolder {
         folder_id: String,
         project_id: String,
@@ -1674,6 +1684,12 @@ mod tests {
             ActionRequest::AddProject {
                 name: "My Project".into(),
                 path: "/home/user/projects/my-project".into(),
+            },
+            ActionRequest::CloneProject {
+                url: "https://github.com/user/my-project.git".into(),
+                parent_dir: "/home/user/projects".into(),
+                directory: "my-project".into(),
+                name: "My Project".into(),
             },
             ActionRequest::ReorderProjectInFolder {
                 folder_id: "f1".into(),

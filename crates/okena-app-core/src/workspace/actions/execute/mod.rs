@@ -484,6 +484,14 @@ pub fn execute_action(
         ActionRequest::AddProject { name, path } => {
             project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
         }
+        ActionRequest::CloneProject {
+            url,
+            parent_dir,
+            directory,
+            name,
+        } => project::clone_project(
+            ws, window_id, url, parent_dir, directory, name, backend, terminals, settings, cx,
+        ),
         ActionRequest::ReorderProjectInFolder {
             folder_id,
             project_id,
