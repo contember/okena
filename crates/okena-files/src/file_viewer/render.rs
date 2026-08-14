@@ -16,6 +16,7 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
+use okena_ui::color_utils::raised_surface_border;
 use okena_ui::file_icon::file_icon;
 use okena_ui::modal::{
     detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer,
@@ -2118,13 +2119,14 @@ impl Render for FileViewer {
                                                     .overflow_x_scroll()
                                                     .child(
                                                         div()
-                                                            .p(px(12.0))
+                                                            .px(px(14.0))
+                                                            .py(px(10.0))
                                                             .font_family("monospace")
                                                             .text_size(ui_text(
                                                                 this.file_font_size,
                                                                 cx,
                                                             ))
-                                                            .text_color(rgb(t.text_secondary))
+                                                            .text_color(rgb(t.text_primary))
                                                             .flex()
                                                             .flex_col()
                                                             .children(line_children),
@@ -2230,22 +2232,40 @@ impl Render for FileViewer {
                                                 ))
                                                 .flex()
                                                 .flex_col()
-                                                .rounded(px(4.0))
+                                                .rounded(px(6.0))
                                                 .border_1()
-                                                .border_color(rgb(t.border))
+                                                .border_color(rgb(raised_surface_border(
+                                                    t.bg_secondary,
+                                                    t.border,
+                                                )))
                                                 .overflow_x_scroll()
                                                 .children(table_rows);
 
                                             table.into_any_element()
                                         }
                                         };
-                                        // Per-block wrapper carries the spacing
-                                        // and max width the old container provided.
+                                        // Per-block wrapper centers the reading
+                                        // column and carries the block's own
+                                        // vertical rhythm (headings take more
+                                        // space above than below).
+                                        let (space_above, space_below) = this
+                                            .active_tab()
+                                            .markdown_doc
+                                            .as_ref()
+                                            .map(|doc| doc.node_spacing(node_idx))
+                                            .unwrap_or((px(0.0), px(12.0)));
                                         div()
                                             .w_full()
-                                            .max_w(px(900.0))
-                                            .pb(px(12.0))
-                                            .child(element)
+                                            .flex()
+                                            .justify_center()
+                                            .pt(space_above)
+                                            .pb(space_below)
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .max_w(okena_markdown::DOC_MAX_WIDTH)
+                                                    .child(element),
+                                            )
                                             .into_any_element()
                                     })
                                 });
@@ -2256,7 +2276,12 @@ impl Render for FileViewer {
                                         .relative()
                                         .flex_1()
                                         .min_h_0()
-                                        .p(px(16.0))
+                                        // Side padding only matters once the pane
+                                        // is narrower than the column; the top gap
+                                        // keeps the document off the tab bar.
+                                        .px(px(28.0))
+                                        .pt(px(24.0))
+                                        .pb(px(16.0))
                                         .bg(rgb(t.bg_secondary))
                                         .cursor(CursorStyle::IBeam)
                                         .on_mouse_up(

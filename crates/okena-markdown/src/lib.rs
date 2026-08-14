@@ -6,12 +6,15 @@
 
 mod parser;
 mod render;
+mod style;
 mod types;
 
 use gpui::*;
 
 use okena_core::selection::SelectionState;
 use types::Node;
+
+pub use style::DOC_MAX_WIDTH;
 
 /// Type alias for markdown selection (1D character offset).
 pub type MarkdownSelection = SelectionState<usize>;

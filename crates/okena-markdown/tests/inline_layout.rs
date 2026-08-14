@@ -54,10 +54,11 @@ fn measure_block_height(cx: &mut TestAppContext, md: &str, width: f32) -> f32 {
 #[gpui::test]
 fn list_item_with_long_trailing_text_is_not_inflated(cx: &mut TestAppContext) {
     // A bullet (flex child) — the shape that triggered the bug. Pre-fix this
-    // measured 220px (10 lines); the same text as a paragraph is ~66px.
+    // measured 220px (10 lines); wrapped correctly it is ~138px (6 lines at the
+    // body leading), so 160px sits clear of both.
     let height = measure_block_height(cx, &format!("- {BODY}"), 600.0);
     assert!(
-        height < 132.0,
+        height < 160.0,
         "list block height {height}px is inflated (expected a handful of text lines)"
     );
 }
@@ -68,7 +69,7 @@ fn paragraph_with_long_trailing_text_is_not_inflated(cx: &mut TestAppContext) {
     // baseline so the list assertion stays meaningful.
     let height = measure_block_height(cx, BODY, 600.0);
     assert!(
-        height < 132.0,
+        height < 160.0,
         "paragraph block height {height}px is inflated (expected a handful of text lines)"
     );
 }
