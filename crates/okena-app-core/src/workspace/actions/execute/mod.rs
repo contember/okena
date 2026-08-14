@@ -516,6 +516,9 @@ pub fn execute_action(
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             project::remove_worktree_project(ws, focus_manager, project_id, force, settings, cx)
         }
+        ActionRequest::ForceRemoveWorktreeProject { project_id } => {
+            project::force_remove_worktree_project(ws, focus_manager, project_id, settings, cx)
+        }
         ActionRequest::CloseWorktree {
             project_id,
             merge,

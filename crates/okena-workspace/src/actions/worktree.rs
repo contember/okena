@@ -24,7 +24,7 @@ pub struct WorktreeRemovalPlan {
     pub worktree_path: std::path::PathBuf,
     /// The main repo path — used for `git worktree prune` in the fast removal.
     pub main_repo_path: String,
-    verified_worktree: okena_git::VerifiedWorktree,
+    target: WorktreeRemovalTarget,
     branch: String,
     project_hooks: HooksConfig,
     project_name: String,
@@ -35,14 +35,36 @@ pub struct WorktreeRemovalPlan {
     folder_name: Option<String>,
 }
 
+/// What a removal plan will actually delete.
+#[derive(Clone)]
+enum WorktreeRemovalTarget {
+    /// A checkout Git still tracks. Deleted through Git, with its dirty-state
+    /// safety intact.
+    Linked(okena_git::VerifiedWorktree),
+    /// A checkout Git no longer tracks, so no Git operation can reach it and no
+    /// dirty-state check is possible. Only [`Workspace::begin_orphaned_worktree_removal`]
+    /// builds this, and only for an explicit user-confirmed force-remove.
+    Orphaned(okena_git::OrphanedWorktree),
+}
+
 impl WorktreeRemovalPlan {
     pub fn worktree_path(&self) -> &std::path::Path {
         &self.worktree_path
     }
 
+    /// Whether this plan deletes a checkout Git no longer tracks.
+    pub fn is_orphaned(&self) -> bool {
+        matches!(self.target, WorktreeRemovalTarget::Orphaned(_))
+    }
+
     /// Reject standard-remove failures that can be known before runtimes are
     /// disturbed. Git refuses a dirty checkout unless the caller passes force.
     pub fn preflight_remove(&self, force: bool) -> Result<(), String> {
+        // An orphan has no Git to consult about dirty state, and reaching this
+        // plan already required an explicit force-remove.
+        if self.is_orphaned() {
+            return Ok(());
+        }
         if !force && okena_git::has_uncommitted_changes(&self.worktree_path) {
             return Err(
                 "worktree has uncommitted changes; pass force=true to remove it".to_string(),
@@ -52,12 +74,22 @@ impl WorktreeRemovalPlan {
     }
 
     pub fn remove(&self, force: bool) -> Result<(), String> {
-        okena_git::remove_worktree(&self.verified_worktree, force)
-            .map_err(|error| error.to_string())
+        match &self.target {
+            WorktreeRemovalTarget::Linked(verified) => okena_git::remove_worktree(verified, force),
+            WorktreeRemovalTarget::Orphaned(orphaned) => {
+                okena_git::remove_orphaned_worktree(orphaned)
+            }
+        }
+        .map_err(|error| error.to_string())
     }
 
     pub fn remove_fast(&self) -> okena_git::GitResult<()> {
-        okena_git::remove_worktree_fast(&self.verified_worktree)
+        match &self.target {
+            WorktreeRemovalTarget::Linked(verified) => okena_git::remove_worktree_fast(verified),
+            WorktreeRemovalTarget::Orphaned(orphaned) => {
+                okena_git::remove_orphaned_worktree(orphaned)
+            }
+        }
     }
 
     /// Run the dirty-close safety hook before the checkout disappears.
@@ -830,6 +862,27 @@ impl Workspace {
         Ok(())
     }
 
+    /// Force-remove a worktree project whose checkout Git no longer tracks
+    /// (synchronous). The destructive counterpart to
+    /// [`remove_worktree_project`](Self::remove_worktree_project) for the one
+    /// case that has no working removal path: it deletes the directory outright
+    /// with no dirty-state check, because Git cannot run one on a checkout it
+    /// does not recognize. Only call it on explicit user confirmation.
+    pub fn force_remove_worktree_project(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        let plan = self.begin_orphaned_worktree_removal(project_id)?;
+        let monitor = cx.hook_monitor();
+        plan.fire_close_hooks_headless(global_hooks, monitor.as_ref());
+        plan.remove(true)?;
+        self.finish_worktree_removal(focus_manager, &plan, global_hooks, cx);
+        Ok(())
+    }
+
     /// Phase 1 of worktree removal: validate and snapshot the inputs the
     /// off-reactor close hooks and finalize step need. Returns the plan; the
     /// caller completes its close hooks, runs `git worktree remove`, and calls
@@ -840,12 +893,40 @@ impl Workspace {
         _global_hooks: &HooksConfig,
         _cx: &mut impl WorkspaceCx,
     ) -> Result<WorktreeRemovalPlan, String> {
-        // Reject removal while the worktree is still being created: the optimistic
-        // create registers the row (worktree_info set) and returns before its
-        // background `git worktree add` finishes, so removing now would race the
-        // in-flight checkout and strand an orphaned, git-registered worktree with
-        // no workspace row. Single choke point for every removal route; mirrors the
-        // `is_creating` guard in `remove_stale_worktree`.
+        self.ensure_worktree_removal_entry_allowed(project_id)?;
+        // For monorepos the project path is a subdirectory inside the checkout;
+        // resolve the actual worktree root so `git worktree remove` gets it right.
+        let verified = self.verified_worktree(project_id)?;
+        let root = verified.checkout_path().to_path_buf();
+        self.plan_worktree_removal(project_id, root, WorktreeRemovalTarget::Linked(verified))
+    }
+
+    /// Phase 1 for a worktree Git no longer tracks — its metadata entry was
+    /// pruned while the checkout survived, so [`begin_worktree_removal`](Self::begin_worktree_removal)
+    /// cannot produce a plan for it and the user has no way to close the row.
+    ///
+    /// The resulting plan deletes the directory outright, so this is reachable
+    /// only from the explicit force-remove action. Verification still proves the
+    /// checkout belonged to this project's parent repo, and the claim check
+    /// still proves no other project lives under it.
+    pub fn begin_orphaned_worktree_removal(
+        &mut self,
+        project_id: &str,
+    ) -> Result<WorktreeRemovalPlan, String> {
+        self.ensure_worktree_removal_entry_allowed(project_id)?;
+        let orphaned = self.orphaned_worktree(project_id)?;
+        let root = orphaned.checkout_path().to_path_buf();
+        self.plan_worktree_removal(project_id, root, WorktreeRemovalTarget::Orphaned(orphaned))
+    }
+
+    /// The checks every removal route must clear before any git work runs.
+    ///
+    /// Rejects removal while the worktree is still being created: the optimistic
+    /// create registers the row (worktree_info set) and returns before its
+    /// background `git worktree add` finishes, so removing now would race the
+    /// in-flight checkout and strand an orphaned, git-registered worktree with
+    /// no workspace row. Mirrors the `is_creating` guard in `remove_stale_worktree`.
+    fn ensure_worktree_removal_entry_allowed(&self, project_id: &str) -> Result<(), String> {
         if self.lifecycle.is_creating(project_id) {
             return Err("worktree is still being created".to_string());
         }
@@ -855,8 +936,22 @@ impl Workspace {
         if project.worktree_info.is_none() {
             return Err("Not a worktree project".to_string());
         }
+        Ok(())
+    }
 
-        self.ensure_worktree_removal_claim_allowed(project_id)?;
+    /// Shared phase-1 body: the claim check and the pre-removal snapshot both
+    /// removal modes need, once the caller has resolved what will be deleted.
+    fn plan_worktree_removal(
+        &mut self,
+        project_id: &str,
+        worktree_path: std::path::PathBuf,
+        target: WorktreeRemovalTarget,
+    ) -> Result<WorktreeRemovalPlan, String> {
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+
+        self.ensure_worktree_root_exclusively_owned(project_id, &worktree_path)?;
 
         // Snapshot everything BEFORE removal, while the project is still in state
         // and its checkout exists on disk (git worktree remove deletes it).
@@ -867,17 +962,13 @@ impl Workspace {
         let project_name = project.name.clone();
         let project_path = project.path.clone();
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
-        // For monorepos the project path is a subdirectory inside the checkout;
-        // resolve the actual worktree root so `git worktree remove` gets it right.
-        let verified_worktree = self.verified_worktree(project_id)?;
-        let worktree_path = verified_worktree.checkout_path().to_path_buf();
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
         Ok(WorktreeRemovalPlan {
             project_id: project_id.to_string(),
             worktree_path,
             main_repo_path,
-            verified_worktree,
+            target,
             branch,
             project_hooks,
             project_name,
@@ -885,6 +976,46 @@ impl Workspace {
             folder_id,
             folder_name,
         })
+    }
+
+    /// Resolve the project's recorded checkout root and verify it is an orphaned
+    /// worktree of its parent repo. Never searches the filesystem for a root: a
+    /// project whose recorded path is wrong must fail here rather than resolve
+    /// onto some neighbouring repository we would then delete.
+    fn orphaned_worktree(&self, project_id: &str) -> Result<okena_git::OrphanedWorktree, String> {
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+        let metadata = project
+            .worktree_info
+            .as_ref()
+            .ok_or_else(|| "Not a worktree project".to_string())?;
+        let project_path = std::path::PathBuf::from(&project.path);
+        let parent = self
+            .project(&metadata.parent_project_id)
+            .ok_or_else(|| "Worktree parent project not found".to_string())?;
+        if parent.is_remote {
+            return Err("Worktree parent project is not local".to_string());
+        }
+        let checkout_root = if metadata.worktree_path.is_empty() {
+            project_path.clone()
+        } else {
+            std::path::PathBuf::from(&metadata.worktree_path)
+        };
+        if !Self::physical_path_identity(&project_path)
+            .starts_with(&Self::physical_path_identity(&checkout_root))
+        {
+            return Err("project path is outside its recorded worktree root".to_string());
+        }
+        okena_git::verify_orphaned_worktree(std::path::Path::new(&parent.path), &checkout_root)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Whether this project's checkout is present but no longer tracked by Git —
+    /// the state in which the standard close can never succeed. Drives the
+    /// force-remove affordance in the close dialog.
+    pub fn worktree_is_orphaned(&self, project_id: &str) -> bool {
+        self.orphaned_worktree(project_id).is_ok()
     }
 
     fn verified_worktree(&self, project_id: &str) -> Result<okena_git::VerifiedWorktree, String> {
@@ -1228,7 +1359,10 @@ impl Workspace {
 
 #[cfg(test)]
 mod merge_pipeline_tests {
-    use super::{CloseWorktreeGitOutcome, WorktreeRemovalPlan, close_worktree_merge_git};
+    use super::{
+        CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget,
+        close_worktree_merge_git,
+    };
     use crate::hook_monitor::{HookMonitor, HookStatus};
     use crate::settings::{HooksConfig, ProjectHooks, WorktreeHooks};
     use std::path::Path;
@@ -1389,7 +1523,7 @@ mod merge_pipeline_tests {
             project_id: "p1".to_string(),
             worktree_path: worktree.clone(),
             main_repo_path: main_repo.to_string_lossy().into_owned(),
-            verified_worktree,
+            target: WorktreeRemovalTarget::Linked(verified_worktree),
             branch: "feature".to_string(),
             project_hooks: hooks,
             project_name: "Project".to_string(),

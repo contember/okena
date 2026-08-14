@@ -1423,7 +1423,7 @@ mod gpui_tests {
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     fn make_workspace_data() -> WorkspaceData {
@@ -2330,6 +2330,167 @@ mod gpui_tests {
             "--force",
             path_str(&worktree),
         ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    /// Build a repo with one linked worktree registered as project "wt1" under
+    /// parent "parent". Returns (fixture root, main repo, checkout, workspace data).
+    fn worktree_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, WorkspaceData) {
+        let fixture = std::env::temp_dir().join(format!("okena-{name}-{}", uuid::Uuid::new_v4()));
+        let main_repo = fixture.join("main");
+        let worktree = fixture.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("file.txt"), "tracked\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "file.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+
+        let mut parent = make_project("parent");
+        parent.path = main_repo.to_string_lossy().into_owned();
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt = make_worktree_project("wt1", "parent");
+        wt.path = worktree.to_string_lossy().into_owned();
+        let metadata = wt.worktree_info.as_mut().unwrap();
+        metadata.main_repo_path = main_repo.to_string_lossy().into_owned();
+        metadata.worktree_path = worktree.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, wt];
+        data.project_order = vec!["parent".to_string()];
+        (fixture, main_repo, worktree, data)
+    }
+
+    /// Orphan the checkout the way a blanket `git worktree prune` does: drop the
+    /// main repo's metadata entry and leave the directory with a dangling `.git`.
+    fn prune_worktree_metadata(main_repo: &Path) {
+        std::fs::remove_dir_all(main_repo.join(".git").join("worktrees").join("worktree"))
+            .expect("prune the worktree metadata entry");
+    }
+
+    #[gpui::test]
+    fn force_remove_clears_an_orphaned_worktree_the_standard_close_cannot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (fixture, main_repo, worktree, data) = worktree_fixture("force-remove-orphan-test");
+        prune_worktree_metadata(&main_repo);
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        // The standard removal is the dead end users hit: git no longer tracks
+        // the checkout, so nothing it can do reaches this directory.
+        let standard = workspace.update(cx, |ws, cx| {
+            ws.remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                true,
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+        assert!(standard.is_err(), "git cannot remove an orphaned checkout");
+        assert!(worktree.exists(), "the failed close leaves the checkout");
+
+        let forced = workspace.update(cx, |ws, cx| {
+            assert!(ws.worktree_is_orphaned("wt1"), "checkout reads as orphaned");
+            ws.force_remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+
+        assert!(forced.is_ok(), "force remove failed: {:?}", forced.err());
+        assert!(!worktree.exists(), "the checkout is deleted from disk");
+        workspace.read_with(cx, |ws: &Workspace, _| {
+            assert!(ws.project("wt1").is_none(), "the project row is dropped");
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn force_remove_refuses_a_healthy_worktree(cx: &mut gpui::TestAppContext) {
+        let (fixture, main_repo, worktree, data) = worktree_fixture("force-remove-healthy-test");
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws, cx| {
+            assert!(!ws.worktree_is_orphaned("wt1"), "checkout is still tracked");
+            ws.force_remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+
+        assert!(
+            result.is_err(),
+            "a tracked checkout must go through the standard close"
+        );
+        assert!(worktree.exists(), "the checkout survives");
+        workspace.read_with(cx, |ws: &Workspace, _| {
+            assert!(ws.project("wt1").is_some(), "the project row survives");
+        });
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn force_remove_refuses_a_checkout_another_project_lives_in(cx: &mut gpui::TestAppContext) {
+        let (fixture, main_repo, worktree, mut data) = worktree_fixture("force-remove-claim-test");
+        prune_worktree_metadata(&main_repo);
+        let sentinel = worktree.join("sibling-data.txt");
+        std::fs::write(&sentinel, "must survive\n").unwrap();
+        let mut claimant = make_project("claimant");
+        claimant.name = "Sibling".to_string();
+        claimant.path = worktree.to_string_lossy().into_owned();
+        data.projects.push(claimant);
+        data.project_order.push("claimant".to_string());
+        let workspace = cx.new(|_| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws, cx| {
+            ws.force_remove_worktree_project(
+                &mut FocusManager::new(),
+                "wt1",
+                &HooksConfig::default(),
+                cx,
+            )
+        });
+
+        assert!(
+            result.is_err_and(|error| error.contains("Sibling")),
+            "force remove must identify the sibling claimant"
+        );
+        assert!(sentinel.exists(), "the sibling's data must survive");
         let _ = std::fs::remove_dir_all(&fixture);
     }
 

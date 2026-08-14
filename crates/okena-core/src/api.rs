@@ -1054,6 +1054,16 @@ pub enum ActionRequest {
         #[serde(default)]
         force: bool,
     },
+    /// Delete a worktree checkout Git no longer tracks, and drop its project.
+    ///
+    /// The fallback for a checkout whose metadata entry was pruned: Git refuses
+    /// to remove it, so `RemoveWorktreeProject` and `CloseWorktree` can never
+    /// succeed and the row would otherwise be stuck forever. Deletes the
+    /// directory with no dirty-state check — send it only on explicit user
+    /// confirmation, and only after the standard close has already failed.
+    ForceRemoveWorktreeProject {
+        project_id: String,
+    },
     CloseWorktree {
         project_id: String,
         #[serde(default)]
@@ -1756,6 +1766,9 @@ mod tests {
             ActionRequest::RemoveWorktreeProject {
                 project_id: "p1".into(),
                 force: true,
+            },
+            ActionRequest::ForceRemoveWorktreeProject {
+                project_id: "p1".into(),
             },
             ActionRequest::AddDiscoveredWorktree {
                 parent_project_id: "p1".into(),

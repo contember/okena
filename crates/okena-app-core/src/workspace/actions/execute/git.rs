@@ -189,11 +189,16 @@ pub(super) fn worktree_close_info(ws: &Workspace, project_id: String) -> ActionR
                 .as_ref()
                 .and_then(|p| okena_git::get_default_branch(std::path::Path::new(p)));
             let unpushed_count = okena_git::count_unpushed_commits(path).unwrap_or(0);
+            // Git no longer tracks this checkout, so every step of the close will
+            // fail. The dialog uses this to explain why and to offer the
+            // force-remove fallback once the close has actually failed.
+            let is_orphaned = ws.worktree_is_orphaned(&project_id);
             ActionResult::Ok(Some(serde_json::json!({
                 "is_dirty": is_dirty,
                 "branch": branch,
                 "default_branch": default_branch,
                 "unpushed_count": unpushed_count,
+                "is_orphaned": is_orphaned,
             })))
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),

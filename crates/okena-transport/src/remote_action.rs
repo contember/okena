@@ -52,6 +52,7 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
             ActionClientKind::Search
         }
         ActionRequest::RemoveWorktreeProject { .. }
+        | ActionRequest::ForceRemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
         _ => ActionClientKind::Fast,
     }

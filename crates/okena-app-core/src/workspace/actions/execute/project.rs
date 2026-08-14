@@ -268,6 +268,26 @@ pub(super) fn remove_worktree_project(
     }
 }
 
+pub(super) fn force_remove_worktree_project(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if ws.project(&project_id).is_none() {
+        return project_not_found(&project_id);
+    }
+    if ws.is_project_closing(&project_id) {
+        return ActionResult::Err("worktree is already closing".to_string());
+    }
+    let global_hooks = settings.hooks.clone();
+    match ws.force_remove_worktree_project(focus_manager, &project_id, &global_hooks, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(error) => ActionResult::Err(error),
+    }
+}
+
 pub(super) fn close_worktree(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
