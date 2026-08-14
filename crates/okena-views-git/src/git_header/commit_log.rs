@@ -656,7 +656,7 @@ impl GitHeader {
                     this.commit_row_menu = None;
                     request_broker.update(cx, |broker, cx| {
                         broker.push_send_to_terminal(
-                            okena_core::send_payload::SendPayload::Text(send_text.clone()),
+                            okena_core::send_payload::SendPayload::text(send_text.clone()),
                             cx,
                         );
                     });

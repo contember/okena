@@ -486,7 +486,7 @@ impl FileViewer {
                                         move |this, _, _, cx| {
                                             this.close_context_menu(cx);
                                             cx.emit(super::FileViewerEvent::SendToTerminal(
-                                                okena_core::send_payload::SendPayload::Path(
+                                                okena_core::send_payload::SendPayload::path(
                                                     path.clone(),
                                                 ),
                                             ));
@@ -602,7 +602,7 @@ impl FileViewer {
                                         move |this, _, _, cx| {
                                             this.tab_context_menu = None;
                                             cx.emit(super::FileViewerEvent::SendToTerminal(
-                                                okena_core::send_payload::SendPayload::Path(
+                                                okena_core::send_payload::SendPayload::path(
                                                     path.clone(),
                                                 ),
                                             ));

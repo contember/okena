@@ -367,7 +367,7 @@ impl DiffViewer {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_commit_hash_menu(cx);
                     cx.emit(super::DiffViewerEvent::SendToTerminal(
-                        okena_core::send_payload::SendPayload::Text(send_text.clone()),
+                        okena_core::send_payload::SendPayload::text(send_text.clone()),
                     ));
                 })),
             )
@@ -490,7 +490,7 @@ impl DiffViewer {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_context_menu(cx);
                     cx.emit(super::DiffViewerEvent::SendToTerminal(
-                        okena_core::send_payload::SendPayload::Path(abs_for_send.clone()),
+                        okena_core::send_payload::SendPayload::path(abs_for_send.clone()),
                     ));
                 })),
             );
