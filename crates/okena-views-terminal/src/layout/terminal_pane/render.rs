@@ -2,11 +2,12 @@
 
 use crate::ActionDispatch;
 use crate::actions::{
-    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
-    FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
-    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
-    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
+    AddTab, AnnotateSelection, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft,
+    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
+    FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
+    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
+    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn,
+    ZoomOut,
 };
 use crate::layout::navigation::NavigationDirection;
 use crate::terminal_view_settings;
@@ -155,6 +156,9 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             }))
             .on_action(cx.listener(|this, _: &Copy, _window, cx| {
                 this.handle_copy(cx);
+            }))
+            .on_action(cx.listener(|this, _: &AnnotateSelection, _window, cx| {
+                this.handle_annotate_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &Paste, _window, cx| {
                 this.handle_paste(cx);

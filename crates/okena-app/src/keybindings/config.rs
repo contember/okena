@@ -213,6 +213,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "AnnotateSelection".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-a", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-shift-a", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
             "ScrollUp".to_string(),
             vec![KeybindingEntry::new("shift-pageup", Some("TerminalPane"))],
         );

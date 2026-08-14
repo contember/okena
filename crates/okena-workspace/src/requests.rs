@@ -52,6 +52,12 @@ pub enum ProjectOverlayKind {
         has_selection: bool,
         link_url: Option<String>,
     },
+    /// Annotate the terminal's current selection and send it back to it.
+    /// `position` anchors the composer, normally just under the selection.
+    AnnotateSelection {
+        terminal_id: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
     TabContextMenu {
         tab_index: usize,
         num_tabs: usize,
