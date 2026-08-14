@@ -41,7 +41,8 @@ okena key okena:0 ctrl-c               # interrupt
 
 ## Manage the workspace
 
-- Projects: `okena project add <path> | rm | rename | color | focus | show | hide`
+- Projects: `okena project add <path> | clone <url> | rm | rename | color | focus | show | hide`
+  (`clone` takes `--into <parent-dir>` (default CWD), `--dir <name>`, `--name <n>`)
 - Layout: `okena term new | close | rename | split <h|v> | tab | focus | minimize | fullscreen`
   (`split h` = stacked top/bottom, `split v` = side by side left/right)
 - Worktrees: `okena worktree add <project> <branch> [--new-branch] | rm`
@@ -58,8 +59,8 @@ okena key okena:0 ctrl-c               # interrupt
   `--keep-config` accepts the risk of an incompatible newer config.
 - Raw: `okena state` (full JSON), `okena action '<json>'` (any ActionRequest).
 
-Commands that create things (`term new/split/tab`, `project add`, `worktree add`,
-`folder add`) print the new id to stdout.
+Commands that create things (`term new/split/tab`, `project add`, `project clone`,
+`worktree add`, `folder add`) print the new id to stdout.
 
 ## Gotchas
 
@@ -70,11 +71,11 @@ Commands that create things (`term new/split/tab`, `project add`, `worktree add`
 - **`run --wait` assumes a POSIX-ish shell** (bash/zsh/sh) and a non-interactive
   command (it appends a completion marker). Don't use it for vim/REPLs.
 - **A bare `run` reports no completion or exit code** — only `run --wait` does.
-- **`worktree add` is optimistic**: it prints the id + path and returns before the
-  checkout exists on disk (the reply carries `pending: true`). Don't `cd` into the
-  path immediately — poll `okena ls`/`okena state` until the worktree's terminal
-  appears; if creation fails the row disappears from state.
-- **`--window` is honored only by** `project add/show/hide/focus` and
+- **`worktree add` and `project clone` are optimistic**: they print the id + path
+  and return before the checkout exists on disk (the reply carries `pending: true`).
+  Don't `cd` into the path immediately — poll `okena ls`/`okena state` until the
+  project's terminal appears; if creation fails the row disappears from state.
+- **`--window` is honored only by** `project add/clone/show/hide/focus` and
   `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
 - Default output is tab-separated (grep/awk friendly); add `--json` for structured.
   `okena ls --json` is a structured overview; `okena state` is the raw dump.

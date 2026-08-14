@@ -1150,7 +1150,103 @@ pub fn cli_project_add(
         }
     };
     println!("{project_id}");
+    project_add_followups(&token, &project_id, hidden, folder, window)
+}
 
+/// `okena project clone <url> [--into <dir>] [--dir <n>] [--name <n>] [--hidden] [--folder <f>]`
+///
+/// Clones into `<into>/<dir>`, where `--into` defaults to the CWD and `--dir`
+/// to the name `git clone` would pick. The clone runs in the background on the
+/// daemon (see the `pending` note below), so this returns as soon as the
+/// project row exists.
+pub fn cli_project_clone(
+    url: &str,
+    into: Option<&str>,
+    dir: Option<&str>,
+    name: Option<&str>,
+    hidden: bool,
+    folder: Option<&str>,
+    window: Option<&str>,
+) -> i32 {
+    let directory = match dir
+        .map(|d| d.to_string())
+        .or_else(|| okena_git::clone_dir_name(url))
+    {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "Cannot derive a directory name from '{url}' — pass --dir <name> to set one."
+            );
+            return 1;
+        }
+    };
+    // Resolve `--into` against the CWD so a relative parent means the same
+    // thing it would to `git clone`. The daemon is normally the same host, but
+    // it does not share this process's working directory.
+    let parent = into.map(std::path::PathBuf::from).unwrap_or_default();
+    let parent = match std::path::absolute(if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent.as_path()
+    }) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("Cannot resolve target directory: {e}");
+            return 1;
+        }
+    };
+
+    let token = match ensure_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let body = serde_json::json!({
+        "action": "clone_project",
+        "url": url,
+        "parent_dir": parent,
+        "directory": directory,
+        "name": name.unwrap_or(&directory),
+    });
+    let resp = match api_action(&token, &body.to_string()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or(serde_json::Value::Null);
+    let project_id = match v.get("project_id").and_then(|x| x.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            eprintln!("clone_project did not return a project_id.\n{resp}");
+            return 1;
+        }
+    };
+    print_response_ids(&resp, &["project_id", "path"]);
+    // The clone is OPTIMISTIC, same contract as `worktree add`: `pending: true`
+    // means the checkout is still running, so `path` does not exist on disk yet.
+    // On a later failure the row is removed from state (visible in `okena ls`)
+    // plus a toast.
+    if v.get("pending").and_then(|p| p.as_bool()).unwrap_or(false) {
+        eprintln!(
+            "clone started in the background; the path will exist once it completes"
+        );
+    }
+    project_add_followups(&token, &project_id, hidden, folder, window)
+}
+
+/// Post-add placement shared by `project add` and `project clone`: hide the
+/// project and/or move it into a folder. Returns the process exit code.
+fn project_add_followups(
+    token: &str,
+    project_id: &str,
+    hidden: bool,
+    folder: Option<&str>,
+    window: Option<&str>,
+) -> i32 {
     // Follow-up: hide.
     if hidden {
         let mut hide_body = serde_json::json!({
@@ -1159,12 +1255,12 @@ pub fn cli_project_add(
             "show": false,
         });
         if let Some(w) = window
-            && let Err(e) = apply_window(&mut hide_body, &token, w)
+            && let Err(e) = apply_window(&mut hide_body, token, w)
         {
             eprintln!("{e}");
             return 1;
         }
-        if let Err(e) = api_action(&token, &hide_body.to_string()) {
+        if let Err(e) = api_action(token, &hide_body.to_string()) {
             eprintln!("Warning: failed to hide project: {e}");
             return 1;
         }
@@ -1172,7 +1268,7 @@ pub fn cli_project_add(
 
     // Follow-up: move into a folder.
     if let Some(folder_filter) = folder {
-        let state = match fetch_state(&token) {
+        let state = match fetch_state(token) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("Warning: could not resolve folder: {e}");
@@ -1191,7 +1287,7 @@ pub fn cli_project_add(
             "project_id": project_id,
             "folder_id": folder_id,
         });
-        if let Err(e) = api_action(&token, &move_body.to_string()) {
+        if let Err(e) = api_action(token, &move_body.to_string()) {
             eprintln!("Warning: failed to move project into folder: {e}");
             return 1;
         }

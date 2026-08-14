@@ -6093,6 +6093,7 @@ dependencies = [
  "dirs 5.0.1",
  "okena-core",
  "okena-ext-updater",
+ "okena-git",
  "okena-remote-server",
  "okena-transport",
  "okena-workspace",

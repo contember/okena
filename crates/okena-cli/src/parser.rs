@@ -338,6 +338,26 @@ pub enum ProjectCmd {
         #[arg(long)]
         folder: Option<String>,
     },
+    /// Clone a git repository and add the checkout as a project
+    Clone {
+        /// Repository URL (anything `git clone` accepts)
+        url: String,
+        /// Parent directory to clone into (defaults to the CWD)
+        #[arg(long)]
+        into: Option<String>,
+        /// Directory name inside the parent (defaults to the repo name)
+        #[arg(long)]
+        dir: Option<String>,
+        /// Display name (defaults to the directory name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Add hidden (not shown in the overview)
+        #[arg(long)]
+        hidden: bool,
+        /// Move into a folder (by name or id) after adding
+        #[arg(long)]
+        folder: Option<String>,
+    },
     /// Remove a project (unlinks it from Okena; the folder on disk is kept)
     Rm {
         /// Project (id / name / path)
