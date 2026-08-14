@@ -108,6 +108,18 @@ pub struct TerminalViewSettings {
     /// When true, Ctrl+C copies the active selection (and clears it) instead of sending SIGINT.
     /// Ctrl+C without a selection always sends SIGINT.
     pub ctrl_c_copies_selection: bool,
+    /// When true, right-click opens the context menu instead of being forwarded
+    /// to an app that requested mouse reporting.
+    #[serde(default = "crate::default_true")]
+    pub right_click_opens_menu: bool,
+    /// When true, a drag selects in Okena under mouse reporting while a plain
+    /// click is still forwarded to the app.
+    #[serde(default)]
+    pub drag_selects_in_mouse_mode: bool,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// Read current terminal view settings from ExtensionSettingsStore.
@@ -130,6 +142,8 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             default_shell: okena_terminal::shell_config::ShellType::Default,
             hooks: Default::default(),
             ctrl_c_copies_selection: false,
+            right_click_opens_menu: true,
+            drag_selects_in_mouse_mode: false,
         })
 }
 

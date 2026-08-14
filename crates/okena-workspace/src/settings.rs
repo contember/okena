@@ -378,6 +378,21 @@ pub struct AppSettings {
     #[serde(default)]
     pub terminal_ctrl_c_copies_selection: bool,
 
+    /// When true, right-click always opens Okena's terminal context menu, even
+    /// while the running app has requested mouse reporting. Agent TUIs (Claude
+    /// Code, Codex) keep the mouse grabbed, which otherwise swallows the menu.
+    /// Default: true (matches GNOME Terminal / iTerm2 / WezTerm).
+    #[serde(default = "default_true")]
+    pub terminal_right_click_opens_menu: bool,
+
+    /// When true, a left-button *drag* selects text in Okena even while the app
+    /// has requested mouse reporting; a plain click is still forwarded to the
+    /// app (delivered on release, once it is known not to be a drag).
+    /// Default: false — apps that use drag themselves (tmux pane resize, vim
+    /// visual mode) would otherwise lose it. Shift+drag selects either way.
+    #[serde(default)]
+    pub terminal_drag_selects_in_mouse_mode: bool,
+
     /// File finder filter preferences. The "Go to File" dialog reads these
     /// when opened and writes them back when the user toggles a filter, so
     /// the last-used state is also the default for future opens.
@@ -447,6 +462,8 @@ impl Default for AppSettings {
             worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),
             terminal_ctrl_c_copies_selection: false,
+            terminal_right_click_opens_menu: true,
+            terminal_drag_selects_in_mouse_mode: false,
             file_finder: FileFinderSettings::default(),
             header_density: HeaderDensity::default(),
             notifications: NotificationSettings::default(),

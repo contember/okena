@@ -58,6 +58,10 @@ pub struct TerminalContent {
     in_scroll_inertia: bool,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
+    /// A left press held back under `drag_selects_in_mouse_mode`: `(mods, col, row)`.
+    /// Moving off the cell turns it into our selection; releasing on it forwards
+    /// the click to the app.
+    pending_click_forward: Option<(u8, usize, i32)>,
     /// Runs while a drag-selection is active, scrolling the viewport when the
     /// pointer is held past the top/bottom edge so selection can extend beyond
     /// the visible area (issue #132).
@@ -100,6 +104,7 @@ impl TerminalContent {
             in_scroll_inertia: false,
             mouse_down_cell: None,
             forwarded_button: None,
+            pending_click_forward: None,
             autoscroll_task: None,
         }
     }
@@ -160,6 +165,7 @@ impl TerminalContent {
         button_code: u8,
         event_position: Point<Pixels>,
         modifiers: &Modifiers,
+        cx: &App,
     ) -> bool {
         let Some(terminal) = self.terminal.as_ref() else {
             return false;
@@ -172,10 +178,24 @@ impl TerminalContent {
         if modifiers.shift {
             return false;
         }
+        let settings = crate::terminal_view_settings(cx);
+        // Right-click belongs to our context menu. Agent TUIs hold the mouse
+        // grabbed for as long as they run, which would otherwise swallow the
+        // menu outright. Matches GNOME Terminal / iTerm2 / WezTerm.
+        if button_code == 2 && settings.right_click_opens_menu {
+            return false;
+        }
         let Some((col, row, _)) = self.pixel_to_cell(event_position) else {
             return false;
         };
         let mods = Self::mouse_modifier_bits(modifiers);
+        // Hold a left press back until it is clear whether this is a click or a
+        // drag: a drag becomes our selection, a click is forwarded on release.
+        // Returning false lets the normal selection path start meanwhile.
+        if button_code == 0 && settings.drag_selects_in_mouse_mode {
+            self.pending_click_forward = Some((mods, col, row));
+            return false;
+        }
         terminal.send_mouse_button(button_code, true, col, row as usize, mods);
         self.forwarded_button = Some((button_code, mods));
         self.mouse_down_cell = None;
@@ -337,6 +357,21 @@ impl TerminalContent {
         Some((col, row, side))
     }
 
+    /// Window position to anchor a popup over the current selection: the start
+    /// column of the selection, just below its last line. Rows above the
+    /// viewport (scrolled-back selections) clamp to the top.
+    pub fn selection_anchor(&self) -> Option<Point<Pixels>> {
+        let bounds = self.element_bounds?;
+        let terminal = self.terminal.as_ref()?;
+        let ((start_col, _), (_, end_row)) = terminal.selection_bounds()?;
+        let (cell_width, cell_height) = terminal.cell_dimensions();
+        let x = f32::from(bounds.origin.x) + Self::TERMINAL_PADDING + start_col as f32 * cell_width;
+        let y = f32::from(bounds.origin.y)
+            + Self::TERMINAL_PADDING
+            + (end_row.max(0) + 1) as f32 * cell_height;
+        Some(point(px(x), px(y)))
+    }
+
     fn pixel_to_cell_raw(
         &self,
         pos: Point<Pixels>,
@@ -430,7 +465,7 @@ impl TerminalContent {
             }
         }
 
-        if self.try_forward_mouse_press(0, event.position, &event.modifiers) {
+        if self.try_forward_mouse_press(0, event.position, &event.modifiers, cx) {
             cx.notify();
             return;
         }
@@ -549,6 +584,15 @@ impl TerminalContent {
             cx.notify();
         }
 
+        // Leaving the press cell settles the held-back left press as a drag:
+        // the app never sees it and the selection below takes over.
+        if let Some((_, press_col, press_row)) = self.pending_click_forward
+            && let Some((col, row, _side)) = self.pixel_to_cell(event.position)
+            && (col != press_col || row != press_row)
+        {
+            self.pending_click_forward = None;
+        }
+
         if let Some((button, mods)) = self.forwarded_button {
             if let Some(ref terminal) = self.terminal
                 && terminal.supports_mouse_drag()
@@ -587,6 +631,20 @@ impl TerminalContent {
     }
 
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        // Released without moving off the cell, so it was a click after all —
+        // hand the app the press and release it never got.
+        if let Some((mods, col, row)) = self.pending_click_forward.take() {
+            if let Some(terminal) = self.terminal.as_ref() {
+                terminal.send_mouse_button(0, true, col, row as usize, mods);
+                terminal.send_mouse_button(0, false, col, row as usize, mods);
+                terminal.clear_selection();
+            }
+            self.is_selecting = false;
+            self.mouse_down_cell = None;
+            cx.notify();
+            return;
+        }
+
         if self.try_forward_mouse_release(0, event.position, &event.modifiers) {
             cx.notify();
             return;
@@ -816,7 +874,7 @@ impl Render for TerminalContent {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    if this.try_forward_mouse_press(2, event.position, &event.modifiers) {
+                    if this.try_forward_mouse_press(2, event.position, &event.modifiers, cx) {
                         cx.notify();
                         return;
                     }
@@ -851,7 +909,7 @@ impl Render for TerminalContent {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    if this.try_forward_mouse_press(1, event.position, &event.modifiers) {
+                    if this.try_forward_mouse_press(1, event.position, &event.modifiers, cx) {
                         cx.notify();
                     } else {
                         #[cfg(target_os = "linux")]
