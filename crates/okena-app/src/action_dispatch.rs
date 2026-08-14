@@ -779,6 +779,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
         },
         ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
+        ActionRequest::CloneProject {
+            url,
+            parent_dir,
+            directory,
+            name,
+        } => ActionRequest::CloneProject {
+            url,
+            parent_dir,
+            directory,
+            name,
+        },
         ActionRequest::ReorderProjectInFolder {
             folder_id,
             project_id,

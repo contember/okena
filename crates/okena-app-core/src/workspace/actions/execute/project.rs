@@ -82,6 +82,47 @@ pub(super) fn add_project(
     }
 }
 
+/// Clone `url` into `parent_dir`/`directory`, then add the checkout as a project.
+///
+/// Blocking end-to-end: the clone runs before the project row exists. The
+/// daemon command loop intercepts `CloneProject` before this and does the same
+/// work optimistically off the reactor; this path serves callers that drive
+/// `execute_action` directly (tests, non-daemon hosts).
+pub(super) fn clone_project(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    url: String,
+    parent_dir: String,
+    directory: String,
+    name: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let target = match okena_workspace::actions::project::resolve_clone_target(
+        &parent_dir,
+        &directory,
+    ) {
+        Ok(target) => target,
+        Err(error) => return ActionResult::Err(error),
+    };
+    let name = okena_workspace::actions::project::clone_project_name(&name, &directory);
+    if let Err(error) = okena_git::clone_repository(&url, &target) {
+        return ActionResult::Err(error.to_string());
+    }
+    add_project(
+        ws,
+        window_id,
+        name,
+        target.to_string_lossy().into_owned(),
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
 pub(super) fn reorder_in_folder(
     ws: &mut Workspace,
     folder_id: String,
@@ -664,7 +705,7 @@ mod hook_action_tests {
     }
 
     #[derive(Default)]
-    struct RecordingBackend {
+    pub(super) struct RecordingBackend {
         transport: Arc<RecordingTransport>,
         next_id: AtomicUsize,
         shells: Mutex<Vec<Option<ShellType>>>,
@@ -1028,6 +1069,169 @@ mod hook_action_tests {
         assert!(workspace.project("p1").is_none());
         assert!(monitor.history().is_empty());
         assert!(monitor.drain_pending_toasts().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod clone_project_tests {
+    use super::{ActionResult, clone_project};
+    use crate::workspace::state::{WindowId, WindowState, Workspace, WorkspaceData};
+    use okena_terminal::TerminalsRegistry;
+    use okena_workspace::context::WorkspaceCx;
+    use okena_workspace::hook_monitor::HookMonitor;
+    use okena_workspace::hooks::HookRunner;
+    use okena_workspace::settings::AppSettings;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    struct TestCx;
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<HookMonitor> {
+            None
+        }
+    }
+
+    fn empty_workspace() -> Workspace {
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A source repository with one commit, cloneable over a plain path URL.
+    fn source_repo(fixture: &Path) -> PathBuf {
+        let source = fixture.join("source");
+        std::fs::create_dir_all(&source).expect("create source dir");
+        git(&source, &["init", "--initial-branch=main"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        std::fs::write(source.join("README.md"), b"hello").expect("write file");
+        git(&source, &["add", "README.md"]);
+        git(&source, &["commit", "-m", "init"]);
+        source
+    }
+
+    fn fixture_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("okena-clone-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    #[test]
+    fn clone_project_checks_out_the_repo_and_registers_the_project() {
+        let fixture = fixture_dir("ok");
+        let source = source_repo(&fixture);
+        let parent = fixture.join("parent");
+        std::fs::create_dir_all(&parent).expect("create parent");
+
+        let mut workspace = empty_workspace();
+        let result = clone_project(
+            &mut workspace,
+            WindowId::Main,
+            source.to_string_lossy().into_owned(),
+            parent.to_string_lossy().into_owned(),
+            "checkout".to_string(),
+            "My Clone".to_string(),
+            &super::hook_action_tests::RecordingBackend::default(),
+            &TerminalsRegistry::default(),
+            &AppSettings::default(),
+            &mut TestCx,
+        );
+
+        if let ActionResult::Err(error) = &result {
+            panic!("clone should succeed, got error: {error}");
+        }
+        assert!(
+            parent.join("checkout/README.md").exists(),
+            "working tree checked out"
+        );
+        let project = workspace
+            .projects()
+            .iter()
+            .find(|p| p.name == "My Clone")
+            .expect("project registered");
+        assert_eq!(
+            Path::new(&project.path),
+            parent.join("checkout"),
+            "project points at the checkout"
+        );
+        assert!(project.layout.is_some(), "terminal layout seeded");
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn clone_project_registers_nothing_when_the_clone_fails() {
+        let fixture = fixture_dir("fail");
+        let parent = fixture.join("parent");
+        std::fs::create_dir_all(&parent).expect("create parent");
+
+        let mut workspace = empty_workspace();
+        let result = clone_project(
+            &mut workspace,
+            WindowId::Main,
+            fixture.join("not-a-repo").to_string_lossy().into_owned(),
+            parent.to_string_lossy().into_owned(),
+            "checkout".to_string(),
+            "My Clone".to_string(),
+            &super::hook_action_tests::RecordingBackend::default(),
+            &TerminalsRegistry::default(),
+            &AppSettings::default(),
+            &mut TestCx,
+        );
+
+        assert!(matches!(result, ActionResult::Err(_)));
+        assert!(workspace.projects().is_empty(), "no row left behind");
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn clone_project_rejects_a_directory_name_that_escapes_the_parent() {
+        let mut workspace = empty_workspace();
+        let result = clone_project(
+            &mut workspace,
+            WindowId::Main,
+            "https://example.com/repo.git".to_string(),
+            "/tmp".to_string(),
+            "../escape".to_string(),
+            "Escape".to_string(),
+            &super::hook_action_tests::RecordingBackend::default(),
+            &TerminalsRegistry::default(),
+            &AppSettings::default(),
+            &mut TestCx,
+        );
+
+        // Rejected before any network access, so the test never touches git.
+        assert!(matches!(result, ActionResult::Err(_)));
+        assert!(workspace.projects().is_empty());
     }
 }
 
