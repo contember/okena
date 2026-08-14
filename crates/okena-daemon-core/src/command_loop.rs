@@ -2876,6 +2876,172 @@ pub async fn daemon_command_loop(
                         }
                     }
 
+                    // ── Clone project: run the blocking git off the reactor ──────
+                    // Same split as `CreateWorktree` below, for the same reason —
+                    // only more so: `git clone` is network-bound and unbounded in
+                    // duration, so holding the workspace lock for it would freeze
+                    // the daemon for however long the repo takes to fetch.
+                    // Register an optimistic row (no layout → the client renders
+                    // the "creating" placeholder), clone with NO lock held, then
+                    // seed the layout + fire on_project_open + spawn PTYs under a
+                    // brief lock. On failure the row is rolled back and toasted.
+                    ActionRequest::CloneProject {
+                        url,
+                        parent_dir,
+                        directory,
+                        name,
+                    } => {
+                        // Phase 0: validate + resolve the target, no lock held. An
+                        // unusable URL or directory name fails the request outright
+                        // instead of creating a row that vanishes a moment later.
+                        let prepared = okena_git::validate_clone_url(&url)
+                            .map_err(|e| e.to_string())
+                            .and_then(|_| {
+                                okena_workspace::actions::project::resolve_clone_target(
+                                    &parent_dir,
+                                    &directory,
+                                )
+                            });
+                        match prepared {
+                            Err(e) => CommandResult::Err(e),
+                            Ok(target) => {
+                                let target_path = target.to_string_lossy().into_owned();
+                                let project_name =
+                                    okena_workspace::actions::project::clone_project_name(
+                                        &name, &directory,
+                                    );
+                                let app_settings = settings.lock().clone();
+                                let registered = {
+                                    let mut cx = DaemonWorkspaceCx::new(
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    );
+                                    let mut ws = workspace.lock();
+                                    let registered = ws.register_pending_project(
+                                        project_name,
+                                        target_path.clone(),
+                                        WindowId::Main,
+                                        &mut cx,
+                                    );
+                                    // Mark creating only on success, so a rejected
+                                    // path claim propagates its own error.
+                                    if let Ok(id) = &registered {
+                                        ws.mark_creating_project(id);
+                                    }
+                                    let operation_epoch = ws.data_replacement_epoch();
+                                    registered.map(|id| (id, operation_epoch))
+                                };
+                                match registered {
+                                    Err(e) => CommandResult::Err(e),
+                                    Ok((new_id, operation_epoch)) => {
+                                        let workspace = workspace.clone();
+                                        let workspace_tick = workspace_tick.clone();
+                                        let hook_runner = hook_runner.clone();
+                                        let hook_monitor = hook_monitor.clone();
+                                        let backend = backend.clone();
+                                        let terminals = terminals.clone();
+                                        let app_settings = app_settings.clone();
+                                        let new_id_task = new_id.clone();
+                                        let clone_url = url.clone();
+                                        tokio::task::spawn_local(async move {
+                                            let git = tokio::task::spawn_blocking(move || {
+                                                okena_git::clone_repository(&clone_url, &target)
+                                            })
+                                            .await;
+
+                                            // The workspace was replaced under us (session
+                                            // load / import): the row this clone belongs to
+                                            // is gone. Unlike a worktree checkout, the
+                                            // clone is left on disk — it is a plain
+                                            // directory of the user's code, and deleting it
+                                            // unprompted is worse than leaving it.
+                                            if workspace.lock().data_replacement_epoch()
+                                                != operation_epoch
+                                            {
+                                                log::info!(
+                                                    "clone-project: ignoring stale completion for {new_id_task}"
+                                                );
+                                                return;
+                                            }
+
+                                            match git {
+                                                Ok(Ok(())) => {
+                                                    let mut cx = DaemonWorkspaceCx::new(
+                                                        &workspace_tick,
+                                                        &hook_runner,
+                                                        &hook_monitor,
+                                                    );
+                                                    let mut ws = workspace.lock();
+                                                    // Seeds the layout, then fires on_project_open.
+                                                    ws.finish_pending_project(
+                                                        &new_id_task,
+                                                        &app_settings.hooks,
+                                                        &mut cx,
+                                                    );
+                                                    // Clear creating BEFORE spawning —
+                                                    // spawn_uninitialized_terminals no-ops
+                                                    // while the project is creating.
+                                                    ws.finish_creating_project(&new_id_task);
+                                                    let _ = spawn_uninitialized_terminals(
+                                                        &mut ws,
+                                                        &new_id_task,
+                                                        &*backend,
+                                                        &terminals,
+                                                        &app_settings,
+                                                        None,
+                                                        &mut cx,
+                                                    );
+                                                    ws.notify_data(&mut cx);
+                                                }
+                                                result => {
+                                                    let msg = match result {
+                                                        Ok(Err(e)) => e.to_string(),
+                                                        Err(join) => {
+                                                            format!("clone task failed: {join}")
+                                                        }
+                                                        Ok(Ok(())) => {
+                                                            unreachable!("success handled above")
+                                                        }
+                                                    };
+                                                    // Roll the optimistic row back. Clear
+                                                    // creating FIRST — remove_pending_project
+                                                    // skips projects still marked creating.
+                                                    {
+                                                        let mut cx = DaemonWorkspaceCx::new(
+                                                            &workspace_tick,
+                                                            &hook_runner,
+                                                            &hook_monitor,
+                                                        );
+                                                        let mut ws = workspace.lock();
+                                                        ws.finish_creating_project(&new_id_task);
+                                                        ws.remove_pending_project(&new_id_task);
+                                                        ws.notify_data(&mut cx);
+                                                    }
+                                                    log::error!("clone-project: {url} failed: {msg}");
+                                                    if let Some(hm) = &hook_monitor {
+                                                        hm.push_toast(okena_state::Toast::error(
+                                                            format!("Clone failed: {msg}"),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        // OPTIMISTIC reply, same contract as
+                                        // `CreateWorktree`: `pending: true` means the
+                                        // checkout is still running, so `path` does not
+                                        // exist on disk yet.
+                                        CommandResult::Ok(Some(serde_json::json!({
+                                            "project_id": new_id,
+                                            "path": target_path,
+                                            "pending": true,
+                                        })))
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // ── Create worktree: run the blocking git off the reactor ────
                     // `git fetch` + `git worktree add` are network/disk-heavy (up to
                     // seconds on a cold fetch). Routing them through the synchronous
