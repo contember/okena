@@ -215,7 +215,7 @@ impl DiffViewer {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&stats.path));
 
-        Some(SendPayload::Code(vec![CodeBlock {
+        Some(SendPayload::code(vec![CodeBlock {
             absolute_path,
             first,
             last,

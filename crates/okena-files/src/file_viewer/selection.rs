@@ -64,7 +64,7 @@ impl FileViewer {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Some(SendPayload::Code(vec![CodeBlock {
+        Some(SendPayload::code(vec![CodeBlock {
             absolute_path: self
                 .project_fs
                 .absolute_path(&tab.relative_path)

@@ -146,7 +146,7 @@ mod tests {
     fn wrapping_in_send_payload_strips_trailing_lf() {
         use okena_core::send_payload::SendPayload;
         let text = format_commit_send_text("abc1234", Some("subject"), None, None, &[]);
-        let formatted = SendPayload::Text(text).format(None);
+        let formatted = SendPayload::text(text).format(None);
         assert!(!formatted.ends_with('\n'), "got: {:?}", formatted);
         assert!(formatted.ends_with("    subject"));
     }
