@@ -5,6 +5,21 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use super::MarkdownDocument;
 use super::types::{FmValue, Frontmatter, Inline, Node};
 
+/// Append `text` to the innermost inline run, merging it into the preceding text
+/// rather than starting a new one. The renderer lays each run out as its own
+/// inline flex item, so an unmerged run per source line would make a paragraph
+/// break wherever the author happened to wrap the file, not where the column
+/// ends.
+fn push_text(stack: &mut [Vec<Inline>], text: &str) {
+    let Some(current) = stack.last_mut() else {
+        return;
+    };
+    match current.last_mut() {
+        Some(Inline::Text(prev)) => prev.push_str(text),
+        _ => current.push(Inline::Text(text.to_string())),
+    }
+}
+
 impl MarkdownDocument {
     /// Parse markdown content into a document.
     pub fn parse(content: &str) -> Self {
@@ -28,6 +43,10 @@ impl MarkdownDocument {
         let parser = Parser::new_ext(markdown, options);
 
         let mut inline_stack: Vec<Vec<Inline>> = vec![Vec::new()];
+        // URLs of the links currently open, parallel to their `inline_stack`
+        // frames. Kept beside the tree rather than as a sentinel inside it, so
+        // the label text is free to merge with its neighbours.
+        let mut link_urls: Vec<String> = Vec::new();
 
         // State
         let mut in_heading: Option<u8> = None;
@@ -198,33 +217,11 @@ impl MarkdownDocument {
                 }
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     inline_stack.push(Vec::new());
-                    // Store URL temporarily - we'll use it on End
-                    if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(format!("\x00LINK:{}\x00", dest_url)));
-                    }
+                    link_urls.push(dest_url.to_string());
                 }
                 Event::End(TagEnd::Link) => {
-                    let mut children = inline_stack.pop().unwrap_or_default();
-                    // Extract URL from marker
-                    let url = children
-                        .iter()
-                        .find_map(|c| {
-                            if let Inline::Text(t) = c
-                                && t.starts_with("\x00LINK:")
-                                && t.ends_with("\x00")
-                            {
-                                return Some(t[6..t.len() - 1].to_string());
-                            }
-                            None
-                        })
-                        .unwrap_or_default();
-                    children.retain(|c| {
-                        if let Inline::Text(t) = c {
-                            !t.starts_with("\x00LINK:")
-                        } else {
-                            true
-                        }
-                    });
+                    let children = inline_stack.pop().unwrap_or_default();
+                    let url = link_urls.pop().unwrap_or_default();
                     if let Some(last) = inline_stack.last_mut() {
                         last.push(Inline::Link {
                             _url: url,
@@ -242,15 +239,15 @@ impl MarkdownDocument {
                 Event::Text(text) => {
                     if in_code_block {
                         code_block_content.push_str(&text);
-                    } else if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(text.to_string()));
+                    } else {
+                        push_text(&mut inline_stack, &text);
                     }
                 }
                 Event::SoftBreak | Event::HardBreak => {
                     if in_code_block {
                         code_block_content.push('\n');
-                    } else if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(" ".to_string()));
+                    } else {
+                        push_text(&mut inline_stack, " ");
                     }
                 }
                 _ => {}
@@ -424,6 +421,19 @@ fn parse_frontmatter(inner: &str) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use super::super::MarkdownDocument;
+
+    /// Adjacent text is merged into one run so a paragraph wraps at the column
+    /// rather than at the author's line breaks. A link label is a run of its
+    /// own, and must survive that merging.
+    #[test]
+    fn link_label_and_soft_wrapped_text_survive_merging() {
+        let doc = MarkdownDocument::parse("A [label](https://example.com) here.");
+        assert_eq!(doc.plain_text, "A label here.\n");
+
+        // A soft break inside a paragraph becomes a space, not a line break.
+        let doc = MarkdownDocument::parse("first line\nsecond line");
+        assert_eq!(doc.plain_text, "first line second line\n");
+    }
 
     /// The precomputed `node_offsets` must match a running offset computed by
     /// walking `node_text_length` over the nodes (the previous behavior).
