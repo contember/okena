@@ -135,6 +135,26 @@ struct SettingsUpdateOutcome {
     committed: bool,
 }
 
+struct CancelCommandOnDrop(Option<okena_core::process::CommandCancellation>);
+
+impl CancelCommandOnDrop {
+    fn new(cancellation: okena_core::process::CommandCancellation) -> Self {
+        Self(Some(cancellation))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelCommandOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.0.take() {
+            cancellation.cancel();
+        }
+    }
+}
+
 impl SettingsUpdateOutcome {
     fn uncommitted(result: CommandResult) -> Self {
         Self {
@@ -2934,7 +2954,27 @@ pub async fn daemon_command_loop(
                                 };
                                 match registered {
                                     Err(e) => CommandResult::Err(e),
-                                    Ok((new_id, operation_epoch)) => {
+                                    Ok((new_id, operation_epoch)) => 'start_clone: {
+                                        let clone_command = match okena_git::start_clone_repository(
+                                            &url, &target,
+                                        ) {
+                                            Ok(command) => command,
+                                            Err(error) => {
+                                                let mut cx = DaemonWorkspaceCx::new(
+                                                    &workspace_tick,
+                                                    &hook_runner,
+                                                    &hook_monitor,
+                                                );
+                                                let mut ws = workspace.lock();
+                                                ws.finish_creating_project(&new_id);
+                                                ws.remove_pending_project(&new_id);
+                                                ws.notify_data(&mut cx);
+                                                break 'start_clone CommandResult::Err(
+                                                    error.to_string(),
+                                                );
+                                            }
+                                        };
+                                        let clone_cancellation = clone_command.cancellation();
                                         let workspace = workspace.clone();
                                         let workspace_tick = workspace_tick.clone();
                                         let hook_runner = hook_runner.clone();
@@ -2943,12 +2983,20 @@ pub async fn daemon_command_loop(
                                         let terminals = terminals.clone();
                                         let app_settings = app_settings.clone();
                                         let new_id_task = new_id.clone();
-                                        let clone_url = url.clone();
+                                        let cancel_on_drop =
+                                            CancelCommandOnDrop::new(clone_cancellation);
                                         tokio::task::spawn_local(async move {
+                                            // `spawn_blocking` itself cannot be aborted. Keep a
+                                            // separate command-bus cancellation capability in
+                                            // the async task so dropping this future at daemon
+                                            // shutdown kills the git process tree and releases
+                                            // the blocking waiter.
+                                            let mut cancel_on_drop = cancel_on_drop;
                                             let git = tokio::task::spawn_blocking(move || {
-                                                okena_git::clone_repository(&clone_url, &target)
+                                                okena_git::finish_clone_repository(clone_command)
                                             })
                                             .await;
+                                            cancel_on_drop.disarm();
 
                                             // The workspace was replaced under us (session
                                             // load / import): the row this clone belongs to
@@ -3018,7 +3066,9 @@ pub async fn daemon_command_loop(
                                                         ws.remove_pending_project(&new_id_task);
                                                         ws.notify_data(&mut cx);
                                                     }
-                                                    log::error!("clone-project: {url} failed: {msg}");
+                                                    log::error!(
+                                                        "clone-project: {url} failed: {msg}"
+                                                    );
                                                     if let Some(hm) = &hook_monitor {
                                                         hm.push_toast(okena_state::Toast::error(
                                                             format!("Clone failed: {msg}"),

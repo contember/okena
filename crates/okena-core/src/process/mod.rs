@@ -14,7 +14,9 @@
 
 mod bus;
 
-pub use bus::{CommandBus, CommandHandle, CommandSpec, Lane, current_lane, with_lane};
+pub use bus::{
+    CommandBus, CommandCancellation, CommandHandle, CommandSpec, Lane, current_lane, with_lane,
+};
 
 /// Create a [`std::process::Command`] that does **not** flash a console
 /// window on Windows.  On other platforms this is identical to
@@ -460,9 +462,10 @@ mod tests {
     fn cancel_kills_running_command() {
         let _g = guard();
         let handle = CommandBus::global().submit(CommandSpec::new("sleep").arg("30"));
+        let cancellation = handle.cancellation();
         // Give the worker a moment to spawn the child, then cancel.
         std::thread::sleep(Duration::from_millis(80));
-        handle.cancel();
+        cancellation.cancel();
         let err = handle.wait().expect_err("cancelled");
         assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
     }
