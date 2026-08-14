@@ -5,15 +5,32 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_ui::code_block::code_block_container;
-use okena_ui::tokens::{ui_text, ui_text_md, ui_text_xl};
+use okena_ui::tokens::ui_text_md;
 
+use super::style::{
+    MdColors, body_line_height, body_size, heading_style, inline_code_size, node_spacing,
+    table_line_height,
+};
 use super::types::{FmValue, Frontmatter, Inline, Node, char_len, slice_by_chars};
 use super::{MarkdownDocument, RenderedNode};
+
+/// Height of one code line. Code blocks are laid out line by line (each line is
+/// its own selectable element), so this stands in for `line_height`.
+const CODE_LINE_HEIGHT: Pixels = px(20.0);
 
 impl MarkdownDocument {
     /// Number of top-level blocks in the document. Each maps to one list item.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Vertical space `(above, below)` the block at `idx`, for the caller to put
+    /// on its per-block wrapper. Out-of-range indices get the paragraph rhythm.
+    pub fn node_spacing(&self, idx: usize) -> (Pixels, Pixels) {
+        match self.nodes.get(idx) {
+            Some(node) => node_spacing(node, idx == 0),
+            None => (px(0.0), px(12.0)),
+        }
     }
 
     /// Render a single top-level node by index, ready for the caller to wrap
@@ -61,13 +78,13 @@ impl MarkdownDocument {
                     let line_div = if let Some((sel_start, sel_end)) = line_sel {
                         let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
                         div()
-                            .h(px(18.0))
+                            .h(CODE_LINE_HEIGHT)
                             .flex()
                             .child(div().child(before))
                             .child(div().bg(selection_bg).child(selected))
                             .child(div().child(after))
                     } else {
-                        div().h(px(18.0)).child(if line.is_empty() {
+                        div().h(CODE_LINE_HEIGHT).child(if line.is_empty() {
                             " ".to_string()
                         } else {
                             line.to_string()
@@ -90,6 +107,7 @@ impl MarkdownDocument {
             } => {
                 // Return tables with individual rows for per-row selection.
                 // Column widths are precomputed at parse time.
+                let c = MdColors::new(t);
                 let mut row_offset = offset;
                 let mut rendered_rows = Vec::new();
                 let mut rendered_header = None;
@@ -138,17 +156,18 @@ impl MarkdownDocument {
                             div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
                                 Self::render_inlines_with_selection(header, t, cx, cell_sel)
                                     .text_size(ui_text_md(cx))
+                                    .line_height(table_line_height(cx))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(t.text_primary)),
+                                    .text_color(rgb(c.heading)),
                             ),
                         );
                         cell_offset += cell_len;
                     }
 
                     let header_div = header_row
-                        .bg(rgb(t.bg_header))
+                        .bg(rgb(c.surface))
                         .border_b_1()
-                        .border_color(rgb(t.border));
+                        .border_color(rgb(c.surface_border));
                     rendered_header = Some((header_div, row_offset, header_end));
                     row_offset = header_end;
                 }
@@ -175,10 +194,10 @@ impl MarkdownDocument {
 
                     let mut row_div = h_flex();
                     if row_idx % 2 == 1 {
-                        row_div = row_div.bg(rgb(t.bg_secondary));
+                        row_div = row_div.bg(rgb(c.surface));
                     }
                     if row_idx < rows.len() - 1 {
-                        row_div = row_div.border_b_1().border_color(rgb(t.border));
+                        row_div = row_div.border_b_1().border_color(rgb(c.surface_border));
                     }
 
                     let mut cell_offset = 0usize;
@@ -203,7 +222,8 @@ impl MarkdownDocument {
                             div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
                                 Self::render_inlines_with_selection(cell, t, cx, cell_sel)
                                     .text_size(ui_text_md(cx))
-                                    .text_color(rgb(t.text_secondary)),
+                                    .line_height(table_line_height(cx))
+                                    .text_color(rgb(c.body)),
                             ),
                         );
                         cell_offset += cell_len;
@@ -292,16 +312,10 @@ impl MarkdownDocument {
         cx: &App,
         selection: Option<(usize, usize)>,
     ) -> Div {
+        let c = MdColors::new(t);
         match node {
             Node::Heading { level, children } => {
-                let (size, weight) = match level {
-                    1 => (px(28.0), FontWeight::BOLD),
-                    2 => (px(24.0), FontWeight::BOLD),
-                    3 => (px(20.0), FontWeight::SEMIBOLD),
-                    4 => (px(18.0), FontWeight::SEMIBOLD),
-                    5 => (px(16.0), FontWeight::MEDIUM),
-                    _ => (px(14.0), FontWeight::MEDIUM),
-                };
+                let (size, line_height) = heading_style(*level, cx);
 
                 // For headings, render inline content with selection support
                 // but apply heading styles to the container
@@ -314,17 +328,18 @@ impl MarkdownDocument {
                 };
 
                 div()
+                    .w_full()
                     .text_size(size)
-                    .font_weight(weight)
-                    .text_color(rgb(t.text_primary))
-                    .pb(px(4.0))
-                    .when(*level <= 2, |d| {
-                        d.border_b_1().border_color(rgb(t.border)).mb(px(4.0))
-                    })
+                    .line_height(line_height)
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(c.heading))
                     .child(content)
             }
+            // `w_full` gives the inline flow a definite width to wrap against.
+            // Without it the run is sized from its own content and spills past
+            // the reading column instead of breaking at its edge.
             Node::Paragraph { children } => {
-                Self::render_inlines_with_selection(children, t, cx, selection)
+                Self::render_inlines_with_selection(children, t, cx, selection).w_full()
             }
             Node::CodeBlock { language, code } => {
                 let selection_bg = rgba(0x3390ff40);
@@ -348,13 +363,13 @@ impl MarkdownDocument {
                     let line_div = if let Some((sel_start, sel_end)) = line_sel {
                         let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
                         div()
-                            .h(px(18.0))
+                            .h(CODE_LINE_HEIGHT)
                             .flex()
                             .child(div().child(before))
                             .child(div().bg(selection_bg).child(selected))
                             .child(div().child(after))
                     } else {
-                        div().h(px(18.0)).child(if line.is_empty() {
+                        div().h(CODE_LINE_HEIGHT).child(if line.is_empty() {
                             " ".to_string()
                         } else {
                             line.to_string()
@@ -367,17 +382,22 @@ impl MarkdownDocument {
 
                 code_block_container(language.as_deref(), t, cx).child(
                     div()
-                        .p(px(12.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
                         .font_family("monospace")
                         .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.text_secondary))
+                        .text_color(rgb(c.body))
                         .flex()
                         .flex_col()
                         .children(code_lines),
                 )
             }
             Node::List { ordered, items } => {
-                let mut list = v_flex().gap(px(4.0)).pl(px(16.0));
+                // One marker column for both list kinds, right-aligned in it, so
+                // the text hangs at the same indent whatever the marker is —
+                // including two-digit numbers.
+                let marker_width = px(22.0);
+                let mut list = v_flex().w_full().gap(px(6.0)).pl(px(4.0));
                 let mut offset = 0usize;
 
                 for (i, item_inlines) in items.iter().enumerate() {
@@ -401,13 +421,18 @@ impl MarkdownDocument {
                     list = list.child(
                         div()
                             .flex()
-                            .gap(px(8.0))
+                            .items_start()
+                            .gap(px(10.0))
                             .child(
                                 div()
-                                    .text_size(ui_text_xl(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .w(px(16.0))
+                                    .text_size(body_size(cx))
+                                    // Match the body leading so the marker sits
+                                    // on the item's first line, not above it.
+                                    .line_height(body_line_height(cx))
+                                    .text_color(rgb(c.muted))
+                                    .w(marker_width)
                                     .flex_shrink_0()
+                                    .text_right()
                                     .child(marker),
                             )
                             .child(
@@ -425,15 +450,18 @@ impl MarkdownDocument {
                 col_widths,
             } => Self::render_table_with_selection(headers, rows, col_widths, t, cx, selection),
             Node::Blockquote { children } => div()
-                .pl(px(12.0))
+                .pl(px(14.0))
                 .border_l_2()
-                .border_color(rgb(t.text_muted))
+                .border_color(rgb(c.surface_border))
                 .child(
                     Self::render_inlines_with_selection(children, t, cx, selection)
-                        .text_color(rgb(t.text_muted))
+                        .w_full()
+                        .text_color(rgb(c.muted))
                         .italic(),
                 ),
-            Node::HorizontalRule => div().w_full().h(px(1.0)).bg(rgb(t.border)).my(px(8.0)),
+            // Whitespace is what separates sections here, so an explicit rule
+            // stays as a hairline that barely registers.
+            Node::HorizontalRule => div().w_full().h(px(1.0)).bg(rgb(c.rule)),
             // Frontmatter renders as a self-contained metadata card. Partial
             // (inline) selection highlighting is intentionally omitted; block
             // selection and copy still work through the flat-text offsets.
@@ -443,28 +471,28 @@ impl MarkdownDocument {
 
     /// Render a frontmatter block as a bordered metadata card.
     fn render_frontmatter(fm: &Frontmatter, t: &ThemeColors, cx: &App) -> Div {
+        let c = MdColors::new(t);
         let card = v_flex()
             .gap(px(4.0))
             .w_full()
-            .p(px(12.0))
-            .mb(px(8.0))
+            .px(px(14.0))
+            .py(px(12.0))
             .rounded(px(6.0))
-            .bg(rgb(t.bg_secondary))
+            .bg(rgb(c.surface))
             .border_1()
-            .border_color(rgb(t.border))
-            .text_size(ui_text_md(cx));
+            .border_color(rgb(c.surface_border))
+            .text_size(ui_text_md(cx))
+            .line_height(table_line_height(cx));
 
         match fm {
             Frontmatter::Raw(raw) => {
                 card.font_family("monospace")
                     .children(raw.lines().map(|line| {
-                        div()
-                            .text_color(rgb(t.text_secondary))
-                            .child(if line.is_empty() {
-                                " ".to_string()
-                            } else {
-                                line.to_string()
-                            })
+                        div().text_color(rgb(c.body)).child(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        })
                     }))
             }
             Frontmatter::Parsed(entries) => card.children(
@@ -478,10 +506,11 @@ impl MarkdownDocument {
     /// Render a single `key: value` frontmatter entry. Scalars sit inline next
     /// to the key; lists and nested maps stack below it, indented.
     fn render_fm_entry(key: &str, value: &FmValue, t: &ThemeColors, cx: &App) -> Div {
+        let c = MdColors::new(t);
         let key_label = || {
             div()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(t.text_muted))
+                .text_color(rgb(c.muted))
                 .child(key.to_string())
         };
 
@@ -490,22 +519,12 @@ impl MarkdownDocument {
                 .gap(px(8.0))
                 .items_baseline()
                 .child(key_label().min_w(px(120.0)).flex_shrink_0())
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(rgb(t.text_primary))
-                        .child(s.clone()),
-                ),
+                .child(div().flex_1().text_color(rgb(c.body)).child(s.clone())),
             FmValue::Empty => h_flex()
                 .gap(px(8.0))
                 .items_baseline()
                 .child(key_label().min_w(px(120.0)).flex_shrink_0())
-                .child(
-                    div()
-                        .italic()
-                        .text_color(rgb(t.text_muted))
-                        .child("\u{2014}"),
-                ),
+                .child(div().italic().text_color(rgb(c.muted)).child("\u{2014}")),
             FmValue::List(items) => v_flex()
                 .gap(px(2.0))
                 .child(key_label())
@@ -521,23 +540,24 @@ impl MarkdownDocument {
 
     /// Render a frontmatter sequence as a bulleted, indented list.
     fn render_fm_list(items: &[FmValue], t: &ThemeColors, cx: &App) -> Div {
+        let c = MdColors::new(t);
         let mut list = v_flex().gap(px(2.0)).pl(px(16.0));
         for item in items {
             list = list.child(match item {
                 FmValue::Scalar(s) => h_flex()
                     .gap(px(8.0))
                     .items_baseline()
-                    .child(div().text_color(rgb(t.text_muted)).child("\u{2022}"))
-                    .child(div().text_color(rgb(t.text_primary)).child(s.clone())),
+                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
+                    .child(div().text_color(rgb(c.body)).child(s.clone())),
                 FmValue::Empty => h_flex()
                     .gap(px(8.0))
-                    .child(div().text_color(rgb(t.text_muted)).child("\u{2022}")),
+                    .child(div().text_color(rgb(c.muted)).child("\u{2022}")),
                 FmValue::List(inner) => v_flex()
-                    .child(div().text_color(rgb(t.text_muted)).child("\u{2022}"))
+                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
                     .child(Self::render_fm_list(inner, t, cx)),
                 FmValue::Map(sub) => v_flex()
                     .gap(px(4.0))
-                    .child(div().text_color(rgb(t.text_muted)).child("\u{2022}"))
+                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
                     .child(
                         v_flex()
                             .gap(px(4.0))
@@ -593,9 +613,9 @@ impl MarkdownDocument {
             // narrow width — inflating the block with a huge vertical gap.
             .min_w_0()
             .items_baseline()
-            .text_size(ui_text_xl(cx))
-            .line_height(px(22.0))
-            .text_color(rgb(t.text_secondary))
+            .text_size(body_size(cx))
+            .line_height(body_line_height(cx))
+            .text_color(rgb(MdColors::new(t).body))
             .children(elements)
     }
 
@@ -607,6 +627,7 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
     ) -> Div {
         let selection_bg = rgba(0x3390ff40);
+        let c = MdColors::new(t);
 
         match inline {
             Inline::Text(text) => {
@@ -614,36 +635,37 @@ impl MarkdownDocument {
                     let (before, selected, after) = slice_by_chars(text, start, end);
                     div()
                         .flex()
-                        .child(div().child(before))
-                        .child(div().bg(selection_bg).child(selected))
-                        .child(div().child(after))
+                        .min_w_0()
+                        .child(div().min_w_0().child(before))
+                        .child(div().min_w_0().bg(selection_bg).child(selected))
+                        .child(div().min_w_0().child(after))
                 } else {
-                    div().child(text.clone())
+                    // `min-width: 0` lets a long run shrink to the column width
+                    // and wrap inside it. On `min-width: auto` the run keeps its
+                    // unwrapped width and paints past the edge of the column.
+                    div().min_w_0().child(text.clone())
                 }
             }
             Inline::Code(code) => {
+                // Emphasis, not a badge: the monospace face and a barely-there
+                // tint carry it, so a paragraph full of code reads as prose.
+                let chip = |d: Div| {
+                    d.font_family("monospace")
+                        .text_size(inline_code_size(cx))
+                        .px(px(3.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(c.inline_code_bg))
+                        .text_color(rgb(c.body))
+                };
                 if let Some((start, end)) = selection {
                     let (before, selected, after) = slice_by_chars(code, start, end);
-                    div()
-                        .font_family("monospace")
-                        .text_size(ui_text(13.0, cx))
-                        .px(px(4.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.bg_primary))
-                        .text_color(rgb(t.text_primary))
+                    chip(div())
                         .flex()
                         .child(div().child(before))
                         .child(div().bg(selection_bg).child(selected))
                         .child(div().child(after))
                 } else {
-                    div()
-                        .font_family("monospace")
-                        .text_size(ui_text(13.0, cx))
-                        .px(px(4.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.bg_primary))
-                        .text_color(rgb(t.text_primary))
-                        .child(code.clone())
+                    chip(div()).child(code.clone())
                 }
             }
             Inline::Bold(children) => {
@@ -693,11 +715,7 @@ impl MarkdownDocument {
                 container
             }
             Inline::Link { children, .. } => {
-                let mut container = div()
-                    .text_color(rgb(t.term_blue))
-                    .underline()
-                    .flex()
-                    .flex_wrap();
+                let mut container = div().text_color(rgb(c.link)).underline().flex().flex_wrap();
                 let mut offset = 0usize;
                 for child in children {
                     let child_len = match child {
@@ -732,10 +750,11 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
     ) -> Div {
         // Column widths are precomputed at parse time.
+        let c = MdColors::new(t);
         let mut table = v_flex()
-            .rounded(px(4.0))
+            .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(t.border))
+            .border_color(rgb(c.surface_border))
             .overflow_hidden();
 
         let mut offset = 0usize;
@@ -744,9 +763,9 @@ impl MarkdownDocument {
         if !headers.is_empty() {
             let mut header_row = div()
                 .flex()
-                .bg(rgb(t.bg_header))
+                .bg(rgb(c.surface))
                 .border_b_1()
-                .border_color(rgb(t.border));
+                .border_color(rgb(c.surface_border));
 
             for (i, header) in headers.iter().enumerate() {
                 let cell_len = Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 }; // +1 for tab
@@ -769,8 +788,9 @@ impl MarkdownDocument {
                     div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
                         Self::render_inlines_with_selection(header, t, cx, cell_sel)
                             .text_size(ui_text_md(cx))
+                            .line_height(table_line_height(cx))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_primary)),
+                            .text_color(rgb(c.heading)),
                     ),
                 );
                 offset += cell_len;
@@ -783,10 +803,10 @@ impl MarkdownDocument {
         for (row_idx, row) in rows.iter().enumerate() {
             let mut row_div = div()
                 .flex()
-                .when(row_idx % 2 == 1, |d| d.bg(rgb(t.bg_secondary)));
+                .when(row_idx % 2 == 1, |d| d.bg(rgb(c.surface)));
 
             if row_idx < rows.len() - 1 {
-                row_div = row_div.border_b_1().border_color(rgb(t.border));
+                row_div = row_div.border_b_1().border_color(rgb(c.surface_border));
             }
 
             for (i, cell) in row.iter().enumerate() {
@@ -810,7 +830,8 @@ impl MarkdownDocument {
                     div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
                         Self::render_inlines_with_selection(cell, t, cx, cell_sel)
                             .text_size(ui_text_md(cx))
-                            .text_color(rgb(t.text_secondary)),
+                            .line_height(table_line_height(cx))
+                            .text_color(rgb(c.body)),
                     ),
                 );
                 offset += cell_len;
