@@ -393,6 +393,14 @@ pub struct AppSettings {
     #[serde(default)]
     pub terminal_drag_selects_in_mouse_mode: bool,
 
+    /// When true, double-click selects a word (and triple-click a line) even
+    /// while the app has requested mouse reporting. The app still receives the
+    /// first click of the gesture; the second and third are kept here, so no
+    /// click has to wait on a double-click timeout.
+    /// Default: false — the app sees one click where the user made two.
+    #[serde(default)]
+    pub terminal_double_click_selects_in_mouse_mode: bool,
+
     /// File finder filter preferences. The "Go to File" dialog reads these
     /// when opened and writes them back when the user toggles a filter, so
     /// the last-used state is also the default for future opens.
@@ -464,6 +472,7 @@ impl Default for AppSettings {
             terminal_ctrl_c_copies_selection: false,
             terminal_right_click_opens_menu: true,
             terminal_drag_selects_in_mouse_mode: false,
+            terminal_double_click_selects_in_mouse_mode: false,
             file_finder: FileFinderSettings::default(),
             header_density: HeaderDensity::default(),
             notifications: NotificationSettings::default(),

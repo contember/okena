@@ -60,6 +60,9 @@ mod tests {
                                 drag_selects_in_mouse_mode: s
                                     .settings
                                     .terminal_drag_selects_in_mouse_mode,
+                                double_click_selects_in_mouse_mode: s
+                                    .settings
+                                    .terminal_double_click_selects_in_mouse_mode,
                             })
                             .ok()
                         }

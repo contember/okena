@@ -70,6 +70,14 @@ impl SettingsPanel {
                     cx,
                 ))
                 .child(self.render_toggle(
+                    "double-click-selects",
+                    "Double Click Selects in Mouse Apps",
+                    s.terminal_double_click_selects_in_mouse_mode,
+                    true,
+                    |state, val, cx| state.set_terminal_double_click_selects_in_mouse_mode(val, cx),
+                    cx,
+                ))
+                .child(self.render_toggle(
                     "idle-detection",
                     "Idle Detection",
                     s.idle_timeout_secs > 0,

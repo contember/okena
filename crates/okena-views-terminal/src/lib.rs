@@ -116,6 +116,10 @@ pub struct TerminalViewSettings {
     /// click is still forwarded to the app.
     #[serde(default)]
     pub drag_selects_in_mouse_mode: bool,
+    /// When true, the second and third click of a gesture select a word/line
+    /// here instead of reaching a mouse-reporting app.
+    #[serde(default)]
+    pub double_click_selects_in_mouse_mode: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -144,6 +148,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             ctrl_c_copies_selection: false,
             right_click_opens_menu: true,
             drag_selects_in_mouse_mode: false,
+            double_click_selects_in_mouse_mode: false,
         })
 }
 
