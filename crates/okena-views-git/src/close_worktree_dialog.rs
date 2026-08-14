@@ -48,6 +48,12 @@ struct CloseInfo {
     branch: Option<String>,
     default_branch: Option<String>,
     unpushed_count: usize,
+    /// The checkout exists but Git no longer tracks it, so every close step
+    /// will fail. Older daemons omit the field; treating that as "not orphaned"
+    /// keeps the force-remove path hidden rather than offering an action they
+    /// cannot serve.
+    #[serde(default)]
+    is_orphaned: bool,
 }
 
 /// Confirmation dialog shown when closing a worktree.
@@ -75,6 +81,13 @@ pub struct CloseWorktreeDialog {
     pub(super) loading_info: bool,
     pub(super) error_message: Option<String>,
     pub(super) processing: ProcessingState,
+    /// Git no longer tracks this checkout — see [`CloseInfo::is_orphaned`].
+    pub(super) is_orphaned: bool,
+    /// The close was attempted and failed on an orphaned worktree, so the
+    /// destructive fallback is now offered. Deliberately gated behind a real
+    /// failure: the fallback deletes the directory outright, and one deliberate
+    /// second click is the only confirmation there is.
+    pub(super) show_force_remove: bool,
 }
 
 impl CloseWorktreeDialog {
@@ -119,6 +132,8 @@ impl CloseWorktreeDialog {
             loading_info: true,
             error_message: None,
             processing: ProcessingState::Idle,
+            is_orphaned: false,
+            show_force_remove: false,
         };
         dialog.load_close_info(cx);
         dialog
@@ -137,6 +152,7 @@ impl CloseWorktreeDialog {
                         this.branch = info.branch;
                         this.default_branch = info.default_branch;
                         this.unpushed_count = info.unpushed_count;
+                        this.is_orphaned = info.is_orphaned;
                     }
                     Err(error) => this.error_message = Some(error),
                 }

@@ -36,6 +36,7 @@ impl Render for CloseWorktreeDialog {
         let can_merge = self.can_merge();
         let confirm_label = self.confirm_label();
         let error_msg = self.error_message.clone();
+        let show_force_remove = self.show_force_remove;
 
         modal_backdrop("close-worktree-dialog-backdrop", &t)
             .track_focus(&focus_handle)
@@ -145,6 +146,35 @@ impl Render for CloseWorktreeDialog {
                                             .child(format!("Path: {}", self.project_path)),
                                     ),
                             )
+                            // Orphaned-checkout warning. Shown up front so the
+                            // close failure that follows isn't a surprise.
+                            .when(self.is_orphaned, |d| {
+                                d.child(
+                                    div()
+                                        .px(px(10.0))
+                                        .py(px(8.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgba(0xff990015))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_md(cx))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0xffaa33))
+                                                .child("Git no longer tracks this worktree."),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_ms(cx))
+                                                .text_color(rgb(0xffaa33))
+                                                .child(
+                                                    "Closing it will fail; you can then delete the folder instead.",
+                                                ),
+                                        ),
+                                )
+                            })
                             // Dirty warning
                             .when(self.is_dirty, |d| {
                                 d.child(
@@ -584,7 +614,26 @@ impl Render for CloseWorktreeDialog {
                                     .when(is_unavailable, |d| {
                                         d.opacity(0.5).cursor(CursorStyle::default())
                                     }),
-                            ),
+                            )
+                            // Destructive fallback, revealed only once the close
+                            // has actually failed on an orphaned checkout.
+                            .when(show_force_remove, |d| {
+                                d.child(
+                                    button("force-remove-wt-btn", "Delete Folder", &t)
+                                        .px(px(16.0))
+                                        .py(px(8.0))
+                                        .bg(rgb(t.error))
+                                        .text_color(rgb(0xffffff))
+                                        .when(!is_unavailable, |d| {
+                                            d.on_click(cx.listener(|this, _, _, cx| {
+                                                this.force_remove(cx);
+                                            }))
+                                        })
+                                        .when(is_unavailable, |d| {
+                                            d.opacity(0.5).cursor(CursorStyle::default())
+                                        }),
+                                )
+                            }),
                     ),
             )
     }
