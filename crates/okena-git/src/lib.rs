@@ -7,6 +7,7 @@ pub mod diff;
 pub mod error;
 pub(crate) mod gix_helpers;
 pub mod repository;
+pub mod review;
 
 pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;
@@ -26,6 +27,10 @@ pub use repository::{
     rebase_onto, remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir,
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
     verify_linked_worktree_fresh,
+};
+pub use review::{
+    ReviewSourceBudget, ReviewSourceContents, get_exact_review_diff, get_exact_review_source,
+    get_review_inventory, resolve_review_comparison,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look

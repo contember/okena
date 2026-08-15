@@ -157,14 +157,14 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             .strip_prefix("rename from ")
             .or_else(|| line.strip_prefix("copy from "))
         {
-            file.old_path = Some(old.to_string());
+            file.old_path = decode_git_path(old).or_else(|| Some(old.to_string()));
             continue;
         }
         if let Some(new) = line
             .strip_prefix("rename to ")
             .or_else(|| line.strip_prefix("copy to "))
         {
-            file.new_path = Some(new.to_string());
+            file.new_path = decode_git_path(new).or_else(|| Some(new.to_string()));
             continue;
         }
 
@@ -172,12 +172,14 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
         // `diff --git` header fallback (e.g. /dev/null clears the path for an
         // added file even though the header carried a fake `a/<new>`).
         if line.starts_with("--- ") {
-            let path = line.strip_prefix("--- ").unwrap_or("");
+            let raw_path = line.strip_prefix("--- ").unwrap_or("");
+            let path =
+                decode_git_patch_marker_path(raw_path).unwrap_or_else(|| raw_path.to_string());
             if path == "/dev/null" {
                 file.old_path = None;
             } else {
                 // Strip "a/" prefix if present
-                let path = path.strip_prefix("a/").unwrap_or(path);
+                let path = path.strip_prefix("a/").unwrap_or(&path);
                 file.old_path = Some(path.to_string());
             }
             continue;
@@ -185,12 +187,14 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
 
         // Parse new file path
         if line.starts_with("+++ ") {
-            let path = line.strip_prefix("+++ ").unwrap_or("");
+            let raw_path = line.strip_prefix("+++ ").unwrap_or("");
+            let path =
+                decode_git_patch_marker_path(raw_path).unwrap_or_else(|| raw_path.to_string());
             if path == "/dev/null" {
                 file.new_path = None;
             } else {
                 // Strip "b/" prefix if present
-                let path = path.strip_prefix("b/").unwrap_or(path);
+                let path = path.strip_prefix("b/").unwrap_or(&path);
                 file.new_path = Some(path.to_string());
             }
             continue;
@@ -298,20 +302,41 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
 /// authoritative paths come from `rename from`/`rename to` or `---`/`+++`
 /// lines when present, which override this.
 ///
-/// Caveat: when paths contain spaces the `a/… b/…` form is ambiguous and git
-/// quotes them or relies on the explicit headers instead, so this helper only
-/// reliably handles unquoted, space-free paths. Returns `(None, None)` if the
-/// header can't be split unambiguously.
 fn parse_diff_git_header(line: &str) -> (Option<String>, Option<String>) {
     let rest = match line.strip_prefix("diff --git ") {
         Some(r) => r,
         None => return (None, None),
     };
 
-    // Quoted paths (contain spaces / special chars) are not handled here; defer
-    // to the explicit rename/`---`/`+++` headers.
     if rest.starts_with('"') {
-        return (None, None);
+        let Some((old, rest)) = take_quoted_git_path(rest) else {
+            return (None, None);
+        };
+        let Some(rest) = rest.strip_prefix(' ') else {
+            return (None, None);
+        };
+        let new = if rest.starts_with('"') {
+            let Some((new, trailing)) = take_quoted_git_path(rest) else {
+                return (None, None);
+            };
+            if !trailing.is_empty() {
+                return (None, None);
+            }
+            new
+        } else {
+            rest.to_string()
+        };
+        return strip_diff_prefixes(old, new);
+    }
+
+    // When only the new side is quoted, its opening quote is an unambiguous
+    // separator because a literal quote in the old path would also be quoted.
+    if let Some((old, new)) = rest.split_once(" \"b/") {
+        let quoted_new = format!("\"b/{new}");
+        let Some(new) = decode_git_path(&quoted_new) else {
+            return (None, None);
+        };
+        return strip_diff_prefixes(old.to_string(), new);
     }
 
     let a = match rest.strip_prefix("a/") {
@@ -330,7 +355,111 @@ fn parse_diff_git_header(line: &str) -> (Option<String>, Option<String>) {
         return (None, None);
     }
 
+    strip_diff_prefixes(format!("a/{old}"), format!("b/{new}"))
+}
+
+fn strip_diff_prefixes(old: String, new: String) -> (Option<String>, Option<String>) {
+    let Some(old) = old.strip_prefix("a/") else {
+        return (None, None);
+    };
+    let Some(new) = new.strip_prefix("b/") else {
+        return (None, None);
+    };
+    if old.is_empty() || new.is_empty() {
+        return (None, None);
+    }
     (Some(old.to_string()), Some(new.to_string()))
+}
+
+fn take_quoted_git_path(input: &str) -> Option<(String, &str)> {
+    if !input.starts_with('"') {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    let mut escaped = false;
+    for index in 1..bytes.len() {
+        match (escaped, bytes[index]) {
+            (false, b'\\') => escaped = true,
+            (false, b'"') => {
+                let quoted = &input[..=index];
+                return decode_git_path(quoted).map(|path| (path, &input[index + 1..]));
+            }
+            (true, _) => escaped = false,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn decode_git_patch_marker_path(input: &str) -> Option<String> {
+    if input.starts_with('"') {
+        let (path, trailing) = take_quoted_git_path(input)?;
+        if trailing.is_empty() || trailing.starts_with('\t') {
+            Some(path)
+        } else {
+            None
+        }
+    } else {
+        Some(
+            input
+                .split_once('\t')
+                .map_or(input, |(path, _)| path)
+                .to_string(),
+        )
+    }
+}
+
+/// Decode Git's `quote.c` double-quoted path representation.
+fn decode_git_path(input: &str) -> Option<String> {
+    if !input.starts_with('"') {
+        return Some(input.to_string());
+    }
+    let bytes = input.as_bytes();
+    if bytes.len() < 2 || bytes.last() != Some(&b'"') {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() - 2);
+    let mut index = 1;
+    while index + 1 < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if index + 1 >= bytes.len() {
+            return None;
+        }
+        let escaped = bytes[index];
+        let value = match escaped {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'0'..=b'7' => {
+                let mut octal = escaped - b'0';
+                let mut digits = 1;
+                while digits < 3
+                    && index + 1 < bytes.len() - 1
+                    && matches!(bytes[index + 1], b'0'..=b'7')
+                {
+                    index += 1;
+                    octal = octal.checked_mul(8)?.checked_add(bytes[index] - b'0')?;
+                    digits += 1;
+                }
+                octal
+            }
+            _ => return None,
+        };
+        decoded.push(value);
+        index += 1;
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// Parse hunk header to extract old and new starting line numbers.
@@ -781,6 +910,69 @@ mod tests {
     }
 
     #[test]
+    fn decodes_git_c_quoted_paths() {
+        assert_eq!(
+            decode_git_path(r#""caf\303\251\t\"name\\file.rs""#).as_deref(),
+            Some("café\t\"name\\file.rs")
+        );
+        assert!(decode_git_path(r#""bad\qpath""#).is_none());
+        assert!(decode_git_path(r#""unterminated"#).is_none());
+        assert_eq!(
+            decode_git_patch_marker_path("\"a/tab\\tname.rs\"\t").as_deref(),
+            Some("a/tab\tname.rs")
+        );
+    }
+
+    #[test]
+    fn parses_quoted_rename_paths_from_all_patch_headers() {
+        let diff = r#"diff --git "a/old \303\251\t\"name.rs" "b/new \303\251\n\"name.rs"
+similarity index 90%
+rename from "old \303\251\t\"name.rs"
+rename to "new \303\251\n\"name.rs"
+--- "a/old \303\251\t\"name.rs"
++++ "b/new \303\251\n\"name.rs"
+@@ -1 +1 @@
+-old
++new
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(
+            result.files[0].old_path.as_deref(),
+            Some("old é\t\"name.rs")
+        );
+        assert_eq!(
+            result.files[0].new_path.as_deref(),
+            Some("new é\n\"name.rs")
+        );
+    }
+
+    #[test]
+    fn parses_quoted_paths_from_mode_only_header() {
+        let diff = r#"diff --git "a/tab\t\303\251.rs" "b/tab\t\303\251.rs"
+old mode 100644
+new mode 100755
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("tab\té.rs"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("tab\té.rs"));
+    }
+
+    #[test]
+    fn parses_c_quoted_copy_headers() {
+        let diff = r#"diff --git "a/source\t\303\251.rs" "b/copy\n\"name.rs"
+similarity index 100%
+copy from "source\t\303\251.rs"
+copy to "copy\n\"name.rs"
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("source\té.rs"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("copy\n\"name.rs"));
+    }
+
+    #[test]
     fn test_parse_unified_diff() {
         let diff = r#"diff --git a/src/main.rs b/src/main.rs
 --- a/src/main.rs
@@ -1092,10 +1284,13 @@ rename to src/new.rs
             parse_diff_git_header("diff --git a/old.rs b/new.rs"),
             (Some("old.rs".to_string()), Some("new.rs".to_string()))
         );
-        // Quoted (special-char) paths are deferred to explicit headers.
+        // Quoted paths are decoded even when no explicit path headers follow.
         assert_eq!(
             parse_diff_git_header("diff --git \"a/has space.rs\" \"b/has space.rs\""),
-            (None, None)
+            (
+                Some("has space.rs".to_string()),
+                Some("has space.rs".to_string())
+            )
         );
         // Non-header input.
         assert_eq!(parse_diff_git_header("@@ -1 +1 @@"), (None, None));
