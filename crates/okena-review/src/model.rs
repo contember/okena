@@ -7,6 +7,7 @@ use okena_syntax::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::num::NonZeroU32;
 
@@ -24,6 +25,98 @@ impl fmt::Display for ModelError {
     }
 }
 impl std::error::Error for ModelError {}
+
+#[derive(Debug)]
+pub(crate) enum ControlledModelError<E> {
+    Invalid(ModelError),
+    Stopped(E),
+}
+
+impl<E> From<ModelError> for ControlledModelError<E> {
+    fn from(error: ModelError) -> Self {
+        Self::Invalid(error)
+    }
+}
+
+pub(crate) fn checked_stable_sort_by<T, E>(
+    items: &mut Vec<T>,
+    mut compare: impl FnMut(&T, &T, &mut dyn FnMut() -> Result<(), E>) -> Result<std::cmp::Ordering, E>,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let len = items.len();
+    if len <= 1 {
+        return checkpoint();
+    }
+    let mut operations = 0_u8;
+    let mut order = Vec::with_capacity(len);
+    for index in 0..len {
+        checked_sort_tick(&mut operations, checkpoint)?;
+        order.push(index);
+    }
+
+    let mut width = 1_usize;
+    while width < len {
+        let mut merged = Vec::with_capacity(len);
+        let mut start = 0_usize;
+        while start < len {
+            checked_sort_tick(&mut operations, checkpoint)?;
+            let middle = start.saturating_add(width).min(len);
+            let end = middle.saturating_add(width).min(len);
+            let (mut left, mut right) = (start, middle);
+            while left < middle && right < end {
+                checked_sort_tick(&mut operations, checkpoint)?;
+                if compare(&items[order[left]], &items[order[right]], checkpoint)?
+                    != std::cmp::Ordering::Greater
+                {
+                    merged.push(order[left]);
+                    left += 1;
+                } else {
+                    merged.push(order[right]);
+                    right += 1;
+                }
+            }
+            while left < middle {
+                checked_sort_tick(&mut operations, checkpoint)?;
+                merged.push(order[left]);
+                left += 1;
+            }
+            while right < end {
+                checked_sort_tick(&mut operations, checkpoint)?;
+                merged.push(order[right]);
+                right += 1;
+            }
+            start = end;
+        }
+        order = merged;
+        width = width.saturating_mul(2);
+    }
+
+    let mut slots = Vec::with_capacity(len);
+    for item in std::mem::take(items) {
+        checked_sort_tick(&mut operations, checkpoint)?;
+        slots.push(Some(item));
+    }
+    for index in order {
+        checked_sort_tick(&mut operations, checkpoint)?;
+        let Some(item) = slots[index].take() else {
+            unreachable!("checked sort order contains each source index once");
+        };
+        items.push(item);
+    }
+    checkpoint()
+}
+
+fn checked_sort_tick<E>(
+    operations: &mut u8,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    *operations = operations.wrapping_add(1);
+    if *operations % 64 == 1 {
+        checkpoint()
+    } else {
+        Ok(())
+    }
+}
 
 /// One-based inclusive changed-line range, distinct from a UTF-8 source range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -201,14 +294,33 @@ impl OutlineFact {
         symbol: SymbolReference,
         children: Vec<Self>,
     ) -> Result<Self, ModelError> {
-        if children.iter().any(|child| {
-            child.provenance != provenance
+        match Self::new_controlled(provenance, symbol, children, &mut || {
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(fact) => Ok(fact),
+            Err(ControlledModelError::Invalid(error)) => Err(error),
+            Err(ControlledModelError::Stopped(never)) => match never {},
+        }
+    }
+
+    pub(crate) fn new_controlled<E>(
+        provenance: SyntaxProvenance,
+        symbol: SymbolReference,
+        children: Vec<Self>,
+        checkpoint: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledModelError<E>> {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
+        for child in &children {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
+            if child.provenance != provenance
                 || child.symbol.side() != symbol.side()
                 || !symbol.range().contains(child.symbol.range())
-        }) {
-            return Err(ModelError::new(
-                "outline children must share provenance and be on the same side inside their parent",
-            ));
+            {
+                return Err(ModelError::new(
+                    "outline children must share provenance and be on the same side inside their parent",
+                )
+                .into());
+            }
         }
         Ok(Self {
             provenance,
@@ -395,6 +507,30 @@ impl SymbolChange {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_controlled<E>(
+        kind: SymbolChangeKind,
+        old: Option<SymbolFact>,
+        new: Option<SymbolFact>,
+        signature_change: Option<SignatureChange>,
+        body_changed: bool,
+        hunks: Vec<ChangedHunk>,
+        navigation: ReviewNavigationTarget,
+        checkpoint: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledModelError<E>> {
+        Self::new_validated_controlled(
+            kind,
+            old,
+            new,
+            signature_change,
+            body_changed,
+            hunks,
+            navigation,
+            None,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn new_validated(
         kind: SymbolChangeKind,
         old: Option<SymbolFact>,
@@ -405,6 +541,36 @@ impl SymbolChange {
         navigation: ReviewNavigationTarget,
         reported_counts: Option<(u32, u32)>,
     ) -> Result<Self, ModelError> {
+        match Self::new_validated_controlled(
+            kind,
+            old,
+            new,
+            signature_change,
+            body_changed,
+            hunks,
+            navigation,
+            reported_counts,
+            &mut || Ok::<(), Infallible>(()),
+        ) {
+            Ok(change) => Ok(change),
+            Err(ControlledModelError::Invalid(error)) => Err(error),
+            Err(ControlledModelError::Stopped(never)) => match never {},
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_validated_controlled<E>(
+        kind: SymbolChangeKind,
+        old: Option<SymbolFact>,
+        new: Option<SymbolFact>,
+        signature_change: Option<SignatureChange>,
+        body_changed: bool,
+        hunks: Vec<ChangedHunk>,
+        navigation: ReviewNavigationTarget,
+        reported_counts: Option<(u32, u32)>,
+        checkpoint: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledModelError<E>> {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         let valid = match kind {
             SymbolChangeKind::Added => {
                 old.is_none()
@@ -425,42 +591,43 @@ impl SymbolChange {
             }
         };
         if !valid {
-            return Err(ModelError::new(
-                "symbol change shape does not match its kind",
-            ));
+            return Err(ModelError::new("symbol change shape does not match its kind").into());
         }
         if let (Some(old), Some(new)) = (&old, &new) {
-            if old.key() != new.key() {
-                return Err(ModelError::new(
-                    "matched symbols must have the same qualified key",
-                ));
+            if !symbol_keys_equal_controlled(old.key(), new.key(), checkpoint)? {
+                return Err(
+                    ModelError::new("matched symbols must have the same qualified key").into(),
+                );
             }
             if old.provenance().language() != new.provenance().language() {
-                return Err(ModelError::new(
-                    "matched symbols must use the same syntax language",
-                ));
+                return Err(
+                    ModelError::new("matched symbols must use the same syntax language").into(),
+                );
             }
             if signature_change.is_none()
                 && old.normalized_signature() != new.normalized_signature()
             {
                 return Err(ModelError::new(
                     "body-only changes require an unchanged normalized signature",
-                ));
+                )
+                .into());
             }
             if let Some(signature) = &signature_change {
                 signature.validate_facts(old, new)?;
             }
         }
         if hunks.is_empty() {
-            return Err(ModelError::new("symbol changes require changed hunks"));
+            return Err(ModelError::new("symbol changes require changed hunks").into());
         }
-        let unique_hunks: HashSet<_> = hunks.iter().collect();
-        if unique_hunks.len() != hunks.len() {
-            return Err(ModelError::new(
-                "symbol changes cannot cite duplicate hunks",
-            ));
+        let mut unique_hunks = HashSet::with_capacity(hunks.len());
+        for hunk in &hunks {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
+            if !unique_hunks.insert(hunk) {
+                return Err(ModelError::new("symbol changes cannot cite duplicate hunks").into());
+            }
         }
         for hunk in &hunks {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
             let intersects_old = old.as_ref().is_some_and(|fact| {
                 hunk.old()
                     .is_some_and(|lines| lines.intersects_source(fact.full_range()))
@@ -480,41 +647,58 @@ impl SymbolChange {
             if old_outside || new_outside || !intersects_old && !intersects_new {
                 return Err(ModelError::new(
                     "symbol change hunks must intersect a paired symbol occurrence",
-                ));
+                )
+                .into());
             }
         }
         if let (Some(signature), Some(old), Some(new)) = (&signature_change, &old, &new) {
-            if !side_has_intersection(&hunks, ComparisonSide::Base, signature.old_range())
-                && !side_has_intersection(&hunks, ComparisonSide::Head, signature.new_range())
-            {
+            if !side_has_intersection_controlled(
+                &hunks,
+                ComparisonSide::Base,
+                signature.old_range(),
+                checkpoint,
+            )? && !side_has_intersection_controlled(
+                &hunks,
+                ComparisonSide::Head,
+                signature.new_range(),
+                checkpoint,
+            )? {
                 return Err(ModelError::new(
                     "signature changes require hunk evidence on at least one exact signature range",
-                ));
+                )
+                .into());
             }
             signature.validate_facts(old, new)?;
         }
         if body_changed {
-            let body_has_evidence = [
+            let mut body_has_evidence = false;
+            for (side, fact) in [
                 (ComparisonSide::Base, old.as_ref()),
                 (ComparisonSide::Head, new.as_ref()),
-            ]
-            .into_iter()
-            .any(|(side, fact)| {
-                fact.and_then(SymbolFact::body_range)
-                    .is_some_and(|body| side_has_intersection(&hunks, side, body))
-            });
+            ] {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                if let Some(body) = fact.and_then(SymbolFact::body_range)
+                    && side_has_intersection_controlled(&hunks, side, body, checkpoint)?
+                {
+                    body_has_evidence = true;
+                    break;
+                }
+            }
             if !body_has_evidence {
                 return Err(ModelError::new(
                     "body changes require hunk evidence on at least one body range",
-                ));
+                )
+                .into());
             }
         }
         if kind == SymbolChangeKind::Modified {
             for hunk in &hunks {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
                 for (side, fact) in [
                     (ComparisonSide::Base, old.as_ref()),
                     (ComparisonSide::Head, new.as_ref()),
                 ] {
+                    checkpoint().map_err(ControlledModelError::Stopped)?;
                     let Some(lines) = hunk_range(hunk, side) else {
                         continue;
                     };
@@ -532,28 +716,41 @@ impl SymbolChange {
                     if !signature_relevant && !body_relevant {
                         return Err(ModelError::new(
                             "every present modified-hunk side must intersect a changed dimension",
-                        ));
+                        )
+                        .into());
                     }
                 }
             }
         }
-        let changed_old_lines = old.as_ref().map_or(Ok(0), |fact| {
-            changed_line_count(&hunks, ComparisonSide::Base, fact.full_range())
-        })?;
-        let changed_new_lines = new.as_ref().map_or(Ok(0), |fact| {
-            changed_line_count(&hunks, ComparisonSide::Head, fact.full_range())
-        })?;
+        let changed_old_lines = match old.as_ref() {
+            Some(fact) => changed_line_count_controlled(
+                &hunks,
+                ComparisonSide::Base,
+                fact.full_range(),
+                checkpoint,
+            )?,
+            None => 0,
+        };
+        let changed_new_lines = match new.as_ref() {
+            Some(fact) => changed_line_count_controlled(
+                &hunks,
+                ComparisonSide::Head,
+                fact.full_range(),
+                checkpoint,
+            )?,
+            None => 0,
+        };
         if changed_old_lines == 0 && changed_new_lines == 0 {
-            return Err(ModelError::new(
-                "symbol changes require changed-line evidence",
-            ));
+            return Err(ModelError::new("symbol changes require changed-line evidence").into());
         }
         if reported_counts.is_some_and(|counts| counts != (changed_old_lines, changed_new_lines)) {
             return Err(ModelError::new(
                 "serialized changed-line counts must equal derived hunk intersections",
-            ));
+            )
+            .into());
         }
         validate_navigation(&navigation)?;
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         Ok(Self {
             kind,
             old,
@@ -595,10 +792,19 @@ impl SymbolChange {
     }
 }
 
-fn side_has_intersection(hunks: &[ChangedHunk], side: ComparisonSide, source: SourceRange) -> bool {
-    hunks
-        .iter()
-        .any(|hunk| hunk_range(hunk, side).is_some_and(|range| range.intersects_source(source)))
+fn side_has_intersection_controlled<E>(
+    hunks: &[ChangedHunk],
+    side: ComparisonSide,
+    source: SourceRange,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<bool, ControlledModelError<E>> {
+    for hunk in hunks {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
+        if hunk_range(hunk, side).is_some_and(|range| range.intersects_source(source)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn hunk_range(hunk: &ChangedHunk, side: ComparisonSide) -> Option<ChangedLineRange> {
@@ -608,24 +814,33 @@ fn hunk_range(hunk: &ChangedHunk, side: ComparisonSide) -> Option<ChangedLineRan
     }
 }
 
-fn changed_line_count(
+fn changed_line_count_controlled<E>(
     hunks: &[ChangedHunk],
     side: ComparisonSide,
     source: SourceRange,
-) -> Result<u32, ModelError> {
-    let mut intersections: Vec<(u32, u32)> = hunks
-        .iter()
-        .filter_map(|hunk| hunk_range(hunk, side))
-        .filter_map(|range| {
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<u32, ControlledModelError<E>> {
+    let mut intersections = Vec::with_capacity(hunks.len());
+    for hunk in hunks {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
+        if let Some(range) = hunk_range(hunk, side) {
             let start = range.start().get().max(source.start_line().get());
             let end = range.end().get().min(source.end_line().get());
-            (start <= end).then_some((start, end))
-        })
-        .collect();
-    intersections.sort_unstable();
+            if start <= end {
+                intersections.push((start, end));
+            }
+        }
+    }
+    checked_stable_sort_by(
+        &mut intersections,
+        |left, right, _| Ok(left.cmp(right)),
+        checkpoint,
+    )
+    .map_err(ControlledModelError::Stopped)?;
     let mut total = 0_u64;
     let mut current: Option<(u32, u32)> = None;
     for (start, end) in intersections {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         match current {
             Some((current_start, current_end)) if start <= current_end.saturating_add(1) => {
                 current = Some((current_start, current_end.max(end)));
@@ -640,7 +855,8 @@ fn changed_line_count(
     if let Some((start, end)) = current {
         total += u64::from(end - start + 1);
     }
-    u32::try_from(total).map_err(|_| ModelError::new("derived changed-line count overflowed"))
+    u32::try_from(total)
+        .map_err(|_| ModelError::new("derived changed-line count overflowed").into())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -902,6 +1118,34 @@ impl CallDiffChange {
         pairing: Option<CallPairingEvidence>,
         navigation: ReviewNavigationTarget,
     ) -> Result<Self, ModelError> {
+        match Self::new_controlled(
+            kind,
+            old,
+            new,
+            arguments_changed,
+            control_context_changed,
+            pairing,
+            navigation,
+            &mut || Ok::<(), Infallible>(()),
+        ) {
+            Ok(change) => Ok(change),
+            Err(ControlledModelError::Invalid(error)) => Err(error),
+            Err(ControlledModelError::Stopped(never)) => match never {},
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_controlled<E>(
+        kind: CallChangeKind,
+        old: Option<CallFact>,
+        new: Option<CallFact>,
+        arguments_changed: bool,
+        control_context_changed: bool,
+        pairing: Option<CallPairingEvidence>,
+        navigation: ReviewNavigationTarget,
+        checkpoint: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledModelError<E>> {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         let valid = match kind {
             CallChangeKind::Added => {
                 old.is_none()
@@ -929,25 +1173,36 @@ impl CallDiffChange {
         if !valid {
             return Err(ModelError::new(
                 "call diff shape does not match its kind or changed dimensions",
-            ));
+            )
+            .into());
         }
         if let (Some(old), Some(new)) = (&old, &new)
             && (old.callee_text() != new.callee_text()
-                || old.enclosing_symbol() != new.enclosing_symbol())
+                || !optional_symbol_keys_equal_controlled(
+                    old.enclosing_symbol(),
+                    new.enclosing_symbol(),
+                    checkpoint,
+                )?)
         {
             return Err(ModelError::new(
                 "paired call modifications require the same callee and enclosing symbol",
-            ));
+            )
+            .into());
         }
         if let (Some(old), Some(new)) = (&old, &new) {
             let actual_arguments_changed = old.argument_text() != new.argument_text();
-            let actual_control_context_changed = old.control_context() != new.control_context();
+            let actual_control_context_changed = !control_contexts_equal_controlled(
+                old.control_context(),
+                new.control_context(),
+                checkpoint,
+            )?;
             if arguments_changed != actual_arguments_changed
                 || control_context_changed != actual_control_context_changed
             {
                 return Err(ModelError::new(
                     "call modification flags must match the paired syntactic facts",
-                ));
+                )
+                .into());
             }
             let evidence = pairing.as_ref().ok_or_else(|| {
                 ModelError::new("modified calls require explicit pairing evidence")
@@ -957,10 +1212,12 @@ impl CallDiffChange {
             {
                 return Err(ModelError::new(
                     "call pairing evidence must name the paired call-site locations",
-                ));
+                )
+                .into());
             }
         }
         validate_navigation(&navigation)?;
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         Ok(Self {
             kind,
             old,
@@ -992,6 +1249,57 @@ impl CallDiffChange {
     pub fn navigation(&self) -> &ReviewNavigationTarget {
         &self.navigation
     }
+}
+
+fn control_contexts_equal_controlled<E>(
+    old: &[okena_syntax::ControlContext],
+    new: &[okena_syntax::ControlContext],
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<bool, ControlledModelError<E>> {
+    checkpoint().map_err(ControlledModelError::Stopped)?;
+    if old.len() != new.len() {
+        return Ok(false);
+    }
+    for (old, new) in old.iter().zip(new) {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
+        if old != new {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn optional_symbol_keys_equal_controlled<E>(
+    old: Option<&SymbolKey>,
+    new: Option<&SymbolKey>,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<bool, ControlledModelError<E>> {
+    match (old, new) {
+        (Some(old), Some(new)) => symbol_keys_equal_controlled(old, new, checkpoint),
+        (None, None) => Ok(true),
+        (Some(_), None) | (None, Some(_)) => Ok(false),
+    }
+}
+
+fn symbol_keys_equal_controlled<E>(
+    old: &SymbolKey,
+    new: &SymbolKey,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<bool, ControlledModelError<E>> {
+    checkpoint().map_err(ControlledModelError::Stopped)?;
+    if old.kind() != new.kind()
+        || old.name() != new.name()
+        || old.qualified_path().len() != new.qualified_path().len()
+    {
+        return Ok(false);
+    }
+    for (old, new) in old.qualified_path().iter().zip(new.qualified_path()) {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
+        if old != new {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1156,15 +1464,55 @@ impl StructuredFile {
         errors: Vec<AnalysisError>,
         truncation: Option<ReviewTruncation>,
     ) -> Result<Self, ModelError> {
+        match Self::new_controlled(
+            old_path,
+            new_path,
+            language,
+            old_provenance,
+            new_provenance,
+            status,
+            old_outline,
+            new_outline,
+            symbol_changes,
+            hotspots,
+            call_diff,
+            changed_hunks,
+            errors,
+            truncation,
+            &mut || Ok::<(), Infallible>(()),
+        ) {
+            Ok(file) => Ok(file),
+            Err(ControlledModelError::Invalid(error)) => Err(error),
+            Err(ControlledModelError::Stopped(never)) => match never {},
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_controlled<E>(
+        old_path: Option<String>,
+        new_path: Option<String>,
+        language: Option<SyntaxLanguage>,
+        old_provenance: Option<SyntaxProvenance>,
+        new_provenance: Option<SyntaxProvenance>,
+        status: FileAnalysisStatus,
+        old_outline: Vec<OutlineFact>,
+        new_outline: Vec<OutlineFact>,
+        symbol_changes: Vec<SymbolChange>,
+        hotspots: Vec<StructuralHotspot>,
+        call_diff: Vec<CallDiffChange>,
+        changed_hunks: Vec<ChangedHunk>,
+        errors: Vec<AnalysisError>,
+        truncation: Option<ReviewTruncation>,
+        checkpoint: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledModelError<E>> {
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         if old_path.is_none() && new_path.is_none() {
-            return Err(ModelError::new(
-                "structured file requires at least one path",
-            ));
+            return Err(ModelError::new("structured file requires at least one path").into());
         }
         if old_path.as_ref().is_some_and(|path| path.trim().is_empty())
             || new_path.as_ref().is_some_and(|path| path.trim().is_empty())
         {
-            return Err(ModelError::new("structured file paths must not be empty"));
+            return Err(ModelError::new("structured file paths must not be empty").into());
         }
         let has_facts = !old_outline.is_empty()
             || !new_outline.is_empty()
@@ -1179,37 +1527,31 @@ impl StructuredFile {
                 | FileAnalysisStatus::Skipped
         ) && has_facts
         {
-            return Err(ModelError::new(
-                "unsuccessful files cannot contain structured facts",
-            ));
+            return Err(
+                ModelError::new("unsuccessful files cannot contain structured facts").into(),
+            );
         }
         if status == FileAnalysisStatus::Unsupported && language.is_some() {
-            return Err(ModelError::new(
-                "unsupported files cannot claim a syntax language",
-            ));
+            return Err(ModelError::new("unsupported files cannot claim a syntax language").into());
         }
         if status == FileAnalysisStatus::Unsupported
             && (old_provenance.is_some() || new_provenance.is_some())
         {
-            return Err(ModelError::new(
-                "unsupported files cannot claim syntax provenance",
-            ));
+            return Err(ModelError::new("unsupported files cannot claim syntax provenance").into());
         }
         if status == FileAnalysisStatus::Pending
             && (old_provenance.is_some() || new_provenance.is_some())
         {
-            return Err(ModelError::new(
-                "pending files cannot claim syntax provenance",
-            ));
+            return Err(ModelError::new("pending files cannot claim syntax provenance").into());
         }
         if matches!(
             status,
             FileAnalysisStatus::Parsed | FileAnalysisStatus::Partial
         ) && language.is_none()
         {
-            return Err(ModelError::new(
-                "successful structured files require a syntax language",
-            ));
+            return Err(
+                ModelError::new("successful structured files require a syntax language").into(),
+            );
         }
         if matches!(
             status,
@@ -1219,34 +1561,33 @@ impl StructuredFile {
         {
             return Err(ModelError::new(
                 "analyzed snapshot paths require matching syntax provenance",
-            ));
+            )
+            .into());
         }
         if status == FileAnalysisStatus::Parsed && (truncation.is_some() || !errors.is_empty()) {
-            return Err(ModelError::new(
-                "parsed files cannot carry errors or truncation",
-            ));
+            return Err(ModelError::new("parsed files cannot carry errors or truncation").into());
         }
         if let Some(truncation) = &truncation {
             validate_review_truncation(truncation)?;
         }
         if status == FileAnalysisStatus::Partial && truncation.is_none() && errors.is_empty() {
-            return Err(ModelError::new(
-                "partial files require errors or truncation",
-            ));
+            return Err(ModelError::new("partial files require errors or truncation").into());
         }
         if status == FileAnalysisStatus::Pending {
             if truncation.is_none() && errors.is_empty() {
                 return Err(ModelError::new(
                     "pending files require budget, cancellation, time, or analysis error evidence",
-                ));
+                )
+                .into());
             }
-            if errors
-                .iter()
-                .any(|error| error.stage() != AnalysisStage::Budget)
-            {
-                return Err(ModelError::new(
-                    "pending files can only carry budget-stage analysis errors",
-                ));
+            for error in &errors {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                if error.stage() != AnalysisStage::Budget {
+                    return Err(ModelError::new(
+                        "pending files can only carry budget-stage analysis errors",
+                    )
+                    .into());
+                }
             }
             if truncation
                 .as_ref()
@@ -1254,46 +1595,55 @@ impl StructuredFile {
             {
                 return Err(ModelError::new(
                     "pending file truncation must describe a budget, cancellation, or time limit",
-                ));
+                )
+                .into());
             }
         }
         if status == FileAnalysisStatus::Failed && errors.is_empty() {
-            return Err(ModelError::new(
-                "failed files require analysis error evidence",
-            ));
+            return Err(ModelError::new("failed files require analysis error evidence").into());
         }
-        let unique_file_hunks: HashSet<_> = changed_hunks.iter().collect();
-        if unique_file_hunks.len() != changed_hunks.len() {
-            return Err(ModelError::new(
-                "structured files cannot contain duplicate changed hunks",
-            ));
+        let mut unique_file_hunks = HashSet::with_capacity(changed_hunks.len());
+        for hunk in &changed_hunks {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
+            if !unique_file_hunks.insert(hunk) {
+                return Err(ModelError::new(
+                    "structured files cannot contain duplicate changed hunks",
+                )
+                .into());
+            }
         }
-        if symbol_changes.iter().any(|change| {
-            change
-                .hunks()
-                .iter()
-                .any(|hunk| !unique_file_hunks.contains(hunk))
-        }) {
-            return Err(ModelError::new(
-                "symbol changes can only cite hunks from their structured file",
-            ));
+        for change in &symbol_changes {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
+            for hunk in change.hunks() {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                if !unique_file_hunks.contains(hunk) {
+                    return Err(ModelError::new(
+                        "symbol changes can only cite hunks from their structured file",
+                    )
+                    .into());
+                }
+            }
         }
         for fact in old_outline.iter() {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
             if fact.symbol().side() != ComparisonSide::Base
                 || Some(fact.provenance()) != old_provenance.as_ref()
             {
                 return Err(ModelError::new(
                     "old outline must use the base side and old document provenance",
-                ));
+                )
+                .into());
             }
         }
         for fact in new_outline.iter() {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
             if fact.symbol().side() != ComparisonSide::Head
                 || Some(fact.provenance()) != new_provenance.as_ref()
             {
                 return Err(ModelError::new(
                     "new outline must use the head side and new document provenance",
-                ));
+                )
+                .into());
             }
         }
         let file = Self {
@@ -1313,38 +1663,47 @@ impl StructuredFile {
             truncation,
         };
         if let Some(language) = file.language {
-            if file
-                .old_provenance
-                .iter()
-                .chain(file.new_provenance.iter())
-                .any(|provenance| provenance.language() != language)
-            {
-                return Err(ModelError::new(
-                    "document provenance must use the file syntax language",
-                ));
+            for provenance in file.old_provenance.iter().chain(file.new_provenance.iter()) {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                if provenance.language() != language {
+                    return Err(ModelError::new(
+                        "document provenance must use the file syntax language",
+                    )
+                    .into());
+                }
             }
-            let symbols_match = file.symbol_changes.iter().all(|change| {
-                change
-                    .old()
-                    .into_iter()
-                    .chain(change.new_fact())
-                    .all(|fact| fact.provenance().language() == language)
-            });
-            let hotspots_match = file
-                .hotspots
-                .iter()
-                .all(|hotspot| hotspot.provenance().language() == language);
-            let calls_match = file.call_diff.iter().all(|change| {
-                change
-                    .old()
-                    .into_iter()
-                    .chain(change.new_fact())
-                    .all(|fact| fact.provenance().language() == language)
-            });
-            if !symbols_match || !hotspots_match || !calls_match {
-                return Err(ModelError::new(
-                    "structured facts must use the file syntax language",
-                ));
+            for change in &file.symbol_changes {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                for fact in change.old().into_iter().chain(change.new_fact()) {
+                    checkpoint().map_err(ControlledModelError::Stopped)?;
+                    if fact.provenance().language() != language {
+                        return Err(ModelError::new(
+                            "structured facts must use the file syntax language",
+                        )
+                        .into());
+                    }
+                }
+            }
+            for hotspot in &file.hotspots {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                if hotspot.provenance().language() != language {
+                    return Err(ModelError::new(
+                        "structured facts must use the file syntax language",
+                    )
+                    .into());
+                }
+            }
+            for change in &file.call_diff {
+                checkpoint().map_err(ControlledModelError::Stopped)?;
+                for fact in change.old().into_iter().chain(change.new_fact()) {
+                    checkpoint().map_err(ControlledModelError::Stopped)?;
+                    if fact.provenance().language() != language {
+                        return Err(ModelError::new(
+                            "structured facts must use the file syntax language",
+                        )
+                        .into());
+                    }
+                }
             }
         }
         for navigation in file
@@ -1354,15 +1713,18 @@ impl StructuredFile {
             .chain(file.hotspots.iter().map(StructuralHotspot::navigation))
             .chain(file.call_diff.iter().map(CallDiffChange::navigation))
         {
+            checkpoint().map_err(ControlledModelError::Stopped)?;
             let expected = file
                 .path_on(navigation.side)
                 .ok_or_else(|| ModelError::new("navigation targets a missing comparison side"))?;
             if navigation.path != expected {
                 return Err(ModelError::new(
                     "navigation path does not match its structured file side",
-                ));
+                )
+                .into());
             }
         }
+        checkpoint().map_err(ControlledModelError::Stopped)?;
         Ok(file)
     }
     pub fn path_on(&self, side: ComparisonSide) -> Option<&str> {
@@ -1967,12 +2329,14 @@ fn add_coverage_count(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use okena_core::review::{
         ComparisonStrategy, GitObjectId, ResolvedComparison, ReviewComparisonId, ReviewSnapshot,
     };
     use okena_core::types::DiffMode;
-    use okena_syntax::{SymbolKind, SymbolVisibility};
+    use okena_syntax::{ControlContext, SymbolKind, SymbolVisibility};
     use serde_json::json;
 
     fn nz(value: u32) -> NonZeroU32 {
@@ -2457,6 +2821,67 @@ mod tests {
     }
 
     #[test]
+    fn controlled_structured_file_validation_stops_inside_hunk_membership_work() {
+        let hunks: Vec<_> = (1_u32..=100)
+            .map(|line| {
+                ChangedHunk::new(
+                    None,
+                    Some(ChangedLineRange::new(nz(line), nz(line)).unwrap()),
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut checks = 0_u32;
+        let error = StructuredFile::new_controlled(
+            None,
+            Some("src/lib.rs".into()),
+            Some(SyntaxLanguage::Rust),
+            None,
+            Some(provenance()),
+            FileAnalysisStatus::Parsed,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            hunks,
+            Vec::new(),
+            None,
+            &mut || {
+                checks += 1;
+                if checks == 40 { Err("stopped") } else { Ok(()) }
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ControlledModelError::Stopped("stopped")));
+    }
+
+    #[test]
+    fn checked_stable_sort_can_stop_after_comparisons_begin() {
+        let comparisons = Cell::new(0_u32);
+        let mut values: Vec<_> = (0_u32..100).rev().collect();
+        let error = checked_stable_sort_by(
+            &mut values,
+            |left, right, _| {
+                comparisons.set(comparisons.get() + 1);
+                Ok(left.cmp(right))
+            },
+            &mut || {
+                if comparisons.get() >= 10 {
+                    Err("stopped")
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "stopped");
+        assert!(comparisons.get() >= 10);
+    }
+
+    #[test]
     fn modified_calls_require_a_changed_dimension_and_same_context() {
         let call = CallFact::new(
             provenance(),
@@ -2514,6 +2939,63 @@ mod tests {
         let mut invalid_wire = serde_json::to_value(change).unwrap();
         invalid_wire["arguments_changed"] = json!(false);
         assert!(serde_json::from_value::<CallDiffChange>(invalid_wire).is_err());
+    }
+
+    #[test]
+    fn controlled_modified_call_validation_stops_inside_context_comparison() {
+        let old_contexts: Vec<_> = (0_u32..100)
+            .map(|index| ControlContext::Other(format!("context-{index}")))
+            .collect();
+        let mut new_contexts = old_contexts.clone();
+        new_contexts[99] = ControlContext::Other("changed".into());
+        let enclosing = symbol("pub fn run()");
+        let old = CallFact::new(
+            provenance(),
+            "work",
+            "value",
+            range(20, 22, 2, 2),
+            range(16, 23, 2, 2),
+            Some(enclosing.key().clone()),
+            old_contexts,
+        )
+        .unwrap();
+        let new = CallFact::new(
+            provenance(),
+            "work",
+            "value",
+            range(20, 22, 2, 2),
+            range(16, 23, 2, 2),
+            Some(enclosing.key().clone()),
+            new_contexts,
+        )
+        .unwrap();
+        let pairing = CallPairingEvidence::new(
+            CallPairingStrategy::UniqueOccurrenceWithinEnclosingRange,
+            old.call_site_range(),
+            new.call_site_range(),
+            enclosing.full_range(),
+            enclosing.full_range(),
+            1,
+            1,
+        )
+        .unwrap();
+        let mut checks = 0_u32;
+        let error = CallDiffChange::new_controlled(
+            CallChangeKind::Modified,
+            Some(old),
+            Some(new),
+            false,
+            true,
+            Some(pairing),
+            navigation(ComparisonSide::Head),
+            &mut || {
+                checks += 1;
+                if checks == 50 { Err("stopped") } else { Ok(()) }
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ControlledModelError::Stopped("stopped")));
     }
 
     #[test]

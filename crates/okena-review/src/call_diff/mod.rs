@@ -7,6 +7,7 @@ use std::fmt;
 use okena_core::review::{ComparisonSide, ReviewNavigationTarget};
 use okena_syntax::{CallFact, ControlContext, SourceRange, SymbolKey, SyntaxLanguage};
 
+use crate::model::{ControlledModelError, checked_stable_sort_by};
 use crate::{CallChangeKind, CallDiffChange, CallPairingEvidence, CallPairingStrategy, ModelError};
 
 /// Exact inputs for comparing direct calls in one uniquely matched descriptive symbol.
@@ -25,6 +26,50 @@ pub struct CallDiffInput<'a> {
     new_calls: &'a [CallFact],
 }
 
+/// Borrowed call candidates already indexed for one enclosing symbol.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexedCallDiffInput<'a> {
+    old_path: &'a str,
+    new_path: &'a str,
+    enclosing_symbol: &'a SymbolKey,
+    old_enclosing_range: SourceRange,
+    new_enclosing_range: SourceRange,
+    old_calls: &'a [&'a CallFact],
+    new_calls: &'a [&'a CallFact],
+}
+
+impl<'a> IndexedCallDiffInput<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        old_path: &'a str,
+        new_path: &'a str,
+        enclosing_symbol: &'a SymbolKey,
+        old_enclosing_range: SourceRange,
+        new_enclosing_range: SourceRange,
+        old_calls: &'a [&'a CallFact],
+        new_calls: &'a [&'a CallFact],
+    ) -> Result<Self, CallDiffError> {
+        validate_paths(old_path, new_path)?;
+        Ok(Self {
+            old_path,
+            new_path,
+            enclosing_symbol,
+            old_enclosing_range,
+            new_enclosing_range,
+            old_calls,
+            new_calls,
+        })
+    }
+}
+
+/// Why a controlled deterministic comparison stopped before producing a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparisonStopReason {
+    Cancelled,
+    Deadline,
+    Disconnected,
+}
+
 impl<'a> CallDiffInput<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -36,12 +81,7 @@ impl<'a> CallDiffInput<'a> {
         old_calls: &'a [CallFact],
         new_calls: &'a [CallFact],
     ) -> Result<Self, CallDiffError> {
-        if old_path.trim().is_empty() {
-            return Err(CallDiffError::EmptyPath(ComparisonSide::Base));
-        }
-        if new_path.trim().is_empty() {
-            return Err(CallDiffError::EmptyPath(ComparisonSide::Head));
-        }
+        validate_paths(old_path, new_path)?;
         Ok(Self {
             old_path,
             new_path,
@@ -83,6 +123,63 @@ impl std::error::Error for CallDiffError {
     }
 }
 
+/// Error returned only by cooperative CallDiff entry points.
+#[derive(Debug)]
+pub enum ControlledCallDiffError {
+    Comparison(CallDiffError),
+    Stopped(ComparisonStopReason),
+}
+
+impl fmt::Display for ControlledCallDiffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Comparison(error) => error.fmt(formatter),
+            Self::Stopped(reason) => write!(formatter, "call-diff comparison stopped: {reason:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlledCallDiffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Comparison(error) => Some(error),
+            Self::Stopped(_) => None,
+        }
+    }
+}
+
+impl ControlledCallDiffError {
+    pub fn stop_reason(&self) -> Option<ComparisonStopReason> {
+        match self {
+            Self::Stopped(reason) => Some(*reason),
+            Self::Comparison(_) => None,
+        }
+    }
+}
+
+impl From<CallDiffError> for ControlledCallDiffError {
+    fn from(error: CallDiffError) -> Self {
+        Self::Comparison(error)
+    }
+}
+
+impl From<ModelError> for ControlledCallDiffError {
+    fn from(error: ModelError) -> Self {
+        Self::Comparison(CallDiffError::InvalidChange(error))
+    }
+}
+
+impl From<ControlledModelError<ComparisonStopReason>> for ControlledCallDiffError {
+    fn from(error: ControlledModelError<ComparisonStopReason>) -> Self {
+        match error {
+            ControlledModelError::Invalid(error) => {
+                Self::Comparison(CallDiffError::InvalidChange(error))
+            }
+            ControlledModelError::Stopped(reason) => Self::Stopped(reason),
+        }
+    }
+}
+
 impl From<ModelError> for CallDiffError {
     fn from(value: ModelError) -> Self {
         Self::InvalidChange(value)
@@ -101,39 +198,132 @@ struct Candidates<'a> {
 /// candidate on each side with identical syntax provenance. Any repetition or provenance mismatch
 /// deliberately degrades to removed and added occurrences.
 pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, CallDiffError> {
-    let mut candidates = BTreeMap::<&str, Candidates<'_>>::new();
-    for call in calls_in_scope(
-        input.old_calls,
-        input.enclosing_symbol,
-        input.old_enclosing_range,
-    ) {
-        candidates
-            .entry(call.callee_text())
-            .or_default()
-            .old
-            .push(call);
+    match compare_calls_controlled(input, &mut || None) {
+        Ok(changes) => Ok(changes),
+        Err(ControlledCallDiffError::Comparison(error)) => Err(error),
+        Err(ControlledCallDiffError::Stopped(_)) => {
+            unreachable!("the legacy CallDiff entry point never requests a stop")
+        }
     }
-    for call in calls_in_scope(
-        input.new_calls,
-        input.enclosing_symbol,
-        input.new_enclosing_range,
-    ) {
-        candidates
-            .entry(call.callee_text())
-            .or_default()
-            .new
-            .push(call);
+}
+
+/// Compare direct calls with a cooperative stop checkpoint.
+pub fn compare_calls_controlled(
+    input: CallDiffInput<'_>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<CallDiffChange>, ControlledCallDiffError> {
+    check(checkpoint)?;
+    let mut old_calls = Vec::new();
+    for call in input.old_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.old_enclosing_range.contains(call.call_site_range())
+        {
+            old_calls.push(call);
+        }
+    }
+    let mut new_calls = Vec::new();
+    for call in input.new_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.new_enclosing_range.contains(call.call_site_range())
+        {
+            new_calls.push(call);
+        }
+    }
+    compare_indexed_calls_controlled(
+        IndexedCallDiffInput::new(
+            input.old_path,
+            input.new_path,
+            input.enclosing_symbol,
+            input.old_enclosing_range,
+            input.new_enclosing_range,
+            &old_calls,
+            &new_calls,
+        )?,
+        checkpoint,
+    )
+}
+
+/// Compare pre-indexed borrowed candidates with cooperative stop checkpoints.
+pub fn compare_indexed_calls(
+    input: IndexedCallDiffInput<'_>,
+) -> Result<Vec<CallDiffChange>, CallDiffError> {
+    match compare_indexed_calls_controlled(input, &mut || None) {
+        Ok(changes) => Ok(changes),
+        Err(ControlledCallDiffError::Comparison(error)) => Err(error),
+        Err(ControlledCallDiffError::Stopped(_)) => {
+            unreachable!("the legacy indexed CallDiff entry point never requests a stop")
+        }
+    }
+}
+
+/// Compare pre-indexed borrowed candidates with cooperative stop checkpoints.
+pub fn compare_indexed_calls_controlled(
+    input: IndexedCallDiffInput<'_>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<CallDiffChange>, ControlledCallDiffError> {
+    check(checkpoint)?;
+    let mut candidates = BTreeMap::<&str, Candidates<'_>>::new();
+    for &call in input.old_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.old_enclosing_range.contains(call.call_site_range())
+        {
+            candidates
+                .entry(call.callee_text())
+                .or_default()
+                .old
+                .push(call);
+        }
+    }
+    for &call in input.new_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.new_enclosing_range.contains(call.call_site_range())
+        {
+            candidates
+                .entry(call.callee_text())
+                .or_default()
+                .new
+                .push(call);
+        }
     }
 
     let mut changes = Vec::new();
     for group in candidates.values_mut() {
-        group.old.sort_by(|left, right| compare_facts(left, right));
-        group.new.sort_by(|left, right| compare_facts(left, right));
+        check(checkpoint)?;
+        for call in &group.old {
+            check(checkpoint)?;
+            for _ in call.control_context() {
+                check(checkpoint)?;
+            }
+        }
+        for call in &group.new {
+            check(checkpoint)?;
+            for _ in call.control_context() {
+                check(checkpoint)?;
+            }
+        }
+        checked_stable_sort_by(
+            &mut group.old,
+            |left, right, checkpoint| compare_facts_controlled(left, right, checkpoint),
+            &mut || check(checkpoint),
+        )?;
+        checked_stable_sort_by(
+            &mut group.new,
+            |left, right, checkpoint| compare_facts_controlled(left, right, checkpoint),
+            &mut || check(checkpoint),
+        )?;
         if let ([old], [new]) = (group.old.as_slice(), group.new.as_slice())
             && old.provenance() == new.provenance()
         {
             let arguments_changed = old.argument_text() != new.argument_text();
-            let control_context_changed = old.control_context() != new.control_context();
+            let control_context_changed = !contexts_equal_controlled(
+                old.control_context(),
+                new.control_context(),
+                checkpoint,
+            )?;
             if !arguments_changed && !control_context_changed {
                 continue;
             }
@@ -146,7 +336,7 @@ pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, Ca
                 1,
                 1,
             )?;
-            changes.push(CallDiffChange::new(
+            changes.push(CallDiffChange::new_controlled(
                 CallChangeKind::Modified,
                 Some((*old).clone()),
                 Some((*new).clone()),
@@ -154,12 +344,14 @@ pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, Ca
                 control_context_changed,
                 Some(pairing),
                 navigation(input.new_path, ComparisonSide::Head, new.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
             )?);
             continue;
         }
 
         for call in &group.old {
-            changes.push(CallDiffChange::new(
+            check(checkpoint)?;
+            changes.push(CallDiffChange::new_controlled(
                 CallChangeKind::Removed,
                 Some((*call).clone()),
                 None,
@@ -167,10 +359,12 @@ pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, Ca
                 false,
                 None,
                 navigation(input.old_path, ComparisonSide::Base, call.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
             )?);
         }
         for call in &group.new {
-            changes.push(CallDiffChange::new(
+            check(checkpoint)?;
+            changes.push(CallDiffChange::new_controlled(
                 CallChangeKind::Added,
                 None,
                 Some((*call).clone()),
@@ -178,22 +372,33 @@ pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, Ca
                 false,
                 None,
                 navigation(input.new_path, ComparisonSide::Head, call.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
             )?);
         }
     }
-    changes.sort_by(compare_changes);
+    checked_stable_sort_by(&mut changes, compare_changes_controlled, &mut || {
+        check(checkpoint)
+    })?;
     Ok(changes)
 }
 
-fn calls_in_scope<'a>(
-    calls: &'a [CallFact],
-    enclosing_symbol: &SymbolKey,
-    enclosing_range: SourceRange,
-) -> impl Iterator<Item = &'a CallFact> {
-    calls.iter().filter(move |call| {
-        call.enclosing_symbol() == Some(enclosing_symbol)
-            && enclosing_range.contains(call.call_site_range())
-    })
+fn validate_paths(old_path: &str, new_path: &str) -> Result<(), CallDiffError> {
+    if old_path.trim().is_empty() {
+        return Err(CallDiffError::EmptyPath(ComparisonSide::Base));
+    }
+    if new_path.trim().is_empty() {
+        return Err(CallDiffError::EmptyPath(ComparisonSide::Head));
+    }
+    Ok(())
+}
+
+fn check(
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<(), ControlledCallDiffError> {
+    match checkpoint() {
+        Some(reason) => Err(ControlledCallDiffError::Stopped(reason)),
+        None => Ok(()),
+    }
 }
 
 fn navigation(path: &str, side: ComparisonSide, call_range: SourceRange) -> ReviewNavigationTarget {
@@ -206,8 +411,13 @@ fn navigation(path: &str, side: ComparisonSide, call_range: SourceRange) -> Revi
     }
 }
 
-fn compare_facts(left: &CallFact, right: &CallFact) -> Ordering {
-    left.call_site_range()
+fn compare_facts_controlled<E>(
+    left: &CallFact,
+    right: &CallFact,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .call_site_range()
         .start_byte()
         .cmp(&right.call_site_range().start_byte())
         .then_with(|| {
@@ -215,13 +425,18 @@ fn compare_facts(left: &CallFact, right: &CallFact) -> Ordering {
                 .end_byte()
                 .cmp(&right.call_site_range().end_byte())
         })
-        .then_with(|| left.argument_text().cmp(right.argument_text()))
-        .then_with(|| compare_contexts(left.control_context(), right.control_context()))
-        .then_with(|| {
-            language_rank(left.provenance().language())
-                .cmp(&language_rank(right.provenance().language()))
-        })
-        .then_with(|| left.provenance().parser().cmp(right.provenance().parser()))
+        .then_with(|| left.argument_text().cmp(right.argument_text()));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    let ordering =
+        compare_contexts_controlled(left.control_context(), right.control_context(), checkpoint)?;
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    Ok(language_rank(left.provenance().language())
+        .cmp(&language_rank(right.provenance().language()))
+        .then_with(|| left.provenance().parser().cmp(right.provenance().parser())))
 }
 
 fn language_rank(language: SyntaxLanguage) -> u8 {
@@ -232,8 +447,13 @@ fn language_rank(language: SyntaxLanguage) -> u8 {
     }
 }
 
-fn compare_contexts(left: &[ControlContext], right: &[ControlContext]) -> Ordering {
+fn compare_contexts_controlled<E>(
+    left: &[ControlContext],
+    right: &[ControlContext],
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
     for (left, right) in left.iter().zip(right) {
+        checkpoint()?;
         let ordering =
             context_rank(left)
                 .cmp(&context_rank(right))
@@ -242,10 +462,18 @@ fn compare_contexts(left: &[ControlContext], right: &[ControlContext]) -> Orderi
                     _ => Ordering::Equal,
                 });
         if ordering != Ordering::Equal {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    left.len().cmp(&right.len())
+    Ok(left.len().cmp(&right.len()))
+}
+
+fn contexts_equal_controlled(
+    left: &[ControlContext],
+    right: &[ControlContext],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<bool, ControlledCallDiffError> {
+    Ok(compare_contexts_controlled(left, right, &mut || check(checkpoint))? == Ordering::Equal)
 }
 
 fn context_rank(context: &ControlContext) -> u8 {
@@ -260,8 +488,13 @@ fn context_rank(context: &ControlContext) -> u8 {
     }
 }
 
-fn compare_changes(left: &CallDiffChange, right: &CallDiffChange) -> Ordering {
-    left.navigation()
+fn compare_changes_controlled<E>(
+    left: &CallDiffChange,
+    right: &CallDiffChange,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .navigation()
         .line
         .cmp(&right.navigation().line)
         .then_with(|| {
@@ -272,13 +505,16 @@ fn compare_changes(left: &CallDiffChange, right: &CallDiffChange) -> Ordering {
         .then_with(|| change_rank(left.kind()).cmp(&change_rank(right.kind())))
         .then_with(|| change_callee(left).cmp(change_callee(right)))
         .then_with(|| left.navigation().path.cmp(&right.navigation().path))
-        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)))
-        .then_with(|| match (change_fact(left), change_fact(right)) {
-            (Some(left), Some(right)) => compare_facts(left, right),
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        })
+        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    match (change_fact(left), change_fact(right)) {
+        (Some(left), Some(right)) => compare_facts_controlled(left, right, checkpoint),
+        (None, Some(_)) => Ok(Ordering::Less),
+        (Some(_), None) => Ok(Ordering::Greater),
+        (None, None) => Ok(Ordering::Equal),
+    }
 }
 
 fn change_rank(kind: CallChangeKind) -> u8 {
@@ -746,5 +982,159 @@ mod tests {
             error,
             CallDiffError::EmptyPath(ComparisonSide::Base)
         ));
+
+        let legacy_shape = match error {
+            CallDiffError::EmptyPath(_) => "empty_path",
+            CallDiffError::InvalidChange(_) => "invalid_change",
+        };
+        assert_eq!(legacy_shape, "empty_path");
+    }
+
+    #[test]
+    fn legacy_entry_point_matches_never_stopped_controlled_output() {
+        let enclosing = key(&[], "review");
+        let old = vec![call("load", "(old)", 10, 2, &enclosing, Vec::new())];
+        let new = vec![call("load", "(new)", 30, 4, &enclosing, Vec::new())];
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &old,
+            &new,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compare_calls(input).unwrap(),
+            compare_calls_controlled(input, &mut || None).unwrap()
+        );
+    }
+
+    #[test]
+    fn controlled_comparison_stops_during_large_candidate_sort() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..100)
+            .rev()
+            .map(|index| {
+                call(
+                    "repeated",
+                    &format!("({index})"),
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &calls,
+            &[],
+        )
+        .unwrap();
+        let mut checks = 0_u32;
+        let error = compare_calls_controlled(input, &mut || {
+            checks += 1;
+            (checks == 306).then_some(ComparisonStopReason::Deadline)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+    }
+
+    #[test]
+    fn controlled_comparison_distinguishes_deadline_and_disconnect_stops() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..100)
+            .map(|index| {
+                call(
+                    &format!("call_{index}"),
+                    "()",
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &calls,
+            &calls,
+        )
+        .unwrap();
+        let mut checkpoints = 0_u32;
+        let error = compare_calls_controlled(input, &mut || {
+            checkpoints += 1;
+            (checkpoints == 250).then_some(ComparisonStopReason::Deadline)
+        })
+        .unwrap_err();
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+
+        let empty = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let error =
+            compare_calls_controlled(empty, &mut || Some(ComparisonStopReason::Disconnected))
+                .unwrap_err();
+        assert_eq!(
+            error.stop_reason(),
+            Some(ComparisonStopReason::Disconnected)
+        );
+    }
+
+    #[test]
+    fn indexed_candidates_are_checkpointed_near_linearly() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..250)
+            .map(|index| {
+                call(
+                    &format!("call_{index}"),
+                    "()",
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let references: Vec<_> = calls.iter().collect();
+        let input = IndexedCallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &references,
+            &references,
+        )
+        .unwrap();
+        let mut checkpoints = 0_usize;
+        let changes = compare_indexed_calls_controlled(input, &mut || {
+            checkpoints += 1;
+            None
+        })
+        .unwrap();
+
+        assert!(changes.is_empty());
+        assert!(checkpoints >= references.len() * 2);
+        assert!(checkpoints <= references.len() * 8 + 2);
     }
 }

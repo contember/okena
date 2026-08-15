@@ -1,7 +1,7 @@
 //! Deterministic structural comparison for one exact file pair.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use okena_core::review::{
@@ -9,10 +9,15 @@ use okena_core::review::{
 };
 use okena_syntax::{
     CallFact, ControlContext, DiagnosticSeverity, DocumentStatus, DocumentStructure, SourceRange,
-    SymbolFact, SymbolKey, SymbolKind, SyntaxLanguage, SyntaxTruncation, SyntaxTruncationReason,
+    SymbolFact, SymbolKey, SymbolKind, SyntaxLanguage, SyntaxProvenance, SyntaxTruncation,
+    SyntaxTruncationReason,
 };
 
-use crate::call_diff::{CallDiffError, CallDiffInput, compare_calls};
+use crate::call_diff::{
+    CallDiffError, ComparisonStopReason, ControlledCallDiffError, IndexedCallDiffInput,
+    compare_indexed_calls_controlled,
+};
+use crate::model::{ControlledModelError, checked_stable_sort_by};
 use crate::{
     AnalysisError, AnalysisStage, CallChangeKind, CallDiffChange, ChangedHunk, ChangedLineRange,
     FileAnalysisStatus, ModelError, OutlineFact, SignatureChange, StructuralHotspot,
@@ -21,17 +26,32 @@ use crate::{
 
 /// Invalid comparator input or a result rejected by the frozen review model.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructureError(String);
+pub enum StructureError {
+    Invalid(String),
+    Stopped(ComparisonStopReason),
+}
 
 impl StructureError {
     fn invalid(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self::Invalid(message.into())
+    }
+
+    pub fn stop_reason(&self) -> Option<ComparisonStopReason> {
+        match self {
+            Self::Stopped(reason) => Some(*reason),
+            Self::Invalid(_) => None,
+        }
     }
 }
 
 impl fmt::Display for StructureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        match self {
+            Self::Invalid(message) => formatter.write_str(message),
+            Self::Stopped(reason) => {
+                write!(formatter, "structural comparison stopped: {reason:?}")
+            }
+        }
     }
 }
 
@@ -39,13 +59,31 @@ impl std::error::Error for StructureError {}
 
 impl From<ModelError> for StructureError {
     fn from(error: ModelError) -> Self {
-        Self(error.to_string())
+        Self::Invalid(error.to_string())
     }
 }
 
 impl From<CallDiffError> for StructureError {
     fn from(error: CallDiffError) -> Self {
-        Self(error.to_string())
+        Self::Invalid(error.to_string())
+    }
+}
+
+impl From<ControlledCallDiffError> for StructureError {
+    fn from(error: ControlledCallDiffError) -> Self {
+        match error {
+            ControlledCallDiffError::Comparison(error) => Self::Invalid(error.to_string()),
+            ControlledCallDiffError::Stopped(reason) => Self::Stopped(reason),
+        }
+    }
+}
+
+impl From<ControlledModelError<ComparisonStopReason>> for StructureError {
+    fn from(error: ControlledModelError<ComparisonStopReason>) -> Self {
+        match error {
+            ControlledModelError::Invalid(error) => Self::Invalid(error.to_string()),
+            ControlledModelError::Stopped(reason) => Self::Stopped(reason),
+        }
     }
 }
 
@@ -62,6 +100,26 @@ pub fn compare_structured_file(
     new_document: Option<&DocumentStructure>,
     changed_hunks: &[ChangedHunk],
 ) -> Result<StructuredFile, StructureError> {
+    compare_structured_file_controlled(
+        old_path,
+        new_path,
+        old_document,
+        new_document,
+        changed_hunks,
+        &mut || None,
+    )
+}
+
+/// Compare one exact file pair with cooperative cancellation/deadline checkpoints.
+pub fn compare_structured_file_controlled(
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+    old_document: Option<&DocumentStructure>,
+    new_document: Option<&DocumentStructure>,
+    changed_hunks: &[ChangedHunk],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<StructuredFile, StructureError> {
+    check(checkpoint)?;
     validate_inputs(old_path, new_path, old_document, new_document)?;
 
     if old_path.is_some() && old_document.is_none() || new_path.is_some() && new_document.is_none()
@@ -72,6 +130,7 @@ pub fn compare_structured_file(
             FileAnalysisStatus::Skipped,
             changed_hunks,
             Vec::new(),
+            checkpoint,
         );
     }
 
@@ -80,7 +139,7 @@ pub fn compare_structured_file(
         .iter()
         .any(|document| document.status() == DocumentStatus::Failed)
     {
-        let mut errors = document_errors(&documents, true)?;
+        let mut errors = document_errors(&documents, true, checkpoint)?;
         if errors.is_empty() {
             errors.push(AnalysisError::new(
                 selected_path(old_path, new_path).map(str::to_owned),
@@ -94,32 +153,35 @@ pub fn compare_structured_file(
             FileAnalysisStatus::Failed,
             changed_hunks,
             errors,
+            checkpoint,
         );
     }
     if documents
         .iter()
         .any(|document| document.status() == DocumentStatus::Unsupported)
     {
-        let errors = document_errors(&documents, true)?;
+        let errors = document_errors(&documents, true, checkpoint)?;
         return unsuccessful_file(
             old_path,
             new_path,
             FileAnalysisStatus::Unsupported,
             changed_hunks,
             errors,
+            checkpoint,
         );
     }
     if documents
         .iter()
         .any(|document| document.status() == DocumentStatus::Skipped)
     {
-        let errors = document_errors(&documents, true)?;
+        let errors = document_errors(&documents, true, checkpoint)?;
         return unsuccessful_file(
             old_path,
             new_path,
             FileAnalysisStatus::Skipped,
             changed_hunks,
             errors,
+            checkpoint,
         );
     }
 
@@ -141,15 +203,16 @@ pub fn compare_structured_file(
                 AnalysisStage::Comparison,
                 "old and new syntax languages differ; structural facts were not matched",
             )?],
+            checkpoint,
         );
     }
 
     let old_outline = old_document
-        .map(|document| build_outline(document, ComparisonSide::Base))
+        .map(|document| build_outline(document, ComparisonSide::Base, checkpoint))
         .transpose()?
         .unwrap_or_default();
     let new_outline = new_document
-        .map(|document| build_outline(document, ComparisonSide::Head))
+        .map(|document| build_outline(document, ComparisonSide::Head, checkpoint))
         .transpose()?
         .unwrap_or_default();
     let symbol_changes = compare_symbols(
@@ -162,13 +225,16 @@ pub fn compare_structured_file(
             .map(DocumentStructure::symbols)
             .unwrap_or_default(),
         changed_hunks,
+        checkpoint,
     )?;
-    let call_diff = compare_matched_calls(old_path, new_path, old_document, new_document)?;
-    let hotspots = build_hotspots(new_path, new_document, &symbol_changes)?;
+    let call_diff =
+        compare_matched_calls(old_path, new_path, old_document, new_document, checkpoint)?;
+    let hotspots = build_hotspots(new_path, new_document, &symbol_changes, checkpoint)?;
 
-    let mut errors = document_errors(&documents, false)?;
+    let mut errors = document_errors(&documents, false, checkpoint)?;
     let truncations = document_truncations(old_document, new_document);
     for (side, document, truncation) in &truncations {
+        check(checkpoint)?;
         errors.push(AnalysisError::new(
             Some(document.path().to_owned()),
             AnalysisStage::Budget,
@@ -193,7 +259,7 @@ pub fn compare_structured_file(
         FileAnalysisStatus::Parsed
     };
 
-    Ok(StructuredFile::new(
+    let file = StructuredFile::new_controlled(
         old_path.map(str::to_owned),
         new_path.map(str::to_owned),
         Some(language),
@@ -205,10 +271,12 @@ pub fn compare_structured_file(
         symbol_changes,
         hotspots,
         call_diff,
-        changed_hunks.to_vec(),
+        clone_hunks(changed_hunks, checkpoint)?,
         errors,
         review_truncation,
-    )?)
+        &mut || checkpoint().map_or(Ok(()), Err),
+    )?;
+    Ok(file)
 }
 
 fn validate_inputs(
@@ -253,8 +321,9 @@ fn unsuccessful_file(
     status: FileAnalysisStatus,
     changed_hunks: &[ChangedHunk],
     errors: Vec<AnalysisError>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<StructuredFile, StructureError> {
-    Ok(StructuredFile::new(
+    let file = StructuredFile::new_controlled(
         old_path.map(str::to_owned),
         new_path.map(str::to_owned),
         None,
@@ -266,10 +335,24 @@ fn unsuccessful_file(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        changed_hunks.to_vec(),
+        clone_hunks(changed_hunks, checkpoint)?,
         errors,
         None,
-    )?)
+        &mut || checkpoint().map_or(Ok(()), Err),
+    )?;
+    Ok(file)
+}
+
+fn clone_hunks(
+    hunks: &[ChangedHunk],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<ChangedHunk>, StructureError> {
+    let mut cloned = Vec::with_capacity(hunks.len());
+    for hunk in hunks {
+        check(checkpoint)?;
+        cloned.push(hunk.clone());
+    }
+    Ok(cloned)
 }
 
 fn selected_path<'a>(old_path: Option<&'a str>, new_path: Option<&'a str>) -> Option<&'a str> {
@@ -279,10 +362,13 @@ fn selected_path<'a>(old_path: Option<&'a str>, new_path: Option<&'a str>) -> Op
 fn document_errors(
     documents: &[&DocumentStructure],
     include_all: bool,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<Vec<AnalysisError>, StructureError> {
     let mut errors = Vec::new();
     for document in documents {
+        check(checkpoint)?;
         for diagnostic in document.diagnostics() {
+            check(checkpoint)?;
             if !include_all && diagnostic.severity() == DiagnosticSeverity::Info {
                 continue;
             }
@@ -316,7 +402,9 @@ fn document_truncations<'a>(
 
 fn translate_truncation(side: ComparisonSide, truncation: &SyntaxTruncation) -> ReviewTruncation {
     let reason = match truncation.reason() {
-        SyntaxTruncationReason::SourceBytes => TruncationReason::ByteLimit,
+        SyntaxTruncationReason::SourceBytes | SyntaxTruncationReason::CaptureBytes => {
+            TruncationReason::ByteLimit
+        }
         SyntaxTruncationReason::SymbolCount
         | SyntaxTruncationReason::CallCount
         | SyntaxTruncationReason::DiagnosticCount => TruncationReason::CaptureLimit,
@@ -341,18 +429,25 @@ fn side_name(side: ComparisonSide) -> &'static str {
 fn build_outline(
     document: &DocumentStructure,
     side: ComparisonSide,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<Vec<OutlineFact>, StructureError> {
     let symbols = document.symbols();
     let mut order: Vec<usize> = (0..symbols.len()).collect();
-    order.sort_by(|left, right| symbol_source_order(&symbols[*left], &symbols[*right]));
+    checked_stable_sort_by(
+        &mut order,
+        |left, right, _| Ok(symbol_source_order(&symbols[*left], &symbols[*right])),
+        &mut || check(checkpoint),
+    )?;
 
     let mut parents = vec![None; symbols.len()];
     let mut stack = Vec::<usize>::new();
     for index in order.iter().copied() {
+        check(checkpoint)?;
         while stack
             .last()
             .is_some_and(|candidate| !is_outline_parent(&symbols[*candidate], &symbols[index]))
         {
+            check(checkpoint)?;
             stack.pop();
         }
         parents[index] = stack.last().copied();
@@ -362,6 +457,7 @@ fn build_outline(
     let mut children = vec![Vec::new(); symbols.len()];
     let mut roots = Vec::new();
     for index in order.iter().copied() {
+        check(checkpoint)?;
         if let Some(parent) = parents[index] {
             children[parent].push(index);
         } else {
@@ -370,29 +466,34 @@ fn build_outline(
     }
     let mut built = vec![None; symbols.len()];
     for index in order.iter().rev().copied() {
-        let child_facts = children[index]
-            .iter()
-            .map(|child| {
+        check(checkpoint)?;
+        let mut child_facts = Vec::with_capacity(children[index].len());
+        for child in &children[index] {
+            check(checkpoint)?;
+            child_facts.push(
                 built[*child]
                     .take()
-                    .ok_or_else(|| StructureError::invalid("outline child was not built"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    .ok_or_else(|| StructureError::invalid("outline child was not built"))?,
+            );
+        }
         let fact = &symbols[index];
-        built[index] = Some(OutlineFact::new(
+        built[index] = Some(OutlineFact::new_controlled(
             document.provenance().clone(),
             SymbolReference::new(side, fact.full_range(), fact.key().clone()),
             child_facts,
+            &mut || checkpoint().map_or(Ok(()), Err),
         )?);
     }
-    roots
-        .into_iter()
-        .map(|root| {
+    let mut outline = Vec::with_capacity(roots.len());
+    for root in roots {
+        check(checkpoint)?;
+        outline.push(
             built[root]
                 .take()
-                .ok_or_else(|| StructureError::invalid("outline root was not built"))
-        })
-        .collect()
+                .ok_or_else(|| StructureError::invalid("outline root was not built"))?,
+        );
+    }
+    Ok(outline)
 }
 
 fn is_outline_parent(parent: &SymbolFact, child: &SymbolFact) -> bool {
@@ -413,12 +514,16 @@ fn compare_symbols(
     old_symbols: &[SymbolFact],
     new_symbols: &[SymbolFact],
     changed_hunks: &[ChangedHunk],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<Vec<SymbolChange>, StructureError> {
+    let old_hunks = attribute_hunks(old_symbols, changed_hunks, ComparisonSide::Base, checkpoint)?;
+    let new_hunks = attribute_hunks(new_symbols, changed_hunks, ComparisonSide::Head, checkpoint)?;
     let mut matched_old = HashSet::new();
     let mut matched_new = HashSet::new();
     let mut changes = Vec::new();
 
-    for (old_index, new_index) in unique_pair_indices(old_symbols, new_symbols) {
+    for (old_index, new_index) in unique_pair_indices(old_symbols, new_symbols, checkpoint)? {
+        check(checkpoint)?;
         let old = &old_symbols[old_index];
         let new = &new_symbols[new_index];
         match compare_unique_pair(
@@ -426,9 +531,12 @@ fn compare_symbols(
             new_path,
             old,
             new,
-            old_symbols,
-            new_symbols,
+            old_index,
+            new_index,
+            &old_hunks,
+            &new_hunks,
             changed_hunks,
+            checkpoint,
         )? {
             UniquePairResult::Unpaired => {}
             UniquePairResult::Unchanged => {
@@ -444,14 +552,15 @@ fn compare_symbols(
     }
 
     for (index, fact) in old_symbols.iter().enumerate() {
+        check(checkpoint)?;
         if matched_old.contains(&index) {
             continue;
         }
-        let hunks = one_side_hunks(changed_hunks, ComparisonSide::Base, fact.full_range());
+        let hunks = hunks_from_indices(changed_hunks, &old_hunks.intersecting[index], checkpoint)?;
         if hunks.is_empty() {
             continue;
         }
-        changes.push(SymbolChange::new(
+        changes.push(SymbolChange::new_controlled(
             SymbolChangeKind::Removed,
             Some(fact.clone()),
             None,
@@ -463,17 +572,19 @@ fn compare_symbols(
                 ComparisonSide::Base,
                 fact,
             ),
+            &mut || checkpoint().map_or(Ok(()), Err),
         )?);
     }
     for (index, fact) in new_symbols.iter().enumerate() {
+        check(checkpoint)?;
         if matched_new.contains(&index) {
             continue;
         }
-        let hunks = one_side_hunks(changed_hunks, ComparisonSide::Head, fact.full_range());
+        let hunks = hunks_from_indices(changed_hunks, &new_hunks.intersecting[index], checkpoint)?;
         if hunks.is_empty() {
             continue;
         }
-        changes.push(SymbolChange::new(
+        changes.push(SymbolChange::new_controlled(
             SymbolChangeKind::Added,
             None,
             Some(fact.clone()),
@@ -485,40 +596,54 @@ fn compare_symbols(
                 ComparisonSide::Head,
                 fact,
             ),
+            &mut || checkpoint().map_or(Ok(()), Err),
         )?);
     }
-    changes.sort_by(symbol_change_order);
+    checked_stable_sort_by(
+        &mut changes,
+        |left, right, _| Ok(symbol_change_order(left, right)),
+        &mut || check(checkpoint),
+    )?;
     Ok(changes)
 }
 
-fn group_by_key(symbols: &[SymbolFact]) -> HashMap<SymbolKey, Vec<usize>> {
+fn group_by_key(
+    symbols: &[SymbolFact],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<HashMap<SymbolKey, Vec<usize>>, StructureError> {
     let mut grouped = HashMap::<SymbolKey, Vec<usize>>::new();
     for (index, symbol) in symbols.iter().enumerate() {
+        check(checkpoint)?;
         grouped.entry(symbol.key().clone()).or_default().push(index);
     }
-    grouped
+    Ok(grouped)
 }
 
 fn unique_pair_indices(
     old_symbols: &[SymbolFact],
     new_symbols: &[SymbolFact],
-) -> Vec<(usize, usize)> {
-    let old_by_key = group_by_key(old_symbols);
-    let new_by_key = group_by_key(new_symbols);
-    old_symbols
-        .iter()
-        .enumerate()
-        .filter_map(|(old_index, old)| {
-            let old_occurrences = old_by_key.get(old.key())?;
-            let new_occurrences = new_by_key.get(old.key())?;
-            if old_occurrences.len() != 1 || new_occurrences.len() != 1 {
-                return None;
-            }
-            let new_index = new_occurrences[0];
-            (old.provenance() == new_symbols[new_index].provenance())
-                .then_some((old_index, new_index))
-        })
-        .collect()
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<(usize, usize)>, StructureError> {
+    let old_by_key = group_by_key(old_symbols, checkpoint)?;
+    let new_by_key = group_by_key(new_symbols, checkpoint)?;
+    let mut pairs = Vec::new();
+    for (old_index, old) in old_symbols.iter().enumerate() {
+        check(checkpoint)?;
+        let Some(old_occurrences) = old_by_key.get(old.key()) else {
+            continue;
+        };
+        let Some(new_occurrences) = new_by_key.get(old.key()) else {
+            continue;
+        };
+        if old_occurrences.len() != 1 || new_occurrences.len() != 1 {
+            continue;
+        }
+        let new_index = new_occurrences[0];
+        if old.provenance() == new_symbols[new_index].provenance() {
+            pairs.push((old_index, new_index));
+        }
+    }
+    Ok(pairs)
 }
 
 enum UniquePairResult {
@@ -533,35 +658,56 @@ fn compare_unique_pair(
     new_path: Option<&str>,
     old: &SymbolFact,
     new: &SymbolFact,
-    old_symbols: &[SymbolFact],
-    new_symbols: &[SymbolFact],
+    old_index: usize,
+    new_index: usize,
+    old_hunks: &HunkAttribution,
+    new_hunks: &HunkAttribution,
     changed_hunks: &[ChangedHunk],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<UniquePairResult, StructureError> {
-    let candidate_hunks = pair_hunks(changed_hunks, old, new, old_symbols, new_symbols);
+    let candidate_hunks = pair_hunks(
+        changed_hunks,
+        old_index,
+        new_index,
+        old_hunks,
+        new_hunks,
+        checkpoint,
+    )?;
     let signature_text_changed = old.normalized_signature() != new.normalized_signature();
     let signature_has_evidence = side_has_intersection(
         &candidate_hunks,
         ComparisonSide::Base,
         old.signature_range(),
-    ) || side_has_intersection(
+        checkpoint,
+    )? || side_has_intersection(
         &candidate_hunks,
         ComparisonSide::Head,
         new.signature_range(),
-    );
+        checkpoint,
+    )?;
     if signature_text_changed && !signature_has_evidence {
         return Ok(UniquePairResult::Unpaired);
     }
-    let body_changed = body_has_evidence(&candidate_hunks, old, new);
+    let body_changed = body_has_evidence(&candidate_hunks, old, new, checkpoint)?;
     let hunks = dimension_hunks(
         &candidate_hunks,
         old,
         new,
         signature_text_changed,
         body_changed,
-    );
-    let signature_has_evidence =
-        side_has_intersection(&hunks, ComparisonSide::Base, old.signature_range())
-            || side_has_intersection(&hunks, ComparisonSide::Head, new.signature_range());
+        checkpoint,
+    )?;
+    let signature_has_evidence = side_has_intersection(
+        &hunks,
+        ComparisonSide::Base,
+        old.signature_range(),
+        checkpoint,
+    )? || side_has_intersection(
+        &hunks,
+        ComparisonSide::Head,
+        new.signature_range(),
+        checkpoint,
+    )?;
     if signature_text_changed && !signature_has_evidence {
         return Ok(UniquePairResult::Unpaired);
     }
@@ -575,27 +721,30 @@ fn compare_unique_pair(
             )
         })
         .transpose()?;
-    let body_changed = body_has_evidence(&hunks, old, new);
+    let body_changed = body_has_evidence(&hunks, old, new, checkpoint)?;
     if signature_change.is_none() && !body_changed {
         return Ok(UniquePairResult::Unchanged);
     }
-    Ok(UniquePairResult::Changed(Box::new(SymbolChange::new(
-        SymbolChangeKind::Modified,
-        Some(old.clone()),
-        Some(new.clone()),
-        signature_change,
-        body_changed,
-        hunks,
-        navigation(
-            required_path(new_path.or(old_path), "modified symbol requires a path")?,
-            if new_path.is_some() {
-                ComparisonSide::Head
-            } else {
-                ComparisonSide::Base
-            },
-            if new_path.is_some() { new } else { old },
-        ),
-    )?)))
+    Ok(UniquePairResult::Changed(Box::new(
+        SymbolChange::new_controlled(
+            SymbolChangeKind::Modified,
+            Some(old.clone()),
+            Some(new.clone()),
+            signature_change,
+            body_changed,
+            hunks,
+            navigation(
+                required_path(new_path.or(old_path), "modified symbol requires a path")?,
+                if new_path.is_some() {
+                    ComparisonSide::Head
+                } else {
+                    ComparisonSide::Base
+                },
+                if new_path.is_some() { new } else { old },
+            ),
+            &mut || checkpoint().map_or(Ok(()), Err),
+        )?,
+    )))
 }
 
 fn dimension_hunks(
@@ -604,22 +753,25 @@ fn dimension_hunks(
     new: &SymbolFact,
     signature_changed: bool,
     body_changed: bool,
-) -> Vec<ChangedHunk> {
-    hunks
-        .iter()
-        .filter(|hunk| {
-            let old_relevant = hunk
-                .old()
-                .map(|lines| dimension_intersects(lines, old, signature_changed, body_changed));
-            let new_relevant = hunk
-                .new_range()
-                .map(|lines| dimension_intersects(lines, new, signature_changed, body_changed));
-            old_relevant.is_none_or(|relevant| relevant)
-                && new_relevant.is_none_or(|relevant| relevant)
-                && (old_relevant.unwrap_or(false) || new_relevant.unwrap_or(false))
-        })
-        .cloned()
-        .collect()
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<ChangedHunk>, StructureError> {
+    let mut relevant = Vec::new();
+    for hunk in hunks {
+        check(checkpoint)?;
+        let old_relevant = hunk
+            .old()
+            .map(|lines| dimension_intersects(lines, old, signature_changed, body_changed));
+        let new_relevant = hunk
+            .new_range()
+            .map(|lines| dimension_intersects(lines, new, signature_changed, body_changed));
+        if old_relevant.is_none_or(|relevant| relevant)
+            && new_relevant.is_none_or(|relevant| relevant)
+            && (old_relevant.unwrap_or(false) || new_relevant.unwrap_or(false))
+        {
+            relevant.push(hunk.clone());
+        }
+    }
+    Ok(relevant)
 }
 
 fn dimension_intersects(
@@ -637,90 +789,201 @@ fn dimension_intersects(
 
 fn pair_hunks(
     hunks: &[ChangedHunk],
-    old: &SymbolFact,
-    new: &SymbolFact,
-    old_symbols: &[SymbolFact],
-    new_symbols: &[SymbolFact],
-) -> Vec<ChangedHunk> {
-    hunks
-        .iter()
-        .filter(|hunk| {
-            let old_valid = hunk
-                .old()
-                .is_none_or(|range| line_range_intersects(range, old.full_range()));
-            let new_valid = hunk
-                .new_range()
-                .is_none_or(|range| line_range_intersects(range, new.full_range()));
-            let intersects_own = hunk
-                .old()
-                .is_some_and(|range| hunk_intersects_own_symbol(range, old, old_symbols))
-                || hunk
-                    .new_range()
-                    .is_some_and(|range| hunk_intersects_own_symbol(range, new, new_symbols));
-            old_valid && new_valid && intersects_own
-        })
-        .cloned()
-        .collect()
+    old_index: usize,
+    new_index: usize,
+    old_hunks: &HunkAttribution,
+    new_hunks: &HunkAttribution,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<ChangedHunk>, StructureError> {
+    let mut candidates = BTreeSet::new();
+    for &hunk_index in &old_hunks.own[old_index] {
+        check(checkpoint)?;
+        candidates.insert(hunk_index);
+    }
+    for &hunk_index in &new_hunks.own[new_index] {
+        check(checkpoint)?;
+        candidates.insert(hunk_index);
+    }
+    let mut paired = Vec::new();
+    for hunk_index in candidates {
+        check(checkpoint)?;
+        let hunk = &hunks[hunk_index];
+        let old_valid = hunk.old().is_none()
+            || old_hunks.intersecting[old_index]
+                .binary_search(&hunk_index)
+                .is_ok();
+        let new_valid = hunk.new_range().is_none()
+            || new_hunks.intersecting[new_index]
+                .binary_search(&hunk_index)
+                .is_ok();
+        let old_own = old_hunks.own[old_index].binary_search(&hunk_index).is_ok();
+        let new_own = new_hunks.own[new_index].binary_search(&hunk_index).is_ok();
+        if old_valid && new_valid && (old_own || new_own) {
+            paired.push(hunk.clone());
+        }
+    }
+    Ok(paired)
 }
 
-fn hunk_intersects_own_symbol(
-    lines: ChangedLineRange,
-    fact: &SymbolFact,
+struct HunkAttribution {
+    intersecting: Vec<Vec<usize>>,
+    own: Vec<Vec<usize>>,
+}
+
+fn attribute_hunks(
     symbols: &[SymbolFact],
-) -> bool {
-    if !line_range_intersects(lines, fact.full_range()) {
-        return false;
+    hunks: &[ChangedHunk],
+    side: ComparisonSide,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<HunkAttribution, StructureError> {
+    let mut symbol_order: Vec<_> = (0..symbols.len()).collect();
+    checked_stable_sort_by(
+        &mut symbol_order,
+        |left, right, _| {
+            Ok(symbols[*left]
+                .full_range()
+                .start_line()
+                .cmp(&symbols[*right].full_range().start_line()))
+        },
+        &mut || check(checkpoint),
+    )?;
+
+    let mut hunk_order = Vec::new();
+    for (index, hunk) in hunks.iter().enumerate() {
+        check(checkpoint)?;
+        if let Some(lines) = hunk_on_side(hunk, side) {
+            hunk_order.push((index, lines));
+        }
     }
-    let clipped_start = lines
-        .start()
-        .get()
-        .max(fact.full_range().start_line().get());
-    let clipped_end = lines.end().get().min(fact.full_range().end_line().get());
-    !symbols.iter().any(|candidate| {
-        is_descendant(fact, candidate)
-            && candidate.full_range().start_line().get() <= clipped_start
-            && clipped_end <= candidate.full_range().end_line().get()
-    })
+    checked_stable_sort_by(
+        &mut hunk_order,
+        |(_, left), (_, right), _| Ok((left.start(), left.end()).cmp(&(right.start(), right.end()))),
+        &mut || check(checkpoint),
+    )?;
+
+    let mut attribution = HunkAttribution {
+        intersecting: vec![Vec::new(); symbols.len()],
+        own: vec![Vec::new(); symbols.len()],
+    };
+    let mut next_symbol = 0;
+    let mut active = Vec::<usize>::new();
+    for (hunk_index, lines) in hunk_order {
+        check(checkpoint)?;
+        while next_symbol < symbol_order.len()
+            && symbols[symbol_order[next_symbol]]
+                .full_range()
+                .start_line()
+                .get()
+                <= lines.end().get()
+        {
+            check(checkpoint)?;
+            active.push(symbol_order[next_symbol]);
+            next_symbol += 1;
+        }
+        let mut retained = Vec::with_capacity(active.len());
+        for symbol_index in active.drain(..) {
+            check(checkpoint)?;
+            if symbols[symbol_index].full_range().end_line().get() >= lines.start().get() {
+                retained.push(symbol_index);
+            }
+        }
+        active = retained;
+        for &symbol_index in &active {
+            check(checkpoint)?;
+            let fact = &symbols[symbol_index];
+            if !line_range_intersects(lines, fact.full_range()) {
+                continue;
+            }
+            attribution.intersecting[symbol_index].push(hunk_index);
+            let clipped_start = lines
+                .start()
+                .get()
+                .max(fact.full_range().start_line().get());
+            let clipped_end = lines.end().get().min(fact.full_range().end_line().get());
+            let mut belongs_to_descendant = false;
+            for &candidate_index in &active {
+                check(checkpoint)?;
+                let candidate = &symbols[candidate_index];
+                if is_descendant(fact, candidate)
+                    && candidate.full_range().start_line().get() <= clipped_start
+                    && clipped_end <= candidate.full_range().end_line().get()
+                {
+                    belongs_to_descendant = true;
+                    break;
+                }
+            }
+            if !belongs_to_descendant {
+                attribution.own[symbol_index].push(hunk_index);
+            }
+        }
+    }
+    for indexes in attribution
+        .intersecting
+        .iter_mut()
+        .chain(attribution.own.iter_mut())
+    {
+        checked_stable_sort_by(indexes, |left, right, _| Ok(left.cmp(right)), &mut || {
+            check(checkpoint)
+        })?;
+    }
+    Ok(attribution)
 }
 
 fn is_descendant(parent: &SymbolFact, candidate: &SymbolFact) -> bool {
-    let mut parent_identity = parent.key().qualified_path().to_vec();
-    parent_identity.push(parent.key().name().to_owned());
-    candidate
-        .key()
-        .qualified_path()
-        .starts_with(&parent_identity)
+    let parent_path = parent.key().qualified_path();
+    let candidate_path = candidate.key().qualified_path();
+    candidate_path.len() > parent_path.len()
+        && candidate_path.starts_with(parent_path)
+        && candidate_path[parent_path.len()] == parent.key().name()
         && parent.full_range() != candidate.full_range()
         && parent.full_range().contains(candidate.full_range())
 }
 
-fn one_side_hunks(
+fn hunks_from_indices(
+    hunks: &[ChangedHunk],
+    indices: &[usize],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<ChangedHunk>, StructureError> {
+    let mut matching = Vec::with_capacity(indices.len());
+    for &index in indices {
+        check(checkpoint)?;
+        matching.push(hunks[index].clone());
+    }
+    Ok(matching)
+}
+
+fn body_has_evidence(
+    hunks: &[ChangedHunk],
+    old: &SymbolFact,
+    new: &SymbolFact,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<bool, StructureError> {
+    if let Some(range) = old.body_range()
+        && side_has_intersection(hunks, ComparisonSide::Base, range, checkpoint)?
+    {
+        return Ok(true);
+    }
+    if let Some(range) = new.body_range()
+        && side_has_intersection(hunks, ComparisonSide::Head, range, checkpoint)?
+    {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn side_has_intersection(
     hunks: &[ChangedHunk],
     side: ComparisonSide,
     range: SourceRange,
-) -> Vec<ChangedHunk> {
-    hunks
-        .iter()
-        .filter(|hunk| {
-            hunk_on_side(hunk, side).is_some_and(|lines| line_range_intersects(lines, range))
-        })
-        .cloned()
-        .collect()
-}
-
-fn body_has_evidence(hunks: &[ChangedHunk], old: &SymbolFact, new: &SymbolFact) -> bool {
-    [
-        (ComparisonSide::Base, old.body_range()),
-        (ComparisonSide::Head, new.body_range()),
-    ]
-    .into_iter()
-    .any(|(side, range)| range.is_some_and(|range| side_has_intersection(hunks, side, range)))
-}
-
-fn side_has_intersection(hunks: &[ChangedHunk], side: ComparisonSide, range: SourceRange) -> bool {
-    hunks.iter().any(|hunk| {
-        hunk_on_side(hunk, side).is_some_and(|lines| line_range_intersects(lines, range))
-    })
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<bool, StructureError> {
+    for hunk in hunks {
+        check(checkpoint)?;
+        if hunk_on_side(hunk, side).is_some_and(|lines| line_range_intersects(lines, range)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn hunk_on_side(hunk: &ChangedHunk, side: ComparisonSide) -> Option<ChangedLineRange> {
@@ -739,37 +1002,87 @@ fn compare_matched_calls(
     new_path: Option<&str>,
     old_document: Option<&DocumentStructure>,
     new_document: Option<&DocumentStructure>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<Vec<CallDiffChange>, StructureError> {
     let (Some(old_path), Some(new_path), Some(old_document), Some(new_document)) =
         (old_path, new_path, old_document, new_document)
     else {
         return Ok(Vec::new());
     };
+    let old_index = index_calls(old_document.calls(), checkpoint)?;
+    let new_index = index_calls(new_document.calls(), checkpoint)?;
     let mut changes = Vec::new();
-    for (old_index, new_index) in
-        unique_pair_indices(old_document.symbols(), new_document.symbols())
+    for (old_symbol_index, new_symbol_index) in
+        unique_pair_indices(old_document.symbols(), new_document.symbols(), checkpoint)?
     {
-        let old = &old_document.symbols()[old_index];
-        let new = &new_document.symbols()[new_index];
+        check(checkpoint)?;
+        let old = &old_document.symbols()[old_symbol_index];
+        let new = &new_document.symbols()[new_symbol_index];
         if !is_function(old.key().kind()) || !is_function(new.key().kind()) {
             continue;
         }
-        changes.extend(compare_calls(CallDiffInput::new(
-            old_path,
-            new_path,
-            old.key(),
-            old.body_range().unwrap_or_else(|| old.full_range()),
-            new.body_range().unwrap_or_else(|| new.full_range()),
-            old_document.calls(),
-            new_document.calls(),
-        )?)?);
+        let old_calls = old_index
+            .get(&(old.key(), old.provenance()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let new_calls = new_index
+            .get(&(new.key(), new.provenance()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        changes.extend(compare_indexed_calls_controlled(
+            IndexedCallDiffInput::new(
+                old_path,
+                new_path,
+                old.key(),
+                old.body_range().unwrap_or_else(|| old.full_range()),
+                new.body_range().unwrap_or_else(|| new.full_range()),
+                old_calls,
+                new_calls,
+            )?,
+            checkpoint,
+        )?);
     }
-    changes.sort_by(compare_call_changes);
+    for change in &changes {
+        check(checkpoint)?;
+        if let Some(fact) = call_change_fact(change) {
+            for _ in fact.control_context() {
+                check(checkpoint)?;
+            }
+        }
+    }
+    checked_stable_sort_by(&mut changes, compare_call_changes_controlled, &mut || {
+        check(checkpoint)
+    })?;
     Ok(changes)
 }
 
-fn compare_call_changes(left: &CallDiffChange, right: &CallDiffChange) -> Ordering {
-    left.navigation()
+type CallIndex<'a> = HashMap<(&'a SymbolKey, &'a SyntaxProvenance), Vec<&'a CallFact>>;
+
+fn index_calls<'a>(
+    calls: &'a [CallFact],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<CallIndex<'a>, StructureError> {
+    let mut index = HashMap::new();
+    for call in calls {
+        check(checkpoint)?;
+        let Some(enclosing) = call.enclosing_symbol() else {
+            continue;
+        };
+        index
+            .entry((enclosing, call.provenance()))
+            .or_insert_with(Vec::new)
+            .push(call);
+    }
+    Ok(index)
+}
+
+fn compare_call_changes_controlled<E>(
+    left: &CallDiffChange,
+    right: &CallDiffChange,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .navigation()
         .line
         .cmp(&right.navigation().line)
         .then_with(|| {
@@ -781,13 +1094,16 @@ fn compare_call_changes(left: &CallDiffChange, right: &CallDiffChange) -> Orderi
         .then_with(|| compare_call_enclosing(left, right))
         .then_with(|| call_callee(left).cmp(call_callee(right)))
         .then_with(|| left.navigation().path.cmp(&right.navigation().path))
-        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)))
-        .then_with(|| match (call_change_fact(left), call_change_fact(right)) {
-            (Some(left), Some(right)) => compare_call_facts(left, right),
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        })
+        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    match (call_change_fact(left), call_change_fact(right)) {
+        (Some(left), Some(right)) => compare_call_facts_controlled(left, right, checkpoint),
+        (None, Some(_)) => Ok(Ordering::Less),
+        (Some(_), None) => Ok(Ordering::Greater),
+        (None, None) => Ok(Ordering::Equal),
+    }
 }
 
 fn call_change_rank(kind: CallChangeKind) -> u8 {
@@ -823,8 +1139,13 @@ fn compare_call_enclosing(left: &CallDiffChange, right: &CallDiffChange) -> Orde
     }
 }
 
-fn compare_call_facts(left: &CallFact, right: &CallFact) -> Ordering {
-    left.call_site_range()
+fn compare_call_facts_controlled<E>(
+    left: &CallFact,
+    right: &CallFact,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .call_site_range()
         .start_byte()
         .cmp(&right.call_site_range().start_byte())
         .then_with(|| {
@@ -832,17 +1153,30 @@ fn compare_call_facts(left: &CallFact, right: &CallFact) -> Ordering {
                 .end_byte()
                 .cmp(&right.call_site_range().end_byte())
         })
-        .then_with(|| left.argument_text().cmp(right.argument_text()))
-        .then_with(|| compare_control_contexts(left.control_context(), right.control_context()))
-        .then_with(|| {
-            syntax_language_rank(left.provenance().language())
-                .cmp(&syntax_language_rank(right.provenance().language()))
-        })
-        .then_with(|| left.provenance().parser().cmp(right.provenance().parser()))
+        .then_with(|| left.argument_text().cmp(right.argument_text()));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    let ordering = compare_control_contexts_controlled(
+        left.control_context(),
+        right.control_context(),
+        checkpoint,
+    )?;
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    Ok(syntax_language_rank(left.provenance().language())
+        .cmp(&syntax_language_rank(right.provenance().language()))
+        .then_with(|| left.provenance().parser().cmp(right.provenance().parser())))
 }
 
-fn compare_control_contexts(left: &[ControlContext], right: &[ControlContext]) -> Ordering {
+fn compare_control_contexts_controlled<E>(
+    left: &[ControlContext],
+    right: &[ControlContext],
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
     for (left, right) in left.iter().zip(right) {
+        checkpoint()?;
         let ordering = control_context_rank(left)
             .cmp(&control_context_rank(right))
             .then_with(|| match (left, right) {
@@ -850,10 +1184,10 @@ fn compare_control_contexts(left: &[ControlContext], right: &[ControlContext]) -
                 _ => Ordering::Equal,
             });
         if ordering != Ordering::Equal {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    left.len().cmp(&right.len())
+    Ok(left.len().cmp(&right.len()))
 }
 
 fn control_context_rank(context: &ControlContext) -> u8 {
@@ -880,9 +1214,11 @@ fn build_hotspots(
     new_path: Option<&str>,
     new_document: Option<&DocumentStructure>,
     changes: &[SymbolChange],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
 ) -> Result<Vec<StructuralHotspot>, StructureError> {
     let mut candidates = Vec::new();
     for change in changes {
+        check(checkpoint)?;
         let fact = change.new_fact().or_else(|| change.old());
         let Some(fact) = fact.filter(|fact| is_function(fact.key().kind())) else {
             continue;
@@ -911,6 +1247,7 @@ fn build_hotspots(
     }
     if let (Some(path), Some(document)) = (new_path, new_document) {
         for fact in document.symbols() {
+            check(checkpoint)?;
             if is_function(fact.key().kind()) {
                 candidates.push(HotspotCandidate::new(
                     fact,
@@ -957,11 +1294,17 @@ fn build_hotspots(
             }
         }
     }
-    candidates.sort_by(HotspotCandidate::compare);
-    Ok(candidates
-        .into_iter()
-        .map(|candidate| candidate.hotspot)
-        .collect())
+    checked_stable_sort_by(
+        &mut candidates,
+        |left, right, _| Ok(HotspotCandidate::compare(left, right)),
+        &mut || check(checkpoint),
+    )?;
+    let mut hotspots = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        check(checkpoint)?;
+        hotspots.push(candidate.hotspot);
+    }
+    Ok(hotspots)
 }
 
 struct HotspotCandidate {
@@ -1007,6 +1350,15 @@ impl HotspotCandidate {
             .then_with(|| left.kind_rank.cmp(&right.kind_rank))
             .then_with(|| left.start_byte.cmp(&right.start_byte))
             .then_with(|| left.side_rank.cmp(&right.side_rank))
+    }
+}
+
+fn check(
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<(), StructureError> {
+    match checkpoint() {
+        Some(reason) => Err(StructureError::Stopped(reason)),
+        None => Ok(()),
     }
 }
 
@@ -2234,6 +2586,223 @@ mod tests {
         );
         assert_eq!(file.truncation().unwrap().limit, None);
         assert_eq!(file.truncation().unwrap().observed, None);
+    }
+
+    #[test]
+    fn controlled_checkpoints_stop_outline_symbol_and_hunk_work() {
+        let rust = provenance(SyntaxLanguage::Rust, "rust-test");
+        let symbols: Vec<_> = (0_u32..100)
+            .map(|index| {
+                function(
+                    &rust,
+                    &[],
+                    &format!("function_{index}"),
+                    index * 10 + 1,
+                    &format!("fn function_{index}()"),
+                )
+            })
+            .collect();
+        let document = parsed("src/lib.rs", &rust, symbols.clone());
+        let mut sort_checks = 0_u32;
+        let error = build_outline(&document, ComparisonSide::Head, &mut || {
+            sort_checks += 1;
+            (sort_checks == 3).then_some(ComparisonStopReason::Deadline)
+        })
+        .unwrap_err();
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+
+        let mut outline_checks = 0_u32;
+        let error = build_outline(&document, ComparisonSide::Head, &mut || {
+            outline_checks += 1;
+            (outline_checks == 25).then_some(ComparisonStopReason::Cancelled)
+        })
+        .unwrap_err();
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Cancelled));
+
+        let mut symbol_checks = 0_u32;
+        let error = compare_symbols(
+            Some("old.rs"),
+            Some("new.rs"),
+            &symbols,
+            &symbols,
+            &[],
+            &mut || {
+                symbol_checks += 1;
+                (symbol_checks == 150).then_some(ComparisonStopReason::Deadline)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+
+        let wide = fact(
+            &rust,
+            &[],
+            SymbolKind::Function,
+            "wide",
+            range(0, 50_000, 1, 500),
+            range(0, 20, 1, 1),
+            Some(range(21, 50_000, 2, 500)),
+            "fn wide()",
+            0,
+            0,
+            0,
+        );
+        let hunks: Vec<_> = (2_u32..102)
+            .map(|line| hunk(Some((line, line)), Some((line, line))))
+            .collect();
+        let mut hunk_checks = 0_u32;
+        let error = compare_symbols(
+            Some("old.rs"),
+            Some("new.rs"),
+            std::slice::from_ref(&wide),
+            std::slice::from_ref(&wide),
+            &hunks,
+            &mut || {
+                hunk_checks += 1;
+                (hunk_checks == 30).then_some(ComparisonStopReason::Disconnected)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.stop_reason(),
+            Some(ComparisonStopReason::Disconnected)
+        );
+    }
+
+    #[test]
+    fn wide_outline_parent_stops_inside_controlled_child_validation() {
+        let rust = provenance(SyntaxLanguage::Rust, "rust-test");
+        let parent = fact(
+            &rust,
+            &[],
+            SymbolKind::Module,
+            "wide",
+            range(0, 200_000, 1, 2_000),
+            range(0, 20, 1, 1),
+            Some(range(21, 200_000, 2, 2_000)),
+            "mod wide",
+            0,
+            0,
+            100,
+        );
+        let mut symbols = vec![parent];
+        symbols.extend((0_u32..100).map(|index| {
+            function(
+                &rust,
+                &["wide"],
+                &format!("child_{index}"),
+                index * 10 + 10,
+                &format!("fn child_{index}()"),
+            )
+        }));
+        let document = parsed("src/lib.rs", &rust, symbols);
+        let mut total_checks = 0_u32;
+        build_outline(&document, ComparisonSide::Head, &mut || {
+            total_checks += 1;
+            None
+        })
+        .unwrap();
+        let stop_at = total_checks - 50;
+        let mut checks = 0_u32;
+        let error = build_outline(&document, ComparisonSide::Head, &mut || {
+            checks += 1;
+            (checks == stop_at).then_some(ComparisonStopReason::Cancelled)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Cancelled));
+    }
+
+    #[test]
+    fn structure_call_index_is_checkpointed_near_linearly() {
+        let rust = provenance(SyntaxLanguage::Rust, "rust-test");
+        let symbols: Vec<_> = (0_u32..100)
+            .map(|index| {
+                function(
+                    &rust,
+                    &[],
+                    &format!("function_{index}"),
+                    index * 10 + 1,
+                    &format!("fn function_{index}()"),
+                )
+            })
+            .collect();
+        let calls: Vec<_> = symbols
+            .iter()
+            .enumerate()
+            .map(|(index, symbol)| {
+                let start_line = u32::try_from(index).unwrap() * 10 + 3;
+                direct_call(
+                    &rust,
+                    symbol,
+                    "load",
+                    "same",
+                    u64::from(start_line - 3) * 100 + 130,
+                    start_line,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let old = parsed_with_calls("old.rs", &rust, symbols.clone(), calls.clone());
+        let new = parsed_with_calls("new.rs", &rust, symbols, calls);
+        let mut checkpoints = 0_usize;
+        let file = compare_structured_file_controlled(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&old),
+            Some(&new),
+            &[],
+            &mut || {
+                checkpoints += 1;
+                None
+            },
+        )
+        .unwrap();
+
+        assert!(file.call_diff().is_empty());
+        assert!(checkpoints < 10_000, "checkpoint count was {checkpoints}");
+    }
+
+    #[test]
+    fn controlled_file_comparison_reports_immediate_disconnect() {
+        let error = compare_structured_file_controlled(
+            None,
+            Some("src/lib.rs"),
+            None,
+            None,
+            &[],
+            &mut || Some(ComparisonStopReason::Disconnected),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.stop_reason(),
+            Some(ComparisonStopReason::Disconnected)
+        );
+    }
+
+    #[test]
+    fn controlled_file_comparison_stops_inside_final_model_validation() {
+        let hunks: Vec<_> = (1_u32..=100)
+            .map(|line| hunk(None, Some((line, line))))
+            .collect();
+        let mut checks = 0_u32;
+        let error = compare_structured_file_controlled(
+            None,
+            Some("src/lib.rs"),
+            None,
+            None,
+            &hunks,
+            &mut || {
+                checks += 1;
+                (checks == 150).then_some(ComparisonStopReason::Disconnected)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.stop_reason(),
+            Some(ComparisonStopReason::Disconnected)
+        );
     }
 
     #[test]
