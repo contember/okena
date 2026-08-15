@@ -21,6 +21,9 @@ const BYTES_TIMEOUT_SECS: u64 = 90;
 /// actions, these may need to walk and inspect an entire large checkout.
 const SEARCH_TIMEOUT_SECS: u64 = 90;
 
+/// Total request timeout for deterministic review inventory, diff, and structure jobs.
+const REVIEW_TIMEOUT_SECS: u64 = 90;
+
 /// Total request timeout for synchronous filesystem mutations. Direct
 /// worktree removal may run two sequential five-minute close hooks before Git.
 const LONG_MUTATION_TIMEOUT_SECS: u64 = 11 * 60;
@@ -40,6 +43,7 @@ enum ActionClientKind {
     Fast,
     Bytes,
     Search,
+    Review,
     LongMutation,
 }
 
@@ -51,6 +55,9 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         ActionRequest::SearchContent { .. } | ActionRequest::SearchPathContent { .. } => {
             ActionClientKind::Search
         }
+        ActionRequest::ReviewInventory { .. }
+        | ActionRequest::ReviewDiff { .. }
+        | ActionRequest::ReviewStructure { .. } => ActionClientKind::Review,
         ActionRequest::RemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
         _ => ActionClientKind::Fast,
@@ -62,6 +69,7 @@ fn timeout_for(action: &ActionRequest) -> u64 {
         ActionClientKind::Fast => FAST_TIMEOUT_SECS,
         ActionClientKind::Bytes => BYTES_TIMEOUT_SECS,
         ActionClientKind::Search => SEARCH_TIMEOUT_SECS,
+        ActionClientKind::Review => REVIEW_TIMEOUT_SECS,
         ActionClientKind::LongMutation => LONG_MUTATION_TIMEOUT_SECS,
     }
 }
@@ -83,6 +91,7 @@ struct RemoteActionClientInner {
     fast: OnceLock<Result<ClientAndUrl, String>>,
     bytes: OnceLock<Result<ClientAndUrl, String>>,
     search: OnceLock<Result<ClientAndUrl, String>>,
+    review: OnceLock<Result<ClientAndUrl, String>>,
     long_mutation: OnceLock<Result<ClientAndUrl, String>>,
     download: OnceLock<Result<ClientAndUrl, String>>,
     #[cfg(feature = "cancellable-http")]
@@ -108,6 +117,7 @@ impl RemoteActionClient {
                 fast: OnceLock::new(),
                 bytes: OnceLock::new(),
                 search: OnceLock::new(),
+                review: OnceLock::new(),
                 long_mutation: OnceLock::new(),
                 download: OnceLock::new(),
                 #[cfg(feature = "cancellable-http")]
@@ -122,6 +132,7 @@ impl RemoteActionClient {
             ActionClientKind::Fast => &self.inner.fast,
             ActionClientKind::Bytes => &self.inner.bytes,
             ActionClientKind::Search => &self.inner.search,
+            ActionClientKind::Review => &self.inner.review,
             ActionClientKind::LongMutation => &self.inner.long_mutation,
         };
         let timeout = std::time::Duration::from_secs(timeout_for(&action));
@@ -467,6 +478,50 @@ mod tests {
         }
     }
 
+    fn review_actions() -> Vec<ActionRequest> {
+        let requested_base = "1".repeat(40);
+        let merge_base = "2".repeat(40);
+        let head = "3".repeat(40);
+        let identity = format!("branch:merge-base:{requested_base}:{head}:{merge_base}");
+        let request: okena_core::review::ReviewDiffRequest =
+            serde_json::from_value(serde_json::json!({
+            "comparison": {
+                "requested": {
+                    "branch_compare": {
+                        "base": "origin/main",
+                        "head": "feature/review"
+                    }
+                },
+                "requested_base_oid": requested_base,
+                "requested_head_oid": head,
+                "strategy": "merge_base_to_head",
+                "base": { "kind": "commit", "oid": merge_base },
+                "head": { "kind": "commit", "oid": head },
+                "merge_base_oid": merge_base,
+                "identity": identity
+            },
+            "ignore_whitespace": false
+            }))
+            .unwrap();
+        vec![
+            ActionRequest::ReviewInventory {
+                project_id: "project".to_string(),
+                mode: okena_core::types::DiffMode::BranchCompare {
+                    base: "origin/main".to_string(),
+                    head: "feature/review".to_string(),
+                },
+            },
+            ActionRequest::ReviewDiff {
+                project_id: "project".to_string(),
+                request: request.clone(),
+            },
+            ActionRequest::ReviewStructure {
+                project_id: "project".to_string(),
+                request,
+            },
+        ]
+    }
+
     #[cfg(feature = "cancellable-http")]
     fn remote_config(port: u16) -> RemoteConnectionConfig {
         RemoteConnectionConfig {
@@ -486,6 +541,15 @@ mod tests {
     fn content_search_uses_long_timeout() {
         assert_eq!(timeout_for(&search_action()), SEARCH_TIMEOUT_SECS);
         assert_eq!(SEARCH_TIMEOUT_SECS, 90);
+    }
+
+    #[test]
+    fn review_actions_use_dedicated_clients_and_timeout() {
+        for action in review_actions() {
+            assert_eq!(client_kind_for(&action), ActionClientKind::Review);
+            assert_eq!(timeout_for(&action), REVIEW_TIMEOUT_SECS);
+        }
+        assert_eq!(REVIEW_TIMEOUT_SECS, 90);
     }
 
     #[test]

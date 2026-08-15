@@ -1,4 +1,5 @@
 use crate::keys::SpecialKey;
+use crate::review::ReviewDiffRequest;
 use crate::shell::ShellType;
 use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
@@ -760,6 +761,18 @@ pub enum ActionRequest {
         #[serde(default)]
         ignore_whitespace: bool,
     },
+    ReviewInventory {
+        project_id: String,
+        mode: DiffMode,
+    },
+    ReviewDiff {
+        project_id: String,
+        request: ReviewDiffRequest,
+    },
+    ReviewStructure {
+        project_id: String,
+        request: ReviewDiffRequest,
+    },
     GitBranches {
         project_id: String,
     },
@@ -1285,6 +1298,121 @@ impl ApiLayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn review_comparison_json() -> Value {
+        let requested_base = "1".repeat(40);
+        let merge_base = "2".repeat(40);
+        let head = "3".repeat(40);
+        let identity = format!("branch:merge-base:{requested_base}:{head}:{merge_base}");
+        json!({
+            "requested": {
+                "branch_compare": {
+                    "base": "origin/main",
+                    "head": "feature/review"
+                }
+            },
+            "requested_base_oid": requested_base,
+            "requested_head_oid": head,
+            "strategy": "merge_base_to_head",
+            "base": { "kind": "commit", "oid": merge_base },
+            "head": { "kind": "commit", "oid": head },
+            "merge_base_oid": merge_base,
+            "identity": identity
+        })
+    }
+
+    fn review_diff_request() -> ReviewDiffRequest {
+        serde_json::from_value(json!({
+            "comparison": review_comparison_json(),
+            "ignore_whitespace": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn review_actions_have_stable_json_shapes() {
+        let inventory = ActionRequest::ReviewInventory {
+            project_id: "project-1".to_string(),
+            mode: DiffMode::BranchCompare {
+                base: "origin/main".to_string(),
+                head: "feature/review".to_string(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(inventory).unwrap(),
+            json!({
+                "action": "review_inventory",
+                "project_id": "project-1",
+                "mode": {
+                    "branch_compare": {
+                        "base": "origin/main",
+                        "head": "feature/review"
+                    }
+                }
+            })
+        );
+
+        for (action, name) in [
+            (
+                ActionRequest::ReviewDiff {
+                    project_id: "project-1".to_string(),
+                    request: review_diff_request(),
+                },
+                "review_diff",
+            ),
+            (
+                ActionRequest::ReviewStructure {
+                    project_id: "project-1".to_string(),
+                    request: review_diff_request(),
+                },
+                "review_structure",
+            ),
+        ] {
+            let expected = json!({
+                "action": name,
+                "project_id": "project-1",
+                "request": {
+                    "comparison": review_comparison_json(),
+                    "ignore_whitespace": false
+                }
+            });
+            let value = serde_json::to_value(&action).unwrap();
+            assert_eq!(value, expected);
+            serde_json::from_value::<ActionRequest>(value).unwrap();
+        }
+    }
+
+    #[test]
+    fn review_actions_reject_mutable_and_malformed_comparisons() {
+        let mutable = json!({
+            "action": "review_diff",
+            "project_id": "project-1",
+            "request": {
+                "comparison": {
+                    "requested": "staged",
+                    "requested_base_oid": "1".repeat(40),
+                    "strategy": "head_to_index",
+                    "base": { "kind": "commit", "oid": "1".repeat(40) },
+                    "head": { "kind": "index", "fingerprint": "index-v1" },
+                    "identity": "staged:index-v1"
+                },
+                "ignore_whitespace": false
+            }
+        });
+        assert!(serde_json::from_value::<ActionRequest>(mutable).is_err());
+
+        let mut malformed = json!({
+            "action": "review_structure",
+            "project_id": "project-1",
+            "request": {
+                "comparison": review_comparison_json(),
+                "ignore_whitespace": false
+            }
+        });
+        malformed["request"]["comparison"]["requested_head_oid"] = json!("abcdef0");
+        assert!(serde_json::from_value::<ActionRequest>(malformed).is_err());
+    }
 
     #[test]
     fn state_response_round_trip() {
@@ -1632,6 +1760,21 @@ mod tests {
                 project_id: "p1".into(),
                 mode: DiffMode::WorkingTree,
                 ignore_whitespace: false,
+            },
+            ActionRequest::ReviewInventory {
+                project_id: "p1".into(),
+                mode: DiffMode::BranchCompare {
+                    base: "origin/main".into(),
+                    head: "feature/review".into(),
+                },
+            },
+            ActionRequest::ReviewDiff {
+                project_id: "p1".into(),
+                request: review_diff_request(),
+            },
+            ActionRequest::ReviewStructure {
+                project_id: "p1".into(),
+                request: review_diff_request(),
             },
             ActionRequest::GitBranches {
                 project_id: "p1".into(),

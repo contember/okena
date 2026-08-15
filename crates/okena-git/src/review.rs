@@ -160,6 +160,34 @@ pub struct ReviewSourceContents {
     pub new_content: Option<String>,
 }
 
+/// Exact line diff paired with the immutable comparison that produced it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExactReviewDiffResponse {
+    comparison: ImmutableResolvedComparison,
+    diff: DiffResult,
+}
+
+impl ExactReviewDiffResponse {
+    fn new(request: &ReviewDiffRequest, diff: DiffResult) -> Self {
+        Self {
+            comparison: request.comparison.clone(),
+            diff,
+        }
+    }
+
+    pub fn comparison(&self) -> &ImmutableResolvedComparison {
+        &self.comparison
+    }
+
+    pub fn diff(&self) -> &DiffResult {
+        &self.diff
+    }
+
+    pub fn into_parts(self) -> (ImmutableResolvedComparison, DiffResult) {
+        (self.comparison, self.diff)
+    }
+}
+
 /// Allocation limits for loading the two sides of an exact source request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSourceBudget {
@@ -282,6 +310,28 @@ pub fn resolve_review_comparison_with_control(
 /// Produce a line diff from the immutable effective snapshots.
 pub fn get_exact_review_diff(path: &Path, request: &ReviewDiffRequest) -> GitResult<DiffResult> {
     get_exact_review_diff_with_control(path, request, &ReviewGitControl::new(Default::default()))
+}
+
+/// Produce an exact line diff paired with its immutable comparison.
+pub fn get_exact_review_diff_response(
+    path: &Path,
+    request: &ReviewDiffRequest,
+) -> GitResult<ExactReviewDiffResponse> {
+    get_exact_review_diff_response_with_control(
+        path,
+        request,
+        &ReviewGitControl::new(Default::default()),
+    )
+}
+
+/// Produce a paired exact line diff using one request-scoped Git control.
+pub fn get_exact_review_diff_response_with_control(
+    path: &Path,
+    request: &ReviewDiffRequest,
+    control: &ReviewGitControl,
+) -> GitResult<ExactReviewDiffResponse> {
+    let diff = get_exact_review_diff_with_control(path, request, control)?;
+    Ok(ExactReviewDiffResponse::new(request, diff))
 }
 
 /// Produce an exact line diff using one request-scoped Git control.
@@ -1530,7 +1580,7 @@ mod tests {
         .unwrap();
         let immutable = immutable(comparison.clone());
         let inventory = get_review_inventory_with_control(&repo, &immutable, &control).unwrap();
-        let diff = get_exact_review_diff_with_control(
+        let diff_response = get_exact_review_diff_response_with_control(
             &repo,
             &ReviewDiffRequest::new(comparison, false).unwrap(),
             &control,
@@ -1538,8 +1588,35 @@ mod tests {
         .unwrap();
 
         assert_eq!(inventory.comparison.identity(), immutable.identity());
-        assert_eq!(inventory.files.len(), diff.files.len());
+        assert_eq!(diff_response.comparison().identity(), immutable.identity());
+        assert_eq!(inventory.files.len(), diff_response.diff().files.len());
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn exact_diff_response_has_stable_json_shape_and_round_trips() {
+        let (_temporary, repo) = init_temp_repo();
+        let comparison =
+            resolve_review_comparison(&repo, DiffMode::Commit("HEAD".to_string())).unwrap();
+        let request = ReviewDiffRequest::new(comparison, false).unwrap();
+        let response = get_exact_review_diff_response(&repo, &request).unwrap();
+        let comparison_json = serde_json::to_value(&request.comparison).unwrap();
+        let diff_json = serde_json::to_value(response.diff()).unwrap();
+        let value = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "comparison": comparison_json,
+                "diff": diff_json
+            })
+        );
+        let decoded: ExactReviewDiffResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            decoded.comparison().identity(),
+            request.comparison.identity()
+        );
+        assert_eq!(decoded.diff().files.len(), response.diff().files.len());
     }
 
     fn commit_at(repo: &Path, subject: &str, timestamp: &str) {

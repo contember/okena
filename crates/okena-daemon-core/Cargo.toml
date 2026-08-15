@@ -11,6 +11,8 @@ okena-core = { path = "../okena-core" }
 okena-state = { path = "../okena-state" }
 okena-terminal = { path = "../okena-terminal" }
 okena-git = { path = "../okena-git" }
+okena-review = { path = "../okena-review" }
+okena-syntax = { path = "../okena-syntax" }
 okena-hooks = { path = "../okena-hooks", default-features = false }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-services = { path = "../okena-services", default-features = false }

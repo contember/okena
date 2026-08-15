@@ -299,6 +299,11 @@ pub fn execute_action(
             mode,
             ignore_whitespace,
         } => git::diff(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::ReviewInventory { .. }
+        | ActionRequest::ReviewDiff { .. }
+        | ActionRequest::ReviewStructure { .. } => ActionResult::Err(
+            "internal error: review actions require the daemon executor".to_string(),
+        ),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
         ActionRequest::GitListPullRequests { project_id, limit } => {
             git::list_pull_requests(ws, project_id, limit)
