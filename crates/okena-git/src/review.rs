@@ -3,9 +3,15 @@
 //! Friendly refs are resolved once. Every subsequent operation consumes the
 //! effective immutable object IDs stored in the resolved comparison.
 
+use std::num::NonZeroU64;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use okena_core::process::{command, safe_output};
+use okena_core::process::{
+    CommandBus, CommandCancellationHandle, CommandFailure, CommandFailureCause, CommandSpec, Lane,
+    OutputLimits,
+};
 use okena_core::review::{
     ComparisonStrategy, FactProvenance, FileClassification, FileRole, GitObjectId,
     ImmutableResolvedComparison, ResolvedComparison, ReviewChangeTotals, ReviewCommitFact,
@@ -20,6 +26,133 @@ use crate::error::{GitError, GitResult};
 
 // Wave 1 records Git facts only; the later classifier replaces this explicit fallback.
 const UNCLASSIFIED_RULE_ID: &str = "builtin.unclassified";
+
+const DEFAULT_STDOUT_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_STDERR_BYTES: u64 = 256 * 1024;
+const DEFAULT_ELAPSED_MICROS: u64 = 90 * 1_000_000;
+
+/// Server-owned limits for one exact review Git request.
+///
+/// Output limits apply independently to every Git command. The elapsed limit
+/// is shared by every command that uses the same [`ReviewGitControl`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewGitBudget {
+    max_stdout_bytes: NonZeroU64,
+    max_stderr_bytes: NonZeroU64,
+    max_elapsed_micros: NonZeroU64,
+}
+
+impl ReviewGitBudget {
+    pub fn new(
+        max_stdout_bytes: NonZeroU64,
+        max_stderr_bytes: NonZeroU64,
+        max_elapsed_micros: NonZeroU64,
+    ) -> Self {
+        Self {
+            max_stdout_bytes,
+            max_stderr_bytes,
+            max_elapsed_micros,
+        }
+    }
+
+    pub fn max_stdout_bytes(self) -> NonZeroU64 {
+        self.max_stdout_bytes
+    }
+
+    pub fn max_stderr_bytes(self) -> NonZeroU64 {
+        self.max_stderr_bytes
+    }
+
+    pub fn max_elapsed_micros(self) -> NonZeroU64 {
+        self.max_elapsed_micros
+    }
+}
+
+impl Default for ReviewGitBudget {
+    fn default() -> Self {
+        Self::new(
+            NonZeroU64::new(DEFAULT_STDOUT_BYTES).unwrap_or(NonZeroU64::MIN),
+            NonZeroU64::new(DEFAULT_STDERR_BYTES).unwrap_or(NonZeroU64::MIN),
+            NonZeroU64::new(DEFAULT_ELAPSED_MICROS).unwrap_or(NonZeroU64::MIN),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ReviewGitControlInner {
+    budget: ReviewGitBudget,
+    started_at: Instant,
+    deadline: Option<Instant>,
+    state: Mutex<ReviewGitControlState>,
+    command_gate: Mutex<()>,
+}
+
+#[derive(Debug, Default)]
+struct ReviewGitControlState {
+    cancelled: bool,
+    active: Option<CommandCancellationHandle>,
+}
+
+/// Runtime-only cooperative cancellation and overall deadline for review Git.
+#[derive(Clone, Debug)]
+pub struct ReviewGitControl(Arc<ReviewGitControlInner>);
+
+impl ReviewGitControl {
+    pub fn new(budget: ReviewGitBudget) -> Self {
+        let started_at = Instant::now();
+        let deadline =
+            started_at.checked_add(Duration::from_micros(budget.max_elapsed_micros().get()));
+        Self(Arc::new(ReviewGitControlInner {
+            budget,
+            started_at,
+            deadline,
+            state: Mutex::new(ReviewGitControlState::default()),
+            command_gate: Mutex::new(()),
+        }))
+    }
+
+    pub fn budget(&self) -> ReviewGitBudget {
+        self.0.budget
+    }
+
+    pub fn cancel(&self) {
+        let active = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.cancelled = true;
+            state.active.clone()
+        };
+        if let Some(active) = active {
+            active.cancel();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancelled
+    }
+
+    pub fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.0.started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    fn deadline_exceeded(&self, now: Instant) -> bool {
+        self.0.deadline.map_or_else(
+            || {
+                u64::try_from(now.saturating_duration_since(self.0.started_at).as_micros())
+                    .unwrap_or(u64::MAX)
+                    >= self.0.budget.max_elapsed_micros().get()
+            },
+            |deadline| now >= deadline,
+        )
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSourceContents {
@@ -50,13 +183,22 @@ impl ReviewSourceBudget {
 
 /// Resolve an immutable review target to full object IDs exactly once.
 pub fn resolve_review_comparison(path: &Path, mode: DiffMode) -> GitResult<ResolvedComparison> {
+    resolve_review_comparison_with_control(path, mode, &ReviewGitControl::new(Default::default()))
+}
+
+/// Resolve an immutable target using one request-scoped Git control.
+pub fn resolve_review_comparison_with_control(
+    path: &Path,
+    mode: DiffMode,
+    control: &ReviewGitControl,
+) -> GitResult<ResolvedComparison> {
     match &mode {
         DiffMode::BranchCompare { base, head } => {
             crate::validate_git_ref(base)?;
             crate::validate_git_ref(head)?;
-            let requested_base = resolve_commit_oid(path, base)?;
-            let requested_head = resolve_commit_oid(path, head)?;
-            let merge_base = resolve_merge_base(path, &requested_base, &requested_head)?;
+            let requested_base = resolve_commit_oid_with_control(path, base, control)?;
+            let requested_head = resolve_commit_oid_with_control(path, head, control)?;
+            let merge_base = resolve_merge_base(path, &requested_base, &requested_head, control)?;
 
             let (strategy, effective_base, merge_base_oid, identity) = match merge_base {
                 Some(merge_base) => (
@@ -96,8 +238,8 @@ pub fn resolve_review_comparison(path: &Path, mode: DiffMode) -> GitResult<Resol
         }
         DiffMode::Commit(reference) => {
             crate::validate_git_ref(reference)?;
-            let commit = resolve_commit_oid(path, reference)?;
-            let parents = commit_parent_oids(path, &commit)?;
+            let commit = resolve_commit_oid_with_control(path, reference, control)?;
+            let parents = commit_parent_oids(path, &commit, control)?;
             let first_parent = parents.first().cloned();
             match first_parent {
                 Some(parent) => resolved(
@@ -113,7 +255,7 @@ pub fn resolve_review_comparison(path: &Path, mode: DiffMode) -> GitResult<Resol
                     ReviewComparisonId(format!("commit:parent:{commit}")),
                 ),
                 None => {
-                    let empty_tree = empty_tree_oid(path)?;
+                    let empty_tree = empty_tree_oid(path, control)?;
                     resolved(
                         mode,
                         None,
@@ -139,6 +281,15 @@ pub fn resolve_review_comparison(path: &Path, mode: DiffMode) -> GitResult<Resol
 
 /// Produce a line diff from the immutable effective snapshots.
 pub fn get_exact_review_diff(path: &Path, request: &ReviewDiffRequest) -> GitResult<DiffResult> {
+    get_exact_review_diff_with_control(path, request, &ReviewGitControl::new(Default::default()))
+}
+
+/// Produce an exact line diff using one request-scoped Git control.
+pub fn get_exact_review_diff_with_control(
+    path: &Path,
+    request: &ReviewDiffRequest,
+    control: &ReviewGitControl,
+) -> GitResult<DiffResult> {
     let comparison = request.comparison.as_resolved();
     let (base, head) = immutable_endpoints(comparison)?;
     let mut args = vec![
@@ -155,7 +306,7 @@ pub fn get_exact_review_diff(path: &Path, request: &ReviewDiffRequest) -> GitRes
     if request.ignore_whitespace {
         args.insert(7, "-w");
     }
-    let output = run_git(path, &args)?;
+    let output = run_git(path, &args, control)?;
     let stdout = String::from_utf8(output)
         .map_err(|error| GitError::ParseError(format!("diff output is not UTF-8: {error}")))?;
     Ok(parse_unified_diff(&stdout))
@@ -167,12 +318,27 @@ pub fn get_exact_review_source(
     request: &ReviewSourceRequest,
     budget: ReviewSourceBudget,
 ) -> GitResult<ReviewSourceContents> {
+    get_exact_review_source_with_control(
+        path,
+        request,
+        budget,
+        &ReviewGitControl::new(Default::default()),
+    )
+}
+
+/// Load exact source using allocation limits and one request-scoped Git control.
+pub fn get_exact_review_source_with_control(
+    path: &Path,
+    request: &ReviewSourceRequest,
+    budget: ReviewSourceBudget,
+    control: &ReviewGitControl,
+) -> GitResult<ReviewSourceContents> {
     let comparison = request.comparison().as_resolved();
-    let old = preflight_snapshot_file(path, comparison.base(), request.old_path())?;
-    let new = preflight_snapshot_file(path, comparison.head(), request.new_path())?;
+    let old = preflight_snapshot_file(path, comparison.base(), request.old_path(), control)?;
+    let new = preflight_snapshot_file(path, comparison.head(), request.new_path(), control)?;
     enforce_source_budget(old.as_ref(), new.as_ref(), budget)?;
-    let old_content = read_preflight_file(path, old)?;
-    let new_content = read_preflight_file(path, new)?;
+    let old_content = read_preflight_file(path, old, control)?;
+    let new_content = read_preflight_file(path, new, control)?;
     Ok(ReviewSourceContents {
         old_content,
         new_content,
@@ -183,6 +349,15 @@ pub fn get_exact_review_source(
 pub fn get_review_inventory(
     path: &Path,
     comparison: &ImmutableResolvedComparison,
+) -> GitResult<ReviewInventory> {
+    get_review_inventory_with_control(path, comparison, &ReviewGitControl::new(Default::default()))
+}
+
+/// Build deterministic inventory using one request-scoped Git control.
+pub fn get_review_inventory_with_control(
+    path: &Path,
+    comparison: &ImmutableResolvedComparison,
+    control: &ReviewGitControl,
 ) -> GitResult<ReviewInventory> {
     let (base, head) = immutable_endpoints(comparison.as_resolved())?;
     let raw = run_git(
@@ -200,6 +375,7 @@ pub fn get_review_inventory(
             base.as_str(),
             head.as_str(),
         ],
+        control,
     )?;
     let numstat = run_git(
         path,
@@ -215,10 +391,11 @@ pub fn get_review_inventory(
             base.as_str(),
             head.as_str(),
         ],
+        control,
     )?;
     let mut files = parse_raw_diff(&raw)?;
     apply_numstat(&mut files, &parse_numstat(&numstat)?)?;
-    let commits = bounded_commit_ledger(path, comparison.as_resolved())?;
+    let commits = bounded_commit_ledger(path, comparison.as_resolved(), control)?;
     let totals = calculate_totals(&files, commits.len() as u64);
     let coverage = ReviewCoverage::new(files.len() as u64, files.len() as u64, 0, 0, 0, 0, None)
         .map_err(model_error)?;
@@ -260,8 +437,8 @@ fn model_error(error: impl std::fmt::Display) -> GitError {
     GitError::ParseError(error.to_string())
 }
 
-fn run_git(path: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
-    let output = safe_output(command("git").arg("-C").arg(path).args(args))?;
+fn run_git(path: &Path, args: &[&str], control: &ReviewGitControl) -> GitResult<Vec<u8>> {
+    let output = run_git_output(path, args, control)?;
     if !output.status.success() {
         return Err(GitError::GitExitError {
             status: output.status.code().unwrap_or(-1),
@@ -271,9 +448,210 @@ fn run_git(path: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn run_git_output(
+    path: &Path,
+    args: &[&str],
+    control: &ReviewGitControl,
+) -> GitResult<std::process::Output> {
+    run_review_command(review_git_spec(path, args, control), control)
+}
+
+fn review_git_spec(path: &Path, args: &[&str], control: &ReviewGitControl) -> CommandSpec {
+    CommandSpec::new("git")
+        .args(args.iter().copied())
+        .current_dir(path)
+        .lane(Lane::Interactive)
+        .label("git.review")
+        .output_limits(OutputLimits::new(
+            control.budget().max_stdout_bytes(),
+            control.budget().max_stderr_bytes(),
+        ))
+}
+
+fn run_review_command(
+    spec: CommandSpec,
+    control: &ReviewGitControl,
+) -> GitResult<std::process::Output> {
+    run_review_command_inner(
+        spec,
+        control,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct ReviewCommandTestHooks {
+    after_submit_before_publish: Option<Arc<dyn Fn() + Send + Sync>>,
+    after_publish: Option<Arc<dyn Fn() + Send + Sync>>,
+    after_wait_before_finish: Option<Arc<dyn Fn() + Send + Sync>>,
+    before_success_accept: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+fn run_review_command_inner(
+    mut spec: CommandSpec,
+    control: &ReviewGitControl,
+    #[cfg(test)] hooks: Option<&ReviewCommandTestHooks>,
+) -> GitResult<std::process::Output> {
+    let _command_guard = control
+        .0
+        .command_gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    preflight_control(control)?;
+    let Some(deadline) = control.0.deadline else {
+        return Err(GitError::ParseError(
+            "process_failure: review Git deadline cannot be represented".to_string(),
+        ));
+    };
+    spec.deadline = Some(deadline);
+
+    let handle = {
+        let mut state = control
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.cancelled {
+            return Err(cancelled_error());
+        }
+        let handle = CommandBus::global().submit(spec);
+        #[cfg(test)]
+        if let Some(hook) = hooks.and_then(|hooks| hooks.after_submit_before_publish.as_ref()) {
+            hook();
+        }
+        let cancellation = handle.cancellation_handle();
+        state.active = Some(cancellation);
+        handle
+    };
+
+    #[cfg(test)]
+    if let Some(hook) = hooks.and_then(|hooks| hooks.after_publish.as_ref()) {
+        hook();
+    }
+    let result = handle.wait_detailed();
+    #[cfg(test)]
+    if let Some(hook) = hooks.and_then(|hooks| hooks.after_wait_before_finish.as_ref()) {
+        hook();
+    }
+    let cancelled_before_success = {
+        let mut state = control
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active.take();
+        if result.is_ok() {
+            #[cfg(test)]
+            if let Some(hook) = hooks.and_then(|hooks| hooks.before_success_accept.as_ref()) {
+                hook();
+            }
+            state.cancelled
+        } else {
+            false
+        }
+    };
+
+    match result {
+        Ok(_) if cancelled_before_success => Err(cancelled_error()),
+        Ok(output) => Ok(output),
+        Err(failure) => Err(map_command_failure(failure, control.budget())),
+    }
+}
+
+fn preflight_control(control: &ReviewGitControl) -> GitResult<()> {
+    if control.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    if control.deadline_exceeded(Instant::now()) {
+        return Err(time_limit_error(control.budget()));
+    }
+    Ok(())
+}
+
+fn cancelled_error() -> GitError {
+    GitError::ParseError("cancelled: review Git command was cancelled".to_string())
+}
+
+fn time_limit_error(budget: ReviewGitBudget) -> GitError {
+    GitError::ParseError(format!(
+        "time_limit: review Git request exceeded {} microseconds",
+        budget.max_elapsed_micros().get()
+    ))
+}
+
+fn map_command_failure(failure: CommandFailure, budget: ReviewGitBudget) -> GitError {
+    let cleanup = cleanup_summary(&failure);
+    let message = match failure.primary {
+        CommandFailureCause::Cancelled { .. } => {
+            format!("cancelled: review Git command was cancelled{cleanup}")
+        }
+        CommandFailureCause::DeadlineExceeded { .. } => format!(
+            "time_limit: review Git request exceeded {} microseconds{cleanup}",
+            budget.max_elapsed_micros().get()
+        ),
+        CommandFailureCause::StdoutLimitExceeded {
+            limit, observed, ..
+        } => format!(
+            "stdout_limit: Git stdout exceeded {limit} bytes (observed at least {observed}){cleanup}"
+        ),
+        CommandFailureCause::StderrLimitExceeded {
+            limit, observed, ..
+        } => format!(
+            "stderr_limit: Git stderr exceeded {limit} bytes (observed at least {observed}){cleanup}"
+        ),
+        CommandFailureCause::Process {
+            operation,
+            kind,
+            message,
+            ..
+        } => format!(
+            "process_failure: Git command {operation} failed ({kind:?}): {}{cleanup}",
+            truncate_message(&message, 512)
+        ),
+    };
+    GitError::ParseError(message)
+}
+
+fn cleanup_summary(failure: &CommandFailure) -> String {
+    if failure.cleanup.is_empty() {
+        return String::new();
+    }
+    let mut entries = failure
+        .cleanup
+        .iter()
+        .take(4)
+        .map(|item| format!("{}:{:?}", item.operation, item.kind))
+        .collect::<Vec<_>>();
+    if failure.cleanup.len() > entries.len() {
+        entries.push(format!("+{} more", failure.cleanup.len() - entries.len()));
+    }
+    format!("; cleanup=[{}]", entries.join(", "))
+}
+
+fn truncate_message(message: &str, max_chars: usize) -> String {
+    let mut chars = message.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+#[cfg(test)]
 fn resolve_commit_oid(path: &Path, reference: &str) -> GitResult<GitObjectId> {
+    resolve_commit_oid_with_control(path, reference, &ReviewGitControl::new(Default::default()))
+}
+
+fn resolve_commit_oid_with_control(
+    path: &Path,
+    reference: &str,
+    control: &ReviewGitControl,
+) -> GitResult<GitObjectId> {
     let revision = format!("{reference}^{{commit}}");
-    let output = run_git(path, &["rev-parse", "--verify", &revision])?;
+    let output = run_git(path, &["rev-parse", "--verify", &revision], control)?;
     parse_oid(trim_ascii(&output), "resolved commit")
 }
 
@@ -281,12 +659,9 @@ fn resolve_merge_base(
     path: &Path,
     base: &GitObjectId,
     head: &GitObjectId,
+    control: &ReviewGitControl,
 ) -> GitResult<Option<GitObjectId>> {
-    let output = safe_output(command("git").arg("-C").arg(path).args([
-        "merge-base",
-        base.as_str(),
-        head.as_str(),
-    ]))?;
+    let output = run_git_output(path, &["merge-base", base.as_str(), head.as_str()], control)?;
     if output.status.success() {
         return parse_oid(trim_ascii(&output.stdout), "merge base").map(Some);
     }
@@ -299,8 +674,16 @@ fn resolve_merge_base(
     })
 }
 
-fn commit_parent_oids(path: &Path, commit: &GitObjectId) -> GitResult<Vec<GitObjectId>> {
-    let output = run_git(path, &["rev-list", "--parents", "-n", "1", commit.as_str()])?;
+fn commit_parent_oids(
+    path: &Path,
+    commit: &GitObjectId,
+    control: &ReviewGitControl,
+) -> GitResult<Vec<GitObjectId>> {
+    let output = run_git(
+        path,
+        &["rev-list", "--parents", "-n", "1", commit.as_str()],
+        control,
+    )?;
     let line = std::str::from_utf8(trim_ascii(&output))
         .map_err(|error| GitError::ParseError(format!("commit parents are not UTF-8: {error}")))?;
     let mut parts = line.split_ascii_whitespace();
@@ -319,10 +702,10 @@ fn commit_parent_oids(path: &Path, commit: &GitObjectId) -> GitResult<Vec<GitObj
         .collect()
 }
 
-fn empty_tree_oid(path: &Path) -> GitResult<GitObjectId> {
-    // The command bus supplies an empty stdin, so this hashes an empty tree
+fn empty_tree_oid(path: &Path, control: &ReviewGitControl) -> GitResult<GitObjectId> {
+    // A null stdin supplies EOF, so this hashes an empty tree
     // without writing an object and works for both SHA-1 and SHA-256 repos.
-    let output = run_git(path, &["hash-object", "-t", "tree", "--stdin"])?;
+    let output = run_git(path, &["hash-object", "-t", "tree", "--stdin"], control)?;
     parse_oid(trim_ascii(&output), "empty tree")
 }
 
@@ -367,6 +750,7 @@ fn preflight_snapshot_file(
     path: &Path,
     snapshot: &ReviewSnapshot,
     file_path: Option<&str>,
+    control: &ReviewGitControl,
 ) -> GitResult<Option<PreflightBlob>> {
     let Some(file_path) = file_path else {
         return Ok(None);
@@ -375,7 +759,7 @@ fn preflight_snapshot_file(
         ReviewSnapshot::EmptyTree { .. } => Ok(None),
         ReviewSnapshot::Commit { oid } => {
             let object = format!("{}:{file_path}", oid.as_str());
-            let output = run_git(path, &["cat-file", "-s", &object])?;
+            let output = run_git(path, &["cat-file", "-s", &object], control)?;
             let size = std::str::from_utf8(trim_ascii(&output))
                 .map_err(|error| GitError::ParseError(format!("blob size is not UTF-8: {error}")))?
                 .parse::<u64>()
@@ -415,11 +799,15 @@ fn enforce_source_budget(
     Ok(())
 }
 
-fn read_preflight_file(path: &Path, blob: Option<PreflightBlob>) -> GitResult<Option<String>> {
+fn read_preflight_file(
+    path: &Path,
+    blob: Option<PreflightBlob>,
+    control: &ReviewGitControl,
+) -> GitResult<Option<String>> {
     let Some(blob) = blob else {
         return Ok(None);
     };
-    let bytes = run_git(path, &["cat-file", "blob", &blob.object])?;
+    let bytes = run_git(path, &["cat-file", "blob", &blob.object], control)?;
     if bytes.len() as u64 != blob.size {
         return Err(GitError::ParseError(format!(
             "blob size changed between preflight and read: expected {}, received {}",
@@ -674,6 +1062,7 @@ fn numstat_matches(file: &ReviewFileFact, paths: &NumstatPaths) -> bool {
 fn bounded_commit_ledger(
     path: &Path,
     comparison: &ResolvedComparison,
+    control: &ReviewGitControl,
 ) -> GitResult<Vec<ReviewCommitFact>> {
     let (_, head) = immutable_endpoints(comparison)?;
     let range;
@@ -704,7 +1093,7 @@ fn bounded_commit_ledger(
         args.push(max_count);
     }
     args.push(revision);
-    let output = run_git(path, &args)?;
+    let output = run_git(path, &args, control)?;
     parse_commit_ledger(&output)
 }
 
@@ -716,7 +1105,7 @@ fn parse_commit_ledger(output: &[u8]) -> GitResult<Vec<ReviewCommitFact>> {
     if chunks.last().is_some_and(|chunk| chunk.is_empty()) {
         chunks.pop();
     }
-    if chunks.len() % 5 != 0 {
+    if !chunks.len().is_multiple_of(5) {
         return Err(GitError::ParseError(format!(
             "commit ledger has {} fields, not a multiple of 5",
             chunks.len()
@@ -805,7 +1194,10 @@ fn calculate_totals(files: &[ReviewFileFact], commits: u64) -> ReviewChangeTotal
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::num::NonZeroU64;
     use std::process::Command;
+    use std::sync::{Barrier, mpsc};
+    use std::time::{Duration, Instant};
 
     use okena_core::review::{ComparisonStrategy, ImmutableResolvedComparison};
 
@@ -818,6 +1210,336 @@ mod tests {
 
     fn source_budget() -> ReviewSourceBudget {
         ReviewSourceBudget::new(1024 * 1024, 2 * 1024 * 1024).unwrap()
+    }
+
+    fn git_budget(stdout: u64, stderr: u64, elapsed_micros: u64) -> ReviewGitBudget {
+        ReviewGitBudget::new(
+            NonZeroU64::new(stdout).unwrap(),
+            NonZeroU64::new(stderr).unwrap(),
+            NonZeroU64::new(elapsed_micros).unwrap(),
+        )
+    }
+
+    #[test]
+    fn command_bus_maps_stdout_overflow() {
+        let (_temporary, repo) = init_temp_repo();
+        let control = ReviewGitControl::new(git_budget(1, 1024 * 1024, 5_000_000));
+        let error = run_git(&repo, &["rev-parse", "HEAD"], &control).unwrap_err();
+        assert!(error.to_string().contains("stdout_limit:"));
+    }
+
+    #[test]
+    fn command_bus_maps_stderr_overflow() {
+        let (_temporary, repo) = init_temp_repo();
+        let control = ReviewGitControl::new(git_budget(1024 * 1024, 1, 5_000_000));
+        let error = run_git_output(
+            &repo,
+            &["rev-parse", "--verify", "definitely-not-a-ref"],
+            &control,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("stderr_limit:"));
+    }
+
+    #[test]
+    fn command_bus_preserves_bounded_nonzero_git_exit() {
+        let (_temporary, repo) = init_temp_repo();
+        let control = ReviewGitControl::new(git_budget(1024 * 1024, 1024, 5_000_000));
+        let error = run_git(
+            &repo,
+            &["rev-parse", "--verify", "definitely-not-a-ref"],
+            &control,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GitError::GitExitError {
+                status: 128,
+                ref stderr,
+            } if !stderr.is_empty() && stderr.len() <= 1024
+        ));
+    }
+
+    #[test]
+    fn command_bus_maps_process_failure() {
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        let error = run_review_command(
+            CommandSpec::new("okena-command-that-does-not-exist")
+                .lane(Lane::Interactive)
+                .label("git.review")
+                .output_limits(OutputLimits::new(
+                    control.budget().max_stdout_bytes(),
+                    control.budget().max_stderr_bytes(),
+                )),
+            &control,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("process_failure:"));
+    }
+
+    #[test]
+    fn cancellation_during_publication_is_forwarded_before_fast_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        let at_publication = Arc::new(Barrier::new(2));
+        let release_publication = Arc::new(Barrier::new(2));
+        let cancellation_finished = Arc::new(Barrier::new(2));
+        let hooks = ReviewCommandTestHooks {
+            after_submit_before_publish: Some({
+                let at_publication = at_publication.clone();
+                let release_publication = release_publication.clone();
+                Arc::new(move || {
+                    at_publication.wait();
+                    release_publication.wait();
+                })
+            }),
+            after_publish: Some({
+                let cancellation_finished = cancellation_finished.clone();
+                Arc::new(move || {
+                    cancellation_finished.wait();
+                })
+            }),
+            ..Default::default()
+        };
+        let runner_control = control.clone();
+        let repo = temporary.path().to_path_buf();
+        let runner = std::thread::spawn(move || {
+            run_review_command_inner(
+                review_git_spec(&repo, &["--version"], &runner_control),
+                &runner_control,
+                Some(&hooks),
+            )
+        });
+
+        at_publication.wait();
+        let (cancel_started_tx, cancel_started_rx) = mpsc::sync_channel(1);
+        let cancelling_control = control.clone();
+        let canceller = std::thread::spawn(move || {
+            cancel_started_tx.send(()).unwrap();
+            cancelling_control.cancel();
+            cancellation_finished.wait();
+        });
+        cancel_started_rx.recv().unwrap();
+        release_publication.wait();
+
+        let error = runner.join().unwrap().unwrap_err();
+        canceller.join().unwrap();
+        assert!(error.to_string().contains("cancelled:"));
+    }
+
+    #[test]
+    fn cancellation_after_wait_before_success_acceptance_wins() {
+        let temporary = tempfile::tempdir().unwrap();
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        let after_wait = Arc::new(Barrier::new(2));
+        let release_finish = Arc::new(Barrier::new(2));
+        let hooks = ReviewCommandTestHooks {
+            after_wait_before_finish: Some({
+                let after_wait = after_wait.clone();
+                let release_finish = release_finish.clone();
+                Arc::new(move || {
+                    after_wait.wait();
+                    release_finish.wait();
+                })
+            }),
+            ..Default::default()
+        };
+        let runner_control = control.clone();
+        let repo = temporary.path().to_path_buf();
+        let runner = std::thread::spawn(move || {
+            run_review_command_inner(
+                review_git_spec(&repo, &["--version"], &runner_control),
+                &runner_control,
+                Some(&hooks),
+            )
+        });
+
+        after_wait.wait();
+        control.cancel();
+        release_finish.wait();
+
+        let error = runner.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled:"));
+    }
+
+    #[test]
+    fn success_acceptance_before_cancellation_keeps_current_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        let before_accept = Arc::new(Barrier::new(2));
+        let release_accept = Arc::new(Barrier::new(2));
+        let hooks = ReviewCommandTestHooks {
+            before_success_accept: Some({
+                let before_accept = before_accept.clone();
+                let release_accept = release_accept.clone();
+                Arc::new(move || {
+                    before_accept.wait();
+                    release_accept.wait();
+                })
+            }),
+            ..Default::default()
+        };
+        let runner_control = control.clone();
+        let repo = temporary.path().to_path_buf();
+        let runner = std::thread::spawn(move || {
+            run_review_command_inner(
+                review_git_spec(&repo, &["--version"], &runner_control),
+                &runner_control,
+                Some(&hooks),
+            )
+        });
+
+        before_accept.wait();
+        let (cancel_started_tx, cancel_started_rx) = mpsc::sync_channel(1);
+        let cancelling_control = control.clone();
+        let canceller = std::thread::spawn(move || {
+            cancel_started_tx.send(()).unwrap();
+            cancelling_control.cancel();
+        });
+        cancel_started_rx.recv().unwrap();
+        release_accept.wait();
+
+        let output = runner.join().unwrap().unwrap();
+        canceller.join().unwrap();
+        assert!(output.status.success());
+        assert!(control.is_cancelled());
+        let error = run_git_output(temporary.path(), &["--version"], &control).unwrap_err();
+        assert!(error.to_string().contains("cancelled:"));
+    }
+
+    #[test]
+    fn cancellation_after_typed_bus_failure_preserves_bus_failure() {
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        let after_wait = Arc::new(Barrier::new(2));
+        let release_finish = Arc::new(Barrier::new(2));
+        let hooks = ReviewCommandTestHooks {
+            after_wait_before_finish: Some({
+                let after_wait = after_wait.clone();
+                let release_finish = release_finish.clone();
+                Arc::new(move || {
+                    after_wait.wait();
+                    release_finish.wait();
+                })
+            }),
+            ..Default::default()
+        };
+        let runner_control = control.clone();
+        let runner = std::thread::spawn(move || {
+            run_review_command_inner(
+                CommandSpec::new("okena-command-that-does-not-exist")
+                    .lane(Lane::Interactive)
+                    .label("git.review")
+                    .output_limits(OutputLimits::new(
+                        runner_control.budget().max_stdout_bytes(),
+                        runner_control.budget().max_stderr_bytes(),
+                    )),
+                &runner_control,
+                Some(&hooks),
+            )
+        });
+
+        after_wait.wait();
+        control.cancel();
+        release_finish.wait();
+
+        let error = runner.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("process_failure:"));
+        assert!(!error.to_string().contains("cancelled:"));
+    }
+
+    #[test]
+    fn command_bus_uses_one_deadline_across_sequential_commands() {
+        let (_temporary, repo) = init_temp_repo();
+        let control = ReviewGitControl::new(git_budget(1024 * 1024, 1024, 100_000));
+        run_git(&repo, &["rev-parse", "HEAD"], &control).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let error = run_git(&repo, &["rev-parse", "HEAD"], &control).unwrap_err();
+        assert!(error.to_string().contains("time_limit:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_bus_does_not_submit_after_control_was_cancelled() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("should-not-exist");
+        let alias = format!("alias.review-touch=!touch {}", marker.display());
+        let control = ReviewGitControl::new(git_budget(1024, 1024, 5_000_000));
+        control.cancel();
+
+        let error = run_git_output(temporary.path(), &["-c", &alias, "review-touch"], &control)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled:"));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_bus_observes_active_cancellation_and_reaps_tree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("started");
+        let control = ReviewGitControl::new(git_budget(1024 * 1024, 1024, 5_000_000));
+        let runner_control = control.clone();
+        let runner_marker = marker.clone();
+        let repo_for_runner = temporary.path().to_path_buf();
+        let runner = std::thread::spawn(move || {
+            let alias = format!(
+                "alias.review-hang=!echo $$ > {}; sleep 30",
+                runner_marker.display()
+            );
+            run_git_output(
+                &repo_for_runner,
+                &["-c", &alias, "review-hang"],
+                &runner_control,
+            )
+        });
+
+        let started = Instant::now();
+        while !marker.exists() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(marker.exists(), "helper did not start before cancellation");
+        control.cancel();
+        let error = runner.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled:"));
+
+        #[cfg(target_os = "linux")]
+        {
+            let pid = fs::read_to_string(marker)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while okena_core::process::is_process_alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!okena_core::process::is_process_alive(pid));
+        }
+    }
+
+    #[test]
+    fn shared_control_runs_normal_exact_review_pipeline() {
+        let (_temporary, repo) = init_temp_repo();
+        let control = ReviewGitControl::new(git_budget(4 * 1024 * 1024, 64 * 1024, 5_000_000));
+        let comparison = resolve_review_comparison_with_control(
+            &repo,
+            DiffMode::Commit("HEAD".to_string()),
+            &control,
+        )
+        .unwrap();
+        let immutable = immutable(comparison.clone());
+        let inventory = get_review_inventory_with_control(&repo, &immutable, &control).unwrap();
+        let diff = get_exact_review_diff_with_control(
+            &repo,
+            &ReviewDiffRequest::new(comparison, false).unwrap(),
+            &control,
+        )
+        .unwrap();
+
+        assert_eq!(inventory.comparison.identity(), immutable.identity());
+        assert_eq!(inventory.files.len(), diff.files.len());
+        assert!(!control.is_cancelled());
     }
 
     fn commit_at(repo: &Path, subject: &str, timestamp: &str) {
