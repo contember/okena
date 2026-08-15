@@ -7,10 +7,10 @@ use std::time::Instant;
 use tree_sitter::{Node, Parser};
 
 use crate::{
-    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, ControlContext, DiagnosticSeverity,
-    DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact, SymbolKey, SymbolKind,
-    SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxLanguage, SyntaxProvenance,
-    SyntaxTruncation, SyntaxTruncationReason,
+    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, CaptureByteTracker, ControlContext,
+    DiagnosticSeverity, DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact,
+    SymbolKey, SymbolKind, SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxLanguage,
+    SyntaxProvenance, SyntaxTruncation, SyntaxTruncationReason,
 };
 
 const TYPESCRIPT_PARSER: &str = "tree-sitter-typescript@0.23.2";
@@ -77,6 +77,23 @@ impl SyntaxAdapter for TypeScriptAdapter {
                 )?,
             );
         }
+        let mut capture = match CaptureByteTracker::for_document(
+            budget.max_capture_bytes(),
+            input.path(),
+            &provenance,
+        ) {
+            Ok(capture) => capture,
+            Err(truncation) => {
+                return partial_document(
+                    &input,
+                    provenance,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    truncation,
+                );
+            }
+        };
         let mut parser = Parser::new();
         let grammar = match language {
             SyntaxLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -90,6 +107,8 @@ impl SyntaxAdapter for TypeScriptAdapter {
                 &input,
                 provenance,
                 format!("failed to load {parser_name}: {error}"),
+                &mut capture,
+                control,
             );
         }
 
@@ -114,7 +133,13 @@ impl SyntaxAdapter for TypeScriptAdapter {
                     truncation,
                 );
             }
-            return failed_document(&input, provenance, "tree-sitter returned no syntax tree");
+            return failed_document(
+                &input,
+                provenance,
+                "tree-sitter returned no syntax tree",
+                &mut capture,
+                control,
+            );
         };
 
         let (exported_names, export_scan_truncation) =
@@ -135,12 +160,17 @@ impl SyntaxAdapter for TypeScriptAdapter {
             budget,
             control,
             exported_names,
+            capture,
         );
         extractor.extract(tree.root_node())?;
 
         let diagnostics = if extractor.truncation.is_none() {
-            let (diagnostics, truncation) =
-                parse_diagnostics(tree.root_node(), control, budget.max_diagnostics().get())?;
+            let (diagnostics, truncation) = parse_diagnostics(
+                tree.root_node(),
+                control,
+                budget.max_diagnostics().get(),
+                &mut extractor.capture,
+            )?;
             extractor.truncation = truncation;
             diagnostics
         } else {
@@ -153,7 +183,8 @@ impl SyntaxAdapter for TypeScriptAdapter {
         } else {
             DocumentStatus::Parsed
         };
-        DocumentStructure::new(
+        let retained_bytes = extractor.capture.retained_bytes();
+        let document = DocumentStructure::new(
             input.path(),
             provenance,
             status,
@@ -161,7 +192,9 @@ impl SyntaxAdapter for TypeScriptAdapter {
             extractor.calls,
             diagnostics,
             truncation,
-        )
+        )?;
+        debug_assert_eq!(document.estimated_owned_bytes(), retained_bytes);
+        Ok(document)
     }
 }
 
@@ -184,20 +217,42 @@ fn failed_document(
     input: &AnalysisInput,
     provenance: SyntaxProvenance,
     message: impl Into<String>,
+    capture: &mut CaptureByteTracker,
+    control: &AnalysisControl,
 ) -> Result<DocumentStructure, ModelError> {
-    DocumentStructure::new(
+    if let Some(truncation) = control.stop_truncation(Instant::now())? {
+        return partial_document(
+            input,
+            provenance,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            truncation,
+        );
+    }
+    let diagnostic = SyntaxDiagnostic::new(DiagnosticSeverity::Error, message, None)?;
+    if let Err(truncation) = capture.try_account_diagnostic(&diagnostic) {
+        return partial_document(
+            input,
+            provenance,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            truncation,
+        );
+    }
+    let retained_bytes = capture.retained_bytes();
+    let document = DocumentStructure::new(
         input.path(),
         provenance,
         DocumentStatus::Failed,
         Vec::new(),
         Vec::new(),
-        vec![SyntaxDiagnostic::new(
-            DiagnosticSeverity::Error,
-            message,
-            None,
-        )?],
+        vec![diagnostic],
         None,
-    )
+    )?;
+    debug_assert_eq!(document.estimated_owned_bytes(), retained_bytes);
+    Ok(document)
 }
 
 fn partial_document(
@@ -252,6 +307,7 @@ struct Extractor<'source, 'control> {
     symbols: Vec<SymbolFact>,
     calls: Vec<CallFact>,
     truncation: Option<SyntaxTruncation>,
+    capture: CaptureByteTracker,
 }
 
 impl<'source, 'control> Extractor<'source, 'control> {
@@ -261,6 +317,7 @@ impl<'source, 'control> Extractor<'source, 'control> {
         budget: AnalysisBudget,
         control: &'control AnalysisControl,
         exported_names: ExportedNames,
+        capture: CaptureByteTracker,
     ) -> Self {
         Self {
             source,
@@ -271,6 +328,7 @@ impl<'source, 'control> Extractor<'source, 'control> {
             symbols: Vec::new(),
             calls: Vec::new(),
             truncation: None,
+            capture,
         }
     }
 
@@ -338,6 +396,9 @@ impl<'source, 'control> Extractor<'source, 'control> {
     }
 
     fn push_symbol(&mut self, fact: SymbolFact) -> Result<bool, ModelError> {
+        if self.should_stop()? {
+            return Ok(false);
+        }
         let limit = usize::try_from(self.budget.max_symbols().get()).unwrap_or(usize::MAX);
         if self.symbols.len() >= limit {
             let observed = u64::try_from(self.symbols.len())
@@ -350,11 +411,18 @@ impl<'source, 'control> Extractor<'source, 'control> {
             )?);
             return Ok(false);
         }
+        if let Err(truncation) = self.capture.try_account_symbol(&fact) {
+            self.truncation = Some(truncation);
+            return Ok(false);
+        }
         self.symbols.push(fact);
         Ok(true)
     }
 
     fn push_call(&mut self, fact: CallFact) -> Result<bool, ModelError> {
+        if self.should_stop()? {
+            return Ok(false);
+        }
         let limit = usize::try_from(self.budget.max_calls().get()).unwrap_or(usize::MAX);
         if self.calls.len() >= limit {
             let observed = u64::try_from(self.calls.len())
@@ -365,6 +433,10 @@ impl<'source, 'control> Extractor<'source, 'control> {
                 Some(self.budget.max_calls().get().into()),
                 Some(observed),
             )?);
+            return Ok(false);
+        }
+        if let Err(truncation) = self.capture.try_account_call(&fact) {
+            self.truncation = Some(truncation);
             return Ok(false);
         }
         self.calls.push(fact);
@@ -981,6 +1053,7 @@ fn parse_diagnostics(
     root: Node<'_>,
     control: &AnalysisControl,
     diagnostic_limit: u32,
+    capture: &mut CaptureByteTracker,
 ) -> Result<(Vec<SyntaxDiagnostic>, Option<SyntaxTruncation>), ModelError> {
     if !root.has_error() {
         return Ok((Vec::new(), control.stop_truncation(Instant::now())?));
@@ -1007,11 +1080,18 @@ fn parse_diagnostics(
             } else {
                 "tree-sitter recovered from invalid syntax".to_string()
             };
-            diagnostics.push(SyntaxDiagnostic::new(
+            let diagnostic = SyntaxDiagnostic::new(
                 DiagnosticSeverity::Warning,
                 message,
                 Some(node_range(node)?),
-            )?);
+            )?;
+            if let Some(truncation) = control.stop_truncation(Instant::now())? {
+                return Ok((diagnostics, Some(truncation)));
+            }
+            if let Err(truncation) = capture.try_account_diagnostic(&diagnostic) {
+                return Ok((diagnostics, Some(truncation)));
+            }
+            diagnostics.push(diagnostic);
             continue;
         }
         for index in (0..node.named_child_count()).rev() {
@@ -1024,11 +1104,21 @@ fn parse_diagnostics(
         }
     }
     if diagnostics.is_empty() {
-        diagnostics.push(SyntaxDiagnostic::new(
+        if let Some(truncation) = control.stop_truncation(Instant::now())? {
+            return Ok((diagnostics, Some(truncation)));
+        }
+        let diagnostic = SyntaxDiagnostic::new(
             DiagnosticSeverity::Warning,
             "tree-sitter reported an incomplete syntax tree",
             Some(node_range(root)?),
-        )?);
+        )?;
+        if let Some(truncation) = control.stop_truncation(Instant::now())? {
+            return Ok((diagnostics, Some(truncation)));
+        }
+        if let Err(truncation) = capture.try_account_diagnostic(&diagnostic) {
+            return Ok((diagnostics, Some(truncation)));
+        }
+        diagnostics.push(diagnostic);
     }
     Ok((diagnostics, None))
 }
@@ -1101,6 +1191,32 @@ mod tests {
             NonZeroU32::new(calls).unwrap(),
             NonZeroU32::new(diagnostics).unwrap(),
         )
+    }
+
+    fn budget_with_capture(
+        source: u64,
+        symbols: u32,
+        calls: u32,
+        diagnostics: u32,
+        capture: u64,
+    ) -> AnalysisBudget {
+        budget_with_diagnostics(source, symbols, calls, diagnostics)
+            .with_max_capture_bytes(NonZeroU64::new(capture).unwrap())
+    }
+
+    fn analyze_with_budget(
+        path: &str,
+        language: SyntaxLanguage,
+        source: &str,
+        budget: AnalysisBudget,
+    ) -> DocumentStructure {
+        TypeScriptAdapter
+            .analyze(
+                AnalysisInput::new(path, language, source.to_string()).unwrap(),
+                budget,
+                &AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap()),
+            )
+            .unwrap()
     }
 
     fn symbol<'a>(document: &'a DocumentStructure, name: &str) -> &'a SymbolFact {
@@ -1383,6 +1499,137 @@ namespace Local {
     }
 
     #[test]
+    fn retained_capture_exact_limit_succeeds_and_one_byte_under_is_partial() {
+        let source = "export function run(value: string) { return work(value); }";
+        let path = "src/capture.ts";
+        let generous = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, 10_000),
+        );
+        assert_eq!(generous.status(), DocumentStatus::Parsed);
+        let exact = generous.estimated_owned_bytes();
+
+        let at_limit = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, exact),
+        );
+        assert_eq!(at_limit.status(), DocumentStatus::Parsed);
+        assert_eq!(at_limit.estimated_owned_bytes(), exact);
+
+        let below = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, exact - 1),
+        );
+        assert_eq!(below.status(), DocumentStatus::Partial);
+        assert_eq!(
+            below.truncation().unwrap().reason(),
+            SyntaxTruncationReason::CaptureBytes
+        );
+        assert_eq!(below.truncation().unwrap().limit(), Some(exact - 1));
+        assert_eq!(below.truncation().unwrap().observed(), Some(exact));
+        assert!(below.estimated_owned_bytes() < exact);
+    }
+
+    #[test]
+    fn overlapping_nested_call_arguments_stop_on_capture_bytes_before_count() {
+        let source = format!(
+            "export function run() {{ return outer(inner(deep(\"{}\"))); }}",
+            "payload".repeat(64)
+        );
+        let path = "src/nested-capture.ts";
+        let generous = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            &source,
+            budget_with_capture(100_000, 100, 100, 100, 100_000),
+        );
+        assert_eq!(generous.status(), DocumentStatus::Parsed);
+        assert_eq!(generous.calls().len(), 3);
+        assert!(
+            generous.calls()[0]
+                .argument_text()
+                .contains(generous.calls()[1].argument_text())
+        );
+        assert!(
+            generous.calls()[0].argument_text().len() + generous.calls()[1].argument_text().len()
+                > generous.calls()[0].argument_text().len()
+        );
+
+        let calls_bytes: u64 = generous
+            .calls()
+            .iter()
+            .map(CallFact::estimated_owned_bytes)
+            .sum();
+        let without_calls = generous.estimated_owned_bytes() - calls_bytes;
+        let first_two = generous.calls()[0].estimated_owned_bytes()
+            + generous.calls()[1].estimated_owned_bytes();
+        let limit = without_calls + first_two - 1;
+        let limited = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            &source,
+            budget_with_capture(100_000, 100, 100, 100, limit),
+        );
+        assert_eq!(limited.status(), DocumentStatus::Partial);
+        assert_eq!(limited.calls().len(), 1);
+        assert_eq!(
+            limited.truncation().unwrap().reason(),
+            SyntaxTruncationReason::CaptureBytes
+        );
+        assert_eq!(limited.truncation().unwrap().limit(), Some(limit));
+        assert_eq!(limited.truncation().unwrap().observed(), Some(limit + 1));
+        assert_eq!(
+            limited.estimated_owned_bytes(),
+            without_calls + generous.calls()[0].estimated_owned_bytes()
+        );
+    }
+
+    #[test]
+    fn retained_diagnostics_are_capture_accounted() {
+        let source = "const first = ;\nconst second = ;\nconst third = ;\n";
+        let path = "src/capture-errors.ts";
+        let generous = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, 10_000),
+        );
+        assert_eq!(generous.status(), DocumentStatus::Partial);
+        assert!(generous.truncation().is_none());
+        assert!(!generous.diagnostics().is_empty());
+        let exact = generous.estimated_owned_bytes();
+
+        let at_limit = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, exact),
+        );
+        assert_eq!(at_limit.estimated_owned_bytes(), exact);
+        assert!(at_limit.truncation().is_none());
+
+        let limited = analyze_with_budget(
+            path,
+            SyntaxLanguage::TypeScript,
+            source,
+            budget_with_capture(10_000, 100, 100, 100, exact - 1),
+        );
+        assert_eq!(limited.status(), DocumentStatus::Partial);
+        assert_eq!(
+            limited.truncation().unwrap().reason(),
+            SyntaxTruncationReason::CaptureBytes
+        );
+        assert!(limited.diagnostics().len() < generous.diagnostics().len());
+        assert!(limited.estimated_owned_bytes() < exact);
+    }
+
+    #[test]
     fn records_callback_closure_and_error_contexts_conservatively() {
         let source = r#"
 export function run(items: string[]) {
@@ -1465,12 +1712,22 @@ export function run(items: string[]) {
             std::thread::sleep(Duration::from_millis(1));
             cancellation_signal.cancel();
         });
+        let cancelled_provenance =
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, TYPESCRIPT_PARSER).unwrap();
+        let cancelled_budget = budget(10_000_000, 200_000, 200_000);
+        let cancelled_capture = CaptureByteTracker::for_document(
+            cancelled_budget.max_capture_bytes(),
+            "src/large.ts",
+            &cancelled_provenance,
+        )
+        .unwrap();
         let mut extractor = Extractor::new(
             &source,
-            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, TYPESCRIPT_PARSER).unwrap(),
-            budget(10_000_000, 200_000, 200_000),
+            cancelled_provenance,
+            cancelled_budget,
             &cancelled,
             ExportedNames::new(),
+            cancelled_capture,
         );
         extractor.extract(tree.root_node()).unwrap();
         canceller.join().unwrap();
@@ -1480,12 +1737,22 @@ export function run(items: string[]) {
         );
 
         let expired = AnalysisControl::new(NonZeroU64::new(500).unwrap());
+        let expired_provenance =
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, TYPESCRIPT_PARSER).unwrap();
+        let expired_budget = budget(10_000_000, 200_000, 200_000);
+        let expired_capture = CaptureByteTracker::for_document(
+            expired_budget.max_capture_bytes(),
+            "src/large.ts",
+            &expired_provenance,
+        )
+        .unwrap();
         let mut extractor = Extractor::new(
             &source,
-            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, TYPESCRIPT_PARSER).unwrap(),
-            budget(10_000_000, 200_000, 200_000),
+            expired_provenance,
+            expired_budget,
             &expired,
             ExportedNames::new(),
+            expired_capture,
         );
         extractor.extract(tree.root_node()).unwrap();
         assert_eq!(
@@ -1536,7 +1803,11 @@ export function run(items: string[]) {
         let cancelled = future();
         cancelled.cancel();
         let cancelled_document = TypeScriptAdapter
-            .analyze(input(), budget(1_000, 10, 10), &cancelled)
+            .analyze(
+                input(),
+                budget_with_capture(1_000, 10, 10, 10, 1),
+                &cancelled,
+            )
             .unwrap();
         assert_eq!(
             cancelled_document.truncation().unwrap().reason(),
@@ -1548,7 +1819,7 @@ export function run(items: string[]) {
             std::hint::spin_loop();
         }
         let timed_out = TypeScriptAdapter
-            .analyze(input(), budget(1_000, 10, 10), &expired)
+            .analyze(input(), budget_with_capture(1_000, 10, 10, 10, 1), &expired)
             .unwrap();
         assert_eq!(
             timed_out.truncation().unwrap().reason(),
@@ -1556,6 +1827,38 @@ export function run(items: string[]) {
         );
         assert_eq!(timed_out.truncation().unwrap().limit(), Some(1));
         assert!(timed_out.truncation().unwrap().observed().unwrap() >= 1);
+    }
+
+    #[test]
+    fn grammar_load_failure_preserves_control_stop_precedence() {
+        let input = AnalysisInput::new("src/grammar.ts", SyntaxLanguage::TypeScript, String::new())
+            .unwrap();
+        let provenance =
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, TYPESCRIPT_PARSER).unwrap();
+        let mut capture = CaptureByteTracker::for_document(
+            NonZeroU64::new(1_000).unwrap(),
+            input.path(),
+            &provenance,
+        )
+        .unwrap();
+        let cancelled = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        cancelled.cancel();
+
+        let document = failed_document(
+            &input,
+            provenance,
+            "failed to load grammar",
+            &mut capture,
+            &cancelled,
+        )
+        .unwrap();
+
+        assert_eq!(document.status(), DocumentStatus::Partial);
+        assert!(document.diagnostics().is_empty());
+        assert_eq!(
+            document.truncation().unwrap().reason(),
+            SyntaxTruncationReason::Cancelled
+        );
     }
 
     #[test]
