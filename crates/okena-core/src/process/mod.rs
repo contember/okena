@@ -14,7 +14,11 @@
 
 mod bus;
 
-pub use bus::{CommandBus, CommandHandle, CommandSpec, Lane, current_lane, with_lane};
+pub use bus::{
+    CommandBus, CommandCancellationHandle, CommandCleanupFailure, CommandFailure,
+    CommandFailureCause, CommandHandle, CommandOperation, CommandSpec, Lane, OutputLimits,
+    current_lane, with_lane,
+};
 
 /// Create a [`std::process::Command`] that does **not** flash a console
 /// window on Windows.  On other platforms this is identical to
@@ -36,6 +40,11 @@ pub fn command(program: &str) -> std::process::Command {
 /// label, timeout, or cancellation scope explicitly.
 pub fn run(spec: CommandSpec) -> std::io::Result<std::process::Output> {
     CommandBus::global().submit(spec).wait()
+}
+
+/// Submit a command and preserve typed stop and cleanup evidence.
+pub fn run_detailed(spec: CommandSpec) -> Result<std::process::Output, CommandFailure> {
+    CommandBus::global().submit(spec).wait_detailed()
 }
 
 /// Spawn a child process and reap it on a background thread.
@@ -274,8 +283,9 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // The bus and its mock slot are process-global, so bus tests must not run
     // concurrently (one test's mock would intercept another's commands).
@@ -283,6 +293,13 @@ mod tests {
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn limits(stdout: u64, stderr: u64) -> OutputLimits {
+        OutputLimits::new(
+            NonZeroU64::new(stdout).unwrap(),
+            NonZeroU64::new(stderr).unwrap(),
+        )
     }
 
     #[test]
@@ -314,6 +331,206 @@ mod tests {
             .timeout(Duration::from_millis(100));
         let err = run(spec).expect_err("should time out");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overflowing_relative_timeout_never_spawns_command() {
+        let _g = guard();
+        let directory = tempfile::tempdir().expect("marker directory");
+        let marker = directory.path().join("spawned");
+        let marker_path = marker.to_string_lossy().into_owned();
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "touch \"$1\"", "okena-test", &marker_path])
+                .timeout(Duration::MAX),
+        )
+        .expect_err("unsupported relative timeout");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Process {
+                operation: CommandOperation::ComputeDeadline,
+                kind: std::io::ErrorKind::InvalidInput,
+                ..
+            }
+        ));
+        assert!(!marker.exists(), "invalid timeout command was spawned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_accepts_exact_stdout_and_stderr_limits() {
+        let _g = guard();
+        let output = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "printf 12345; printf abcde >&2"])
+                .output_limits(limits(5, 5)),
+        )
+        .expect("exact limits");
+        assert_eq!(output.stdout, b"12345");
+        assert_eq!(output.stderr, b"abcde");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_rejects_first_stdout_byte_beyond_limit() {
+        let _g = guard();
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "printf 123456"])
+                .output_limits(limits(5, 64)),
+        )
+        .expect_err("stdout overflow");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::StdoutLimitExceeded {
+                limit: 5,
+                observed: 6,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_rejects_first_stderr_byte_beyond_limit() {
+        let _g = guard();
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "printf 123456 >&2"])
+                .output_limits(limits(64, 5)),
+        )
+        .expect_err("stderr overflow");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::StderrLimitExceeded {
+                limit: 5,
+                observed: 6,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_pipe_drain_overflow_beats_apparent_parent_success() {
+        let _g = guard();
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "(sleep 0.02; printf 123456) &"])
+                .output_limits(limits(5, 64)),
+        )
+        .expect_err("descendant stdout overflow");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::StdoutLimitExceeded {
+                limit: 5,
+                observed: 6,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cancellation_handle_is_cloneable_and_preserves_typed_primary() {
+        let _g = guard();
+        let handle = CommandBus::global().submit(
+            CommandSpec::new("sleep")
+                .arg("30")
+                .deadline(Instant::now() + Duration::from_secs(5)),
+        );
+        let cancellation = handle.cancellation_handle();
+        let cloned = cancellation.clone();
+        std::thread::sleep(Duration::from_millis(80));
+        cloned.cancel();
+
+        let failure = handle.wait_detailed().expect_err("cancelled");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+    }
+
+    #[test]
+    fn expired_absolute_deadline_beats_later_cancellation() {
+        let _g = guard();
+        let handle = CommandBus::global().submit(
+            CommandSpec::new("sleep")
+                .arg("30")
+                .deadline(Instant::now() + Duration::from_millis(100)),
+        );
+        let cancellation = handle.cancellation_handle();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(180));
+            cancellation.cancel();
+        });
+        let failure = handle.wait_detailed().expect_err("deadline");
+        canceller.join().unwrap();
+
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::DeadlineExceeded { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_expired_command_never_spawns() {
+        let _g = guard();
+        let blockers = occupy_long_lane();
+        let directory = tempfile::tempdir().expect("marker directory");
+        let marker = directory.path().join("spawned");
+        let marker_path = marker.to_string_lossy().into_owned();
+        let handle = CommandBus::global().submit(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "touch \"$1\"", "okena-test", &marker_path])
+                .lane(Lane::Long)
+                .deadline(Instant::now()),
+        );
+
+        for blocker in &blockers {
+            blocker.cancel();
+        }
+        for blocker in blockers {
+            let _ = blocker.wait_detailed();
+        }
+        let failure = handle.wait_detailed().expect_err("queued deadline");
+
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::DeadlineExceeded { .. }
+        ));
+        assert!(!marker.exists(), "expired command was spawned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_cancellation_before_registration_never_spawns() {
+        let _g = guard();
+        let blockers = occupy_long_lane();
+        let directory = tempfile::tempdir().expect("marker directory");
+        let marker = directory.path().join("spawned");
+        let marker_path = marker.to_string_lossy().into_owned();
+        let handle = CommandBus::global().submit(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "touch \"$1\"", "okena-test", &marker_path])
+                .lane(Lane::Long),
+        );
+        handle.cancel();
+
+        for blocker in &blockers {
+            blocker.cancel();
+        }
+        for blocker in blockers {
+            let _ = blocker.wait_detailed();
+        }
+        let failure = handle.wait_detailed().expect_err("queued cancellation");
+
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+        assert!(!marker.exists(), "cancelled command was spawned");
     }
 
     #[cfg(unix)]
@@ -356,6 +573,46 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn output_overflow_kills_descendants_without_touching_unrelated_process() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+        let mut unrelated = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("unrelated process");
+
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args([
+                    "-c",
+                    "(sleep 0.05; while :; do printf xxxxxxxxxxxxxxxx; done) & echo $! > \"$1\"; wait $!",
+                    "okena-test",
+                    &pid_path,
+                ])
+                .output_limits(limits(1024, 1024)),
+        )
+        .expect_err("stdout overflow");
+        let descendant_pid = read_test_pid(pid_file.path());
+        let descendant_dead = wait_for_test_process_exit(descendant_pid, Duration::from_secs(1));
+        let unrelated_alive = unrelated.try_wait().expect("probe unrelated").is_none();
+
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        if !descendant_dead {
+            kill_test_process(descendant_pid);
+        }
+
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::StdoutLimitExceeded { .. }
+        ));
+        assert!(descendant_dead, "overflow descendant survived cleanup");
+        assert!(unrelated_alive, "unrelated process was terminated");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn exited_parent_with_background_pipe_descendant_finishes_bounded() {
         let _g = guard();
         let pid_file = tempfile::NamedTempFile::new().expect("pid file");
@@ -380,6 +637,114 @@ mod tests {
         assert_eq!(output.stdout, b"retained\n");
         assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
         assert!(descendant_dead, "background descendant survived collection");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn escaped_pipe_holder_cannot_pin_bus_lane() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+
+        let started = Instant::now();
+        let failure = run_detailed(CommandSpec::new("/bin/sh").args([
+            "-c",
+            "setsid /bin/sh -c 'echo $$ > \"$1\"; sleep 30' okena-escaped \"$1\" &",
+            "okena-test",
+            &pid_path,
+        ]))
+        .expect_err("escaped descendant retains pipes");
+        let elapsed = started.elapsed();
+        let escaped_pid = wait_for_test_pid(pid_file.path(), Duration::from_secs(1));
+        kill_test_process_group(escaped_pid);
+        let escaped_dead = wait_for_test_process_exit(escaped_pid, Duration::from_secs(1));
+
+        assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Process {
+                operation: CommandOperation::JoinStdoutReader | CommandOperation::JoinStderrReader,
+                kind: std::io::ErrorKind::TimedOut,
+                ..
+            }
+        ));
+        assert!(
+            escaped_dead,
+            "escaped test process survived explicit cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_spawn_panic_reaps_child_and_returns_typed_failure() {
+        let _g = guard();
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+
+        let started = Instant::now();
+        let failure = run_detailed(
+            CommandSpec::new("/bin/sh")
+                .args(["-c", "echo $$ > \"$1\"; sleep 30", "okena-test", &pid_path])
+                .env("OKENA_TEST_PANIC_AFTER_SPAWN", "1"),
+        )
+        .expect_err("injected panic");
+        let elapsed = started.elapsed();
+        let child_pid = read_test_pid(pid_file.path());
+        let child_dead = wait_for_test_process_exit(child_pid, Duration::from_secs(1));
+        let mut wait_status = 0;
+        // SAFETY: this probes only the PID written by our direct child.
+        let wait_result = unsafe {
+            libc::waitpid(
+                libc::pid_t::try_from(child_pid).expect("test pid fits pid_t"),
+                &mut wait_status,
+                libc::WNOHANG,
+            )
+        };
+        let wait_error = std::io::Error::last_os_error();
+        if !child_dead {
+            kill_test_process(child_pid);
+        }
+
+        assert!(elapsed < Duration::from_secs(2), "elapsed: {elapsed:?}");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Process {
+                operation: CommandOperation::Worker,
+                ..
+            }
+        ));
+        assert!(child_dead, "post-spawn panic left a live or zombie child");
+        assert_eq!(wait_result, -1, "child remained waitable after return");
+        assert_eq!(
+            wait_error.raw_os_error(),
+            Some(libc::ECHILD),
+            "child was not reaped by the command bus"
+        );
+    }
+
+    #[cfg(unix)]
+    fn occupy_long_lane() -> Vec<CommandHandle> {
+        let directory = tempfile::tempdir().expect("lane marker directory");
+        let handles: Vec<_> = (0..Lane::Long.workers())
+            .map(|index| {
+                let marker = directory.path().join(index.to_string());
+                let marker_path = marker.to_string_lossy().into_owned();
+                CommandBus::global().submit(
+                    CommandSpec::new("/bin/sh")
+                        .args(["-c", "touch \"$1\"; sleep 30", "okena-test", &marker_path])
+                        .lane(Lane::Long),
+                )
+            })
+            .collect();
+        for index in 0..Lane::Long.workers() {
+            let marker = directory.path().join(index.to_string());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !marker.exists() {
+                assert!(Instant::now() < deadline, "long lane was not occupied");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        handles
     }
 
     #[cfg(unix)]
@@ -427,6 +792,18 @@ mod tests {
         };
         // SAFETY: this fallback only targets the PID written by the test child.
         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_test_process_group(pid: u32) {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        let Some(group) = pid.checked_neg() else {
+            return;
+        };
+        // SAFETY: the test created this session and read its group leader PID.
+        let _ = unsafe { libc::kill(group, libc::SIGKILL) };
     }
 
     #[test]

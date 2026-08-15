@@ -25,6 +25,9 @@
 //!   for the same permits.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
+use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,7 +51,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    fn workers(self) -> usize {
+    pub(super) fn workers(self) -> usize {
         match self {
             // Sum across lanes (4 + 4 + 2 = 10) is the effective global cap on
             // concurrent child processes — comfortably under every platform's
@@ -103,6 +106,192 @@ pub fn current_lane() -> Lane {
     CURRENT_LANE.with(|c| c.get())
 }
 
+/// Fixed-width capture limits for one command's stdout and stderr streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputLimits {
+    stdout_bytes: NonZeroU64,
+    stderr_bytes: NonZeroU64,
+}
+
+impl OutputLimits {
+    pub fn new(stdout_bytes: NonZeroU64, stderr_bytes: NonZeroU64) -> Self {
+        Self {
+            stdout_bytes,
+            stderr_bytes,
+        }
+    }
+
+    pub fn stdout_bytes(self) -> NonZeroU64 {
+        self.stdout_bytes
+    }
+
+    pub fn stderr_bytes(self) -> NonZeroU64 {
+        self.stderr_bytes
+    }
+}
+
+/// Stage at which command execution or cleanup failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOperation {
+    Spawn,
+    SpawnStdoutReader,
+    SpawnStderrReader,
+    Poll,
+    TerminateTree,
+    KillChild,
+    WaitChild,
+    ReadStdout,
+    ReadStderr,
+    JoinStdoutReader,
+    JoinStderrReader,
+    ComputeDeadline,
+    Mock,
+    Worker,
+}
+
+impl fmt::Display for CommandOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Spawn => "spawn",
+            Self::SpawnStdoutReader => "spawn stdout reader",
+            Self::SpawnStderrReader => "spawn stderr reader",
+            Self::Poll => "poll",
+            Self::TerminateTree => "terminate process tree",
+            Self::KillChild => "kill child",
+            Self::WaitChild => "wait for child",
+            Self::ReadStdout => "read stdout",
+            Self::ReadStderr => "read stderr",
+            Self::JoinStdoutReader => "join stdout reader",
+            Self::JoinStderrReader => "join stderr reader",
+            Self::ComputeDeadline => "compute deadline",
+            Self::Mock => "mock command",
+            Self::Worker => "command bus worker",
+        };
+        formatter.write_str(name)
+    }
+}
+
+/// The first condition that prevented a command from completing normally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandFailureCause {
+    Cancelled {
+        at: Instant,
+    },
+    DeadlineExceeded {
+        deadline: Instant,
+    },
+    StdoutLimitExceeded {
+        at: Instant,
+        limit: u64,
+        observed: u64,
+    },
+    StderrLimitExceeded {
+        at: Instant,
+        limit: u64,
+        observed: u64,
+    },
+    Process {
+        at: Instant,
+        operation: CommandOperation,
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+}
+
+impl CommandFailureCause {
+    fn at(&self) -> Instant {
+        match self {
+            Self::Cancelled { at }
+            | Self::StdoutLimitExceeded { at, .. }
+            | Self::StderrLimitExceeded { at, .. }
+            | Self::Process { at, .. } => *at,
+            Self::DeadlineExceeded { deadline } => *deadline,
+        }
+    }
+
+    fn tie_priority(&self) -> u8 {
+        match self {
+            Self::DeadlineExceeded { .. } => 0,
+            Self::Cancelled { .. } => 1,
+            Self::StdoutLimitExceeded { .. } => 2,
+            Self::StderrLimitExceeded { .. } => 3,
+            Self::Process { .. } => 4,
+        }
+    }
+
+    fn precedes(&self, current: &Self) -> bool {
+        (self.at(), self.tie_priority()) < (current.at(), current.tie_priority())
+    }
+
+    fn io_kind(&self) -> std::io::ErrorKind {
+        match self {
+            Self::Cancelled { .. } => std::io::ErrorKind::Interrupted,
+            Self::DeadlineExceeded { .. } => std::io::ErrorKind::TimedOut,
+            Self::StdoutLimitExceeded { .. } | Self::StderrLimitExceeded { .. } => {
+                std::io::ErrorKind::Other
+            }
+            Self::Process { kind, .. } => *kind,
+        }
+    }
+}
+
+impl fmt::Display for CommandFailureCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled { .. } => formatter.write_str("command cancelled"),
+            Self::DeadlineExceeded { .. } => formatter.write_str("process timed out"),
+            Self::StdoutLimitExceeded {
+                limit, observed, ..
+            } => write!(
+                formatter,
+                "stdout exceeded {limit} bytes (observed at least {observed})"
+            ),
+            Self::StderrLimitExceeded {
+                limit, observed, ..
+            } => write!(
+                formatter,
+                "stderr exceeded {limit} bytes (observed at least {observed})"
+            ),
+            Self::Process {
+                operation, message, ..
+            } => write!(formatter, "{operation}: {message}"),
+        }
+    }
+}
+
+/// A secondary failure observed while terminating, reaping, or draining a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCleanupFailure {
+    pub operation: CommandOperation,
+    pub kind: std::io::ErrorKind,
+    pub message: String,
+}
+
+/// Detailed command failure with a stable primary cause and cleanup evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFailure {
+    pub primary: CommandFailureCause,
+    pub cleanup: Vec<CommandCleanupFailure>,
+}
+
+impl CommandFailure {
+    fn into_io_error(self) -> std::io::Error {
+        std::io::Error::new(self.primary.io_kind(), self)
+    }
+}
+
+impl fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.primary)?;
+        if !self.cleanup.is_empty() {
+            write!(formatter, " ({} cleanup failure(s))", self.cleanup.len())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for CommandFailure {}
+
 /// A fully-described one-shot command. Built directly, or extracted from a
 /// configured [`std::process::Command`] via [`CommandSpec::from_command`].
 #[derive(Debug, Clone)]
@@ -112,6 +301,10 @@ pub struct CommandSpec {
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     pub timeout: Option<Duration>,
+    /// Optional request-wide absolute deadline. Unlike `timeout`, queue time is included.
+    pub deadline: Option<Instant>,
+    /// Optional independent stdout/stderr capture limits.
+    pub output_limits: Option<OutputLimits>,
     pub lane: Lane,
     /// Stable short label for the audit log (e.g. `"git.worktree.list"`). Falls
     /// back to the program name when `None`.
@@ -130,6 +323,8 @@ impl CommandSpec {
             cwd: None,
             env: Vec::new(),
             timeout: None,
+            deadline: None,
+            output_limits: None,
             lane: current_lane(),
             label: None,
             scope: None,
@@ -162,6 +357,16 @@ impl CommandSpec {
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn output_limits(mut self, limits: OutputLimits) -> Self {
+        self.output_limits = Some(limits);
         self
     }
 
@@ -213,6 +418,8 @@ impl CommandSpec {
             cwd,
             env,
             timeout: None,
+            deadline: None,
+            output_limits: None,
             lane: current_lane(),
             label: None,
             scope: None,
@@ -253,11 +460,18 @@ impl CommandSpec {
     }
 }
 
-/// Per-job shared control block. Lets the submitter (and a scope-wide cancel)
-/// signal cancellation, and lets the running worker register the live child so
-/// it can be killed mid-flight.
+#[derive(Default)]
+struct FailureState {
+    primary: Option<CommandFailureCause>,
+    cleanup: Vec<CommandCleanupFailure>,
+    completion_accepted: bool,
+    finalized: bool,
+}
+
+/// Per-job shared control block. It latches the actual first stop condition and
+/// owns the live process-tree registration used by every cancellation source.
 struct JobControl {
-    cancelled: AtomicBool,
+    failure: Mutex<FailureState>,
     /// Set by the worker once the process tree is owned; taken to kill it.
     kill: Mutex<Option<KillHandle>>,
 }
@@ -268,8 +482,8 @@ struct KillHandle {
 }
 
 impl KillHandle {
-    fn kill(&self) {
-        self.tree.terminate();
+    fn kill(&self) -> std::io::Result<()> {
+        self.tree.terminate()
     }
 }
 
@@ -277,10 +491,17 @@ impl KillHandle {
 /// identifier or job handle can become stale.
 struct KillRegistration<'a> {
     control: &'a JobControl,
+    tree: Arc<ProcessTree>,
 }
 
 impl Drop for KillRegistration<'_> {
     fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Err(error) = self.tree.terminate()
+        {
+            self.control
+                .append_cleanup(CommandOperation::TerminateTree, error);
+        }
         let mut guard = self.control.kill.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
     }
@@ -289,58 +510,302 @@ impl Drop for KillRegistration<'_> {
 impl JobControl {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            cancelled: AtomicBool::new(false),
+            failure: Mutex::new(FailureState::default()),
             kill: Mutex::new(None),
         })
     }
 
     fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        if let Ok(guard) = self.kill.lock()
-            && let Some(handle) = guard.as_ref()
-        {
-            handle.kill();
+        let should_terminate = {
+            let mut state = self
+                .failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.completion_accepted || state.finalized {
+                false
+            } else {
+                let cause = CommandFailureCause::Cancelled { at: Instant::now() };
+                Self::insert_cause(&mut state, cause);
+                true
+            }
+        };
+        if should_terminate {
+            self.terminate_registered();
         }
     }
 
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+    fn register(&self, tree: Arc<ProcessTree>) -> KillRegistration<'_> {
+        {
+            let mut guard = self.kill.lock().unwrap_or_else(|error| error.into_inner());
+            *guard = Some(KillHandle { tree: tree.clone() });
+        }
+        // A pre-publication stop is visible here; a later stop sees the handle.
+        if self.has_failure()
+            && let Err(error) = tree.terminate()
+        {
+            self.record_cleanup(CommandOperation::TerminateTree, error);
+        }
+        KillRegistration {
+            control: self,
+            tree,
+        }
     }
 
-    fn register(&self, tree: Arc<ProcessTree>) -> KillRegistration<'_> {
-        let mut guard = self.kill.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(KillHandle { tree });
-        KillRegistration { control: self }
+    fn has_failure(&self) -> bool {
+        self.failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .primary
+            .is_some()
+    }
+
+    fn record_cause(&self, cause: CommandFailureCause, terminate: bool) {
+        let accepted = {
+            let mut state = self
+                .failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.finalized
+                || state.completion_accepted
+                    && matches!(cause, CommandFailureCause::Cancelled { .. })
+            {
+                false
+            } else {
+                Self::insert_cause(&mut state, cause);
+                true
+            }
+        };
+        if terminate && accepted {
+            self.terminate_registered();
+        }
+    }
+
+    fn insert_cause(state: &mut FailureState, cause: CommandFailureCause) {
+        match state.primary.as_ref() {
+            Some(current) if !cause.precedes(current) => {
+                if let CommandFailureCause::Process {
+                    operation,
+                    kind,
+                    message,
+                    ..
+                } = cause
+                {
+                    state.cleanup.push(CommandCleanupFailure {
+                        operation,
+                        kind,
+                        message,
+                    });
+                }
+            }
+            Some(_) => {
+                let previous = state.primary.replace(cause);
+                if let Some(CommandFailureCause::Process {
+                    operation,
+                    kind,
+                    message,
+                    ..
+                }) = previous
+                {
+                    state.cleanup.push(CommandCleanupFailure {
+                        operation,
+                        kind,
+                        message,
+                    });
+                }
+            }
+            None => state.primary = Some(cause),
+        }
+    }
+
+    fn terminate_registered(&self) {
+        let result = self
+            .kill
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(KillHandle::kill);
+        if let Some(Err(error)) = result {
+            self.record_cleanup(CommandOperation::TerminateTree, error);
+        }
+    }
+
+    fn record_io(&self, operation: CommandOperation, error: std::io::Error, terminate: bool) {
+        self.record_cause(
+            CommandFailureCause::Process {
+                at: Instant::now(),
+                operation,
+                kind: error.kind(),
+                message: error.to_string(),
+            },
+            terminate,
+        );
+    }
+
+    fn record_cleanup(&self, operation: CommandOperation, error: std::io::Error) {
+        let mut state = self
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.primary.is_none() {
+            state.primary = Some(CommandFailureCause::Process {
+                at: Instant::now(),
+                operation,
+                kind: error.kind(),
+                message: error.to_string(),
+            });
+        } else {
+            state.cleanup.push(CommandCleanupFailure {
+                operation,
+                kind: error.kind(),
+                message: error.to_string(),
+            });
+        }
+    }
+
+    fn append_cleanup(&self, operation: CommandOperation, error: std::io::Error) {
+        self.failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cleanup
+            .push(CommandCleanupFailure {
+                operation,
+                kind: error.kind(),
+                message: error.to_string(),
+            });
+    }
+
+    fn latch_deadline(&self, deadline: Option<Instant>, now: Instant) {
+        if let Some(deadline) = deadline
+            && now >= deadline
+        {
+            self.record_cause(CommandFailureCause::DeadlineExceeded { deadline }, true);
+        }
+    }
+
+    fn accept_completion(&self, deadline: Option<Instant>, observed_at: Instant) -> bool {
+        let mut state = self
+            .failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(deadline) = deadline
+            && observed_at >= deadline
+        {
+            Self::insert_cause(
+                &mut state,
+                CommandFailureCause::DeadlineExceeded { deadline },
+            );
+        }
+        if state.primary.is_some() {
+            return false;
+        }
+        state.completion_accepted = true;
+        true
+    }
+
+    fn finalize_success(
+        &self,
+        deadline: Option<Instant>,
+        observed_at: Instant,
+    ) -> Result<(), CommandFailure> {
+        let mut state = self
+            .failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(deadline) = deadline
+            && observed_at >= deadline
+        {
+            Self::insert_cause(
+                &mut state,
+                CommandFailureCause::DeadlineExceeded { deadline },
+            );
+        }
+        if let Some(primary) = state.primary.clone() {
+            return Err(CommandFailure {
+                primary,
+                cleanup: state.cleanup.clone(),
+            });
+        }
+        state.completion_accepted = true;
+        state.finalized = true;
+        Ok(())
+    }
+
+    fn failure(&self) -> Option<CommandFailure> {
+        let state = self
+            .failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.primary.clone().map(|primary| CommandFailure {
+            primary,
+            cleanup: state.cleanup.clone(),
+        })
     }
 }
 
 struct Job {
     spec: CommandSpec,
     ctl: Arc<JobControl>,
-    result_tx: SyncSender<std::io::Result<Output>>,
+    result_tx: SyncSender<Result<Output, CommandFailure>>,
 }
 
 /// Handle to a submitted command. Block on [`wait`](Self::wait) to get the
 /// output, or [`cancel`](Self::cancel) to kill it.
 pub struct CommandHandle {
-    rx: Receiver<std::io::Result<Output>>,
+    rx: Receiver<Result<Output, CommandFailure>>,
     ctl: Arc<JobControl>,
+}
+
+/// Cloneable cancellation capability for one submitted command.
+#[derive(Clone)]
+pub struct CommandCancellationHandle {
+    ctl: Arc<JobControl>,
+}
+
+impl fmt::Debug for CommandCancellationHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CommandCancellationHandle")
+    }
+}
+
+impl CommandCancellationHandle {
+    pub fn cancel(&self) {
+        self.ctl.cancel();
+    }
 }
 
 impl CommandHandle {
     /// Block until the command finishes, returning its captured output. Returns
     /// an `Other` error if the bus worker died, or `Interrupted` if cancelled.
     pub fn wait(self) -> std::io::Result<Output> {
-        match self.rx.recv() {
-            Ok(result) => result,
-            Err(_) => Err(std::io::Error::other("command bus worker dropped result")),
-        }
+        self.wait_detailed().map_err(CommandFailure::into_io_error)
+    }
+
+    /// Block until completion while preserving the typed primary and cleanup causes.
+    pub fn wait_detailed(self) -> Result<Output, CommandFailure> {
+        self.rx.recv().unwrap_or_else(|_| {
+            Err(CommandFailure {
+                primary: CommandFailureCause::Process {
+                    at: Instant::now(),
+                    operation: CommandOperation::Worker,
+                    kind: std::io::ErrorKind::Other,
+                    message: "command bus worker dropped result".to_string(),
+                },
+                cleanup: Vec::new(),
+            })
+        })
     }
 
     /// Request cancellation: kills the child if it is already running, or
     /// prevents it from starting if still queued.
     pub fn cancel(&self) {
         self.ctl.cancel();
+    }
+
+    /// Obtain a cloneable cancellation capability without moving the result receiver.
+    pub fn cancellation_handle(&self) -> CommandCancellationHandle {
+        CommandCancellationHandle {
+            ctl: self.ctl.clone(),
+        }
     }
 }
 
@@ -444,7 +909,16 @@ impl CommandBus {
         if let Ok(guard) = self.mock.lock()
             && let Some(mock) = guard.as_ref()
         {
-            let _ = tx.send(mock(&spec));
+            let result = mock(&spec).map_err(|error| CommandFailure {
+                primary: CommandFailureCause::Process {
+                    at: Instant::now(),
+                    operation: CommandOperation::Mock,
+                    kind: error.kind(),
+                    message: error.to_string(),
+                },
+                cleanup: Vec::new(),
+            });
+            let _ = tx.send(result);
             return CommandHandle { rx, ctl };
         }
 
@@ -502,13 +976,26 @@ const POLL_MAX: Duration = Duration::from_millis(20);
 /// Give reader threads a brief chance to collect bytes already in the pipes
 /// before treating open pipe handles as descendants left behind by the parent.
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
+/// Never let an inherited pipe held by an escaped descendant pin a bus lane.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_millis(250);
 
-fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output> {
-    // Cancelled before we even started.
-    if ctl.is_cancelled() {
-        return Err(cancelled_err());
+fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> Result<Output, CommandFailure> {
+    ctl.latch_deadline(spec.deadline, Instant::now());
+    if let Some(failure) = ctl.failure() {
+        return Err(failure);
     }
-
+    if let Err(error) = validate_relative_timeout(spec.timeout, Instant::now()) {
+        ctl.record_io(CommandOperation::ComputeDeadline, error, false);
+        return Err(ctl.failure().unwrap_or_else(|| CommandFailure {
+            primary: CommandFailureCause::Process {
+                at: Instant::now(),
+                operation: CommandOperation::ComputeDeadline,
+                kind: std::io::ErrorKind::InvalidInput,
+                message: "relative command timeout validation failed".to_string(),
+            },
+            cleanup: Vec::new(),
+        }));
+    }
     let started = Instant::now();
     let detail = spec.audit_detail();
     log::trace!(target: "okena::cmd", "[{}] start {}", spec.lane.name(), detail);
@@ -519,9 +1006,22 @@ fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output>
         spawn_and_collect(spec, ctl)
     }))
     .unwrap_or_else(|panic| {
-        let msg = panic_message(&panic);
-        log::error!(target: "okena::cmd", "[{}] {} panicked: {msg}", spec.lane.name(), detail);
-        Err(std::io::Error::other(format!("command panicked: {msg}")))
+        let message = panic_message(&panic);
+        log::error!(target: "okena::cmd", "[{}] {} panicked: {message}", spec.lane.name(), detail);
+        ctl.record_io(
+            CommandOperation::Worker,
+            std::io::Error::other(format!("command panicked: {message}")),
+            true,
+        );
+        Err(ctl.failure().unwrap_or_else(|| CommandFailure {
+            primary: CommandFailureCause::Process {
+                at: Instant::now(),
+                operation: CommandOperation::Worker,
+                kind: std::io::ErrorKind::Other,
+                message,
+            },
+            cleanup: Vec::new(),
+        }))
     });
 
     let elapsed = started.elapsed().as_millis();
@@ -532,9 +1032,9 @@ fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output>
             spec.lane.name(), detail,
             out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
         ),
-        Err(e) => log::warn!(
+        Err(error) => log::warn!(
             target: "okena::cmd",
-            "[{}] {} failed: {e} ({elapsed}ms)", spec.lane.name(), detail,
+            "[{}] {} failed: {error} ({elapsed}ms)", spec.lane.name(), detail,
         ),
     }
     result
@@ -542,80 +1042,292 @@ fn run_job(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output>
 
 /// Spawn the child with piped stdio and poll until it exits, the deadline
 /// passes, or cancellation is requested.
-fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Result<Output> {
+fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> Result<Output, CommandFailure> {
     let mut cmd = spec.build();
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let (mut child, tree) = ProcessTree::spawn(&mut cmd)?;
+    let (mut child, tree) = match ProcessTree::spawn(&mut cmd, ctl) {
+        Ok(process) => process,
+        Err(error) => {
+            ctl.record_io(CommandOperation::Spawn, error, false);
+            return Err(ctl.failure().unwrap_or_else(|| CommandFailure {
+                primary: CommandFailureCause::Process {
+                    at: Instant::now(),
+                    operation: CommandOperation::Spawn,
+                    kind: std::io::ErrorKind::Other,
+                    message: "process spawn failed without error evidence".to_string(),
+                },
+                cleanup: Vec::new(),
+            }));
+        }
+    };
 
-    // Drain stdout/stderr on dedicated threads, concurrently with the wait loop
-    // below. Otherwise a child that writes more than the OS pipe buffer (~64KB)
-    // blocks on `write` forever while we wait for it to exit and never drain —
-    // a classic deadlock, hit by e.g. a large `docker ps -a` or `git diff`.
-    let out_reader = spawn_pipe_reader(child.stdout.take());
-    let err_reader = spawn_pipe_reader(child.stderr.take());
-
-    // Publish the kill handle so cancel()/cancel_scope() can reach the whole
-    // process tree. The registration clears it before the OS identity can be
-    // reused for an unrelated process.
+    // Publish ownership before creating readers. A cancellation that raced
+    // with spawn either sees this handle or is observed by register itself.
     let _registration = ctl.register(tree.clone());
-    // Lost a cancellation race between the check above and registering: honor it.
-    if ctl.is_cancelled() {
-        terminate_and_reap(&tree, &mut child);
-        let _ = out_reader.join();
-        let _ = err_reader.join();
-        return Err(cancelled_err());
-    }
-
-    let deadline = spec.timeout.map(|t| Instant::now() + t);
-    let mut backoff = POLL_MIN;
-
-    loop {
-        // Check cancellation before reaping: a killed child exits, and we must
-        // report that as cancelled rather than as a (signal) success.
-        if ctl.is_cancelled() {
-            terminate_and_reap(&tree, &mut child);
-            let _ = out_reader.join();
-            let _ = err_reader.join();
-            return Err(cancelled_err());
-        }
-
-        if process_exited(&mut child)? {
-            // A direct parent may exit while a background descendant still
-            // owns the inherited pipes. Bound the drain, then terminate the
-            // owned tree so joining the readers cannot hang forever.
-            let _ = wait_for_readers(&out_reader, &err_reader, POST_EXIT_DRAIN);
-            tree.terminate();
-            let status = child.wait()?;
-            let stdout = out_reader.join().unwrap_or_default();
-            let stderr = err_reader.join().unwrap_or_default();
-            if ctl.is_cancelled() {
-                return Err(cancelled_err());
+    let mut deadline = spec.deadline;
+    let mut out_reader = None;
+    let mut err_reader = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        deadline = match effective_deadline(spec.deadline, spec.timeout, Instant::now()) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                ctl.record_io(CommandOperation::ComputeDeadline, error, true);
+                return finish_child(&tree, &mut child, None, None, ctl, spec.deadline, false);
             }
-            return Ok(Output {
-                status,
-                stdout,
-                stderr,
-            });
+        };
+
+        // Drain both pipes while polling. A child can otherwise block after
+        // filling an OS pipe buffer before the parent observes its exit.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        if stdout.is_none() {
+            ctl.record_io(
+                CommandOperation::SpawnStdoutReader,
+                std::io::Error::other("stdout pipe was not created"),
+                true,
+            );
+        }
+        if stderr.is_none() {
+            ctl.record_io(
+                CommandOperation::SpawnStderrReader,
+                std::io::Error::other("stderr pipe was not created"),
+                true,
+            );
+        }
+        let stdout_limit = spec.output_limits.map(OutputLimits::stdout_bytes);
+        let stderr_limit = spec.output_limits.map(OutputLimits::stderr_bytes);
+        out_reader = stdout.and_then(|pipe| {
+            match spawn_pipe_reader(pipe, OutputStream::Stdout, stdout_limit, ctl.clone()) {
+                Ok(reader) => Some(reader),
+                Err(error) => {
+                    ctl.record_io(CommandOperation::SpawnStdoutReader, error, true);
+                    None
+                }
+            }
+        });
+        err_reader = stderr.and_then(|pipe| {
+            match spawn_pipe_reader(pipe, OutputStream::Stderr, stderr_limit, ctl.clone()) {
+                Ok(reader) => Some(reader),
+                Err(error) => {
+                    ctl.record_io(CommandOperation::SpawnStderrReader, error, true);
+                    None
+                }
+            }
+        });
+
+        maybe_panic_after_spawn(spec);
+        drive_child(
+            &tree,
+            &mut child,
+            &mut out_reader,
+            &mut err_reader,
+            ctl,
+            deadline,
+        )
+    }));
+    match result {
+        Ok(result) => result,
+        Err(panic) => {
+            let message = panic_message(&panic);
+            ctl.record_io(
+                CommandOperation::Worker,
+                std::io::Error::other(format!("command panicked after spawn: {message}")),
+                true,
+            );
+            finish_child(
+                &tree,
+                &mut child,
+                out_reader.take(),
+                err_reader.take(),
+                ctl,
+                deadline,
+                false,
+            )
+        }
+    }
+}
+
+fn effective_deadline(
+    absolute: Option<Instant>,
+    relative_timeout: Option<Duration>,
+    relative_start: Instant,
+) -> std::io::Result<Option<Instant>> {
+    let relative = relative_timeout
+        .map(|timeout| checked_relative_deadline(relative_start, timeout))
+        .transpose()?;
+    Ok(match (absolute, relative) {
+        (Some(absolute), Some(relative)) => Some(absolute.min(relative)),
+        (Some(absolute), None) => Some(absolute),
+        (None, relative) => relative,
+    })
+}
+
+fn validate_relative_timeout(timeout: Option<Duration>, at: Instant) -> std::io::Result<()> {
+    timeout
+        .map(|timeout| checked_relative_deadline(at, timeout).map(|_| ()))
+        .transpose()
+        .map(|_| ())
+}
+
+fn checked_relative_deadline(start: Instant, timeout: Duration) -> std::io::Result<Instant> {
+    start.checked_add(timeout).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "relative command timeout exceeds the supported Instant range",
+        )
+    })
+}
+
+fn drive_child(
+    tree: &ProcessTree,
+    child: &mut std::process::Child,
+    stdout_reader: &mut Option<PipeReader>,
+    stderr_reader: &mut Option<PipeReader>,
+    ctl: &JobControl,
+    deadline: Option<Instant>,
+) -> Result<Output, CommandFailure> {
+    let mut backoff = POLL_MIN;
+    loop {
+        ctl.latch_deadline(deadline, Instant::now());
+        if ctl.has_failure() {
+            return finish_child(
+                tree,
+                child,
+                stdout_reader.take(),
+                stderr_reader.take(),
+                ctl,
+                deadline,
+                false,
+            );
         }
 
-        if let Some(deadline) = deadline
-            && Instant::now() >= deadline
-        {
-            terminate_and_reap(&tree, &mut child);
-            let _ = out_reader.join();
-            let _ = err_reader.join();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "process timed out",
-            ));
+        let exited = match process_exited(child) {
+            Ok(exited) => exited,
+            Err(error) => {
+                ctl.record_io(CommandOperation::Poll, error, true);
+                return finish_child(
+                    tree,
+                    child,
+                    stdout_reader.take(),
+                    stderr_reader.take(),
+                    ctl,
+                    deadline,
+                    false,
+                );
+            }
+        };
+        if exited {
+            let observed_at = Instant::now();
+            if !ctl.accept_completion(deadline, observed_at) {
+                return finish_child(
+                    tree,
+                    child,
+                    stdout_reader.take(),
+                    stderr_reader.take(),
+                    ctl,
+                    deadline,
+                    false,
+                );
+            }
+            // A direct parent may exit while a background descendant still
+            // owns inherited pipes. Drain briefly, then terminate the tree.
+            wait_for_readers(stdout_reader, stderr_reader, POST_EXIT_DRAIN);
+            return finish_child(
+                tree,
+                child,
+                stdout_reader.take(),
+                stderr_reader.take(),
+                ctl,
+                deadline,
+                true,
+            );
         }
 
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(POLL_MAX);
     }
+}
+
+fn finish_child(
+    tree: &ProcessTree,
+    child: &mut std::process::Child,
+    stdout_reader: Option<PipeReader>,
+    stderr_reader: Option<PipeReader>,
+    ctl: &JobControl,
+    deadline: Option<Instant>,
+    parent_exited: bool,
+) -> Result<Output, CommandFailure> {
+    if let Err(error) = tree.terminate() {
+        ctl.record_cleanup(CommandOperation::TerminateTree, error);
+    }
+
+    let status = if parent_exited {
+        match child.wait() {
+            Ok(status) => Some(status),
+            Err(error) => {
+                ctl.record_cleanup(CommandOperation::WaitChild, error);
+                None
+            }
+        }
+    } else {
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    ctl.record_cleanup(CommandOperation::KillChild, error);
+                }
+                match child.wait() {
+                    Ok(status) => Some(status),
+                    Err(error) => {
+                        ctl.record_cleanup(CommandOperation::WaitChild, error);
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                ctl.record_cleanup(CommandOperation::Poll, error);
+                if let Err(error) = child.kill() {
+                    ctl.record_cleanup(CommandOperation::KillChild, error);
+                }
+                match child.wait() {
+                    Ok(status) => Some(status),
+                    Err(error) => {
+                        ctl.record_cleanup(CommandOperation::WaitChild, error);
+                        None
+                    }
+                }
+            }
+        }
+    };
+
+    let stdout = join_pipe_reader(stdout_reader, OutputStream::Stdout, ctl);
+    let stderr = join_pipe_reader(stderr_reader, OutputStream::Stderr, ctl);
+
+    if parent_exited {
+        ctl.finalize_success(deadline, Instant::now())?;
+    } else {
+        ctl.latch_deadline(deadline, Instant::now());
+        if let Some(failure) = ctl.failure() {
+            return Err(failure);
+        }
+    }
+    let status = status.ok_or_else(|| CommandFailure {
+        primary: CommandFailureCause::Process {
+            at: Instant::now(),
+            operation: CommandOperation::WaitChild,
+            kind: std::io::ErrorKind::Other,
+            message: "child status was unavailable".to_string(),
+        },
+        cleanup: Vec::new(),
+    })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Detect exit without reaping on supported Unix hosts. Keeping the group
@@ -647,52 +1359,178 @@ fn process_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
     child.try_wait().map(|status| status.is_some())
 }
 
-/// Spawn a thread that reads a child pipe to EOF into a buffer. Reading
-/// concurrently with the wait loop prevents a full-pipe write deadlock.
-fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
-    pipe: Option<R>,
-) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut r) = pipe {
-            let _ = r.read_to_end(&mut buf);
-        }
-        buf
-    })
+#[derive(Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
 }
 
-fn wait_for_readers(
-    stdout: &std::thread::JoinHandle<Vec<u8>>,
-    stderr: &std::thread::JoinHandle<Vec<u8>>,
-    timeout: Duration,
-) -> bool {
+struct PipeReader {
+    handle: std::thread::JoinHandle<()>,
+    captured: Arc<Mutex<Vec<u8>>>,
+    discard: Arc<AtomicBool>,
+}
+
+/// Drain one pipe concurrently. Once the first byte beyond the limit arrives,
+/// retain no more data, latch the event, and keep draining until tree cleanup.
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+    stream: OutputStream,
+    limit: Option<NonZeroU64>,
+    ctl: Arc<JobControl>,
+) -> std::io::Result<PipeReader> {
+    let name = match stream {
+        OutputStream::Stdout => "okena-cmd-stdout",
+        OutputStream::Stderr => "okena-cmd-stderr",
+    };
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = captured.clone();
+    let discard = Arc::new(AtomicBool::new(false));
+    let reader_discard = discard.clone();
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let mut observed = 0_u64;
+            let mut overflowed = false;
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let count = match pipe.read(&mut chunk) {
+                    Ok(0) => return,
+                    Ok(count) => count,
+                    Err(error) => {
+                        let operation = match stream {
+                            OutputStream::Stdout => CommandOperation::ReadStdout,
+                            OutputStream::Stderr => CommandOperation::ReadStderr,
+                        };
+                        ctl.record_io(operation, error, true);
+                        return;
+                    }
+                };
+                let previous = observed;
+                observed = observed.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+                if let Some(limit) = limit {
+                    let limit = limit.get();
+                    if previous < limit {
+                        let retained = usize::try_from(limit - previous)
+                            .unwrap_or(usize::MAX)
+                            .min(count);
+                        let mut capture = reader_capture
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if !reader_discard.load(Ordering::Acquire) {
+                            capture.extend_from_slice(&chunk[..retained]);
+                        }
+                    }
+                    if !overflowed && observed > limit {
+                        overflowed = true;
+                        let at = Instant::now();
+                        let cause = match stream {
+                            OutputStream::Stdout => CommandFailureCause::StdoutLimitExceeded {
+                                at,
+                                limit,
+                                observed: limit.saturating_add(1),
+                            },
+                            OutputStream::Stderr => CommandFailureCause::StderrLimitExceeded {
+                                at,
+                                limit,
+                                observed: limit.saturating_add(1),
+                            },
+                        };
+                        ctl.record_cause(cause, true);
+                    }
+                } else {
+                    let mut capture = reader_capture
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if !reader_discard.load(Ordering::Acquire) {
+                        capture.extend_from_slice(&chunk[..count]);
+                    }
+                }
+            }
+        })
+        .map(|handle| PipeReader {
+            handle,
+            captured,
+            discard,
+        })
+}
+
+fn wait_for_readers(stdout: &Option<PipeReader>, stderr: &Option<PipeReader>, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while !(stdout.is_finished() && stderr.is_finished()) {
+    while !(reader_finished(stdout) && reader_finished(stderr)) {
         if Instant::now() >= deadline {
-            return false;
+            return;
         }
         std::thread::sleep(POLL_MIN);
     }
-    true
 }
 
-fn terminate_and_reap(tree: &ProcessTree, child: &mut std::process::Child) {
-    tree.terminate();
-    // The direct kill is an exact Child handle fallback if platform tree
-    // setup succeeded but group/job termination itself was denied.
-    let _ = child.kill();
-    let _ = child.wait();
+fn reader_finished(reader: &Option<PipeReader>) -> bool {
+    reader
+        .as_ref()
+        .is_none_or(|reader| reader.handle.is_finished())
 }
+
+fn join_pipe_reader(reader: Option<PipeReader>, stream: OutputStream, ctl: &JobControl) -> Vec<u8> {
+    let Some(reader) = reader else {
+        return Vec::new();
+    };
+    let operation = match stream {
+        OutputStream::Stdout => CommandOperation::JoinStdoutReader,
+        OutputStream::Stderr => CommandOperation::JoinStderrReader,
+    };
+    let deadline = Instant::now() + READER_JOIN_TIMEOUT;
+    while !reader.handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(POLL_MIN);
+    }
+    if reader.handle.is_finished() {
+        if reader.handle.join().is_err() {
+            ctl.record_cleanup(operation, std::io::Error::other("output reader panicked"));
+        }
+    } else {
+        reader.discard.store(true, Ordering::Release);
+        ctl.record_cleanup(
+            operation,
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "output reader did not stop after process-tree cleanup; detached",
+            ),
+        );
+    }
+    reader
+        .captured
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+fn maybe_panic_after_spawn(spec: &CommandSpec) {
+    if spec
+        .env
+        .iter()
+        .any(|(key, value)| key == "OKENA_TEST_PANIC_AFTER_SPAWN" && value == "1")
+    {
+        std::thread::sleep(Duration::from_millis(50));
+        panic!("injected post-spawn panic");
+    }
+}
+
+#[cfg(not(test))]
+fn maybe_panic_after_spawn(_spec: &CommandSpec) {}
 
 #[cfg(unix)]
 struct ProcessTree {
     process_group: libc::pid_t,
-    terminated: AtomicBool,
+    terminated: Mutex<bool>,
 }
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+    fn spawn(
+        cmd: &mut std::process::Command,
+        ctl: &JobControl,
+    ) -> std::io::Result<(std::process::Child, Arc<Self>)> {
         use std::os::unix::process::CommandExt;
 
         cmd.process_group(0);
@@ -700,45 +1538,65 @@ impl ProcessTree {
         let process_group = match libc::pid_t::try_from(child.id()) {
             Ok(process_group) if process_group > 0 => process_group,
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(std::io::Error::other(
-                    "spawned process has an invalid process group",
-                ));
+                let error = std::io::Error::other("spawned process has an invalid process group");
+                if let Err(cleanup) = child.kill() {
+                    ctl.append_cleanup(CommandOperation::KillChild, cleanup);
+                }
+                if let Err(cleanup) = child.wait() {
+                    ctl.append_cleanup(CommandOperation::WaitChild, cleanup);
+                }
+                return Err(error);
             }
         };
         Ok((
             child,
             Arc::new(Self {
                 process_group,
-                terminated: AtomicBool::new(false),
+                terminated: Mutex::new(false),
             }),
         ))
     }
 
-    fn terminate(&self) {
-        if self.terminated.swap(true, Ordering::SeqCst) {
-            return;
+    fn terminate(&self) -> std::io::Result<()> {
+        let mut terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *terminated {
+            return Ok(());
         }
         let Some(group_target) = self.process_group.checked_neg() else {
-            return;
+            return Err(std::io::Error::other("invalid process group"));
         };
         // SAFETY: process_group is the positive PID returned for a child that
         // was atomically placed in its own group before exec. Registration is
         // cleared before this identity can be reused by an unrelated process.
-        let _ = unsafe { libc::kill(group_target, libc::SIGKILL) };
+        if unsafe { libc::kill(group_target, libc::SIGKILL) } == 0 {
+            *terminated = true;
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            *terminated = true;
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 }
 
 #[cfg(windows)]
 struct ProcessTree {
     job: std::os::windows::io::OwnedHandle,
-    terminated: AtomicBool,
+    terminated: Mutex<bool>,
 }
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+    fn spawn(
+        cmd: &mut std::process::Command,
+        ctl: &JobControl,
+    ) -> std::io::Result<(std::process::Child, Arc<Self>)> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::JobObjects::{
@@ -782,13 +1640,21 @@ impl ProcessTree {
         // SAFETY: both handles are live and owned for the duration of the call.
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {
             let error = std::io::Error::last_os_error();
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(cleanup) = child.kill() {
+                ctl.append_cleanup(CommandOperation::KillChild, cleanup);
+            }
+            if let Err(cleanup) = child.wait() {
+                ctl.append_cleanup(CommandOperation::WaitChild, cleanup);
+            }
             return Err(error);
         }
         if let Err(error) = resume_suspended_process(child.id()) {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(cleanup) = child.kill() {
+                ctl.append_cleanup(CommandOperation::KillChild, cleanup);
+            }
+            if let Err(cleanup) = child.wait() {
+                ctl.append_cleanup(CommandOperation::WaitChild, cleanup);
+            }
             return Err(error);
         }
 
@@ -796,20 +1662,29 @@ impl ProcessTree {
             child,
             Arc::new(Self {
                 job,
-                terminated: AtomicBool::new(false),
+                terminated: Mutex::new(false),
             }),
         ))
     }
 
-    fn terminate(&self) {
+    fn terminate(&self) -> std::io::Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
-        if self.terminated.swap(true, Ordering::SeqCst) {
-            return;
+        let mut terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *terminated {
+            return Ok(());
         }
         // SAFETY: the owned job handle remains live for this call.
-        let _ = unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
+        if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } != 0 {
+            *terminated = true;
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 }
 
@@ -862,10 +1737,6 @@ fn resume_suspended_process(process_id: u32) -> std::io::Result<()> {
     ))
 }
 
-fn cancelled_err() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Interrupted, "command cancelled")
-}
-
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = panic.downcast_ref::<String>() {
         s.clone()
@@ -873,5 +1744,337 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
         (*s).to_string()
     } else {
         "unknown panic".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BrokenReader;
+
+    impl Read for BrokenReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("synthetic read failure"))
+        }
+    }
+
+    struct BlockingReader {
+        released: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            let (released, cv) = &*self.released;
+            let mut released = released.lock().unwrap_or_else(|error| error.into_inner());
+            while !*released {
+                released = cv.wait(released).unwrap_or_else(|error| error.into_inner());
+            }
+            Ok(0)
+        }
+    }
+
+    fn stdout(at: Instant) -> CommandFailureCause {
+        CommandFailureCause::StdoutLimitExceeded {
+            at,
+            limit: 10,
+            observed: 11,
+        }
+    }
+
+    fn stderr(at: Instant) -> CommandFailureCause {
+        CommandFailureCause::StderrLimitExceeded {
+            at,
+            limit: 10,
+            observed: 11,
+        }
+    }
+
+    #[test]
+    fn first_cause_uses_time_then_deterministic_tie_priority() {
+        let at = Instant::now();
+        let ctl = JobControl::new();
+        ctl.record_cause(stderr(at), false);
+        ctl.record_cause(stdout(at), false);
+        ctl.record_cause(CommandFailureCause::Cancelled { at }, false);
+        ctl.record_cause(
+            CommandFailureCause::DeadlineExceeded { deadline: at },
+            false,
+        );
+
+        assert!(matches!(
+            ctl.failure().unwrap().primary,
+            CommandFailureCause::DeadlineExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn earlier_cause_replaces_later_but_later_cause_never_replaces_first() {
+        let base = Instant::now();
+        let early = base + Duration::from_millis(1);
+        let late = base + Duration::from_millis(2);
+        let ctl = JobControl::new();
+        ctl.record_cause(stderr(late), false);
+        ctl.record_cause(stdout(early), false);
+        ctl.record_cause(CommandFailureCause::Cancelled { at: late }, false);
+
+        assert!(matches!(
+            ctl.failure().unwrap().primary,
+            CommandFailureCause::StdoutLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn cleanup_failure_does_not_replace_primary() {
+        let ctl = JobControl::new();
+        ctl.record_cause(CommandFailureCause::Cancelled { at: Instant::now() }, false);
+        ctl.record_cleanup(
+            CommandOperation::WaitChild,
+            std::io::Error::other("synthetic cleanup failure"),
+        );
+
+        let failure = ctl.failure().unwrap();
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+        assert_eq!(failure.cleanup.len(), 1);
+        assert_eq!(failure.cleanup[0].operation, CommandOperation::WaitChild);
+    }
+
+    #[test]
+    fn reader_cleanup_evidence_is_attached_to_existing_primary() {
+        let ctl = JobControl::new();
+        ctl.record_cause(CommandFailureCause::Cancelled { at: Instant::now() }, false);
+        let reader = spawn_pipe_reader(BrokenReader, OutputStream::Stdout, None, ctl.clone())
+            .expect("reader thread");
+        let _ = join_pipe_reader(Some(reader), OutputStream::Stdout, &ctl);
+
+        let failure = ctl.failure().unwrap();
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+        assert!(
+            failure
+                .cleanup
+                .iter()
+                .any(|evidence| evidence.operation == CommandOperation::ReadStdout)
+        );
+    }
+
+    #[test]
+    fn stuck_reader_is_detached_with_cleanup_evidence() {
+        let ctl = JobControl::new();
+        ctl.record_cause(CommandFailureCause::Cancelled { at: Instant::now() }, false);
+        let released = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader = spawn_pipe_reader(
+            BlockingReader {
+                released: released.clone(),
+            },
+            OutputStream::Stdout,
+            None,
+            ctl.clone(),
+        )
+        .expect("reader thread");
+
+        let started = Instant::now();
+        let _ = join_pipe_reader(Some(reader), OutputStream::Stdout, &ctl);
+        let elapsed = started.elapsed();
+        let (flag, cv) = &*released;
+        *flag.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        cv.notify_all();
+
+        assert!(elapsed < Duration::from_secs(1), "elapsed: {elapsed:?}");
+        assert!(ctl.failure().unwrap().cleanup.iter().any(|evidence| {
+            evidence.operation == CommandOperation::JoinStdoutReader
+                && evidence.kind == std::io::ErrorKind::TimedOut
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_failure_is_cleanup_evidence_not_a_new_primary() {
+        let ctl = JobControl::new();
+        ctl.record_cause(CommandFailureCause::Cancelled { at: Instant::now() }, false);
+        let tree = ProcessTree {
+            process_group: libc::pid_t::MIN,
+            terminated: Mutex::new(false),
+        };
+        let error = tree.terminate().expect_err("invalid process group");
+        ctl.record_cleanup(CommandOperation::TerminateTree, error);
+
+        let failure = ctl.failure().unwrap();
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+        assert!(
+            failure
+                .cleanup
+                .iter()
+                .any(|evidence| evidence.operation == CommandOperation::TerminateTree)
+        );
+    }
+
+    #[test]
+    fn cancellation_before_observed_completion_wins() {
+        let ctl = JobControl::new();
+        ctl.cancel();
+        assert!(!ctl.accept_completion(None, Instant::now()));
+        assert!(matches!(
+            ctl.failure().unwrap().primary,
+            CommandFailureCause::Cancelled { .. }
+        ));
+    }
+
+    #[test]
+    fn cancellation_after_accepted_completion_cannot_replace_success() {
+        let ctl = JobControl::new();
+        assert!(ctl.accept_completion(None, Instant::now()));
+        ctl.cancel();
+        assert!(ctl.finalize_success(None, Instant::now()).is_ok());
+        assert!(ctl.failure().is_none());
+    }
+
+    #[test]
+    fn overflow_during_final_drain_beats_accepted_completion() {
+        let ctl = JobControl::new();
+        assert!(ctl.accept_completion(None, Instant::now()));
+        ctl.record_cause(stdout(Instant::now()), false);
+        let failure = ctl
+            .finalize_success(None, Instant::now())
+            .expect_err("final-drain overflow");
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::StdoutLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn deadline_is_checked_atomically_when_completion_is_observed() {
+        let ctl = JobControl::new();
+        let deadline = Instant::now();
+        assert!(!ctl.accept_completion(Some(deadline), deadline));
+        assert!(matches!(
+            ctl.failure().unwrap().primary,
+            CommandFailureCause::DeadlineExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn relative_timeout_overflow_is_rejected() {
+        let error = effective_deadline(None, Some(Duration::MAX), Instant::now())
+            .expect_err("overflowing timeout");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn escaped_noisy_reader_stops_retaining_after_detach() {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_path = pid_file.path().to_string_lossy().into_owned();
+        let ctl = JobControl::new();
+        let spec = CommandSpec::new("/bin/sh").args([
+            "-c",
+            "setsid /bin/sh -c 'echo $$ > \"$1\"; i=0; while [ \"$i\" -lt 300 ]; do printf 0123456789abcdef; i=$((i + 1)); sleep 0.01; done' okena-escaped \"$1\" &",
+            "okena-test",
+            &pid_path,
+        ]);
+        let mut command = spec.build();
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let (mut child, tree) = ProcessTree::spawn(&mut command, &ctl).expect("spawn parent");
+        let _registration = ctl.register(tree.clone());
+        let mut stdout_reader = Some(
+            spawn_pipe_reader(
+                child.stdout.take().expect("stdout pipe"),
+                OutputStream::Stdout,
+                None,
+                ctl.clone(),
+            )
+            .expect("stdout reader"),
+        );
+        let retained = stdout_reader.as_ref().unwrap().captured.clone();
+        let mut stderr_reader = Some(
+            spawn_pipe_reader(
+                child.stderr.take().expect("stderr pipe"),
+                OutputStream::Stderr,
+                None,
+                ctl.clone(),
+            )
+            .expect("stderr reader"),
+        );
+
+        let exit_deadline = Instant::now() + Duration::from_secs(2);
+        while !process_exited(&mut child).expect("poll parent") {
+            assert!(Instant::now() < exit_deadline, "parent did not exit");
+            std::thread::sleep(POLL_MIN);
+        }
+        assert!(ctl.accept_completion(None, Instant::now()));
+        wait_for_readers(&stdout_reader, &stderr_reader, POST_EXIT_DRAIN);
+        let failure = finish_child(
+            &tree,
+            &mut child,
+            stdout_reader.take(),
+            stderr_reader.take(),
+            &ctl,
+            None,
+            true,
+        )
+        .expect_err("escaped readers must detach");
+
+        let length_at_return = retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        std::thread::sleep(Duration::from_millis(150));
+        let length_later = retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let escaped_pid = wait_for_pid_file(pid_file.path(), Duration::from_secs(1));
+        kill_process_group(escaped_pid);
+
+        assert!(matches!(
+            failure.primary,
+            CommandFailureCause::Process {
+                operation: CommandOperation::JoinStdoutReader | CommandOperation::JoinStderrReader,
+                kind: std::io::ErrorKind::TimedOut,
+                ..
+            }
+        ));
+        assert!(
+            length_at_return < 128 * 1024,
+            "retained {length_at_return} bytes before detach"
+        );
+        assert_eq!(
+            length_later, length_at_return,
+            "detached reader kept retaining output"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_pid_file(path: &std::path::Path, timeout: Duration) -> u32 {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse()
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for pid");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_process_group(pid: u32) {
+        let pid = libc::pid_t::try_from(pid).expect("test pid fits pid_t");
+        let group = pid.checked_neg().expect("positive test pid");
+        // SAFETY: the test created this session and read its group leader PID.
+        let _ = unsafe { libc::kill(group, libc::SIGKILL) };
     }
 }
