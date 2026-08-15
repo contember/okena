@@ -1,5 +1,5 @@
 use crate::keys::SpecialKey;
-use crate::review::ReviewDiffRequest;
+use crate::review::{ReviewDiffRequest, ReviewSourceRequest};
 use crate::shell::ShellType;
 use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
@@ -769,6 +769,11 @@ pub enum ActionRequest {
         project_id: String,
         request: ReviewDiffRequest,
     },
+    ReviewSource {
+        project_id: String,
+        // Boxed to keep the exact source paths from inflating every action.
+        request: Box<ReviewSourceRequest>,
+    },
     ReviewStructure {
         project_id: String,
         request: ReviewDiffRequest,
@@ -1330,6 +1335,15 @@ mod tests {
         .unwrap()
     }
 
+    fn review_source_request() -> ReviewSourceRequest {
+        serde_json::from_value(json!({
+            "comparison": review_comparison_json(),
+            "old_path": "src/old.rs",
+            "new_path": "src/new.rs"
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn review_actions_have_stable_json_shapes() {
         let inventory = ActionRequest::ReviewInventory {
@@ -1381,6 +1395,22 @@ mod tests {
             assert_eq!(value, expected);
             serde_json::from_value::<ActionRequest>(value).unwrap();
         }
+
+        let source = ActionRequest::ReviewSource {
+            project_id: "project-1".to_string(),
+            request: Box::new(review_source_request()),
+        };
+        let source_json = json!({
+            "action": "review_source",
+            "project_id": "project-1",
+            "request": {
+                "comparison": review_comparison_json(),
+                "old_path": "src/old.rs",
+                "new_path": "src/new.rs"
+            }
+        });
+        assert_eq!(serde_json::to_value(&source).unwrap(), source_json);
+        serde_json::from_value::<ActionRequest>(source_json).unwrap();
     }
 
     #[test]
@@ -1401,6 +1431,23 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<ActionRequest>(mutable).is_err());
+
+        let mutable_source = json!({
+            "action": "review_source",
+            "project_id": "project-1",
+            "request": {
+                "comparison": {
+                    "requested": "staged",
+                    "requested_base_oid": "1".repeat(40),
+                    "strategy": "head_to_index",
+                    "base": { "kind": "commit", "oid": "1".repeat(40) },
+                    "head": { "kind": "index", "fingerprint": "index-v1" },
+                    "identity": "staged:index-v1"
+                },
+                "new_path": "src/new.rs"
+            }
+        });
+        assert!(serde_json::from_value::<ActionRequest>(mutable_source).is_err());
 
         let mut malformed = json!({
             "action": "review_structure",
@@ -1771,6 +1818,10 @@ mod tests {
             ActionRequest::ReviewDiff {
                 project_id: "p1".into(),
                 request: review_diff_request(),
+            },
+            ActionRequest::ReviewSource {
+                project_id: "p1".into(),
+                request: Box::new(review_source_request()),
             },
             ActionRequest::ReviewStructure {
                 project_id: "p1".into(),

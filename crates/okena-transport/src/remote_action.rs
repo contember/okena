@@ -57,6 +57,7 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         }
         ActionRequest::ReviewInventory { .. }
         | ActionRequest::ReviewDiff { .. }
+        | ActionRequest::ReviewSource { .. }
         | ActionRequest::ReviewStructure { .. } => ActionClientKind::Review,
         ActionRequest::RemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
@@ -503,6 +504,12 @@ mod tests {
             "ignore_whitespace": false
             }))
             .unwrap();
+        let source_request = okena_core::review::ReviewSourceRequest::new(
+            request.comparison.as_resolved().clone(),
+            Some("src/old.rs".to_string()),
+            Some("src/new.rs".to_string()),
+        )
+        .unwrap();
         vec![
             ActionRequest::ReviewInventory {
                 project_id: "project".to_string(),
@@ -514,6 +521,10 @@ mod tests {
             ActionRequest::ReviewDiff {
                 project_id: "project".to_string(),
                 request: request.clone(),
+            },
+            ActionRequest::ReviewSource {
+                project_id: "project".to_string(),
+                request: Box::new(source_request),
             },
             ActionRequest::ReviewStructure {
                 project_id: "project".to_string(),

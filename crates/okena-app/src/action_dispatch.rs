@@ -771,6 +771,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             request,
         },
+        ActionRequest::ReviewSource {
+            project_id,
+            request,
+        } => ActionRequest::ReviewSource {
+            project_id: s(&project_id),
+            request,
+        },
         ActionRequest::ReviewStructure {
             project_id,
             request,
@@ -1299,6 +1306,16 @@ mod tests {
         .unwrap()
     }
 
+    fn review_source_request() -> okena_core::review::ReviewSourceRequest {
+        let comparison = review_diff_request().comparison;
+        okena_core::review::ReviewSourceRequest::new(
+            comparison.into_resolved(),
+            Some("src/old.rs".to_string()),
+            Some("src/new.rs".to_string()),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn rows_map_visual_split_axis_back_to_canonical_axis() {
         let action = canonicalize_layout_action(
@@ -1354,7 +1371,7 @@ mod tests {
     fn review_actions_strip_only_the_remote_project_prefix() {
         let project_id = "remote:connection-1:project-1".to_string();
         let request = review_diff_request();
-        let comparison = serde_json::to_value(&request.comparison).unwrap();
+        let source_request = review_source_request();
         let actions = [
             ActionRequest::ReviewInventory {
                 project_id: project_id.clone(),
@@ -1367,6 +1384,10 @@ mod tests {
                 project_id: project_id.clone(),
                 request: request.clone(),
             },
+            ActionRequest::ReviewSource {
+                project_id: project_id.clone(),
+                request: Box::new(source_request),
+            },
             ActionRequest::ReviewStructure {
                 project_id,
                 request,
@@ -1374,10 +1395,11 @@ mod tests {
         ];
 
         for action in actions {
+            let original = serde_json::to_value(&action).unwrap();
             let value = serde_json::to_value(strip_remote_ids(action, "connection-1")).unwrap();
             assert_eq!(value["project_id"], "project-1");
-            if let Some(request) = value.get("request") {
-                assert_eq!(request["comparison"], comparison);
+            if original.get("request").is_some() {
+                assert_eq!(value["request"], original["request"]);
             }
         }
     }

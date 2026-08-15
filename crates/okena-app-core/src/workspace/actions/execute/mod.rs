@@ -301,6 +301,7 @@ pub fn execute_action(
         } => git::diff(ws, project_id, mode, ignore_whitespace),
         ActionRequest::ReviewInventory { .. }
         | ActionRequest::ReviewDiff { .. }
+        | ActionRequest::ReviewSource { .. }
         | ActionRequest::ReviewStructure { .. } => ActionResult::Err(
             "internal error: review actions require the daemon executor".to_string(),
         ),
