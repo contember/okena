@@ -999,6 +999,7 @@ impl CallDiffChange {
 pub enum FileAnalysisStatus {
     Parsed,
     Partial,
+    Pending,
     Unsupported,
     Failed,
     Skipped,
@@ -1172,7 +1173,8 @@ impl StructuredFile {
             || !call_diff.is_empty();
         if matches!(
             status,
-            FileAnalysisStatus::Unsupported
+            FileAnalysisStatus::Pending
+                | FileAnalysisStatus::Unsupported
                 | FileAnalysisStatus::Failed
                 | FileAnalysisStatus::Skipped
         ) && has_facts
@@ -1191,6 +1193,13 @@ impl StructuredFile {
         {
             return Err(ModelError::new(
                 "unsupported files cannot claim syntax provenance",
+            ));
+        }
+        if status == FileAnalysisStatus::Pending
+            && (old_provenance.is_some() || new_provenance.is_some())
+        {
+            return Err(ModelError::new(
+                "pending files cannot claim syntax provenance",
             ));
         }
         if matches!(
@@ -1224,6 +1233,29 @@ impl StructuredFile {
             return Err(ModelError::new(
                 "partial files require errors or truncation",
             ));
+        }
+        if status == FileAnalysisStatus::Pending {
+            if truncation.is_none() && errors.is_empty() {
+                return Err(ModelError::new(
+                    "pending files require budget, cancellation, time, or analysis error evidence",
+                ));
+            }
+            if errors
+                .iter()
+                .any(|error| error.stage() != AnalysisStage::Budget)
+            {
+                return Err(ModelError::new(
+                    "pending files can only carry budget-stage analysis errors",
+                ));
+            }
+            if truncation
+                .as_ref()
+                .is_some_and(|truncation| !is_pending_truncation(truncation.reason))
+            {
+                return Err(ModelError::new(
+                    "pending file truncation must describe a budget, cancellation, or time limit",
+                ));
+            }
         }
         if status == FileAnalysisStatus::Failed && errors.is_empty() {
             return Err(ModelError::new(
@@ -1556,6 +1588,18 @@ fn validate_review_truncation(truncation: &ReviewTruncation) -> Result<(), Model
     }
 }
 
+fn is_pending_truncation(reason: TruncationReason) -> bool {
+    matches!(
+        reason,
+        TruncationReason::ItemLimit
+            | TruncationReason::ByteLimit
+            | TruncationReason::TimeLimit
+            | TruncationReason::CaptureLimit
+            | TruncationReason::ResponseLimit
+            | TruncationReason::Cancelled
+    )
+}
+
 fn validate_coverage(
     files: &[StructuredFile],
     coverage: &ReviewCoverage,
@@ -1577,9 +1621,13 @@ fn validate_coverage(
             .get(&FileAnalysisStatus::Partial)
             .copied()
             .unwrap_or(0);
+    let pending = counts
+        .get(&FileAnalysisStatus::Pending)
+        .copied()
+        .unwrap_or(0);
     let matches = coverage.total_items() == u64::try_from(selected.len()).unwrap_or(u64::MAX)
         && coverage.analyzed_items() == analyzed
-        && coverage.pending_items() == 0
+        && coverage.pending_items() == pending
         && coverage.skipped_items()
             == counts
                 .get(&FileAnalysisStatus::Skipped)
@@ -1708,6 +1756,44 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn pending_file(
+        path: &str,
+        language: Option<SyntaxLanguage>,
+        truncation: Option<ReviewTruncation>,
+        errors: Vec<AnalysisError>,
+    ) -> StructuredFile {
+        StructuredFile::new(
+            None,
+            Some(path.into()),
+            language,
+            None,
+            None,
+            FileAnalysisStatus::Pending,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            errors,
+            truncation,
+        )
+        .unwrap()
+    }
+
+    fn measured_truncation(
+        reason: TruncationReason,
+        limit: u64,
+        observed: u64,
+    ) -> ReviewTruncation {
+        ReviewTruncation {
+            reason,
+            limit: Some(limit),
+            observed: Some(observed),
+            detail: None,
+        }
     }
 
     #[test]
@@ -2166,6 +2252,171 @@ mod tests {
     }
 
     #[test]
+    fn pending_files_accept_explicit_budget_time_and_cancellation_evidence() {
+        let cases = [
+            measured_truncation(TruncationReason::ItemLimit, 100, 100),
+            measured_truncation(TruncationReason::ByteLimit, 1_000_000, 1_000_001),
+            measured_truncation(TruncationReason::TimeLimit, 50_000, 50_000),
+            ReviewTruncation {
+                reason: TruncationReason::Cancelled,
+                limit: None,
+                observed: None,
+                detail: Some("daemon request cancelled".into()),
+            },
+        ];
+
+        for (index, truncation) in cases.into_iter().enumerate() {
+            let file = pending_file(
+                &format!("src/pending-{index}.rs"),
+                Some(SyntaxLanguage::Rust),
+                Some(truncation),
+                Vec::new(),
+            );
+            assert_eq!(file.status(), FileAnalysisStatus::Pending);
+            assert!(file.old_provenance().is_none());
+            assert!(file.new_provenance().is_none());
+            assert!(file.old_outline().is_empty());
+            assert!(file.new_outline().is_empty());
+            assert_eq!(
+                serde_json::from_value::<StructuredFile>(serde_json::to_value(&file).unwrap())
+                    .unwrap(),
+                file
+            );
+        }
+
+        let error = AnalysisError::new(
+            Some("src/pending-error.rs".into()),
+            AnalysisStage::Budget,
+            "analysis slot was not available",
+        )
+        .unwrap();
+        let pending = pending_file("src/pending-error.rs", None, None, vec![error]);
+        assert_eq!(pending.status(), FileAnalysisStatus::Pending);
+        assert_eq!(
+            serde_json::from_value::<StructuredFile>(serde_json::to_value(&pending).unwrap())
+                .unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn pending_files_reject_successful_facts_provenance_and_invalid_evidence() {
+        let mut with_facts = serde_json::to_value(parsed_file()).unwrap();
+        with_facts["status"] = json!("pending");
+        with_facts["truncation"] =
+            serde_json::to_value(measured_truncation(TruncationReason::ItemLimit, 1, 1)).unwrap();
+        assert!(serde_json::from_value::<StructuredFile>(with_facts).is_err());
+
+        assert!(
+            StructuredFile::new(
+                None,
+                Some("src/pending.rs".into()),
+                Some(SyntaxLanguage::Rust),
+                None,
+                Some(provenance()),
+                FileAnalysisStatus::Pending,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(measured_truncation(TruncationReason::ByteLimit, 100, 100)),
+            )
+            .is_err()
+        );
+        assert!(
+            StructuredFile::new(
+                None,
+                Some("src/pending.rs".into()),
+                Some(SyntaxLanguage::Rust),
+                None,
+                None,
+                FileAnalysisStatus::Pending,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            StructuredFile::new(
+                None,
+                Some("src/pending.rs".into()),
+                None,
+                None,
+                None,
+                FileAnalysisStatus::Pending,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(ReviewTruncation {
+                    reason: TruncationReason::Other,
+                    limit: None,
+                    observed: None,
+                    detail: Some("not a scheduling or budget reason".into()),
+                }),
+            )
+            .is_err()
+        );
+
+        for stage in [
+            AnalysisStage::Detection,
+            AnalysisStage::Parsing,
+            AnalysisStage::Comparison,
+        ] {
+            let invalid_error =
+                AnalysisError::new(Some("src/pending.rs".into()), stage, "not pending evidence")
+                    .unwrap();
+            assert!(
+                StructuredFile::new(
+                    None,
+                    Some("src/pending.rs".into()),
+                    Some(SyntaxLanguage::Rust),
+                    None,
+                    None,
+                    FileAnalysisStatus::Pending,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    vec![invalid_error.clone()],
+                    Some(measured_truncation(TruncationReason::TimeLimit, 50, 50)),
+                )
+                .is_err()
+            );
+
+            let budget_error = AnalysisError::new(
+                Some("src/pending.rs".into()),
+                AnalysisStage::Budget,
+                "scheduler deferred analysis",
+            )
+            .unwrap();
+            let valid = pending_file(
+                "src/pending.rs",
+                None,
+                Some(measured_truncation(TruncationReason::ByteLimit, 100, 100)),
+                vec![budget_error],
+            );
+            let mut wire = serde_json::to_value(valid).unwrap();
+            wire["errors"] = json!([invalid_error]);
+            assert!(serde_json::from_value::<StructuredFile>(wire).is_err());
+        }
+    }
+
+    #[test]
     fn partial_and_failed_files_require_explicit_evidence() {
         let mut partial = serde_json::to_value(parsed_file()).unwrap();
         partial["status"] = json!("partial");
@@ -2230,6 +2481,146 @@ mod tests {
             .unwrap()
             .push(duplicate);
         assert!(serde_json::from_value::<ReviewStructure>(value).is_err());
+    }
+
+    #[test]
+    fn aggregate_and_language_coverage_count_pending_files_exactly() {
+        let files = vec![
+            parsed_file(),
+            pending_file(
+                "src/pending-rust.rs",
+                Some(SyntaxLanguage::Rust),
+                Some(measured_truncation(TruncationReason::ByteLimit, 100, 101)),
+                Vec::new(),
+            ),
+            pending_file(
+                "src/pending-ts.ts",
+                Some(SyntaxLanguage::TypeScript),
+                Some(measured_truncation(TruncationReason::TimeLimit, 50, 50)),
+                Vec::new(),
+            ),
+            pending_file(
+                "src/pending-undetected",
+                None,
+                Some(ReviewTruncation {
+                    reason: TruncationReason::Cancelled,
+                    limit: None,
+                    observed: None,
+                    detail: None,
+                }),
+                Vec::new(),
+            ),
+        ];
+        let aggregate = ReviewCoverage::new(4, 1, 3, 0, 0, 0, None).unwrap();
+        let rust = ReviewCoverage::new(2, 1, 1, 0, 0, 0, None).unwrap();
+        let typescript = ReviewCoverage::new(1, 0, 1, 0, 0, 0, None).unwrap();
+        let review = ReviewStructure::new(
+            immutable_comparison(),
+            files,
+            aggregate,
+            vec![
+                LanguageCoverage::new(SyntaxLanguage::Rust, rust),
+                LanguageCoverage::new(SyntaxLanguage::TypeScript, typescript),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(review.coverage().pending_items(), 3);
+        assert_eq!(review.language_coverage()[0].coverage().pending_items(), 1);
+        assert_eq!(review.language_coverage()[1].coverage().pending_items(), 1);
+
+        let value = serde_json::to_value(&review).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ReviewStructure>(value.clone()).unwrap(),
+            review
+        );
+        let mut invalid = value;
+        invalid["language_coverage"][0]["coverage"] =
+            serde_json::to_value(ReviewCoverage::new(2, 2, 0, 0, 0, 0, None).unwrap()).unwrap();
+        assert!(serde_json::from_value::<ReviewStructure>(invalid).is_err());
+    }
+
+    #[test]
+    fn pending_exact_comparison_response_has_stable_golden_json() {
+        let truncation = measured_truncation(TruncationReason::ByteLimit, 1_000, 1_250);
+        let pending = pending_file(
+            "src/pending.rs",
+            Some(SyntaxLanguage::Rust),
+            Some(truncation.clone()),
+            Vec::new(),
+        );
+        let pending_coverage = ReviewCoverage::new(1, 0, 1, 0, 0, 0, None).unwrap();
+        let review = ReviewStructure::new(
+            immutable_comparison(),
+            vec![pending],
+            pending_coverage.clone(),
+            vec![LanguageCoverage::new(
+                SyntaxLanguage::Rust,
+                pending_coverage,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(&review).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "comparison": {
+                    "requested": { "branch_compare": { "base": "origin/main", "head": "feature" } },
+                    "requested_base_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "requested_head_oid": "2222222222222222222222222222222222222222",
+                    "strategy": "merge_base_to_head",
+                    "base": { "kind": "commit", "oid": "1111111111111111111111111111111111111111" },
+                    "head": { "kind": "commit", "oid": "2222222222222222222222222222222222222222" },
+                    "merge_base_oid": "1111111111111111111111111111111111111111",
+                    "identity": "comparison-1"
+                },
+                "files": [{
+                    "old_path": null,
+                    "new_path": "src/pending.rs",
+                    "language": "rust",
+                    "old_provenance": null,
+                    "new_provenance": null,
+                    "status": "pending",
+                    "old_outline": [],
+                    "new_outline": [],
+                    "symbol_changes": [],
+                    "hotspots": [],
+                    "call_diff": [],
+                    "changed_hunks": [],
+                    "errors": [],
+                    "truncation": {
+                        "reason": "byte_limit",
+                        "limit": 1_000,
+                        "observed": 1_250
+                    }
+                }],
+                "coverage": {
+                    "total_items": 1,
+                    "analyzed_items": 0,
+                    "pending_items": 1,
+                    "skipped_items": 0,
+                    "unsupported_items": 0,
+                    "failed_items": 0
+                },
+                "language_coverage": [{
+                    "language": "rust",
+                    "coverage": {
+                        "total_items": 1,
+                        "analyzed_items": 0,
+                        "pending_items": 1,
+                        "skipped_items": 0,
+                        "unsupported_items": 0,
+                        "failed_items": 0
+                    }
+                }],
+                "errors": []
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ReviewStructure>(value).unwrap(),
+            review
+        );
     }
 
     #[test]
