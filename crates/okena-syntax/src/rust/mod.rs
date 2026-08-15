@@ -1,10 +1,10 @@
 //! Rust tree-sitter adapter.
 
 use crate::{
-    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, ControlContext, DiagnosticSeverity,
-    DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact, SymbolKey, SymbolKind,
-    SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxLanguage, SyntaxProvenance,
-    SyntaxTruncation, SyntaxTruncationReason,
+    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, CaptureByteTracker, ControlContext,
+    DiagnosticSeverity, DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact,
+    SymbolKey, SymbolKind, SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxLanguage,
+    SyntaxProvenance, SyntaxTruncation, SyntaxTruncationReason,
 };
 use std::ops::ControlFlow;
 use std::time::Instant;
@@ -20,20 +20,41 @@ impl RustAdapter {
         Self
     }
 
-    fn failed(path: &str, message: &str) -> Result<DocumentStructure, ModelError> {
-        DocumentStructure::new(
+    fn failed(
+        path: &str,
+        message: &str,
+        provenance: SyntaxProvenance,
+        mut capture: CaptureByteTracker,
+        control: &AnalysisControl,
+    ) -> Result<DocumentStructure, ModelError> {
+        let diagnostic = SyntaxDiagnostic::new(DiagnosticSeverity::Error, message, None)?;
+        let observed_at = Instant::now();
+        let (status, diagnostics, truncation) =
+            if let Some(truncation) = control.stop_truncation(observed_at)? {
+                (DocumentStatus::Partial, Vec::new(), Some(truncation))
+            } else {
+                let observed_at = Instant::now();
+                match capture.try_account_diagnostic(&diagnostic) {
+                    Ok(()) => (DocumentStatus::Failed, vec![diagnostic], None),
+                    Err(truncation) => (
+                        DocumentStatus::Partial,
+                        Vec::new(),
+                        Some(first_cause(control, truncation, observed_at)?),
+                    ),
+                }
+            };
+        let retained_bytes = capture.retained_bytes();
+        let document = DocumentStructure::new(
             path,
-            provenance()?,
-            DocumentStatus::Failed,
+            provenance,
+            status,
             Vec::new(),
             Vec::new(),
-            vec![SyntaxDiagnostic::new(
-                DiagnosticSeverity::Error,
-                message,
-                None,
-            )?],
-            None,
-        )
+            diagnostics,
+            truncation,
+        )?;
+        debug_assert_eq!(document.estimated_owned_bytes(), retained_bytes);
+        Ok(document)
     }
 }
 
@@ -49,22 +70,45 @@ impl SyntaxAdapter for RustAdapter {
         control: &AnalysisControl,
     ) -> Result<DocumentStructure, ModelError> {
         let provenance = provenance()?;
-        if input.language() != SyntaxLanguage::Rust {
-            return Self::failed(input.path(), "Rust adapter received a non-Rust document");
-        }
         if let Some(truncation) = control.stop_truncation(Instant::now())? {
             return truncated_document(&input, provenance, truncation);
         }
         let source_bytes = u64::try_from(input.source().len()).unwrap_or(u64::MAX);
+        let observed_at = Instant::now();
         if source_bytes > budget.max_source_bytes().get() {
+            let truncation = SyntaxTruncation::new(
+                SyntaxTruncationReason::SourceBytes,
+                Some(budget.max_source_bytes().get()),
+                Some(source_bytes),
+            )?;
             return truncated_document(
                 &input,
                 provenance,
-                SyntaxTruncation::new(
-                    SyntaxTruncationReason::SourceBytes,
-                    Some(budget.max_source_bytes().get()),
-                    Some(source_bytes),
-                )?,
+                first_cause(control, truncation, observed_at)?,
+            );
+        }
+        let observed_at = Instant::now();
+        let capture = match CaptureByteTracker::for_document(
+            budget.max_capture_bytes(),
+            input.path(),
+            &provenance,
+        ) {
+            Ok(capture) => capture,
+            Err(truncation) => {
+                return truncated_document(
+                    &input,
+                    provenance,
+                    first_cause(control, truncation, observed_at)?,
+                );
+            }
+        };
+        if input.language() != SyntaxLanguage::Rust {
+            return Self::failed(
+                input.path(),
+                "Rust adapter received a non-Rust document",
+                provenance,
+                capture,
+                control,
             );
         }
 
@@ -73,7 +117,13 @@ impl SyntaxAdapter for RustAdapter {
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .is_err()
         {
-            return Self::failed(input.path(), "tree-sitter rejected the Rust grammar");
+            return Self::failed(
+                input.path(),
+                "tree-sitter rejected the Rust grammar",
+                provenance,
+                capture,
+                control,
+            );
         }
         let source = input.source().as_bytes();
         let mut parse_stopped = false;
@@ -91,10 +141,16 @@ impl SyntaxAdapter for RustAdapter {
             None,
             Some(options),
         ) else {
-            if parse_stopped && let Some(truncation) = control.stop_truncation(Instant::now())? {
+            if let Some(truncation) = control.stop_truncation(Instant::now())? {
                 return truncated_document(&input, provenance, truncation);
             }
-            return Self::failed(input.path(), "tree-sitter did not produce a Rust tree");
+            return Self::failed(
+                input.path(),
+                "tree-sitter did not produce a Rust tree",
+                provenance,
+                capture,
+                control,
+            );
         };
         if parse_stopped && let Some(truncation) = control.stop_truncation(Instant::now())? {
             return truncated_document(&input, provenance, truncation);
@@ -105,6 +161,7 @@ impl SyntaxAdapter for RustAdapter {
             provenance: provenance.clone(),
             budget,
             control,
+            capture,
             symbols: Vec::new(),
             calls: Vec::new(),
             truncation: None,
@@ -116,18 +173,26 @@ impl SyntaxAdapter for RustAdapter {
             && tree.root_node().has_error()
             && let Some(error) = engine.first_error(tree.root_node())?
         {
-            diagnostics.push(SyntaxDiagnostic::new(
+            let diagnostic = SyntaxDiagnostic::new(
                 DiagnosticSeverity::Error,
                 "Rust syntax contains an error or missing token",
                 node_range(error),
-            )?);
+            )?;
+            if !engine.should_stop()? {
+                let observed_at = Instant::now();
+                match engine.capture.try_account_diagnostic(&diagnostic) {
+                    Ok(()) => diagnostics.push(diagnostic),
+                    Err(truncation) => engine.latch_local(truncation, observed_at)?,
+                }
+            }
         }
         let status = if engine.truncation.is_some() || !diagnostics.is_empty() {
             DocumentStatus::Partial
         } else {
             DocumentStatus::Parsed
         };
-        DocumentStructure::new(
+        let retained_bytes = engine.capture.retained_bytes();
+        let document = DocumentStructure::new(
             input.path(),
             provenance,
             status,
@@ -135,7 +200,9 @@ impl SyntaxAdapter for RustAdapter {
             engine.calls,
             diagnostics,
             engine.truncation,
-        )
+        )?;
+        debug_assert_eq!(document.estimated_owned_bytes(), retained_bytes);
+        Ok(document)
     }
 }
 
@@ -157,6 +224,14 @@ fn truncated_document(
         Vec::new(),
         Some(truncation),
     )
+}
+
+fn first_cause(
+    control: &AnalysisControl,
+    local: SyntaxTruncation,
+    observed_at: Instant,
+) -> Result<SyntaxTruncation, ModelError> {
+    Ok(control.stop_truncation(observed_at)?.unwrap_or(local))
 }
 
 #[derive(Clone, Default)]
@@ -181,6 +256,7 @@ struct Engine<'a> {
     provenance: SyntaxProvenance,
     budget: AnalysisBudget,
     control: &'a AnalysisControl,
+    capture: CaptureByteTracker,
     symbols: Vec<SymbolFact>,
     calls: Vec<CallFact>,
     truncation: Option<SyntaxTruncation>,
@@ -197,11 +273,13 @@ impl Engine<'_> {
             let mut child_context = context.clone();
             if let Some(spec) = symbol_spec(node, &context, self.source) {
                 if self.symbols.len() >= usize_from_u32(self.budget.max_symbols().get()) {
-                    self.truncation = Some(SyntaxTruncation::new(
+                    let observed_at = Instant::now();
+                    let truncation = SyntaxTruncation::new(
                         SyntaxTruncationReason::SymbolCount,
                         Some(u64::from(self.budget.max_symbols().get())),
                         Some(u64::from(self.budget.max_symbols().get()) + 1),
-                    )?);
+                    )?;
+                    self.latch_local(truncation, observed_at)?;
                     break;
                 }
                 let Some(depth) = self.syntactic_nesting_depth(body_node(node).unwrap_or(node))?
@@ -227,6 +305,14 @@ impl Engine<'_> {
                     &self.provenance,
                     metrics,
                 )? {
+                    if self.should_stop()? {
+                        break;
+                    }
+                    let observed_at = Instant::now();
+                    if let Err(truncation) = self.capture.try_account_symbol(&fact) {
+                        self.latch_local(truncation, observed_at)?;
+                        break;
+                    }
                     child_context.path.push(spec.name.clone());
                     child_context.enclosing_symbol = Some(fact.key().clone());
                     child_context.method_parent =
@@ -238,11 +324,21 @@ impl Engine<'_> {
 
             if let Some(call) = make_call(node, &context, self.source, &self.provenance)? {
                 if self.calls.len() >= usize_from_u32(self.budget.max_calls().get()) {
-                    self.truncation = Some(SyntaxTruncation::new(
+                    let observed_at = Instant::now();
+                    let truncation = SyntaxTruncation::new(
                         SyntaxTruncationReason::CallCount,
                         Some(u64::from(self.budget.max_calls().get())),
                         Some(u64::from(self.budget.max_calls().get()) + 1),
-                    )?);
+                    )?;
+                    self.latch_local(truncation, observed_at)?;
+                    break;
+                }
+                if self.should_stop()? {
+                    break;
+                }
+                let observed_at = Instant::now();
+                if let Err(truncation) = self.capture.try_account_call(&call) {
+                    self.latch_local(truncation, observed_at)?;
                     break;
                 }
                 self.calls.push(call);
@@ -448,6 +544,15 @@ impl Engine<'_> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn latch_local(
+        &mut self,
+        truncation: SyntaxTruncation,
+        observed_at: Instant,
+    ) -> Result<(), ModelError> {
+        self.truncation = Some(first_cause(self.control, truncation, observed_at)?);
+        Ok(())
     }
 }
 
@@ -746,11 +851,23 @@ mod tests {
     }
 
     fn analyze(source: &str) -> DocumentStructure {
+        analyze_with_budget(
+            source,
+            budget(100_000, 1_000, 1_000),
+            &AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap()),
+        )
+    }
+
+    fn analyze_with_budget(
+        source: &str,
+        budget: AnalysisBudget,
+        control: &AnalysisControl,
+    ) -> DocumentStructure {
         RustAdapter::new()
             .analyze(
                 AnalysisInput::new("src/lib.rs", SyntaxLanguage::Rust, source.to_owned()).unwrap(),
-                budget(100_000, 1_000, 1_000),
-                &AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap()),
+                budget,
+                control,
             )
             .unwrap()
     }
@@ -1074,11 +1191,19 @@ fn inspect(value: Value) {
             std::thread::sleep(Duration::from_millis(1));
             cancellation_signal.cancel();
         });
+        let engine_budget = budget(1_000_000, 100_000, 100_000);
+        let engine_provenance = provenance().unwrap();
         let mut engine = Engine {
             source: &source,
-            provenance: provenance().unwrap(),
-            budget: budget(1_000_000, 100_000, 100_000),
+            provenance: engine_provenance.clone(),
+            budget: engine_budget,
             control: &cancelled,
+            capture: CaptureByteTracker::for_document(
+                engine_budget.max_capture_bytes(),
+                "src/lib.rs",
+                &engine_provenance,
+            )
+            .unwrap(),
             symbols: Vec::new(),
             calls: Vec::new(),
             truncation: None,
@@ -1091,11 +1216,18 @@ fn inspect(value: Value) {
         );
 
         let expired = AnalysisControl::new(NonZeroU64::new(500).unwrap());
+        let engine_provenance = provenance().unwrap();
         let mut engine = Engine {
             source: &source,
-            provenance: provenance().unwrap(),
-            budget: budget(1_000_000, 100_000, 100_000),
+            provenance: engine_provenance.clone(),
+            budget: engine_budget,
             control: &expired,
+            capture: CaptureByteTracker::for_document(
+                engine_budget.max_capture_bytes(),
+                "src/lib.rs",
+                &engine_provenance,
+            )
+            .unwrap(),
             symbols: Vec::new(),
             calls: Vec::new(),
             truncation: None,
@@ -1118,6 +1250,105 @@ fn inspect(value: Value) {
                 .iter()
                 .any(|diagnostic| diagnostic.severity() == DiagnosticSeverity::Error)
         );
+    }
+
+    #[test]
+    fn rust_capture_budget_accepts_exact_limit_and_rejects_the_next_byte() {
+        let source = "fn work() { perform(value); }";
+        let control = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        let generous =
+            budget(10_000, 100, 100).with_max_capture_bytes(NonZeroU64::new(10_000).unwrap());
+        let baseline = analyze_with_budget(source, generous, &control);
+        assert_eq!(baseline.status(), DocumentStatus::Parsed);
+        let exact = baseline.estimated_owned_bytes();
+
+        let exact_document = analyze_with_budget(
+            source,
+            budget(10_000, 100, 100).with_max_capture_bytes(NonZeroU64::new(exact).unwrap()),
+            &control,
+        );
+        assert_eq!(exact_document.status(), DocumentStatus::Parsed);
+        assert_eq!(exact_document.estimated_owned_bytes(), exact);
+
+        let short_document = analyze_with_budget(
+            source,
+            budget(10_000, 100, 100).with_max_capture_bytes(NonZeroU64::new(exact - 1).unwrap()),
+            &control,
+        );
+        assert_eq!(short_document.status(), DocumentStatus::Partial);
+        let truncation = short_document.truncation().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::CaptureBytes);
+        assert_eq!(truncation.limit(), Some(exact - 1));
+        assert_eq!(truncation.observed(), Some(exact));
+        assert!(short_document.calls().is_empty());
+        assert!(short_document.estimated_owned_bytes() < exact);
+    }
+
+    #[test]
+    fn rust_capture_budget_stops_deep_overlapping_call_arguments_before_count_limit() {
+        let depth = 256;
+        let mut expression = "leaf()".to_string();
+        for _ in 0..depth {
+            expression = format!("wrap({expression})");
+        }
+        let source = format!("fn deep() {{ {expression}; }}");
+        let source_limit = NonZeroU64::new(source.len() as u64).unwrap();
+        let capture_limit = NonZeroU64::new(source.len() as u64 * 3).unwrap();
+        let document = analyze_with_budget(
+            &source,
+            AnalysisBudget::new(
+                source_limit,
+                NonZeroU32::new(1_000).unwrap(),
+                NonZeroU32::new(1_000).unwrap(),
+                NonZeroU32::new(64).unwrap(),
+            )
+            .with_max_capture_bytes(capture_limit),
+            &AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap()),
+        );
+        assert_eq!(document.status(), DocumentStatus::Partial);
+        let truncation = document.truncation().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::CaptureBytes);
+        assert_eq!(truncation.limit(), Some(capture_limit.get()));
+        assert!(truncation.observed().unwrap() > capture_limit.get());
+        assert!(document.calls().len() < 10);
+        assert!(document.calls().len() < depth);
+        assert!(document.estimated_owned_bytes() <= capture_limit.get());
+    }
+
+    #[test]
+    fn rust_diagnostics_participate_in_capture_budget() {
+        let source = "fn broken( { let value = ; }";
+        let control = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        let generous =
+            budget(10_000, 100, 100).with_max_capture_bytes(NonZeroU64::new(10_000).unwrap());
+        let baseline = analyze_with_budget(source, generous, &control);
+        assert_eq!(baseline.status(), DocumentStatus::Partial);
+        assert!(baseline.truncation().is_none());
+        let diagnostic = baseline.diagnostics().first().unwrap();
+        let exact = baseline.estimated_owned_bytes();
+        let without_diagnostic = exact - diagnostic.estimated_owned_bytes();
+
+        let exact_document = analyze_with_budget(
+            source,
+            budget(10_000, 100, 100).with_max_capture_bytes(NonZeroU64::new(exact).unwrap()),
+            &control,
+        );
+        assert_eq!(exact_document.diagnostics().len(), 1);
+        assert!(exact_document.truncation().is_none());
+        assert_eq!(exact_document.estimated_owned_bytes(), exact);
+
+        let limited = analyze_with_budget(
+            source,
+            budget(10_000, 100, 100)
+                .with_max_capture_bytes(NonZeroU64::new(without_diagnostic).unwrap()),
+            &control,
+        );
+        assert!(limited.diagnostics().is_empty());
+        assert_eq!(limited.estimated_owned_bytes(), without_diagnostic);
+        let truncation = limited.truncation().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::CaptureBytes);
+        assert_eq!(truncation.limit(), Some(without_diagnostic));
+        assert_eq!(truncation.observed(), Some(exact));
     }
 
     #[test]
@@ -1158,6 +1389,109 @@ fn inspect(value: Value) {
     }
 
     #[test]
+    fn rust_failure_hook_prefers_control_over_one_remaining_capture_byte() {
+        let path = "src/lib.rs";
+        let message = "failure diagnostic exceeds one byte";
+
+        let cancelled = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        cancelled.cancel();
+        let syntax_provenance = provenance().unwrap();
+        let baseline = path.len() as u64 + syntax_provenance.estimated_owned_bytes();
+        let capture = CaptureByteTracker::for_document(
+            NonZeroU64::new(baseline + 1).unwrap(),
+            path,
+            &syntax_provenance,
+        )
+        .unwrap();
+        let document =
+            RustAdapter::failed(path, message, syntax_provenance, capture, &cancelled).unwrap();
+        assert_eq!(document.status(), DocumentStatus::Partial);
+        assert!(document.diagnostics().is_empty());
+        assert_eq!(document.estimated_owned_bytes(), baseline);
+        assert_eq!(
+            document.truncation().unwrap().reason(),
+            SyntaxTruncationReason::Cancelled
+        );
+
+        let expired = AnalysisControl::new(NonZeroU64::new(500).unwrap());
+        std::thread::sleep(Duration::from_millis(2));
+        let syntax_provenance = provenance().unwrap();
+        let capture = CaptureByteTracker::for_document(
+            NonZeroU64::new(baseline + 1).unwrap(),
+            path,
+            &syntax_provenance,
+        )
+        .unwrap();
+        let document =
+            RustAdapter::failed(path, message, syntax_provenance, capture, &expired).unwrap();
+        assert_eq!(document.status(), DocumentStatus::Partial);
+        assert!(document.diagnostics().is_empty());
+        assert_eq!(document.estimated_owned_bytes(), baseline);
+        assert_eq!(
+            document.truncation().unwrap().reason(),
+            SyntaxTruncationReason::Time
+        );
+    }
+
+    #[test]
+    fn rust_capture_observation_preserves_both_race_directions() {
+        let path = "src/lib.rs";
+        let syntax_provenance = provenance().unwrap();
+        let baseline = path.len() as u64 + syntax_provenance.estimated_owned_bytes();
+        let diagnostic =
+            SyntaxDiagnostic::new(DiagnosticSeverity::Error, "too large", None).unwrap();
+
+        let mut capture = CaptureByteTracker::for_document(
+            NonZeroU64::new(baseline + 1).unwrap(),
+            path,
+            &syntax_provenance,
+        )
+        .unwrap();
+        let control = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        let observed_at = Instant::now();
+        let local = capture.try_account_diagnostic(&diagnostic).unwrap_err();
+        control.cancel();
+        let chosen = first_cause(&control, local, observed_at).unwrap();
+        assert_eq!(chosen.reason(), SyntaxTruncationReason::CaptureBytes);
+
+        let mut capture = CaptureByteTracker::for_document(
+            NonZeroU64::new(baseline + 1).unwrap(),
+            path,
+            &syntax_provenance,
+        )
+        .unwrap();
+        let control = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        control.cancel();
+        let observed_at = Instant::now();
+        let local = capture.try_account_diagnostic(&diagnostic).unwrap_err();
+        let chosen = first_cause(&control, local, observed_at).unwrap();
+        assert_eq!(chosen.reason(), SyntaxTruncationReason::Cancelled);
+    }
+
+    #[test]
+    fn rust_count_observation_uses_the_shared_first_cause() {
+        let symbol_count =
+            SyntaxTruncation::new(SyntaxTruncationReason::SymbolCount, Some(1), Some(2)).unwrap();
+        let call_count =
+            SyntaxTruncation::new(SyntaxTruncationReason::CallCount, Some(1), Some(2)).unwrap();
+
+        let cancelled = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        cancelled.cancel();
+        let chosen = first_cause(&cancelled, symbol_count.clone(), Instant::now()).unwrap();
+        assert_eq!(chosen.reason(), SyntaxTruncationReason::Cancelled);
+
+        let expired = AnalysisControl::new(NonZeroU64::new(500).unwrap());
+        std::thread::sleep(Duration::from_millis(2));
+        let chosen = first_cause(&expired, call_count, Instant::now()).unwrap();
+        assert_eq!(chosen.reason(), SyntaxTruncationReason::Time);
+
+        let live = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
+        let chosen = first_cause(&live, symbol_count, Instant::now()).unwrap();
+        live.cancel();
+        assert_eq!(chosen.reason(), SyntaxTruncationReason::SymbolCount);
+    }
+
+    #[test]
     fn rust_honors_cancellation_and_deadline() {
         let adapter = RustAdapter::new();
         let input = || {
@@ -1171,7 +1505,11 @@ fn inspect(value: Value) {
         let cancelled = AnalysisControl::new(NonZeroU64::new(5_000_000).unwrap());
         cancelled.cancel();
         let document = adapter
-            .analyze(input(), budget(1_000, 10, 10), &cancelled)
+            .analyze(
+                input(),
+                budget(1_000, 10, 10).with_max_capture_bytes(NonZeroU64::new(1).unwrap()),
+                &cancelled,
+            )
             .unwrap();
         assert_eq!(
             document.truncation().unwrap().reason(),
@@ -1181,7 +1519,11 @@ fn inspect(value: Value) {
         let expired = AnalysisControl::new(NonZeroU64::new(1_000).unwrap());
         std::thread::sleep(Duration::from_millis(3));
         let document = adapter
-            .analyze(input(), budget(1_000, 10, 10), &expired)
+            .analyze(
+                input(),
+                budget(1_000, 10, 10).with_max_capture_bytes(NonZeroU64::new(1).unwrap()),
+                &expired,
+            )
             .unwrap();
         let truncation = document.truncation().unwrap();
         assert_eq!(truncation.reason(), SyntaxTruncationReason::Time);
