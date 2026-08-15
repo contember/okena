@@ -485,33 +485,56 @@ impl SymbolChange {
         }
         if let (Some(signature), Some(old), Some(new)) = (&signature_change, &old, &new) {
             if !side_has_intersection(&hunks, ComparisonSide::Base, signature.old_range())
-                || !side_has_intersection(&hunks, ComparisonSide::Head, signature.new_range())
+                && !side_has_intersection(&hunks, ComparisonSide::Head, signature.new_range())
             {
                 return Err(ModelError::new(
-                    "signature changes require old and new hunks intersecting exact signature ranges",
+                    "signature changes require hunk evidence on at least one exact signature range",
                 ));
             }
             signature.validate_facts(old, new)?;
         }
         if body_changed {
-            let mut available_body = false;
-            for (side, fact) in [
+            let body_has_evidence = [
                 (ComparisonSide::Base, old.as_ref()),
                 (ComparisonSide::Head, new.as_ref()),
-            ] {
-                if let Some(body_range) = fact.and_then(SymbolFact::body_range) {
-                    available_body = true;
-                    if !side_has_intersection(&hunks, side, body_range) {
+            ]
+            .into_iter()
+            .any(|(side, fact)| {
+                fact.and_then(SymbolFact::body_range)
+                    .is_some_and(|body| side_has_intersection(&hunks, side, body))
+            });
+            if !body_has_evidence {
+                return Err(ModelError::new(
+                    "body changes require hunk evidence on at least one body range",
+                ));
+            }
+        }
+        if kind == SymbolChangeKind::Modified {
+            for hunk in &hunks {
+                for (side, fact) in [
+                    (ComparisonSide::Base, old.as_ref()),
+                    (ComparisonSide::Head, new.as_ref()),
+                ] {
+                    let Some(lines) = hunk_range(hunk, side) else {
+                        continue;
+                    };
+                    let signature_relevant = signature_change.as_ref().is_some_and(|signature| {
+                        let range = match side {
+                            ComparisonSide::Base => signature.old_range(),
+                            ComparisonSide::Head => signature.new_range(),
+                        };
+                        lines.intersects_source(range)
+                    });
+                    let body_relevant = body_changed
+                        && fact
+                            .and_then(SymbolFact::body_range)
+                            .is_some_and(|body| lines.intersects_source(body));
+                    if !signature_relevant && !body_relevant {
                         return Err(ModelError::new(
-                            "body changes require hunks intersecting every available body range",
+                            "every present modified-hunk side must intersect a changed dimension",
                         ));
                     }
                 }
-            }
-            if !available_body {
-                return Err(ModelError::new(
-                    "body changes require at least one available body range",
-                ));
             }
         }
         let changed_old_lines = old.as_ref().map_or(Ok(0), |fact| {
@@ -1809,6 +1832,106 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn modified_symbol_accepts_one_sided_body_evidence_and_derives_zero_other_count() {
+        let old = symbol("pub fn run()");
+        let new = symbol("pub fn run()");
+        let insertion =
+            ChangedHunk::new(None, Some(ChangedLineRange::new(nz(2), nz(2)).unwrap())).unwrap();
+        let inserted = SymbolChange::new(
+            SymbolChangeKind::Modified,
+            Some(old.clone()),
+            Some(new.clone()),
+            None,
+            true,
+            vec![insertion],
+            navigation(ComparisonSide::Head),
+        )
+        .unwrap();
+        assert_eq!(inserted.changed_old_lines(), 0);
+        assert_eq!(inserted.changed_new_lines(), 1);
+
+        let deletion =
+            ChangedHunk::new(Some(ChangedLineRange::new(nz(3), nz(3)).unwrap()), None).unwrap();
+        let deleted = SymbolChange::new(
+            SymbolChangeKind::Modified,
+            Some(old),
+            Some(new),
+            None,
+            true,
+            vec![deletion],
+            navigation(ComparisonSide::Head),
+        )
+        .unwrap();
+        assert_eq!(deleted.changed_old_lines(), 1);
+        assert_eq!(deleted.changed_new_lines(), 0);
+        assert_eq!(
+            serde_json::from_value::<SymbolChange>(serde_json::to_value(&deleted).unwrap())
+                .unwrap(),
+            deleted
+        );
+    }
+
+    #[test]
+    fn modified_signature_accepts_one_sided_evidence_but_rejects_present_unrelated_sides() {
+        let old = symbol("pub fn run()");
+        let new = symbol("pub fn run(value: u32)");
+        let signature = SignatureChange::new(
+            old.normalized_signature(),
+            new.normalized_signature(),
+            old.signature_range(),
+            new.signature_range(),
+        )
+        .unwrap();
+        let insertion =
+            ChangedHunk::new(None, Some(ChangedLineRange::new(nz(1), nz(1)).unwrap())).unwrap();
+        let inserted = SymbolChange::new(
+            SymbolChangeKind::Modified,
+            Some(old.clone()),
+            Some(new.clone()),
+            Some(signature.clone()),
+            false,
+            vec![insertion],
+            navigation(ComparisonSide::Head),
+        )
+        .unwrap();
+        assert_eq!(inserted.changed_old_lines(), 0);
+        assert_eq!(inserted.changed_new_lines(), 1);
+
+        let unrelated_old_side = ChangedHunk::new(
+            Some(ChangedLineRange::new(nz(2), nz(2)).unwrap()),
+            Some(ChangedLineRange::new(nz(1), nz(1)).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            SymbolChange::new(
+                SymbolChangeKind::Modified,
+                Some(old.clone()),
+                Some(new.clone()),
+                Some(signature.clone()),
+                false,
+                vec![unrelated_old_side],
+                navigation(ComparisonSide::Head),
+            )
+            .is_err()
+        );
+
+        let deletion =
+            ChangedHunk::new(Some(ChangedLineRange::new(nz(1), nz(1)).unwrap()), None).unwrap();
+        let deleted = SymbolChange::new(
+            SymbolChangeKind::Modified,
+            Some(old),
+            Some(new),
+            Some(signature),
+            false,
+            vec![deletion],
+            navigation(ComparisonSide::Head),
+        )
+        .unwrap();
+        assert_eq!(deleted.changed_old_lines(), 1);
+        assert_eq!(deleted.changed_new_lines(), 0);
     }
 
     #[test]
