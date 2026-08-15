@@ -1161,18 +1161,31 @@ impl Render for DiffViewer {
                 let body = if self.smart_review.lens == ReviewLens::Diff {
                     let state = self.smart_diff_view_state();
                     if state == SmartDiffViewState::Ready {
-                        self.render_diff_pane(
-                            &t,
-                            is_binary,
-                            file_path,
-                            line_count,
-                            gutter_width,
-                            theme_colors,
-                            cx,
-                        )
-                        .into_any_element()
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .children(self.render_navigation_unavailable(&t, cx))
+                            .child(self.render_diff_pane(
+                                &t,
+                                is_binary,
+                                file_path,
+                                line_count,
+                                gutter_width,
+                                theme_colors,
+                                cx,
+                            ))
+                            .into_any_element()
                     } else {
-                        self.render_smart_diff_state(state, &t, cx)
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .children(self.render_navigation_unavailable(&t, cx))
+                            .child(self.render_smart_diff_state(state, &t, cx))
+                            .into_any_element()
                     }
                 } else {
                     self.render_review_lens_body(cx)

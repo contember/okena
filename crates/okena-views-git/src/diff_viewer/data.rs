@@ -23,6 +23,7 @@ impl DiffViewer {
         select_file: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.review_navigation.invalidate();
         if is_smart_mode(&mode) {
             self.load_smart_review_async(mode, select_file, cx);
         } else {
@@ -220,8 +221,10 @@ impl DiffViewer {
                         if !diff.is_empty() {
                             this.store_diff_result(diff);
                             this.build_file_tree();
-                            this.reconcile_smart_selection(cx);
-                        } else {
+                            if !this.review_navigation.has_pending() {
+                                this.reconcile_smart_selection(cx);
+                            }
+                        } else if !this.review_navigation.has_pending() {
                             this.smart_review.file.clear();
                         }
                     }
@@ -231,6 +234,7 @@ impl DiffViewer {
                     }
                     None => return,
                 }
+                this.resume_review_navigation(cx);
                 cx.notify();
             });
         })
@@ -257,6 +261,7 @@ impl DiffViewer {
     }
 
     pub(super) fn select_smart_file(&mut self, key: ReviewFileKey, cx: &mut Context<Self>) {
+        self.review_navigation.invalidate();
         self.smart_review.set_selected_file(key);
         self.reconcile_smart_selection(cx);
         cx.notify();
@@ -274,7 +279,7 @@ impl DiffViewer {
         self.select_smart_file(key, cx);
     }
 
-    fn reconcile_smart_selection(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reconcile_smart_selection(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.smart_review.selected_file.clone() else {
             self.smart_review.file.clear();
             return;
@@ -303,6 +308,14 @@ impl DiffViewer {
 
     /// Process the currently selected file with syntax highlighting (async).
     pub(super) fn process_current_file_async(&mut self, cx: &mut Context<Self>) {
+        self.process_current_file_for_generation(None, cx);
+    }
+
+    pub(super) fn process_current_file_for_generation(
+        &mut self,
+        requested: Option<(super::review::FileGeneration, ReviewFileKey)>,
+        cx: &mut Context<Self>,
+    ) {
         self.current_file = None;
         self.current_file_old_content = None;
         self.current_file_new_content = None;
@@ -316,7 +329,15 @@ impl DiffViewer {
         };
 
         let key = ReviewFileKey::from_diff(&raw_file);
-        let generation = self.smart_review.file.begin(key.clone());
+        let generation = match requested {
+            Some((generation, requested_key))
+                if requested_key == key
+                    && self.smart_review.file.accepts(generation, &requested_key) =>
+            {
+                generation
+            }
+            Some(_) | None => self.smart_review.file.begin(key.clone()),
+        };
         let provider = self.provider.clone();
         let syntax_set = self.syntax_set.clone();
         let is_dark = self.is_dark;
@@ -325,6 +346,7 @@ impl DiffViewer {
             let Some(comparison) = self.smart_review.comparison() else {
                 self.smart_review.file.source =
                     LoadState::Failed("Exact review comparison is not ready".to_string());
+                self.resume_review_navigation(cx);
                 return;
             };
             let request = match ReviewSourceRequest::new(
@@ -335,6 +357,7 @@ impl DiffViewer {
                 Ok(request) => request,
                 Err(error) => {
                     self.smart_review.file.source = LoadState::Failed(error.to_string());
+                    self.resume_review_navigation(cx);
                     return;
                 }
             };
@@ -398,6 +421,7 @@ impl DiffViewer {
                             this.current_file = None;
                         }
                     }
+                    this.resume_review_navigation(cx);
                     cx.notify();
                 });
             })

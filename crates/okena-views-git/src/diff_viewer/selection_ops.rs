@@ -1,6 +1,7 @@
 //! Context expansion and text selection ops for the diff viewer.
 
 use super::DiffViewer;
+use super::review_nav::{NavigationUnavailable, validate_expander};
 use super::types::{self, DisplayItem, SideBySideSide};
 
 use okena_core::types::DiffViewMode;
@@ -17,40 +18,50 @@ impl DiffViewer {
         new_range: (usize, usize),
         cx: &mut Context<Self>,
     ) {
-        let file = match self.current_file.as_ref() {
-            Some(f) => f,
-            None => return,
-        };
-        let item_index = file.items.iter().position(|item| {
-            matches!(item, DisplayItem::Expander(e) if e.old_range == old_range && e.new_range == new_range)
-        });
-        if let Some(idx) = item_index {
-            self.expand_context(idx, cx);
-        }
+        let _ = self.expand_context_by_range_checked(old_range, new_range, cx);
     }
 
-    /// Expand all hidden context lines at the given item index.
-    pub(super) fn expand_context(&mut self, item_index: usize, cx: &mut Context<Self>) {
-        let file = match self.current_file.as_mut() {
-            Some(f) => f,
-            None => return,
-        };
-
-        let expander = match &file.items[item_index] {
-            DisplayItem::Expander(e) => e.clone(),
-            _ => return,
-        };
-
-        let (old_start, old_end) = expander.old_range;
-        let (new_start, new_end) = expander.new_range;
-
-        // Validate ranges
-        if new_start == 0 || new_end < new_start || old_end < old_start {
-            return;
+    pub(super) fn expand_context_by_range_checked(
+        &mut self,
+        old_range: (usize, usize),
+        new_range: (usize, usize),
+        cx: &mut Context<Self>,
+    ) -> Result<(), NavigationUnavailable> {
+        let file = self
+            .current_file
+            .as_ref()
+            .ok_or(NavigationUnavailable::MissingCurrentFile)?;
+        let mut matches = file.items.iter().enumerate().filter_map(|(index, item)| {
+            matches!(item, DisplayItem::Expander(expander)
+                if expander.old_range == old_range && expander.new_range == new_range)
+            .then_some(index)
+        });
+        let index = matches
+            .next()
+            .ok_or(NavigationUnavailable::MissingExpander)?;
+        if matches.next().is_some() {
+            return Err(NavigationUnavailable::DuplicateExpander);
         }
+        self.expand_context_checked(index, cx)
+    }
 
-        self.selection.clear();
-        self.selection_side = None;
+    pub(super) fn expand_context_checked(
+        &mut self,
+        item_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NavigationUnavailable> {
+        let file = self
+            .current_file
+            .as_ref()
+            .ok_or(NavigationUnavailable::MissingCurrentFile)?;
+        let expander = match file.items.get(item_index) {
+            Some(DisplayItem::Expander(expander)) => expander.clone(),
+            Some(DisplayItem::Line(_)) => return Err(NavigationUnavailable::NotAnExpander),
+            None => return Err(NavigationUnavailable::MissingExpander),
+        };
+
+        let (old_start, _) = expander.old_range;
+        let (new_start, _) = expander.new_range;
 
         let old_lines: Vec<&str> = self
             .current_file_old_content
@@ -62,14 +73,24 @@ impl DiffViewer {
             .as_deref()
             .map(|c| c.lines().collect())
             .unwrap_or_default();
-
-        let count = new_end - new_start + 1;
+        let count = validate_expander(
+            &expander,
+            file.old_line_count,
+            file.new_line_count,
+            old_lines.len(),
+            new_lines.len(),
+        )?;
         let mut new_items: Vec<DisplayItem> = Vec::with_capacity(count);
 
         for i in 0..count {
             let new_ln = new_start + i;
             let old_ln = old_start + i;
 
+            let plain_text = new_lines
+                .get(new_ln - 1)
+                .or_else(|| old_lines.get(old_ln - 1))
+                .ok_or(NavigationUnavailable::SourceRangeUnavailable)?
+                .replace('\t', "    ");
             let spans = file
                 .new_highlighted
                 .get(&new_ln)
@@ -77,37 +98,26 @@ impl DiffViewer {
                 .cloned()
                 .unwrap_or_default();
 
-            let plain_text = new_lines
-                .get(new_ln - 1)
-                .or_else(|| old_lines.get(old_ln - 1))
-                .unwrap_or(&"")
-                .replace('\t', "    ");
-
             new_items.push(DisplayItem::Line(types::DisplayLine {
                 line_type: okena_git::DiffLineType::Context,
-                old_line_num: if old_ln >= 1 && old_ln <= file.old_line_count {
-                    Some(old_ln)
-                } else {
-                    None
-                },
-                new_line_num: if new_ln >= 1 && new_ln <= file.new_line_count {
-                    Some(new_ln)
-                } else {
-                    None
-                },
+                old_line_num: Some(old_ln),
+                new_line_num: Some(new_ln),
                 spans,
                 plain_text,
             }));
         }
 
         let Some(file) = self.current_file.as_mut() else {
-            return;
+            return Err(NavigationUnavailable::MissingCurrentFile);
         };
+        self.selection.clear();
+        self.selection_side = None;
         file.items.splice(item_index..=item_index, new_items);
 
         self.max_line_chars = Self::calc_max_line_chars(file);
         self.update_side_by_side_cache();
         cx.notify();
+        Ok(())
     }
 
     pub(super) fn get_selected_text(&self) -> Option<String> {

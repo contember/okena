@@ -3,6 +3,7 @@
 
 use super::DiffViewer;
 use super::DiffViewerEvent;
+use super::review::is_smart_mode;
 use super::side_by_side;
 use crate::settings::{git_settings, set_git_settings};
 
@@ -29,11 +30,15 @@ impl DiffViewer {
     }
 
     pub(super) fn toggle_mode(&mut self, cx: &mut Context<Self>) {
+        if is_smart_mode(&self.diff_mode) {
+            return;
+        }
         let new_mode = self.diff_mode.toggle();
         self.load_diff_async(new_mode, None, cx);
     }
 
     pub(super) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        self.review_navigation.invalidate();
         self.view_mode = self.view_mode.toggle();
         self.selection.clear();
         self.selection_side = None;
@@ -73,6 +78,16 @@ impl DiffViewer {
         }
         if index == self.selected_file_index && self.current_file.is_some() {
             return;
+        }
+        self.review_navigation.invalidate();
+        if is_smart_mode(&self.diff_mode)
+            && let Some(file) = self.file_stats.get(index)
+        {
+            self.smart_review
+                .set_selected_file(super::review::ReviewFileKey {
+                    old_path: file.old_path.clone(),
+                    new_path: file.new_path.clone(),
+                });
         }
         self.selected_file_index = index;
         self.selection.clear();

@@ -1,8 +1,8 @@
 //! Pure state for coordinating immutable smart-review datasets.
 
 use okena_core::review::{
-    ExactReviewSourceResponse, FileRole, ImmutableResolvedComparison, ReviewDiffRequest,
-    ReviewInventory,
+    ComparisonSide, ExactReviewSourceResponse, FileRole, ImmutableResolvedComparison,
+    ReviewDiffRequest, ReviewInventory,
 };
 use okena_git::{DiffMode, ExactReviewDiffResponse, FileDiff};
 use okena_review::ReviewStructure;
@@ -53,6 +53,13 @@ impl ReviewFileKey {
             (_, Some(new)) => new.clone(),
             (Some(old), None) => old.clone(),
             (None, None) => "(no file)".into(),
+        }
+    }
+
+    pub(crate) fn path(&self, side: ComparisonSide) -> Option<&str> {
+        match side {
+            ComparisonSide::Base => self.old_path.as_deref(),
+            ComparisonSide::Head => self.new_path.as_deref(),
         }
     }
 

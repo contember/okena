@@ -10,6 +10,7 @@ mod nav;
 pub mod provider;
 mod render;
 pub(crate) mod review;
+mod review_nav;
 mod review_render;
 mod scrollbar;
 mod search;
@@ -140,6 +141,7 @@ pub struct DiffViewer {
     pub(super) review_render_cache: Vec<review_render::ReviewRenderCache>,
     pub(super) review_scroll_handle: UniformListScrollHandle,
     pub(super) review_sidebar_scroll_handle: UniformListScrollHandle,
+    pub(super) review_navigation: review_nav::ReviewNavigationState,
 }
 
 impl DiffViewer {
@@ -208,6 +210,7 @@ impl DiffViewer {
             review_render_cache: Vec::new(),
             review_scroll_handle: UniformListScrollHandle::new(),
             review_sidebar_scroll_handle: UniformListScrollHandle::new(),
+            review_navigation: review_nav::ReviewNavigationState::default(),
         };
 
         if !provider.is_git_repo() {

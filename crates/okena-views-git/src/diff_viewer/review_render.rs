@@ -2,6 +2,7 @@
 
 use super::DiffViewer;
 use super::review::{LoadState, ReviewFileKey, ReviewLens};
+use super::review_nav::EvidenceTarget;
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::review::{
@@ -37,7 +38,7 @@ struct ReviewRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReviewRowTarget {
     File(ReviewFileKey),
-    Evidence(ReviewNavigationTarget),
+    Evidence(Box<EvidenceTarget>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,7 +405,7 @@ fn symbol_name(change: &SymbolChange) -> String {
         .unwrap_or_else(|| "(unknown symbol)".into())
 }
 
-fn symbol_change_row(change: &SymbolChange) -> ReviewRow {
+fn symbol_change_row(key: &ReviewFileKey, change: &SymbolChange) -> ReviewRow {
     let dimensions = match (change.signature_change().is_some(), change.body_changed()) {
         (true, true) => "signature + body",
         (true, false) => "signature",
@@ -452,11 +453,14 @@ fn symbol_change_row(change: &SymbolChange) -> ReviewRow {
             SymbolChangeKind::Removed => RowTone::Removed,
             SymbolChangeKind::Modified => RowTone::Neutral,
         },
-        target: Some(ReviewRowTarget::Evidence(change.navigation().clone())),
+        target: Some(ReviewRowTarget::Evidence(Box::new(EvidenceTarget {
+            file: key.clone(),
+            navigation: change.navigation().clone(),
+        }))),
     }
 }
 
-fn hotspot_row(hotspot: &okena_review::StructuralHotspot) -> ReviewRow {
+fn hotspot_row(key: &ReviewFileKey, hotspot: &okena_review::StructuralHotspot) -> ReviewRow {
     let (label, value) = match hotspot.metric() {
         StructuralMetric::FunctionLineCount { lines } => ("function lines", lines.to_string()),
         StructuralMetric::ChangedLines { old, new } => ("changed lines", format!("-{old} +{new}")),
@@ -476,11 +480,19 @@ fn hotspot_row(hotspot: &okena_review::StructuralHotspot) -> ReviewRow {
             hotspot.navigation().line
         ),
         tone: RowTone::Neutral,
-        target: Some(ReviewRowTarget::Evidence(hotspot.navigation().clone())),
+        target: Some(ReviewRowTarget::Evidence(Box::new(EvidenceTarget {
+            file: key.clone(),
+            navigation: hotspot.navigation().clone(),
+        }))),
     }
 }
 
-fn outline_rows(side: &str, roots: &[OutlineFact]) -> Vec<ReviewRow> {
+fn outline_rows(
+    label: &str,
+    side: okena_core::review::ComparisonSide,
+    key: &ReviewFileKey,
+    roots: &[OutlineFact],
+) -> Vec<ReviewRow> {
     let mut rows = Vec::new();
     let mut stack = roots
         .iter()
@@ -490,10 +502,21 @@ fn outline_rows(side: &str, roots: &[OutlineFact]) -> Vec<ReviewRow> {
     while let Some((fact, depth)) = stack.pop() {
         rows.push(ReviewRow {
             primary: format!("{}{}", "  ".repeat(depth), fact.symbol().key().name()),
-            secondary: format!("{side} · {:?}", fact.symbol().key().kind()),
+            secondary: format!("{label} · {:?}", fact.symbol().key().kind()),
             trailing: fact.symbol().range().start_line().to_string(),
             tone: RowTone::Neutral,
-            target: None,
+            target: key.path(side).map(|path| {
+                ReviewRowTarget::Evidence(Box::new(EvidenceTarget {
+                    file: key.clone(),
+                    navigation: ReviewNavigationTarget {
+                        path: path.to_string(),
+                        side,
+                        line: fact.symbol().range().start_line(),
+                        byte_offset: Some(fact.symbol().range().start_byte()),
+                        symbol_context: None,
+                    },
+                }))
+            }),
         });
         stack.extend(fact.children().iter().rev().map(|child| (child, depth + 1)));
     }
@@ -529,21 +552,35 @@ fn structure_model(structure: &ReviewStructure, key: Option<&ReviewFileKey>) -> 
     }
 
     let mut sections = Vec::new();
-    if let Some(file) = selected {
+    if let (Some(file), Some(key)) = (selected, key) {
         sections.push(ReviewSection {
             title: "Symbol changes".into(),
             rows: file
                 .symbol_changes()
                 .iter()
-                .map(symbol_change_row)
+                .map(|change| symbol_change_row(key, change))
                 .collect(),
         });
         sections.push(ReviewSection {
             title: "Hotspots".into(),
-            rows: file.hotspots().iter().map(hotspot_row).collect(),
+            rows: file
+                .hotspots()
+                .iter()
+                .map(|hotspot| hotspot_row(key, hotspot))
+                .collect(),
         });
-        let mut outline = outline_rows("base", file.old_outline());
-        outline.extend(outline_rows("head", file.new_outline()));
+        let mut outline = outline_rows(
+            "base",
+            okena_core::review::ComparisonSide::Base,
+            key,
+            file.old_outline(),
+        );
+        outline.extend(outline_rows(
+            "head",
+            okena_core::review::ComparisonSide::Head,
+            key,
+            file.new_outline(),
+        ));
         sections.push(ReviewSection {
             title: "Outline".into(),
             rows: outline,
@@ -693,7 +730,7 @@ fn call_fact_label(change: &CallDiffChange) -> String {
         .map_or_else(|| "(unknown call)".into(), |call| call.callee_text().into())
 }
 
-fn call_change_row(change: &CallDiffChange) -> ReviewRow {
+fn call_change_row(key: &ReviewFileKey, change: &CallDiffChange) -> ReviewRow {
     let dimensions = match (change.arguments_changed(), change.control_context_changed()) {
         (true, true) => "arguments + control context",
         (true, false) => "arguments",
@@ -755,14 +792,23 @@ fn call_change_row(change: &CallDiffChange) -> ReviewRow {
             CallChangeKind::Removed => RowTone::Removed,
             CallChangeKind::Modified => RowTone::Neutral,
         },
-        target: Some(ReviewRowTarget::Evidence(change.navigation().clone())),
+        target: Some(ReviewRowTarget::Evidence(Box::new(EvidenceTarget {
+            file: key.clone(),
+            navigation: change.navigation().clone(),
+        }))),
     }
 }
 
 fn call_diff_model(structure: &ReviewStructure, key: Option<&ReviewFileKey>) -> ReviewRenderModel {
     let selected = key.and_then(|key| structure.files().iter().find(|file| matches_key(file, key)));
     let rows: Vec<ReviewRow> = selected
-        .map(|file| file.call_diff().iter().map(call_change_row).collect())
+        .zip(key)
+        .map(|(file, key)| {
+            file.call_diff()
+                .iter()
+                .map(|change| call_change_row(key, change))
+                .collect()
+        })
         .unwrap_or_default();
     ReviewRenderModel {
         summary: vec![
@@ -898,6 +944,26 @@ impl DiffViewer {
             SmartDiffViewState::Ready => return div().into_any_element(),
         };
         self.render_review_state(title, detail.as_deref(), t, cx)
+    }
+
+    pub(super) fn render_navigation_unavailable(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.review_navigation.unavailable.as_ref().map(|error| {
+            div()
+                .h(px(30.0))
+                .px(px(16.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(rgb(t.border))
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.term_yellow))
+                .child(format!("Evidence unavailable: {error}"))
+                .into_any_element()
+        })
     }
 
     pub(super) fn render_review_selection(
@@ -1287,6 +1353,10 @@ impl DiffViewer {
             Some(ReviewRowTarget::File(key)) => Some(key.clone()),
             Some(ReviewRowTarget::Evidence(_)) | None => None,
         };
+        let evidence_target = match &row.target {
+            Some(ReviewRowTarget::Evidence(target)) => Some(target.clone()),
+            Some(ReviewRowTarget::File(_)) | None => None,
+        };
         let selected = file_target
             .as_ref()
             .is_some_and(|key| self.smart_review.selected_file.as_ref() == Some(key));
@@ -1346,6 +1416,13 @@ impl DiffViewer {
                     .hover(|style| style.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_smart_file(key.clone(), cx);
+                    }))
+            })
+            .when_some(evidence_target, |d, target| {
+                d.cursor_pointer()
+                    .hover(|style| style.bg(rgb(t.bg_hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.navigate_to_evidence(*target.clone(), cx);
                     }))
             })
             .into_any_element()
@@ -1657,7 +1734,11 @@ mod tests {
             "navigation": { "path": "src/lib.rs", "side": "head", "line": 3 }
         }))
         .unwrap();
-        let row = call_change_row(&change);
+        let key = ReviewFileKey {
+            old_path: Some("src/lib.rs".into()),
+            new_path: Some("src/lib.rs".into()),
+        };
+        let row = call_change_row(&key, &change);
         assert!(row.secondary.contains("module::Type::caller"));
         assert!(matches!(row.target, Some(ReviewRowTarget::Evidence(_))));
         assert_eq!(row.trailing, "src/lib.rs:3");
