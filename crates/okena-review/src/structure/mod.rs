@@ -8,14 +8,15 @@ use okena_core::review::{
     ComparisonSide, ReviewNavigationTarget, ReviewTruncation, TruncationReason,
 };
 use okena_syntax::{
-    DiagnosticSeverity, DocumentStatus, DocumentStructure, SourceRange, SymbolFact, SymbolKey,
-    SymbolKind, SyntaxTruncation, SyntaxTruncationReason,
+    CallFact, ControlContext, DiagnosticSeverity, DocumentStatus, DocumentStructure, SourceRange,
+    SymbolFact, SymbolKey, SymbolKind, SyntaxLanguage, SyntaxTruncation, SyntaxTruncationReason,
 };
 
+use crate::call_diff::{CallDiffError, CallDiffInput, compare_calls};
 use crate::{
-    AnalysisError, AnalysisStage, ChangedHunk, ChangedLineRange, FileAnalysisStatus, ModelError,
-    OutlineFact, SignatureChange, StructuralHotspot, StructuralMetric, StructuredFile,
-    SymbolChange, SymbolChangeKind, SymbolReference,
+    AnalysisError, AnalysisStage, CallChangeKind, CallDiffChange, ChangedHunk, ChangedLineRange,
+    FileAnalysisStatus, ModelError, OutlineFact, SignatureChange, StructuralHotspot,
+    StructuralMetric, StructuredFile, SymbolChange, SymbolChangeKind, SymbolReference,
 };
 
 /// Invalid comparator input or a result rejected by the frozen review model.
@@ -38,6 +39,12 @@ impl std::error::Error for StructureError {}
 
 impl From<ModelError> for StructureError {
     fn from(error: ModelError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl From<CallDiffError> for StructureError {
+    fn from(error: CallDiffError) -> Self {
         Self(error.to_string())
     }
 }
@@ -156,6 +163,7 @@ pub fn compare_structured_file(
             .unwrap_or_default(),
         changed_hunks,
     )?;
+    let call_diff = compare_matched_calls(old_path, new_path, old_document, new_document)?;
     let hotspots = build_hotspots(new_path, new_document, &symbol_changes)?;
 
     let mut errors = document_errors(&documents, false)?;
@@ -196,7 +204,7 @@ pub fn compare_structured_file(
         new_outline,
         symbol_changes,
         hotspots,
-        Vec::new(),
+        call_diff,
         changed_hunks.to_vec(),
         errors,
         review_truncation,
@@ -406,27 +414,13 @@ fn compare_symbols(
     new_symbols: &[SymbolFact],
     changed_hunks: &[ChangedHunk],
 ) -> Result<Vec<SymbolChange>, StructureError> {
-    let old_by_key = group_by_key(old_symbols);
-    let new_by_key = group_by_key(new_symbols);
     let mut matched_old = HashSet::new();
     let mut matched_new = HashSet::new();
     let mut changes = Vec::new();
 
-    for (old_index, old) in old_symbols.iter().enumerate() {
-        let Some(old_occurrences) = old_by_key.get(old.key()) else {
-            continue;
-        };
-        let Some(new_occurrences) = new_by_key.get(old.key()) else {
-            continue;
-        };
-        if old_occurrences.len() != 1 || new_occurrences.len() != 1 {
-            continue;
-        }
-        let new_index = new_occurrences[0];
+    for (old_index, new_index) in unique_pair_indices(old_symbols, new_symbols) {
+        let old = &old_symbols[old_index];
         let new = &new_symbols[new_index];
-        if old.provenance() != new.provenance() {
-            continue;
-        }
         match compare_unique_pair(
             old_path,
             new_path,
@@ -503,6 +497,28 @@ fn group_by_key(symbols: &[SymbolFact]) -> HashMap<SymbolKey, Vec<usize>> {
         grouped.entry(symbol.key().clone()).or_default().push(index);
     }
     grouped
+}
+
+fn unique_pair_indices(
+    old_symbols: &[SymbolFact],
+    new_symbols: &[SymbolFact],
+) -> Vec<(usize, usize)> {
+    let old_by_key = group_by_key(old_symbols);
+    let new_by_key = group_by_key(new_symbols);
+    old_symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(old_index, old)| {
+            let old_occurrences = old_by_key.get(old.key())?;
+            let new_occurrences = new_by_key.get(old.key())?;
+            if old_occurrences.len() != 1 || new_occurrences.len() != 1 {
+                return None;
+            }
+            let new_index = new_occurrences[0];
+            (old.provenance() == new_symbols[new_index].provenance())
+                .then_some((old_index, new_index))
+        })
+        .collect()
 }
 
 enum UniquePairResult {
@@ -716,6 +732,148 @@ fn hunk_on_side(hunk: &ChangedHunk, side: ComparisonSide) -> Option<ChangedLineR
 
 fn line_range_intersects(lines: ChangedLineRange, source: SourceRange) -> bool {
     lines.start().get() <= source.end_line().get() && source.start_line().get() <= lines.end().get()
+}
+
+fn compare_matched_calls(
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+    old_document: Option<&DocumentStructure>,
+    new_document: Option<&DocumentStructure>,
+) -> Result<Vec<CallDiffChange>, StructureError> {
+    let (Some(old_path), Some(new_path), Some(old_document), Some(new_document)) =
+        (old_path, new_path, old_document, new_document)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut changes = Vec::new();
+    for (old_index, new_index) in
+        unique_pair_indices(old_document.symbols(), new_document.symbols())
+    {
+        let old = &old_document.symbols()[old_index];
+        let new = &new_document.symbols()[new_index];
+        if !is_function(old.key().kind()) || !is_function(new.key().kind()) {
+            continue;
+        }
+        changes.extend(compare_calls(CallDiffInput::new(
+            old_path,
+            new_path,
+            old.key(),
+            old.body_range().unwrap_or_else(|| old.full_range()),
+            new.body_range().unwrap_or_else(|| new.full_range()),
+            old_document.calls(),
+            new_document.calls(),
+        )?)?);
+    }
+    changes.sort_by(compare_call_changes);
+    Ok(changes)
+}
+
+fn compare_call_changes(left: &CallDiffChange, right: &CallDiffChange) -> Ordering {
+    left.navigation()
+        .line
+        .cmp(&right.navigation().line)
+        .then_with(|| {
+            left.navigation()
+                .byte_offset
+                .cmp(&right.navigation().byte_offset)
+        })
+        .then_with(|| call_change_rank(left.kind()).cmp(&call_change_rank(right.kind())))
+        .then_with(|| compare_call_enclosing(left, right))
+        .then_with(|| call_callee(left).cmp(call_callee(right)))
+        .then_with(|| left.navigation().path.cmp(&right.navigation().path))
+        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)))
+        .then_with(|| match (call_change_fact(left), call_change_fact(right)) {
+            (Some(left), Some(right)) => compare_call_facts(left, right),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        })
+}
+
+fn call_change_rank(kind: CallChangeKind) -> u8 {
+    match kind {
+        CallChangeKind::Removed => 0,
+        CallChangeKind::Modified => 1,
+        CallChangeKind::Added => 2,
+    }
+}
+
+fn call_change_fact(change: &CallDiffChange) -> Option<&CallFact> {
+    change.new_fact().or_else(|| change.old())
+}
+
+fn call_callee(change: &CallDiffChange) -> &str {
+    call_change_fact(change)
+        .map(CallFact::callee_text)
+        .unwrap_or_default()
+}
+
+fn compare_call_enclosing(left: &CallDiffChange, right: &CallDiffChange) -> Ordering {
+    let left = call_change_fact(left).and_then(CallFact::enclosing_symbol);
+    let right = call_change_fact(right).and_then(CallFact::enclosing_symbol);
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .qualified_path()
+            .cmp(right.qualified_path())
+            .then_with(|| left.name().cmp(right.name()))
+            .then_with(|| symbol_kind_rank(left.kind()).cmp(&symbol_kind_rank(right.kind()))),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_call_facts(left: &CallFact, right: &CallFact) -> Ordering {
+    left.call_site_range()
+        .start_byte()
+        .cmp(&right.call_site_range().start_byte())
+        .then_with(|| {
+            left.call_site_range()
+                .end_byte()
+                .cmp(&right.call_site_range().end_byte())
+        })
+        .then_with(|| left.argument_text().cmp(right.argument_text()))
+        .then_with(|| compare_control_contexts(left.control_context(), right.control_context()))
+        .then_with(|| {
+            syntax_language_rank(left.provenance().language())
+                .cmp(&syntax_language_rank(right.provenance().language()))
+        })
+        .then_with(|| left.provenance().parser().cmp(right.provenance().parser()))
+}
+
+fn compare_control_contexts(left: &[ControlContext], right: &[ControlContext]) -> Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let ordering = control_context_rank(left)
+            .cmp(&control_context_rank(right))
+            .then_with(|| match (left, right) {
+                (ControlContext::Other(left), ControlContext::Other(right)) => left.cmp(right),
+                _ => Ordering::Equal,
+            });
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn control_context_rank(context: &ControlContext) -> u8 {
+    match context {
+        ControlContext::Condition => 0,
+        ControlContext::Loop => 1,
+        ControlContext::MatchArm => 2,
+        ControlContext::ErrorBranch => 3,
+        ControlContext::Callback => 4,
+        ControlContext::Closure => 5,
+        ControlContext::Other(_) => 6,
+    }
+}
+
+fn syntax_language_rank(language: SyntaxLanguage) -> u8 {
+    match language {
+        SyntaxLanguage::Rust => 0,
+        SyntaxLanguage::TypeScript => 1,
+        SyntaxLanguage::Tsx => 2,
+    }
 }
 
 fn build_hotspots(
@@ -1034,12 +1192,33 @@ mod tests {
         diagnostics: Vec<SyntaxDiagnostic>,
         truncation: Option<SyntaxTruncation>,
     ) -> DocumentStructure {
+        document_with_calls(
+            path,
+            provenance,
+            status,
+            symbols,
+            Vec::new(),
+            diagnostics,
+            truncation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn document_with_calls(
+        path: &str,
+        provenance: &SyntaxProvenance,
+        status: DocumentStatus,
+        symbols: Vec<SymbolFact>,
+        calls: Vec<CallFact>,
+        diagnostics: Vec<SyntaxDiagnostic>,
+        truncation: Option<SyntaxTruncation>,
+    ) -> DocumentStructure {
         DocumentStructure::new(
             path,
             provenance.clone(),
             status,
             symbols,
-            Vec::new(),
+            calls,
             diagnostics,
             truncation,
         )
@@ -1072,6 +1251,45 @@ mod tests {
             2,
             0,
         )
+    }
+
+    fn parsed_with_calls(
+        path: &str,
+        provenance: &SyntaxProvenance,
+        symbols: Vec<SymbolFact>,
+        calls: Vec<CallFact>,
+    ) -> DocumentStructure {
+        document_with_calls(
+            path,
+            provenance,
+            DocumentStatus::Parsed,
+            symbols,
+            calls,
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn direct_call(
+        provenance: &SyntaxProvenance,
+        enclosing: &SymbolFact,
+        callee: &str,
+        arguments: &str,
+        start_byte: u64,
+        line: u32,
+        contexts: Vec<ControlContext>,
+    ) -> CallFact {
+        let call_range = range(start_byte, start_byte + 12, line, line);
+        CallFact::new(
+            provenance.clone(),
+            callee,
+            arguments,
+            range(start_byte + 4, start_byte + 10, line, line),
+            call_range,
+            Some(enclosing.key().clone()),
+            contexts,
+        )
+        .unwrap()
     }
 
     fn parsed(
@@ -1614,6 +1832,327 @@ mod tests {
         assert!(file.symbol_changes().is_empty());
         assert_eq!(file.old_outline().len(), 1);
         assert_eq!(file.new_outline().len(), 1);
+    }
+
+    #[test]
+    fn unique_callable_pairs_report_each_changed_call_dimension() {
+        let ts = provenance(SyntaxLanguage::TypeScript, "ts-test");
+        let arguments = function(&ts, &[], "arguments", 1, "function arguments() {}");
+        let control = function(&ts, &[], "control", 10, "function control() {}");
+        let combined = function(&ts, &[], "combined", 20, "function combined() {}");
+        let symbols = vec![arguments.clone(), control.clone(), combined.clone()];
+        let old_calls = vec![
+            direct_call(&ts, &arguments, "load", "old", 130, 3, Vec::new()),
+            direct_call(&ts, &control, "load", "same", 1_030, 12, Vec::new()),
+            direct_call(
+                &ts,
+                &combined,
+                "load",
+                "old",
+                2_030,
+                22,
+                vec![ControlContext::Loop],
+            ),
+        ];
+        let new_calls = vec![
+            direct_call(&ts, &arguments, "load", "new", 130, 3, Vec::new()),
+            direct_call(
+                &ts,
+                &control,
+                "load",
+                "same",
+                1_030,
+                12,
+                vec![ControlContext::Condition],
+            ),
+            direct_call(
+                &ts,
+                &combined,
+                "load",
+                "new",
+                2_030,
+                22,
+                vec![ControlContext::Condition],
+            ),
+        ];
+        let file = compare_structured_file(
+            Some("src/old.ts"),
+            Some("src/new.ts"),
+            Some(&parsed_with_calls(
+                "src/old.ts",
+                &ts,
+                symbols.clone(),
+                old_calls,
+            )),
+            Some(&parsed_with_calls("src/new.ts", &ts, symbols, new_calls)),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(file.call_diff().len(), 3);
+        let find = |name: &str| {
+            file.call_diff()
+                .iter()
+                .find(|change| {
+                    call_change_fact(change)
+                        .and_then(CallFact::enclosing_symbol)
+                        .is_some_and(|key| key.name() == name)
+                })
+                .unwrap()
+        };
+        let argument_change = find("arguments");
+        assert!(argument_change.arguments_changed());
+        assert!(!argument_change.control_context_changed());
+        let control_change = find("control");
+        assert!(!control_change.arguments_changed());
+        assert!(control_change.control_context_changed());
+        let combined_change = find("combined");
+        assert!(combined_change.arguments_changed());
+        assert!(combined_change.control_context_changed());
+        assert!(file.call_diff().iter().all(|change| {
+            change.kind() == CallChangeKind::Modified
+                && change.navigation().path == "src/new.ts"
+                && change.navigation().side == ComparisonSide::Head
+        }));
+    }
+
+    #[test]
+    fn repeated_calls_degrade_and_duplicate_symbol_keys_suppress_pairing() {
+        let rust = provenance(SyntaxLanguage::Rust, "rust-test");
+        let run = function(&rust, &[], "run", 1, "fn run() {}");
+        let repeated = compare_structured_file(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&parsed_with_calls(
+                "old.rs",
+                &rust,
+                vec![run.clone()],
+                vec![
+                    direct_call(&rust, &run, "load", "old-a", 130, 3, Vec::new()),
+                    direct_call(&rust, &run, "load", "old-b", 150, 4, Vec::new()),
+                ],
+            )),
+            Some(&parsed_with_calls(
+                "new.rs",
+                &rust,
+                vec![run.clone()],
+                vec![direct_call(&rust, &run, "load", "new", 130, 3, Vec::new())],
+            )),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(repeated.call_diff().len(), 3);
+        assert_eq!(
+            repeated
+                .call_diff()
+                .iter()
+                .filter(|change| change.kind() == CallChangeKind::Removed)
+                .count(),
+            2
+        );
+        assert_eq!(
+            repeated
+                .call_diff()
+                .iter()
+                .filter(|change| change.kind() == CallChangeKind::Added)
+                .count(),
+            1
+        );
+        assert!(
+            repeated
+                .call_diff()
+                .iter()
+                .all(|change| change.pairing().is_none())
+        );
+
+        let duplicate_old = vec![run.clone(), function(&rust, &[], "run", 10, "fn run() {}")];
+        let duplicate_new = duplicate_old.clone();
+        let duplicate = compare_structured_file(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&parsed_with_calls(
+                "old.rs",
+                &rust,
+                duplicate_old,
+                vec![direct_call(&rust, &run, "load", "old", 130, 3, Vec::new())],
+            )),
+            Some(&parsed_with_calls(
+                "new.rs",
+                &rust,
+                duplicate_new,
+                vec![direct_call(&rust, &run, "load", "new", 130, 3, Vec::new())],
+            )),
+            &[],
+        )
+        .unwrap();
+        assert!(duplicate.call_diff().is_empty());
+    }
+
+    #[test]
+    fn same_callee_is_scoped_to_function_and_method_across_renamed_paths() {
+        let ts = provenance(SyntaxLanguage::TypeScript, "ts-test");
+        let function = function(&ts, &[], "loadPage", 1, "function loadPage() {}");
+        let method = fact(
+            &ts,
+            &["Store"],
+            SymbolKind::Method,
+            "refresh",
+            range(1_000, 1_090, 10, 14),
+            range(1_000, 1_020, 10, 10),
+            Some(range(1_021, 1_090, 11, 14)),
+            "refresh() {}",
+            0,
+            1,
+            0,
+        );
+        let symbols = vec![function.clone(), method.clone()];
+        let old_calls = vec![
+            direct_call(&ts, &function, "load", "page-old", 130, 3, Vec::new()),
+            direct_call(&ts, &method, "load", "store-old", 1_030, 12, Vec::new()),
+        ];
+        let new_calls = vec![
+            direct_call(&ts, &function, "load", "page-new", 130, 3, Vec::new()),
+            direct_call(&ts, &method, "load", "store-new", 1_030, 12, Vec::new()),
+        ];
+        let file = compare_structured_file(
+            Some("src/before.ts"),
+            Some("src/after.ts"),
+            Some(&parsed_with_calls(
+                "src/before.ts",
+                &ts,
+                symbols.clone(),
+                old_calls,
+            )),
+            Some(&parsed_with_calls("src/after.ts", &ts, symbols, new_calls)),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(file.call_diff().len(), 2);
+        let enclosing_names: HashSet<_> = file
+            .call_diff()
+            .iter()
+            .map(|change| {
+                change
+                    .new_fact()
+                    .unwrap()
+                    .enclosing_symbol()
+                    .unwrap()
+                    .qualified_name()
+            })
+            .collect();
+        assert_eq!(
+            enclosing_names,
+            HashSet::from(["loadPage".to_owned(), "Store::refresh".to_owned()])
+        );
+        assert!(file.call_diff().iter().all(|change| {
+            change.navigation().path == "src/after.ts"
+                && change.navigation().side == ComparisonSide::Head
+        }));
+    }
+
+    #[test]
+    fn parser_mismatch_suppresses_call_diff() {
+        let old_provenance = provenance(SyntaxLanguage::Rust, "rust-old");
+        let new_provenance = provenance(SyntaxLanguage::Rust, "rust-new");
+        let old = function(&old_provenance, &[], "run", 1, "fn run() {}");
+        let new = function(&new_provenance, &[], "run", 1, "fn run() {}");
+        let file = compare_structured_file(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&parsed_with_calls(
+                "old.rs",
+                &old_provenance,
+                vec![old.clone()],
+                vec![direct_call(
+                    &old_provenance,
+                    &old,
+                    "load",
+                    "old",
+                    130,
+                    3,
+                    Vec::new(),
+                )],
+            )),
+            Some(&parsed_with_calls(
+                "new.rs",
+                &new_provenance,
+                vec![new.clone()],
+                vec![direct_call(
+                    &new_provenance,
+                    &new,
+                    "load",
+                    "new",
+                    130,
+                    3,
+                    Vec::new(),
+                )],
+            )),
+            &[],
+        )
+        .unwrap();
+        assert!(file.call_diff().is_empty());
+    }
+
+    #[test]
+    fn multi_function_call_diff_order_is_stable_for_reversed_inputs() {
+        let rust = provenance(SyntaxLanguage::Rust, "rust-test");
+        let first = function(&rust, &[], "first", 1, "fn first() {}");
+        let second = function(&rust, &[], "second", 10, "fn second() {}");
+        let symbols = vec![first.clone(), second.clone()];
+        let old_calls = vec![
+            direct_call(&rust, &first, "zeta", "old", 150, 4, Vec::new()),
+            direct_call(&rust, &second, "alpha", "old", 1_030, 12, Vec::new()),
+        ];
+        let new_calls = vec![
+            direct_call(&rust, &first, "zeta", "new", 150, 4, Vec::new()),
+            direct_call(&rust, &second, "alpha", "new", 1_030, 12, Vec::new()),
+        ];
+        let forward = compare_structured_file(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&parsed_with_calls(
+                "old.rs",
+                &rust,
+                symbols.clone(),
+                old_calls.clone(),
+            )),
+            Some(&parsed_with_calls(
+                "new.rs",
+                &rust,
+                symbols.clone(),
+                new_calls.clone(),
+            )),
+            &[],
+        )
+        .unwrap();
+        let reversed = compare_structured_file(
+            Some("old.rs"),
+            Some("new.rs"),
+            Some(&parsed_with_calls(
+                "old.rs",
+                &rust,
+                symbols.iter().cloned().rev().collect(),
+                old_calls.iter().cloned().rev().collect(),
+            )),
+            Some(&parsed_with_calls(
+                "new.rs",
+                &rust,
+                symbols.into_iter().rev().collect(),
+                new_calls.into_iter().rev().collect(),
+            )),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(forward.call_diff(), reversed.call_diff());
+        assert_eq!(
+            forward
+                .call_diff()
+                .iter()
+                .map(|change| change.navigation().line.get())
+                .collect::<Vec<_>>(),
+            vec![4, 12]
+        );
     }
 
     #[test]
