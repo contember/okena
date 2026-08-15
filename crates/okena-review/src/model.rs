@@ -1454,10 +1454,193 @@ impl LanguageCoverage {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OmittedFileReason {
+    UnsupportedLanguage,
+    Binary,
+    Submodule,
+    ModeOnly,
+    WhitespaceIgnored,
+    FileLimit,
+    SourceByteLimit,
+    AggregateByteLimit,
+    TimeLimit,
+    FactLimit,
+    ResponseLimit,
+    Cancelled,
+}
+
+impl OmittedFileReason {
+    pub fn status(self) -> FileAnalysisStatus {
+        match self {
+            Self::UnsupportedLanguage | Self::Binary | Self::Submodule => {
+                FileAnalysisStatus::Unsupported
+            }
+            Self::ModeOnly | Self::WhitespaceIgnored => FileAnalysisStatus::Skipped,
+            Self::FileLimit
+            | Self::SourceByteLimit
+            | Self::AggregateByteLimit
+            | Self::TimeLimit
+            | Self::FactLimit
+            | Self::ResponseLimit
+            | Self::Cancelled => FileAnalysisStatus::Pending,
+        }
+    }
+
+    fn truncation_reason(self) -> Option<TruncationReason> {
+        match self {
+            Self::UnsupportedLanguage
+            | Self::Binary
+            | Self::Submodule
+            | Self::ModeOnly
+            | Self::WhitespaceIgnored => None,
+            Self::FileLimit => Some(TruncationReason::ItemLimit),
+            Self::SourceByteLimit | Self::AggregateByteLimit => Some(TruncationReason::ByteLimit),
+            Self::TimeLimit => Some(TruncationReason::TimeLimit),
+            Self::FactLimit => Some(TruncationReason::CaptureLimit),
+            Self::ResponseLimit => Some(TruncationReason::ResponseLimit),
+            Self::Cancelled => Some(TruncationReason::Cancelled),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OmittedFileGroup {
+    count: u64,
+    language: Option<SyntaxLanguage>,
+    reason: OmittedFileReason,
+    status: FileAnalysisStatus,
+    truncation: Option<ReviewTruncation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OmittedFileGroupWire {
+    count: u64,
+    language: Option<SyntaxLanguage>,
+    reason: OmittedFileReason,
+    status: FileAnalysisStatus,
+    truncation: Option<ReviewTruncation>,
+}
+
+impl TryFrom<OmittedFileGroupWire> for OmittedFileGroup {
+    type Error = ModelError;
+
+    fn try_from(value: OmittedFileGroupWire) -> Result<Self, Self::Error> {
+        Self::new_with_status(
+            value.count,
+            value.language,
+            value.reason,
+            value.status,
+            value.truncation,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for OmittedFileGroup {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        OmittedFileGroupWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl OmittedFileGroup {
+    pub fn new(
+        count: u64,
+        language: Option<SyntaxLanguage>,
+        reason: OmittedFileReason,
+        truncation: Option<ReviewTruncation>,
+    ) -> Result<Self, ModelError> {
+        Self::new_with_status(count, language, reason, reason.status(), truncation)
+    }
+
+    fn new_with_status(
+        count: u64,
+        language: Option<SyntaxLanguage>,
+        reason: OmittedFileReason,
+        status: FileAnalysisStatus,
+        truncation: Option<ReviewTruncation>,
+    ) -> Result<Self, ModelError> {
+        if count == 0 {
+            return Err(ModelError::new("omitted file group count must be positive"));
+        }
+        if status != reason.status() {
+            return Err(ModelError::new(
+                "omitted file status must match its deterministic reason category",
+            ));
+        }
+        if reason == OmittedFileReason::UnsupportedLanguage && language.is_some() {
+            return Err(ModelError::new(
+                "unsupported-language omissions cannot claim a supported syntax language",
+            ));
+        }
+        match (reason.truncation_reason(), truncation.as_ref()) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(ModelError::new(
+                    "non-pending omission reasons cannot carry truncation evidence",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(ModelError::new(
+                    "pending omission reasons require truncation evidence",
+                ));
+            }
+            (Some(expected), Some(actual)) if actual.reason != expected => {
+                return Err(ModelError::new(
+                    "omission truncation reason does not match its omission reason",
+                ));
+            }
+            (Some(_), Some(actual)) => validate_review_truncation(actual)?,
+        }
+        Ok(Self {
+            count,
+            language,
+            reason,
+            status,
+            truncation,
+        })
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn language(&self) -> Option<SyntaxLanguage> {
+        self.language
+    }
+
+    pub fn reason(&self) -> OmittedFileReason {
+        self.reason
+    }
+
+    pub fn status(&self) -> FileAnalysisStatus {
+        self.status
+    }
+
+    pub fn truncation(&self) -> Option<&ReviewTruncation> {
+        self.truncation.as_ref()
+    }
+
+    fn equivalent_to(&self, other: &Self) -> bool {
+        self.language == other.language
+            && self.reason == other.reason
+            && self.status == other.status
+            && self.truncation == other.truncation
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ReviewStructure {
     comparison: ImmutableResolvedComparison,
     files: Vec<StructuredFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    omissions: Vec<OmittedFileGroup>,
     coverage: ReviewCoverage,
     language_coverage: Vec<LanguageCoverage>,
     errors: Vec<AnalysisError>,
@@ -1467,6 +1650,8 @@ pub struct ReviewStructure {
 struct ReviewStructureWire {
     comparison: ImmutableResolvedComparison,
     files: Vec<StructuredFile>,
+    #[serde(default)]
+    omissions: Vec<OmittedFileGroup>,
     coverage: ReviewCoverage,
     language_coverage: Vec<LanguageCoverage>,
     errors: Vec<AnalysisError>,
@@ -1474,9 +1659,10 @@ struct ReviewStructureWire {
 impl TryFrom<ReviewStructureWire> for ReviewStructure {
     type Error = ModelError;
     fn try_from(value: ReviewStructureWire) -> Result<Self, Self::Error> {
-        Self::new(
+        Self::new_with_omissions(
             value.comparison,
             value.files,
+            value.omissions,
             value.coverage,
             value.language_coverage,
             value.errors,
@@ -1501,10 +1687,38 @@ impl ReviewStructure {
         language_coverage: Vec<LanguageCoverage>,
         errors: Vec<AnalysisError>,
     ) -> Result<Self, ModelError> {
+        Self::new_with_omissions(
+            comparison,
+            files,
+            Vec::new(),
+            coverage,
+            language_coverage,
+            errors,
+        )
+    }
+
+    pub fn new_with_omissions(
+        comparison: ImmutableResolvedComparison,
+        files: Vec<StructuredFile>,
+        mut omissions: Vec<OmittedFileGroup>,
+        coverage: ReviewCoverage,
+        language_coverage: Vec<LanguageCoverage>,
+        errors: Vec<AnalysisError>,
+    ) -> Result<Self, ModelError> {
         if let Some(truncation) = coverage.truncation() {
             validate_review_truncation(truncation)?;
         }
-        validate_coverage(&files, &coverage, None)?;
+        if omissions.iter().enumerate().any(|(index, omission)| {
+            omissions[..index]
+                .iter()
+                .any(|earlier| omission.equivalent_to(earlier))
+        }) {
+            return Err(ModelError::new(
+                "equivalent omitted file groups must be combined",
+            ));
+        }
+        omissions.sort_by(compare_omitted_file_groups);
+        validate_coverage(&files, &omissions, &coverage, None)?;
         let mut seen = HashSet::new();
         for language in &language_coverage {
             if !seen.insert(language.language()) {
@@ -1513,10 +1727,18 @@ impl ReviewStructure {
             if let Some(truncation) = language.coverage().truncation() {
                 validate_review_truncation(truncation)?;
             }
-            validate_coverage(&files, language.coverage(), Some(language.language()))?;
+            validate_coverage(
+                &files,
+                &omissions,
+                language.coverage(),
+                Some(language.language()),
+            )?;
         }
-        let covered_languages: HashSet<_> =
-            files.iter().filter_map(StructuredFile::language).collect();
+        let covered_languages: HashSet<_> = files
+            .iter()
+            .filter_map(StructuredFile::language)
+            .chain(omissions.iter().filter_map(OmittedFileGroup::language))
+            .collect();
         if seen != covered_languages {
             return Err(ModelError::new(
                 "language coverage must account for every detected language exactly once",
@@ -1525,6 +1747,7 @@ impl ReviewStructure {
         Ok(Self {
             comparison,
             files,
+            omissions,
             coverage,
             language_coverage,
             errors,
@@ -1536,6 +1759,9 @@ impl ReviewStructure {
     pub fn files(&self) -> &[StructuredFile] {
         &self.files
     }
+    pub fn omissions(&self) -> &[OmittedFileGroup] {
+        &self.omissions
+    }
     pub fn coverage(&self) -> &ReviewCoverage {
         &self.coverage
     }
@@ -1544,6 +1770,67 @@ impl ReviewStructure {
     }
     pub fn errors(&self) -> &[AnalysisError] {
         &self.errors
+    }
+}
+
+fn compare_omitted_file_groups(
+    left: &OmittedFileGroup,
+    right: &OmittedFileGroup,
+) -> std::cmp::Ordering {
+    optional_language_rank(left.language())
+        .cmp(&optional_language_rank(right.language()))
+        .then_with(|| {
+            omission_reason_rank(left.reason()).cmp(&omission_reason_rank(right.reason()))
+        })
+        .then_with(|| {
+            left.truncation()
+                .and_then(|truncation| truncation.limit)
+                .cmp(&right.truncation().and_then(|truncation| truncation.limit))
+        })
+        .then_with(|| {
+            left.truncation()
+                .and_then(|truncation| truncation.observed)
+                .cmp(
+                    &right
+                        .truncation()
+                        .and_then(|truncation| truncation.observed),
+                )
+        })
+        .then_with(|| {
+            left.truncation()
+                .and_then(|truncation| truncation.detail.as_deref())
+                .cmp(
+                    &right
+                        .truncation()
+                        .and_then(|truncation| truncation.detail.as_deref()),
+                )
+        })
+        .then_with(|| left.count().cmp(&right.count()))
+}
+
+fn optional_language_rank(language: Option<SyntaxLanguage>) -> u8 {
+    match language {
+        None => 0,
+        Some(SyntaxLanguage::Rust) => 1,
+        Some(SyntaxLanguage::TypeScript) => 2,
+        Some(SyntaxLanguage::Tsx) => 3,
+    }
+}
+
+fn omission_reason_rank(reason: OmittedFileReason) -> u8 {
+    match reason {
+        OmittedFileReason::UnsupportedLanguage => 0,
+        OmittedFileReason::Binary => 1,
+        OmittedFileReason::Submodule => 2,
+        OmittedFileReason::ModeOnly => 3,
+        OmittedFileReason::WhitespaceIgnored => 4,
+        OmittedFileReason::FileLimit => 5,
+        OmittedFileReason::SourceByteLimit => 6,
+        OmittedFileReason::AggregateByteLimit => 7,
+        OmittedFileReason::TimeLimit => 8,
+        OmittedFileReason::FactLimit => 9,
+        OmittedFileReason::ResponseLimit => 10,
+        OmittedFileReason::Cancelled => 11,
     }
 }
 
@@ -1602,30 +1889,44 @@ fn is_pending_truncation(reason: TruncationReason) -> bool {
 
 fn validate_coverage(
     files: &[StructuredFile],
+    omissions: &[OmittedFileGroup],
     coverage: &ReviewCoverage,
     language: Option<SyntaxLanguage>,
 ) -> Result<(), ModelError> {
-    let selected: Vec<_> = files
+    let mut counts: HashMap<FileAnalysisStatus, u64> = HashMap::new();
+    for file in files
         .iter()
         .filter(|file| language.is_none_or(|language| file.language() == Some(language)))
-        .collect();
-    let mut counts: HashMap<FileAnalysisStatus, u64> = HashMap::new();
-    for file in &selected {
-        *counts.entry(file.status()).or_default() += 1;
+    {
+        add_coverage_count(&mut counts, file.status(), 1)?;
+    }
+    for omission in omissions
+        .iter()
+        .filter(|omission| language.is_none_or(|language| omission.language() == Some(language)))
+    {
+        add_coverage_count(&mut counts, omission.status(), omission.count())?;
     }
     let analyzed = counts
         .get(&FileAnalysisStatus::Parsed)
         .copied()
         .unwrap_or(0)
-        + counts
-            .get(&FileAnalysisStatus::Partial)
-            .copied()
-            .unwrap_or(0);
+        .checked_add(
+            counts
+                .get(&FileAnalysisStatus::Partial)
+                .copied()
+                .unwrap_or(0),
+        )
+        .ok_or_else(|| ModelError::new("coverage count overflow"))?;
     let pending = counts
         .get(&FileAnalysisStatus::Pending)
         .copied()
         .unwrap_or(0);
-    let matches = coverage.total_items() == u64::try_from(selected.len()).unwrap_or(u64::MAX)
+    let total = counts.values().try_fold(0_u64, |total, count| {
+        total
+            .checked_add(*count)
+            .ok_or_else(|| ModelError::new("coverage count overflow"))
+    })?;
+    let matches = coverage.total_items() == total
         && coverage.analyzed_items() == analyzed
         && coverage.pending_items() == pending
         && coverage.skipped_items()
@@ -1647,9 +1948,21 @@ fn validate_coverage(
         Ok(())
     } else {
         Err(ModelError::new(
-            "coverage does not account for its structured files",
+            "coverage does not account for its structured files and omissions",
         ))
     }
+}
+
+fn add_coverage_count(
+    counts: &mut HashMap<FileAnalysisStatus, u64>,
+    status: FileAnalysisStatus,
+    count: u64,
+) -> Result<(), ModelError> {
+    let current = counts.entry(status).or_default();
+    *current = current
+        .checked_add(count)
+        .ok_or_else(|| ModelError::new("coverage count overflow"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1794,6 +2107,48 @@ mod tests {
             observed: Some(observed),
             detail: None,
         }
+    }
+
+    fn omission(
+        count: u64,
+        language: Option<SyntaxLanguage>,
+        reason: OmittedFileReason,
+    ) -> OmittedFileGroup {
+        let truncation = match reason {
+            OmittedFileReason::UnsupportedLanguage
+            | OmittedFileReason::Binary
+            | OmittedFileReason::Submodule
+            | OmittedFileReason::ModeOnly
+            | OmittedFileReason::WhitespaceIgnored => None,
+            OmittedFileReason::FileLimit => {
+                Some(measured_truncation(TruncationReason::ItemLimit, 100, 100))
+            }
+            OmittedFileReason::SourceByteLimit | OmittedFileReason::AggregateByteLimit => Some(
+                measured_truncation(TruncationReason::ByteLimit, 1_000, 1_001),
+            ),
+            OmittedFileReason::TimeLimit => Some(measured_truncation(
+                TruncationReason::TimeLimit,
+                50_000,
+                50_001,
+            )),
+            OmittedFileReason::FactLimit => Some(measured_truncation(
+                TruncationReason::CaptureLimit,
+                500,
+                500,
+            )),
+            OmittedFileReason::ResponseLimit => Some(measured_truncation(
+                TruncationReason::ResponseLimit,
+                10_000,
+                10_001,
+            )),
+            OmittedFileReason::Cancelled => Some(ReviewTruncation {
+                reason: TruncationReason::Cancelled,
+                limit: None,
+                observed: None,
+                detail: None,
+            }),
+        };
+        OmittedFileGroup::new(count, language, reason, truncation).unwrap()
     }
 
     #[test]
@@ -2541,6 +2896,284 @@ mod tests {
     }
 
     #[test]
+    fn every_omission_reason_has_a_fixed_status_and_evidence_shape() {
+        let cases = [
+            (
+                OmittedFileReason::UnsupportedLanguage,
+                FileAnalysisStatus::Unsupported,
+                None,
+            ),
+            (
+                OmittedFileReason::Binary,
+                FileAnalysisStatus::Unsupported,
+                None,
+            ),
+            (
+                OmittedFileReason::Submodule,
+                FileAnalysisStatus::Unsupported,
+                None,
+            ),
+            (
+                OmittedFileReason::ModeOnly,
+                FileAnalysisStatus::Skipped,
+                None,
+            ),
+            (
+                OmittedFileReason::WhitespaceIgnored,
+                FileAnalysisStatus::Skipped,
+                None,
+            ),
+            (
+                OmittedFileReason::FileLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::ItemLimit),
+            ),
+            (
+                OmittedFileReason::SourceByteLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::ByteLimit),
+            ),
+            (
+                OmittedFileReason::AggregateByteLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::ByteLimit),
+            ),
+            (
+                OmittedFileReason::TimeLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::TimeLimit),
+            ),
+            (
+                OmittedFileReason::FactLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::CaptureLimit),
+            ),
+            (
+                OmittedFileReason::ResponseLimit,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::ResponseLimit),
+            ),
+            (
+                OmittedFileReason::Cancelled,
+                FileAnalysisStatus::Pending,
+                Some(TruncationReason::Cancelled),
+            ),
+        ];
+
+        for (reason, status, truncation_reason) in cases {
+            let language =
+                (reason != OmittedFileReason::UnsupportedLanguage).then_some(SyntaxLanguage::Rust);
+            let group = omission(3, language, reason);
+            assert_eq!(group.count(), 3);
+            assert_eq!(group.reason(), reason);
+            assert_eq!(group.status(), status);
+            assert_eq!(
+                group.truncation().map(|truncation| truncation.reason),
+                truncation_reason
+            );
+            assert_eq!(
+                serde_json::from_value::<OmittedFileGroup>(serde_json::to_value(&group).unwrap())
+                    .unwrap(),
+                group
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_omissions_support_huge_counts_without_file_expansion() {
+        let group = omission(u64::MAX, None, OmittedFileReason::FileLimit);
+        let review = ReviewStructure::new_with_omissions(
+            immutable_comparison(),
+            Vec::new(),
+            vec![group],
+            ReviewCoverage::new(u64::MAX, 0, u64::MAX, 0, 0, 0, None).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(review.files().is_empty());
+        assert_eq!(review.omissions().len(), 1);
+        assert_eq!(review.omissions()[0].count(), u64::MAX);
+    }
+
+    #[test]
+    fn unknown_language_omissions_only_contribute_to_aggregate_coverage() {
+        let omissions = vec![
+            omission(3, None, OmittedFileReason::FileLimit),
+            omission(
+                2,
+                Some(SyntaxLanguage::TypeScript),
+                OmittedFileReason::ModeOnly,
+            ),
+        ];
+        let review = ReviewStructure::new_with_omissions(
+            immutable_comparison(),
+            vec![parsed_file()],
+            omissions,
+            ReviewCoverage::new(6, 1, 3, 2, 0, 0, None).unwrap(),
+            vec![
+                LanguageCoverage::new(
+                    SyntaxLanguage::Rust,
+                    ReviewCoverage::new(1, 1, 0, 0, 0, 0, None).unwrap(),
+                ),
+                LanguageCoverage::new(
+                    SyntaxLanguage::TypeScript,
+                    ReviewCoverage::new(2, 0, 0, 2, 0, 0, None).unwrap(),
+                ),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(review.coverage().total_items(), 6);
+        assert_eq!(review.language_coverage()[0].coverage().total_items(), 1);
+        assert_eq!(review.language_coverage()[1].coverage().total_items(), 2);
+    }
+
+    #[test]
+    fn invalid_omission_shapes_duplicates_and_coverage_are_rejected() {
+        assert!(OmittedFileGroup::new(0, None, OmittedFileReason::FileLimit, None).is_err());
+        assert!(
+            OmittedFileGroup::new(
+                1,
+                Some(SyntaxLanguage::Rust),
+                OmittedFileReason::UnsupportedLanguage,
+                None,
+            )
+            .is_err()
+        );
+        assert!(OmittedFileGroup::new(1, None, OmittedFileReason::FileLimit, None).is_err());
+        assert!(
+            OmittedFileGroup::new(
+                1,
+                None,
+                OmittedFileReason::SourceByteLimit,
+                Some(measured_truncation(TruncationReason::ItemLimit, 1, 1)),
+            )
+            .is_err()
+        );
+        assert!(
+            OmittedFileGroup::new(
+                1,
+                None,
+                OmittedFileReason::Binary,
+                Some(measured_truncation(TruncationReason::ByteLimit, 1, 1)),
+            )
+            .is_err()
+        );
+
+        let group = omission(1, None, OmittedFileReason::FileLimit);
+        let mut invalid_wire = serde_json::to_value(&group).unwrap();
+        invalid_wire["count"] = json!(0);
+        assert!(serde_json::from_value::<OmittedFileGroup>(invalid_wire).is_err());
+        for invalid_status in [
+            FileAnalysisStatus::Parsed,
+            FileAnalysisStatus::Partial,
+            FileAnalysisStatus::Failed,
+            FileAnalysisStatus::Skipped,
+        ] {
+            let mut invalid_wire = serde_json::to_value(&group).unwrap();
+            invalid_wire["status"] = serde_json::to_value(invalid_status).unwrap();
+            assert!(serde_json::from_value::<OmittedFileGroup>(invalid_wire).is_err());
+        }
+
+        assert!(
+            ReviewStructure::new_with_omissions(
+                immutable_comparison(),
+                Vec::new(),
+                vec![group.clone(), group.clone()],
+                ReviewCoverage::new(2, 0, 2, 0, 0, 0, None).unwrap(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            ReviewStructure::new_with_omissions(
+                immutable_comparison(),
+                Vec::new(),
+                vec![group],
+                ReviewCoverage::new(2, 0, 2, 0, 0, 0, None).unwrap(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn non_empty_omission_response_has_stable_golden_json() {
+        let pending_coverage = ReviewCoverage::new(3, 0, 3, 0, 0, 0, None).unwrap();
+        let review = ReviewStructure::new_with_omissions(
+            immutable_comparison(),
+            Vec::new(),
+            vec![omission(
+                3,
+                Some(SyntaxLanguage::Rust),
+                OmittedFileReason::TimeLimit,
+            )],
+            pending_coverage.clone(),
+            vec![LanguageCoverage::new(
+                SyntaxLanguage::Rust,
+                pending_coverage,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let value = serde_json::to_value(&review).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "comparison": {
+                    "requested": { "branch_compare": { "base": "origin/main", "head": "feature" } },
+                    "requested_base_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "requested_head_oid": "2222222222222222222222222222222222222222",
+                    "strategy": "merge_base_to_head",
+                    "base": { "kind": "commit", "oid": "1111111111111111111111111111111111111111" },
+                    "head": { "kind": "commit", "oid": "2222222222222222222222222222222222222222" },
+                    "merge_base_oid": "1111111111111111111111111111111111111111",
+                    "identity": "comparison-1"
+                },
+                "files": [],
+                "omissions": [{
+                    "count": 3,
+                    "language": "rust",
+                    "reason": "time_limit",
+                    "status": "pending",
+                    "truncation": {
+                        "reason": "time_limit",
+                        "limit": 50_000,
+                        "observed": 50_001
+                    }
+                }],
+                "coverage": {
+                    "total_items": 3,
+                    "analyzed_items": 0,
+                    "pending_items": 3,
+                    "skipped_items": 0,
+                    "unsupported_items": 0,
+                    "failed_items": 0
+                },
+                "language_coverage": [{
+                    "language": "rust",
+                    "coverage": {
+                        "total_items": 3,
+                        "analyzed_items": 0,
+                        "pending_items": 3,
+                        "skipped_items": 0,
+                        "unsupported_items": 0,
+                        "failed_items": 0
+                    }
+                }],
+                "errors": []
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ReviewStructure>(value).unwrap(),
+            review
+        );
+    }
+
+    #[test]
     fn pending_exact_comparison_response_has_stable_golden_json() {
         let truncation = measured_truncation(TruncationReason::ByteLimit, 1_000, 1_250);
         let pending = pending_file(
@@ -2662,6 +3295,12 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_value::<ReviewStructure>(value.clone()).unwrap(),
+            review
+        );
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("omissions");
+        assert_eq!(
+            serde_json::from_value::<ReviewStructure>(legacy).unwrap(),
             review
         );
     }

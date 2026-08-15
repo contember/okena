@@ -10,8 +10,9 @@ pub mod structure;
 pub use model::{
     AnalysisError, AnalysisStage, CallChangeKind, CallDiffChange, CallPairingEvidence,
     CallPairingStrategy, ChangedHunk, ChangedLineRange, FileAnalysisStatus, LanguageCoverage,
-    ModelError, OutlineFact, ReviewStructure, SignatureChange, StructuralHotspot, StructuralMetric,
-    StructuredFile, SymbolChange, SymbolChangeKind, SymbolReference,
+    ModelError, OmittedFileGroup, OmittedFileReason, OutlineFact, ReviewStructure, SignatureChange,
+    StructuralHotspot, StructuralMetric, StructuredFile, SymbolChange, SymbolChangeKind,
+    SymbolReference,
 };
 
 pub use okena_core::review::{
