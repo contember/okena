@@ -9,6 +9,7 @@ mod line_render;
 mod nav;
 pub mod provider;
 mod render;
+pub(crate) mod review;
 mod scrollbar;
 mod search;
 mod selection_ops;
@@ -84,6 +85,8 @@ pub struct DiffViewer {
     /// Width and active resize gesture for the file tree sidebar.
     pub(super) sidebar_resize: ResizableSidebarState,
     pub(super) error_message: Option<String>,
+    /// Whether `error_message` belongs only to the selected legacy file load.
+    pub(super) file_error_active: bool,
     pub(super) line_num_width: usize,
     pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
@@ -131,6 +134,8 @@ pub struct DiffViewer {
     pub(super) search: Option<okena_files::in_page_search::InPageSearch>,
     /// See [`DiffSearchSig`].
     pub(super) search_sig: Option<DiffSearchSig>,
+    /// Independently loaded immutable review datasets and exact file source.
+    pub(super) smart_review: review::SmartReviewState,
 }
 
 impl DiffViewer {
@@ -169,6 +174,7 @@ impl DiffViewer {
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_resize: ResizableSidebarState::default(),
             error_message: None,
+            file_error_active: false,
             line_num_width: 4,
             syntax_set: load_syntax_set(),
             scrollbar_drag: None,
@@ -194,6 +200,7 @@ impl DiffViewer {
             selection_context_menu: None,
             search: None,
             search_sig: None,
+            smart_review: review::SmartReviewState::default(),
         };
 
         if !provider.is_git_repo() {
