@@ -9,15 +9,16 @@ use std::sync::{Arc, Mutex};
 
 use okena_core::api::{ActionRequest, CommandResult};
 use okena_core::review::{
-    ImmutableResolvedComparison, ReviewCoverage, ReviewDiffRequest, ReviewFileFact,
-    ReviewFileStatus, ReviewInventory, ReviewSourceRequest, ReviewTruncation, TruncationReason,
+    ExactReviewSourceResponse, ImmutableResolvedComparison, ReviewCoverage, ReviewDiffRequest,
+    ReviewFileFact, ReviewFileStatus, ReviewInventory, ReviewSourceRequest, ReviewTruncation,
+    TruncationReason,
 };
 use okena_core::types::DiffMode;
 use okena_git::{
     DiffLineType, ExactReviewDiffResponse, FileDiff, GitError, ReviewGitControl,
     ReviewSourceBudget, ReviewSourceBudgetKind, get_exact_review_diff_response_with_control,
-    get_exact_review_source_with_control, get_review_inventory_with_control,
-    resolve_review_comparison_with_control,
+    get_exact_review_source_response_with_control, get_exact_review_source_with_control,
+    get_review_inventory_with_control, resolve_review_comparison_with_control,
 };
 use okena_review::call_diff::ComparisonStopReason;
 use okena_review::classification::classify_file_fact;
@@ -40,6 +41,7 @@ pub(crate) const MAX_CONCURRENT_REVIEWS: usize = 2;
 const MAX_FILES: usize = 200;
 const MAX_SOURCE_SIDE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STANDALONE_SOURCE_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CAPTURE_SIDE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CAPTURE_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
@@ -54,6 +56,7 @@ const RESPONSE_CHECKPOINT_BYTES: usize = 16 * 1024;
 enum ReviewRequest {
     Inventory(DiffMode),
     Diff(ReviewDiffRequest),
+    Source(Box<ReviewSourceRequest>),
     Structure(ReviewDiffRequest),
 }
 
@@ -119,6 +122,7 @@ pub(crate) fn is_review_action(action: &ActionRequest) -> bool {
         action,
         ActionRequest::ReviewInventory { .. }
             | ActionRequest::ReviewDiff { .. }
+            | ActionRequest::ReviewSource { .. }
             | ActionRequest::ReviewStructure { .. }
     )
 }
@@ -136,6 +140,10 @@ pub(crate) fn prepare_review_action(
             project_id,
             request,
         } => (project_id, ReviewRequest::Diff(request)),
+        ActionRequest::ReviewSource {
+            project_id,
+            request,
+        } => (project_id, ReviewRequest::Source(request)),
         ActionRequest::ReviewStructure {
             project_id,
             request,
@@ -253,6 +261,10 @@ fn execute_review_action(
                 .map_err(|error| error.to_string())
                 .and_then(|response| serialize_diff_response(response, control))
         }
+        ReviewRequest::Source(request) => {
+            build_source(&action.project_path, &request, git_control, control)
+                .and_then(|response| serialize_source_response(response, control))
+        }
         ReviewRequest::Structure(request) => {
             build_structure(&action.project_path, request, git_control, control)
                 .and_then(|response| serialize_structure_response(response, control))
@@ -262,6 +274,22 @@ fn execute_review_action(
         Ok(value) => CommandResult::Ok(Some(value)),
         Err(error) => CommandResult::Err(error),
     }
+}
+
+fn build_source(
+    project_path: &Path,
+    request: &ReviewSourceRequest,
+    git_control: &ReviewGitControl,
+    control: &ReviewWorkerControl,
+) -> Result<ExactReviewSourceResponse, String> {
+    control.checkpoint()?;
+    let budget = ReviewSourceBudget::new(MAX_SOURCE_SIDE_BYTES, MAX_STANDALONE_SOURCE_TOTAL_BYTES)
+        .map_err(|error| error.to_string())?;
+    let response =
+        get_exact_review_source_response_with_control(project_path, request, budget, git_control)
+            .map_err(|error| error.to_string())?;
+    control.checkpoint()?;
+    Ok(response)
 }
 
 fn build_inventory(
@@ -1522,6 +1550,13 @@ fn serialize_diff_response(
     serialize_bounded(control, |writer| serde_json::to_writer(writer, &response))
 }
 
+fn serialize_source_response(
+    response: ExactReviewSourceResponse,
+    control: &ReviewWorkerControl,
+) -> Result<serde_json::Value, String> {
+    serialize_bounded(control, |writer| serde_json::to_writer(writer, &response))
+}
+
 fn serialize_structure_response(
     response: ReviewStructure,
     control: &ReviewWorkerControl,
@@ -1784,6 +1819,44 @@ mod tests {
         }
     }
 
+    fn resolved_comparison(repo: &TestRepo) -> okena_core::review::ResolvedComparison {
+        resolve_review_comparison_with_control(
+            &repo.0,
+            DiffMode::BranchCompare {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            },
+            &ReviewGitControl::new(Default::default()),
+        )
+        .unwrap()
+    }
+
+    fn execute_source_request(
+        repo: &TestRepo,
+        request: ReviewSourceRequest,
+    ) -> Result<ExactReviewSourceResponse, String> {
+        let result = execute_review_action(
+            PreparedReviewAction {
+                project_path: repo.0.clone(),
+                request: ReviewRequest::Source(Box::new(request)),
+            },
+            &ReviewGitControl::new(Default::default()),
+            &ReviewWorkerControl::default(),
+        );
+        match result {
+            CommandResult::Ok(Some(value)) => serde_json::from_value(value)
+                .map_err(|error| format!("invalid exact source response: {error}")),
+            CommandResult::Ok(None) => Err("exact source response had no payload".to_string()),
+            CommandResult::OkBytes(_) => {
+                Err("exact source response unexpectedly returned raw bytes".to_string())
+            }
+            CommandResult::OkSnapshot { .. } => {
+                Err("exact source response unexpectedly returned a snapshot".to_string())
+            }
+            CommandResult::Err(error) => Err(error),
+        }
+    }
+
     #[test]
     fn status_aware_language_detection_uses_the_surviving_side() {
         assert_eq!(
@@ -1793,6 +1866,169 @@ mod tests {
         assert_eq!(
             detect_language(&file(Some("src/lib.rs"), None, ReviewFileStatus::Deleted)),
             Some(SyntaxLanguage::Rust)
+        );
+    }
+
+    #[test]
+    fn exact_source_action_returns_rename_add_and_delete_sides() {
+        let repo = TestRepo::new();
+        repo.write("src/old.rs", "pub fn renamed() -> u32 { 1 }\n");
+        repo.write("src/deleted.rs", "pub fn deleted() {}\n");
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.git(&["mv", "src/old.rs", "src/new.rs"]);
+        repo.write("src/new.rs", "pub fn renamed() -> u32 { 2 }\n");
+        repo.write("src/added.rs", "pub fn added() {}\n");
+        std::fs::remove_file(repo.0.join("src/deleted.rs")).unwrap();
+        repo.commit_all("feature");
+
+        let comparison = resolved_comparison(&repo);
+        assert!(is_review_action(&ActionRequest::ReviewSource {
+            project_id: "test".to_string(),
+            request: Box::new(
+                ReviewSourceRequest::new(
+                    comparison.clone(),
+                    Some("src/old.rs".to_string()),
+                    Some("src/new.rs".to_string()),
+                )
+                .unwrap(),
+            ),
+        }));
+        let rename = execute_source_request(
+            &repo,
+            ReviewSourceRequest::new(
+                comparison.clone(),
+                Some("src/old.rs".to_string()),
+                Some("src/new.rs".to_string()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rename.old_path(), Some("src/old.rs"));
+        assert_eq!(rename.new_path(), Some("src/new.rs"));
+        assert_eq!(
+            rename.old_content(),
+            Some("pub fn renamed() -> u32 { 1 }\n")
+        );
+        assert_eq!(
+            rename.new_content(),
+            Some("pub fn renamed() -> u32 { 2 }\n")
+        );
+        assert_eq!(rename.comparison().as_resolved(), &comparison);
+
+        let addition = execute_source_request(
+            &repo,
+            ReviewSourceRequest::new(comparison.clone(), None, Some("src/added.rs".to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(addition.old_content(), None);
+        assert_eq!(addition.new_content(), Some("pub fn added() {}\n"));
+
+        let deletion = execute_source_request(
+            &repo,
+            ReviewSourceRequest::new(comparison, Some("src/deleted.rs".to_string()), None).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deletion.old_content(), Some("pub fn deleted() {}\n"));
+        assert_eq!(deletion.new_content(), None);
+    }
+
+    #[test]
+    fn exact_source_request_is_immune_to_a_moved_head_ref() {
+        let repo = TestRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        repo.commit_all("frozen feature");
+        let comparison = resolved_comparison(&repo);
+        let request = ReviewSourceRequest::new(
+            comparison.clone(),
+            Some("src/lib.rs".to_string()),
+            Some("src/lib.rs".to_string()),
+        )
+        .unwrap();
+
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        repo.commit_all("move feature ref");
+
+        let source = execute_source_request(&repo, request).unwrap();
+        assert_eq!(source.new_content(), Some("pub fn value() -> u32 { 2 }\n"));
+        assert_eq!(source.comparison().as_resolved(), &comparison);
+    }
+
+    #[test]
+    fn exact_source_enforces_side_limit_and_accepts_full_pair_boundary() {
+        let repo = TestRepo::new();
+        let side_len = usize::try_from(MAX_SOURCE_SIDE_BYTES).unwrap();
+        repo.write("src/old.txt", &"a".repeat(side_len));
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.git(&["mv", "src/old.txt", "src/new.txt"]);
+        repo.write("src/new.txt", &"b".repeat(side_len));
+        repo.write("src/oversize.txt", &"x".repeat(side_len + 1));
+        repo.commit_all("feature");
+        let comparison = resolved_comparison(&repo);
+
+        let boundary = execute_source_request(
+            &repo,
+            ReviewSourceRequest::new(
+                comparison.clone(),
+                Some("src/old.txt".to_string()),
+                Some("src/new.txt".to_string()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(boundary.old_content().unwrap().len(), side_len);
+        assert_eq!(boundary.new_content().unwrap().len(), side_len);
+
+        let error = execute_source_request(
+            &repo,
+            ReviewSourceRequest::new(comparison, None, Some("src/oversize.txt".to_string()))
+                .unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("per-file byte budget exceeded"), "{error}");
+        assert!(error.contains(&(MAX_SOURCE_SIDE_BYTES + 1).to_string()));
+        assert!(error.contains(&MAX_SOURCE_SIDE_BYTES.to_string()));
+    }
+
+    #[test]
+    fn exact_source_honors_worker_and_git_cancellation() {
+        let repo = TestRepo::new();
+        repo.write("src/lib.rs", "pub fn value() {}\n");
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.write("src/lib.rs", "pub fn value() { changed(); }\n");
+        repo.commit_all("feature");
+        let request = ReviewSourceRequest::new(
+            resolved_comparison(&repo),
+            Some("src/lib.rs".to_string()),
+            Some("src/lib.rs".to_string()),
+        )
+        .unwrap();
+        let budget =
+            ReviewSourceBudget::new(MAX_SOURCE_SIDE_BYTES, MAX_STANDALONE_SOURCE_TOTAL_BYTES)
+                .unwrap();
+
+        let git = ReviewGitControl::new(Default::default());
+        git.cancel();
+        assert!(
+            get_exact_review_source_response_with_control(&repo.0, &request, budget, &git).is_err()
+        );
+
+        let worker = ReviewWorkerControl::default();
+        worker.cancel();
+        assert!(
+            build_source(
+                &repo.0,
+                &request,
+                &ReviewGitControl::new(Default::default()),
+                &worker,
+            )
+            .is_err()
         );
     }
 
