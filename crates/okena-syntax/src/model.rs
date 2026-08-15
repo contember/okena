@@ -207,6 +207,11 @@ impl SyntaxProvenance {
     pub fn parser(&self) -> &str {
         &self.parser
     }
+
+    /// Owned UTF-8 payload bytes retained by this value.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        string_owned_bytes(&self.parser)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -317,6 +322,15 @@ impl SymbolKey {
             .cloned()
             .collect::<Vec<_>>()
             .join("::")
+    }
+
+    /// Owned UTF-8 payload bytes, excluding vector and allocator overhead.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        self.qualified_path
+            .iter()
+            .map(|part| string_owned_bytes(part))
+            .chain(std::iter::once(string_owned_bytes(&self.name)))
+            .fold(0, u64::saturating_add)
     }
 }
 
@@ -450,6 +464,15 @@ impl SymbolFact {
     pub fn type_member_count(&self) -> u32 {
         self.type_member_count
     }
+
+    /// Owned UTF-8 payload bytes retained by this fact, including duplicated provenance and key.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        saturating_owned_sum([
+            self.provenance.estimated_owned_bytes(),
+            self.key.estimated_owned_bytes(),
+            string_owned_bytes(&self.normalized_signature),
+        ])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -462,6 +485,16 @@ pub enum ControlContext {
     Callback,
     Closure,
     Other(String),
+}
+
+impl ControlContext {
+    /// Owned UTF-8 payload bytes retained by this context.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        match self {
+            Self::Other(value) => string_owned_bytes(value),
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -563,6 +596,22 @@ impl CallFact {
     pub fn control_context(&self) -> &[ControlContext] {
         &self.control_context
     }
+
+    /// Owned UTF-8 payload bytes retained by this fact, including duplicated provenance and key.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        let direct = saturating_owned_sum([
+            self.provenance.estimated_owned_bytes(),
+            string_owned_bytes(&self.callee_text),
+            string_owned_bytes(&self.argument_text),
+            self.enclosing_symbol
+                .as_ref()
+                .map_or(0, SymbolKey::estimated_owned_bytes),
+        ]);
+        self.control_context
+            .iter()
+            .map(ControlContext::estimated_owned_bytes)
+            .fold(direct, u64::saturating_add)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,6 +636,7 @@ pub enum DiagnosticSeverity {
 #[serde(rename_all = "snake_case")]
 pub enum SyntaxTruncationReason {
     SourceBytes,
+    CaptureBytes,
     SymbolCount,
     CallCount,
     DiagnosticCount,
@@ -642,6 +692,16 @@ impl SyntaxTruncation {
                 ));
             }
             SyntaxTruncationReason::Cancelled => {}
+            SyntaxTruncationReason::CaptureBytes => match (limit, observed) {
+                (Some(limit), Some(observed))
+                    if limit > 0
+                        && (observed > limit || limit == u64::MAX && observed == u64::MAX) => {}
+                _ => {
+                    return Err(ModelError::new(
+                        "capture-byte truncation requires a positive limit and observed value above it",
+                    ));
+                }
+            },
             _ => match (limit, observed) {
                 (Some(limit), Some(observed)) if limit > 0 && observed >= limit => {}
                 _ => {
@@ -725,6 +785,11 @@ impl SyntaxDiagnostic {
     }
     pub fn range(&self) -> Option<SourceRange> {
         self.range
+    }
+
+    /// Owned UTF-8 payload bytes retained by this diagnostic.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        string_owned_bytes(&self.message)
     }
 }
 
@@ -869,15 +934,111 @@ impl DocumentStructure {
     pub fn truncation(&self) -> Option<&SyntaxTruncation> {
         self.truncation.as_ref()
     }
+
+    /// Estimated retained UTF-8 payload bytes in this complete document.
+    ///
+    /// Every owned string is counted at each storage location, including cloned provenance and
+    /// symbol keys. Fixed-size fields, vector capacity, and allocator overhead are excluded. If a
+    /// sum exceeds the fixed-width wire measurement, the result saturates at `u64::MAX`.
+    pub fn estimated_owned_bytes(&self) -> u64 {
+        let base = saturating_owned_sum([
+            string_owned_bytes(&self.path),
+            self.provenance.estimated_owned_bytes(),
+        ]);
+        let with_symbols = self
+            .symbols
+            .iter()
+            .map(SymbolFact::estimated_owned_bytes)
+            .fold(base, u64::saturating_add);
+        let with_calls = self
+            .calls
+            .iter()
+            .map(CallFact::estimated_owned_bytes)
+            .fold(with_symbols, u64::saturating_add);
+        self.diagnostics
+            .iter()
+            .map(SyntaxDiagnostic::estimated_owned_bytes)
+            .fold(with_calls, u64::saturating_add)
+    }
 }
 
 /// Server-selected bounded analysis limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnalysisBudget {
     max_source_bytes: NonZeroU64,
+    max_capture_bytes: NonZeroU64,
     max_symbols: NonZeroU32,
     max_calls: NonZeroU32,
     max_diagnostics: NonZeroU32,
+}
+
+/// Incremental retained-payload accounting for one syntax document.
+///
+/// Adapters initialize this with [`Self::for_document`], then account each candidate with the
+/// matching typed method before pushing it into a retained collection. Rejected candidates do not
+/// change the retained count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureByteTracker {
+    limit: NonZeroU64,
+    retained: u64,
+}
+
+impl CaptureByteTracker {
+    fn new(limit: NonZeroU64) -> Self {
+        Self { limit, retained: 0 }
+    }
+
+    pub fn for_document(
+        limit: NonZeroU64,
+        path: &str,
+        provenance: &SyntaxProvenance,
+    ) -> Result<Self, SyntaxTruncation> {
+        let mut tracker = Self::new(limit);
+        tracker.try_account(saturating_owned_sum([
+            string_owned_bytes(path),
+            provenance.estimated_owned_bytes(),
+        ]))?;
+        Ok(tracker)
+    }
+
+    pub fn limit(self) -> NonZeroU64 {
+        self.limit
+    }
+
+    pub fn retained_bytes(self) -> u64 {
+        self.retained
+    }
+
+    pub fn try_account_symbol(&mut self, candidate: &SymbolFact) -> Result<(), SyntaxTruncation> {
+        self.try_account(candidate.estimated_owned_bytes())
+    }
+
+    pub fn try_account_call(&mut self, candidate: &CallFact) -> Result<(), SyntaxTruncation> {
+        self.try_account(candidate.estimated_owned_bytes())
+    }
+
+    pub fn try_account_diagnostic(
+        &mut self,
+        candidate: &SyntaxDiagnostic,
+    ) -> Result<(), SyntaxTruncation> {
+        self.try_account(candidate.estimated_owned_bytes())
+    }
+
+    /// Account a candidate before retaining it. Exact-limit candidates are accepted.
+    ///
+    /// On fixed-width addition overflow, `observed` saturates at `u64::MAX` and the candidate is
+    /// rejected even when the configured limit is also `u64::MAX`.
+    fn try_account(&mut self, candidate_bytes: u64) -> Result<(), SyntaxTruncation> {
+        let observed = match self.retained.checked_add(candidate_bytes) {
+            Some(observed) => observed,
+            None => return Err(capture_byte_truncation(self.limit, u64::MAX)),
+        };
+        if observed > self.limit.get() {
+            return Err(capture_byte_truncation(self.limit, observed));
+        }
+        self.retained = observed;
+        Ok(())
+    }
 }
 
 /// Runtime-only stop control. It is deliberately separate from serializable document facts.
@@ -1000,6 +1161,22 @@ fn duration_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
+fn string_owned_bytes(value: &str) -> u64 {
+    u64::try_from(value.len()).unwrap_or(u64::MAX)
+}
+
+fn saturating_owned_sum<const N: usize>(values: [u64; N]) -> u64 {
+    values.into_iter().fold(0, u64::saturating_add)
+}
+
+fn capture_byte_truncation(limit: NonZeroU64, observed: u64) -> SyntaxTruncation {
+    SyntaxTruncation {
+        reason: SyntaxTruncationReason::CaptureBytes,
+        limit: Some(limit.get()),
+        observed: Some(observed),
+    }
+}
+
 impl AnalysisBudget {
     pub fn new(
         max_source_bytes: NonZeroU64,
@@ -1009,13 +1186,24 @@ impl AnalysisBudget {
     ) -> Self {
         Self {
             max_source_bytes,
+            max_capture_bytes: max_source_bytes,
             max_symbols,
             max_calls,
             max_diagnostics,
         }
     }
+
+    /// Override the default capture limit, which equals `max_source_bytes`.
+    pub fn with_max_capture_bytes(mut self, max_capture_bytes: NonZeroU64) -> Self {
+        self.max_capture_bytes = max_capture_bytes;
+        self
+    }
+
     pub fn max_source_bytes(self) -> NonZeroU64 {
         self.max_source_bytes
+    }
+    pub fn max_capture_bytes(self) -> NonZeroU64 {
+        self.max_capture_bytes
     }
     pub fn max_symbols(self) -> NonZeroU32 {
         self.max_symbols
@@ -1106,6 +1294,22 @@ mod tests {
             0,
             1,
             0,
+        )
+        .unwrap()
+    }
+
+    fn call(argument_text: impl Into<String>) -> CallFact {
+        CallFact::new(
+            provenance(),
+            "work",
+            argument_text,
+            range(4, 96, 1, 1),
+            range(0, 100, 1, 1),
+            Some(SymbolKey::new(vec!["worker".into()], SymbolKind::Function, "run").unwrap()),
+            vec![
+                ControlContext::Condition,
+                ControlContext::Other("guard".into()),
+            ],
         )
         .unwrap()
     }
@@ -1223,6 +1427,141 @@ mod tests {
     }
 
     #[test]
+    fn capture_byte_truncation_has_validated_golden_wire_evidence() {
+        assert!(
+            serde_json::from_value::<SyntaxTruncation>(json!({
+                "reason": "capture_bytes", "limit": 100, "observed": 100
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SyntaxTruncation>(json!({
+                "reason": "capture_bytes", "limit": 0, "observed": 1
+            }))
+            .is_err()
+        );
+        let truncation =
+            SyntaxTruncation::new(SyntaxTruncationReason::CaptureBytes, Some(100), Some(101))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_string(&truncation).unwrap(),
+            r#"{"reason":"capture_bytes","limit":100,"observed":101}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<SyntaxTruncation>(
+                r#"{"reason":"capture_bytes","limit":100,"observed":101}"#
+            )
+            .unwrap(),
+            truncation
+        );
+    }
+
+    #[test]
+    fn owned_byte_estimates_count_each_retained_string_copy() {
+        let provenance = provenance();
+        let symbol = symbol();
+        let call = call("(nested(value))");
+        let diagnostic =
+            SyntaxDiagnostic::new(DiagnosticSeverity::Info, "parser note", None).unwrap();
+        assert_eq!(
+            provenance.estimated_owned_bytes(),
+            provenance.parser().len() as u64
+        );
+        assert_eq!(
+            symbol.key().estimated_owned_bytes(),
+            ("worker".len() + "run".len()) as u64
+        );
+        assert_eq!(
+            symbol.estimated_owned_bytes(),
+            (provenance.parser().len() + "worker".len() + "run".len() + "pub fn run()".len())
+                as u64
+        );
+        assert_eq!(
+            call.estimated_owned_bytes(),
+            (provenance.parser().len()
+                + "work".len()
+                + "(nested(value))".len()
+                + "worker".len()
+                + "run".len()
+                + "guard".len()) as u64
+        );
+        assert_eq!(
+            diagnostic.estimated_owned_bytes(),
+            "parser note".len() as u64
+        );
+
+        let expected = "src/lib.rs".len() as u64
+            + provenance.estimated_owned_bytes()
+            + symbol.estimated_owned_bytes()
+            + call.estimated_owned_bytes()
+            + diagnostic.estimated_owned_bytes();
+        let mut tracker =
+            CaptureByteTracker::for_document(nz64(expected), "src/lib.rs", &provenance).unwrap();
+        tracker.try_account_symbol(&symbol).unwrap();
+        tracker.try_account_call(&call).unwrap();
+        tracker.try_account_diagnostic(&diagnostic).unwrap();
+        assert_eq!(tracker.retained_bytes(), expected);
+        let document = DocumentStructure::new(
+            "src/lib.rs",
+            provenance,
+            DocumentStatus::Parsed,
+            vec![symbol],
+            vec![call],
+            vec![diagnostic],
+            None,
+        )
+        .unwrap();
+        assert_eq!(document.estimated_owned_bytes(), expected);
+    }
+
+    #[test]
+    fn overlapping_call_arguments_are_bounded_independently_of_fact_count() {
+        let outer_argument = format!("({})", "nested(".repeat(64));
+        let inner_argument = outer_argument[1..].to_string();
+        let outer = call(outer_argument.clone());
+        let inner = call(inner_argument.clone());
+        assert_eq!(outer.argument_text().len(), outer_argument.len());
+        assert_eq!(inner.argument_text().len(), inner_argument.len());
+        assert!(outer.argument_text().len() + inner.argument_text().len() > outer_argument.len());
+
+        let provenance = provenance();
+        let base = string_owned_bytes("src/lib.rs") + provenance.estimated_owned_bytes();
+        let exact = base + outer.estimated_owned_bytes() + inner.estimated_owned_bytes();
+        let mut exact_tracker =
+            CaptureByteTracker::for_document(nz64(exact), "src/lib.rs", &provenance).unwrap();
+        exact_tracker.try_account_call(&outer).unwrap();
+        exact_tracker.try_account_call(&inner).unwrap();
+        assert_eq!(exact_tracker.retained_bytes(), exact);
+
+        let mut short_tracker =
+            CaptureByteTracker::for_document(nz64(exact - 1), "src/lib.rs", &provenance).unwrap();
+        short_tracker.try_account_call(&outer).unwrap();
+        let truncation = short_tracker.try_account_call(&inner).unwrap_err();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::CaptureBytes);
+        assert_eq!(truncation.limit(), Some(exact - 1));
+        assert_eq!(truncation.observed(), Some(exact));
+    }
+
+    #[test]
+    fn capture_accounting_saturates_evidence_and_never_accepts_overflow() {
+        assert_eq!(saturating_owned_sum([u64::MAX, 1]), u64::MAX);
+        let mut tracker = CaptureByteTracker::new(nz64(u64::MAX));
+        tracker.try_account(u64::MAX).unwrap();
+        let truncation = tracker.try_account(1).unwrap_err();
+        assert_eq!(truncation.limit(), Some(u64::MAX));
+        assert_eq!(truncation.observed(), Some(u64::MAX));
+        assert_eq!(tracker.retained_bytes(), u64::MAX);
+        assert!(
+            SyntaxTruncation::new(
+                SyntaxTruncationReason::CaptureBytes,
+                Some(u64::MAX),
+                Some(u64::MAX),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn analysis_control_reports_configured_and_elapsed_microseconds() {
         assert_eq!(
             AnalysisControl::new(nz64(100)).time_limit_micros(),
@@ -1327,9 +1666,14 @@ mod tests {
     fn analysis_budget_exposes_every_positive_fixed_width_limit() {
         let budget = AnalysisBudget::new(nz64(1_000), nz(10), nz(20), nz(30));
         assert_eq!(budget.max_source_bytes(), nz64(1_000));
+        assert_eq!(budget.max_capture_bytes(), nz64(1_000));
         assert_eq!(budget.max_symbols(), nz(10));
         assert_eq!(budget.max_calls(), nz(20));
         assert_eq!(budget.max_diagnostics(), nz(30));
+
+        let overridden = budget.with_max_capture_bytes(nz64(750));
+        assert_eq!(overridden.max_source_bytes(), nz64(1_000));
+        assert_eq!(overridden.max_capture_bytes(), nz64(750));
     }
 
     #[test]

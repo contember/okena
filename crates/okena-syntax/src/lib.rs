@@ -11,8 +11,8 @@ pub mod typescript;
 
 pub use language::SyntaxLanguage;
 pub use model::{
-    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, ControlContext, DiagnosticSeverity,
-    DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact, SymbolKey, SymbolKind,
-    SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxProvenance, SyntaxTruncation,
-    SyntaxTruncationReason,
+    AnalysisBudget, AnalysisControl, AnalysisInput, CallFact, CaptureByteTracker, ControlContext,
+    DiagnosticSeverity, DocumentStatus, DocumentStructure, ModelError, SourceRange, SymbolFact,
+    SymbolKey, SymbolKind, SymbolVisibility, SyntaxAdapter, SyntaxDiagnostic, SyntaxProvenance,
+    SyntaxTruncation, SyntaxTruncationReason,
 };
