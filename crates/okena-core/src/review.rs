@@ -470,7 +470,7 @@ pub struct ReviewTruncation {
 }
 
 /// Inspectable coverage shared by deterministic and syntax-derived analysis.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ReviewCoverageWire")]
 pub struct ReviewCoverage {
     total_items: u64,
@@ -508,20 +508,6 @@ impl TryFrom<ReviewCoverageWire> for ReviewCoverage {
             value.failed_items,
             value.truncation,
         )
-    }
-}
-
-impl Default for ReviewCoverage {
-    fn default() -> Self {
-        Self {
-            total_items: 0,
-            analyzed_items: 0,
-            pending_items: 0,
-            skipped_items: 0,
-            unsupported_items: 0,
-            failed_items: 0,
-            truncation: None,
-        }
     }
 }
 
