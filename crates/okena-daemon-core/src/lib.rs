@@ -36,6 +36,7 @@ pub mod git_poll;
 pub mod observers;
 pub mod pty_loop;
 pub mod reactor;
+mod review;
 pub mod service_cx;
 pub mod soft_close;
 pub mod toast_poll;
