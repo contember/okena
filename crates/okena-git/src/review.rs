@@ -22,7 +22,7 @@ use okena_core::types::DiffMode;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffResult, parse_unified_diff};
-use crate::error::{GitError, GitResult};
+use crate::error::{GitError, GitResult, ReviewSourceBudgetKind};
 
 // Wave 1 records Git facts only; the later classifier replaces this explicit fallback.
 const UNCLASSIFIED_RULE_ID: &str = "builtin.unclassified";
@@ -830,10 +830,11 @@ fn enforce_source_budget(
     let budget = ReviewSourceBudget::new(budget.max_file_bytes, budget.max_total_bytes)?;
     for blob in [old, new].into_iter().flatten() {
         if blob.size > budget.max_file_bytes {
-            return Err(GitError::ParseError(format!(
-                "source blob is {} bytes, exceeding the per-file limit of {} bytes",
-                blob.size, budget.max_file_bytes
-            )));
+            return Err(GitError::ReviewSourceBudgetExceeded {
+                kind: ReviewSourceBudgetKind::PerFileSourceBytes,
+                observed: blob.size,
+                limit: budget.max_file_bytes,
+            });
         }
     }
     let total = old
@@ -841,10 +842,11 @@ fn enforce_source_budget(
         .checked_add(new.map_or(0, |blob| blob.size))
         .ok_or_else(|| GitError::ParseError("source byte total overflowed".to_string()))?;
     if total > budget.max_total_bytes {
-        return Err(GitError::ParseError(format!(
-            "source request is {total} bytes, exceeding the total limit of {} bytes",
-            budget.max_total_bytes
-        )));
+        return Err(GitError::ReviewSourceBudgetExceeded {
+            kind: ReviewSourceBudgetKind::AggregateSourceBytes,
+            observed: total,
+            limit: budget.max_total_bytes,
+        });
     }
     Ok(())
 }
@@ -1882,9 +1884,66 @@ mod tests {
     }
 
     #[test]
-    fn exact_source_preflights_per_file_and_total_byte_limits() {
+    fn exact_source_preflights_per_file_limits_for_both_sides() {
         let (_tmp, repo) = init_temp_repo();
-        fs::write(repo.join("file.txt"), "next").unwrap();
+        fs::write(repo.join("file.txt"), "previous").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "previous"],
+        );
+        fs::write(repo.join("file.txt"), "next content").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "next"],
+        );
+        let comparison =
+            resolve_review_comparison(&repo, DiffMode::Commit("HEAD".to_string())).unwrap();
+        let old_request =
+            ReviewSourceRequest::new(comparison.clone(), Some("file.txt".to_string()), None)
+                .unwrap();
+        let old_error =
+            get_exact_review_source(&repo, &old_request, ReviewSourceBudget::new(7, 64).unwrap())
+                .unwrap_err();
+        assert!(matches!(
+            old_error,
+            GitError::ReviewSourceBudgetExceeded {
+                kind: ReviewSourceBudgetKind::PerFileSourceBytes,
+                observed: 8,
+                limit: 7,
+            }
+        ));
+
+        let new_request =
+            ReviewSourceRequest::new(comparison, None, Some("file.txt".to_string())).unwrap();
+        let new_error = get_exact_review_source(
+            &repo,
+            &new_request,
+            ReviewSourceBudget::new(11, 64).unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            new_error,
+            GitError::ReviewSourceBudgetExceeded {
+                kind: ReviewSourceBudgetKind::PerFileSourceBytes,
+                observed: 12,
+                limit: 11,
+            }
+        ));
+        assert!(ReviewSourceBudget::new(0, 1).is_err());
+    }
+
+    #[test]
+    fn exact_source_reports_aggregate_remaining_budget_structurally() {
+        let (_tmp, repo) = init_temp_repo();
+        fs::write(repo.join("file.txt"), "previous").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "previous"],
+        );
+        fs::write(repo.join("file.txt"), "next content").unwrap();
         git_in(&repo, &["add", "file.txt"]);
         git_in(
             &repo,
@@ -1899,16 +1958,17 @@ mod tests {
         )
         .unwrap();
 
-        let per_file =
-            get_exact_review_source(&repo, &request, ReviewSourceBudget::new(3, 16).unwrap())
+        let error =
+            get_exact_review_source(&repo, &request, ReviewSourceBudget::new(64, 19).unwrap())
                 .unwrap_err();
-        assert!(per_file.to_string().contains("per-file limit"));
-
-        let total =
-            get_exact_review_source(&repo, &request, ReviewSourceBudget::new(4, 4).unwrap())
-                .unwrap_err();
-        assert!(total.to_string().contains("total limit"));
-        assert!(ReviewSourceBudget::new(0, 1).is_err());
+        assert!(matches!(
+            error,
+            GitError::ReviewSourceBudgetExceeded {
+                kind: ReviewSourceBudgetKind::AggregateSourceBytes,
+                observed: 20,
+                limit: 19,
+            }
+        ));
     }
 
     #[test]

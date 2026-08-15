@@ -15,7 +15,7 @@ pub use diff::{
     DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options,
     get_file_contents_for_diff, is_git_repo,
 };
-pub use error::{GitError, GitResult};
+pub use error::{GitError, GitResult, ReviewSourceBudgetKind};
 pub use repository::{
     BranchList, HeadSnapshot, VerifiedWorktree, checkout_local_branch, checkout_remote_branch,
     compute_target_paths, count_ahead_behind, count_unpushed_commits, create_and_checkout_branch,
