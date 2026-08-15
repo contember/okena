@@ -2,11 +2,8 @@ use crate::SyntaxLanguage;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelError(String);
@@ -592,6 +589,7 @@ pub enum SyntaxTruncationReason {
     SourceBytes,
     SymbolCount,
     CallCount,
+    DiagnosticCount,
     Time,
     Cancelled,
 }
@@ -879,42 +877,127 @@ pub struct AnalysisBudget {
     max_source_bytes: NonZeroU64,
     max_symbols: NonZeroU32,
     max_calls: NonZeroU32,
+    max_diagnostics: NonZeroU32,
 }
 
 /// Runtime-only stop control. It is deliberately separate from serializable document facts.
 #[derive(Clone, Debug)]
 pub struct AnalysisControl {
-    deadline: Instant,
-    cancelled: Arc<AtomicBool>,
+    started_at: Instant,
+    deadline: Option<Instant>,
+    time_limit_micros: NonZeroU64,
+    cancelled_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AnalysisControl {
-    pub fn new(deadline: Instant) -> Self {
+    pub fn new(time_limit_micros: NonZeroU64) -> Self {
+        Self::new_at(Instant::now(), time_limit_micros)
+    }
+
+    fn new_at(started_at: Instant, time_limit_micros: NonZeroU64) -> Self {
+        let deadline = started_at.checked_add(Duration::from_micros(time_limit_micros.get()));
         Self {
+            started_at,
             deadline,
-            cancelled: Arc::new(AtomicBool::new(false)),
+            time_limit_micros,
+            cancelled_at: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancel_at(Instant::now());
+    }
+
+    fn cancel_at(&self, cancelled_at: Instant) {
+        let mut stored = match self.cancelled_at.lock() {
+            Ok(stored) => stored,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if stored.is_none_or(|existing| cancelled_at < existing) {
+            *stored = Some(cancelled_at);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.cancellation_instant().is_some()
     }
 
-    pub fn deadline(&self) -> Instant {
-        self.deadline
+    fn cancellation_instant(&self) -> Option<Instant> {
+        match self.cancelled_at.lock() {
+            Ok(stored) => *stored,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    pub fn time_limit_micros(&self) -> NonZeroU64 {
+        self.time_limit_micros
+    }
+
+    pub fn elapsed_micros(&self, now: Instant) -> u64 {
+        duration_micros(now.saturating_duration_since(self.started_at))
     }
 
     pub fn deadline_exceeded(&self, now: Instant) -> bool {
-        now >= self.deadline
+        time_limit_reached(
+            self.deadline,
+            now,
+            self.elapsed_micros(now),
+            self.time_limit_micros,
+        )
     }
 
     pub fn should_stop(&self, now: Instant) -> bool {
-        self.is_cancelled() || self.deadline_exceeded(now)
+        self.cancellation_instant()
+            .is_some_and(|cancelled_at| cancelled_at <= now)
+            || self.deadline_exceeded(now)
     }
+
+    /// Return inspectable stop evidence in the same microsecond unit as the configured limit.
+    pub fn stop_truncation(&self, now: Instant) -> Result<Option<SyntaxTruncation>, ModelError> {
+        let cancellation = self
+            .cancellation_instant()
+            .filter(|cancelled_at| *cancelled_at <= now);
+        let time_reached = self.deadline_exceeded(now);
+        let cancellation_first = cancellation.is_some_and(|cancelled_at| match self.deadline {
+            Some(deadline) => cancelled_at < deadline,
+            None => self.elapsed_micros(cancelled_at) < self.time_limit_micros.get(),
+        });
+        if cancellation_first || cancellation.is_some() && !time_reached {
+            return SyntaxTruncation::new(SyntaxTruncationReason::Cancelled, None, None).map(Some);
+        }
+        if time_reached {
+            let limit = self.time_limit_micros.get();
+            let observed = self.elapsed_micros(now);
+            if observed < limit {
+                return Err(ModelError::new(
+                    "expired analysis control measured less elapsed time than its configured limit",
+                ));
+            }
+            return SyntaxTruncation::new(
+                SyntaxTruncationReason::Time,
+                Some(limit),
+                Some(observed),
+            )
+            .map(Some);
+        }
+        Ok(None)
+    }
+}
+
+fn time_limit_reached(
+    deadline: Option<Instant>,
+    now: Instant,
+    elapsed_micros: u64,
+    limit_micros: NonZeroU64,
+) -> bool {
+    deadline.map_or_else(
+        || elapsed_micros >= limit_micros.get(),
+        |deadline| now >= deadline,
+    )
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 impl AnalysisBudget {
@@ -922,11 +1005,13 @@ impl AnalysisBudget {
         max_source_bytes: NonZeroU64,
         max_symbols: NonZeroU32,
         max_calls: NonZeroU32,
+        max_diagnostics: NonZeroU32,
     ) -> Self {
         Self {
             max_source_bytes,
             max_symbols,
             max_calls,
+            max_diagnostics,
         }
     }
     pub fn max_source_bytes(self) -> NonZeroU64 {
@@ -937,6 +1022,9 @@ impl AnalysisBudget {
     }
     pub fn max_calls(self) -> NonZeroU32 {
         self.max_calls
+    }
+    pub fn max_diagnostics(self) -> NonZeroU32 {
+        self.max_diagnostics
     }
 }
 
@@ -978,6 +1066,9 @@ impl AnalysisInput {
 /// Shared adapter seam. Implementations must return explicit partial/failed output.
 pub trait SyntaxAdapter: Send + Sync {
     fn language(&self) -> SyntaxLanguage;
+    fn supports(&self, language: SyntaxLanguage) -> bool {
+        language == self.language()
+    }
     fn analyze(
         &self,
         input: AnalysisInput,
@@ -993,6 +1084,9 @@ mod tests {
 
     fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
+    }
+    fn nz64(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
     }
     fn range(start: u64, end: u64, start_line: u32, end_line: u32) -> SourceRange {
         SourceRange::new(start, end, nz(start_line), nz(end_line)).unwrap()
@@ -1126,5 +1220,138 @@ mod tests {
             "truncation":{"reason":"call_count","limit":10,"observed":10}
         });
         assert!(serde_json::from_value::<DocumentStructure>(partial_with_limit).is_ok());
+    }
+
+    #[test]
+    fn analysis_control_reports_configured_and_elapsed_microseconds() {
+        assert_eq!(
+            AnalysisControl::new(nz64(100)).time_limit_micros(),
+            nz64(100)
+        );
+        let started_at = Instant::now();
+        let control = AnalysisControl::new_at(started_at, nz64(100));
+        let before_deadline = started_at.checked_add(Duration::from_micros(40)).unwrap();
+
+        assert_eq!(control.time_limit_micros(), nz64(100));
+        assert_eq!(control.elapsed_micros(before_deadline), 40);
+        assert!(!control.deadline_exceeded(before_deadline));
+        assert!(!control.should_stop(before_deadline));
+        assert_eq!(control.stop_truncation(before_deadline).unwrap(), None);
+    }
+
+    #[test]
+    fn expired_control_reports_truthful_time_truncation() {
+        let started_at = Instant::now();
+        let control = AnalysisControl::new_at(started_at, nz64(100));
+        let after_deadline = started_at.checked_add(Duration::from_micros(175)).unwrap();
+
+        assert!(control.deadline_exceeded(after_deadline));
+        assert!(control.should_stop(after_deadline));
+        let truncation = control.stop_truncation(after_deadline).unwrap().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::Time);
+        assert_eq!(truncation.limit(), Some(100));
+        assert_eq!(truncation.observed(), Some(175));
+    }
+
+    #[test]
+    fn cancellation_before_deadline_is_the_shared_first_stop_cause() {
+        let started_at = Instant::now();
+        let control = AnalysisControl::new_at(started_at, nz64(100));
+        let cloned = control.clone();
+        let cancelled_at = started_at.checked_add(Duration::from_micros(40)).unwrap();
+        let observed_at = started_at.checked_add(Duration::from_micros(175)).unwrap();
+        cloned.cancel_at(cancelled_at);
+
+        assert!(control.is_cancelled());
+        assert!(control.should_stop(observed_at));
+        let truncation = control.stop_truncation(observed_at).unwrap().unwrap();
+        assert_eq!(
+            cloned.stop_truncation(observed_at).unwrap().as_ref(),
+            Some(&truncation)
+        );
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::Cancelled);
+        assert_eq!(truncation.limit(), None);
+        assert_eq!(truncation.observed(), None);
+    }
+
+    #[test]
+    fn deadline_before_cancellation_remains_the_first_stop_cause() {
+        let started_at = Instant::now();
+        let control = AnalysisControl::new_at(started_at, nz64(100));
+        control.cancel_at(started_at.checked_add(Duration::from_micros(150)).unwrap());
+        let observed_at = started_at.checked_add(Duration::from_micros(175)).unwrap();
+
+        let truncation = control.stop_truncation(observed_at).unwrap().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::Time);
+        assert_eq!(truncation.limit(), Some(100));
+        assert_eq!(truncation.observed(), Some(175));
+    }
+
+    #[test]
+    fn cancellation_at_deadline_deterministically_reports_time() {
+        let started_at = Instant::now();
+        let control = AnalysisControl::new_at(started_at, nz64(100));
+        let boundary = started_at.checked_add(Duration::from_micros(100)).unwrap();
+        control.cancel_at(boundary);
+
+        let truncation = control.stop_truncation(boundary).unwrap().unwrap();
+        assert_eq!(truncation.reason(), SyntaxTruncationReason::Time);
+        assert_eq!(truncation.limit(), Some(100));
+        assert_eq!(truncation.observed(), Some(100));
+    }
+
+    #[test]
+    fn analysis_control_tests_overflow_fallback_and_fixed_width_saturation() {
+        assert_eq!(duration_micros(Duration::MAX), u64::MAX);
+        let now = Instant::now();
+        assert!(!time_limit_reached(None, now, 99, nz64(100)));
+        assert!(time_limit_reached(None, now, 100, nz64(100)));
+    }
+
+    #[test]
+    fn time_truncation_requires_matching_positive_microsecond_evidence() {
+        assert!(SyntaxTruncation::new(SyntaxTruncationReason::Time, Some(100), Some(100)).is_ok());
+        assert!(SyntaxTruncation::new(SyntaxTruncationReason::Time, Some(100), Some(99)).is_err());
+        assert!(SyntaxTruncation::new(SyntaxTruncationReason::Time, None, None).is_err());
+        assert!(
+            SyntaxTruncation::new(SyntaxTruncationReason::DiagnosticCount, Some(64), Some(65))
+                .is_ok()
+        );
+        assert!(
+            SyntaxTruncation::new(SyntaxTruncationReason::DiagnosticCount, Some(64), Some(63))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn analysis_budget_exposes_every_positive_fixed_width_limit() {
+        let budget = AnalysisBudget::new(nz64(1_000), nz(10), nz(20), nz(30));
+        assert_eq!(budget.max_source_bytes(), nz64(1_000));
+        assert_eq!(budget.max_symbols(), nz(10));
+        assert_eq!(budget.max_calls(), nz(20));
+        assert_eq!(budget.max_diagnostics(), nz(30));
+    }
+
+    #[test]
+    fn syntax_adapter_default_support_matches_its_primary_language() {
+        struct RustOnly;
+        impl SyntaxAdapter for RustOnly {
+            fn language(&self) -> SyntaxLanguage {
+                SyntaxLanguage::Rust
+            }
+
+            fn analyze(
+                &self,
+                _input: AnalysisInput,
+                _budget: AnalysisBudget,
+                _control: &AnalysisControl,
+            ) -> Result<DocumentStructure, ModelError> {
+                Err(ModelError::new("not used by this contract test"))
+            }
+        }
+
+        assert!(RustOnly.supports(SyntaxLanguage::Rust));
+        assert!(!RustOnly.supports(SyntaxLanguage::TypeScript));
+        assert!(!RustOnly.supports(SyntaxLanguage::Tsx));
     }
 }
