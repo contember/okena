@@ -2,7 +2,10 @@
 
 use futures::future::BoxFuture;
 use okena_core::api::ActionRequest;
-use okena_core::review::{ReviewComparisonId, ReviewDiffRequest, ReviewInventory};
+use okena_core::review::{
+    ExactReviewSourceResponse, ImmutableResolvedComparison, ReviewComparisonId, ReviewDiffRequest,
+    ReviewInventory, ReviewSourceRequest,
+};
 use okena_git::ExactReviewDiffResponse;
 use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
 use okena_review::ReviewStructure;
@@ -30,6 +33,12 @@ pub trait GitProvider: Send + Sync + 'static {
         _request: ReviewDiffRequest,
     ) -> BoxFuture<'static, Result<ExactReviewDiffResponse, String>> {
         Box::pin(async { Err("Exact review diff is not supported by this provider".to_string()) })
+    }
+    fn get_review_source(
+        &self,
+        _request: ReviewSourceRequest,
+    ) -> BoxFuture<'static, Result<ExactReviewSourceResponse, String>> {
+        Box::pin(async { Err("Exact review source is not supported by this provider".to_string()) })
     }
     fn get_review_structure(
         &self,
@@ -162,11 +171,33 @@ fn review_diff_action(project_id: &str, request: ReviewDiffRequest) -> ActionReq
     }
 }
 
+fn review_source_action(project_id: &str, request: ReviewSourceRequest) -> ActionRequest {
+    ActionRequest::ReviewSource {
+        project_id: project_id.to_string(),
+        request: Box::new(request),
+    }
+}
+
 fn review_structure_action(project_id: &str, request: ReviewDiffRequest) -> ActionRequest {
     ActionRequest::ReviewStructure {
         project_id: project_id.to_string(),
         request,
     }
+}
+
+fn require_exact_source_match(
+    expected_comparison: &ImmutableResolvedComparison,
+    expected_old_path: Option<&str>,
+    expected_new_path: Option<&str>,
+    response: &ExactReviewSourceResponse,
+) -> Result<(), String> {
+    if response.comparison() == expected_comparison
+        && response.old_path() == expected_old_path
+        && response.new_path() == expected_new_path
+    {
+        return Ok(());
+    }
+    Err("Exact review source response did not match the requested comparison and paths".to_string())
 }
 
 fn require_comparison_identity(
@@ -233,6 +264,29 @@ impl GitProvider for RemoteGitProvider {
                 &expected,
                 response.comparison().identity(),
                 "Exact review diff",
+            )?;
+            Ok(response)
+        })
+    }
+
+    fn get_review_source(
+        &self,
+        request: ReviewSourceRequest,
+    ) -> BoxFuture<'static, Result<ExactReviewSourceResponse, String>> {
+        let expected_comparison = request.comparison().clone();
+        let expected_old_path = request.old_path().map(str::to_owned);
+        let expected_new_path = request.new_path().map(str::to_owned);
+        let response = self.post_json_async::<ExactReviewSourceResponse>(
+            review_source_action(&self.project_id, request),
+            "exact review source",
+        );
+        Box::pin(async move {
+            let response = response.await?;
+            require_exact_source_match(
+                &expected_comparison,
+                expected_old_path.as_deref(),
+                expected_new_path.as_deref(),
+                &response,
             )?;
             Ok(response)
         })
@@ -436,6 +490,15 @@ mod tests {
         .expect("valid review request")
     }
 
+    fn source_request(old_path: Option<&str>, new_path: Option<&str>) -> ReviewSourceRequest {
+        ReviewSourceRequest::new(
+            request().comparison.into_resolved(),
+            old_path.map(str::to_owned),
+            new_path.map(str::to_owned),
+        )
+        .expect("valid exact source request")
+    }
+
     #[test]
     fn review_actions_keep_project_and_exact_request() {
         let mode = DiffMode::BranchCompare {
@@ -454,6 +517,22 @@ mod tests {
                         "base": "origin/main",
                         "head": "feature/review"
                     }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(review_source_action(
+                "project-1",
+                source_request(Some("src/old.rs"), Some("src/new.rs")),
+            ))
+            .unwrap(),
+            json!({
+                "action": "review_source",
+                "project_id": "project-1",
+                "request": {
+                    "comparison": comparison_json(),
+                    "old_path": "src/old.rs",
+                    "new_path": "src/new.rs"
                 }
             })
         );
@@ -522,6 +601,21 @@ mod tests {
         assert_eq!(diff.comparison().identity().0, comparison_identity());
         assert!(diff.diff().is_empty());
 
+        let source: ExactReviewSourceResponse = decode_json_response(
+            Some(json!({
+                "comparison": comparison_json(),
+                "old_path": "src/old.rs",
+                "new_path": "src/new.rs",
+                "old_content": "old source\n",
+                "new_content": "new source\n"
+            })),
+            "exact review source",
+        )
+        .expect("typed exact source");
+        assert_eq!(source.comparison().identity().0, comparison_identity());
+        assert_eq!(source.old_path(), Some("src/old.rs"));
+        assert_eq!(source.new_path(), Some("src/new.rs"));
+
         let structure: ReviewStructure =
             decode_json_response(Some(valid_structure_json()), "review structure")
                 .expect("typed review structure");
@@ -540,6 +634,121 @@ mod tests {
         let error = decode_json_response::<ReviewStructure>(Some(malformed), "review structure")
             .expect_err("invalid coverage must fail");
         assert!(error.starts_with("Invalid review structure response:"));
+
+        let missing =
+            decode_json_response::<ExactReviewSourceResponse>(None, "exact review source")
+                .expect_err("missing exact source response must fail");
+        assert_eq!(missing, "Missing exact review source response");
+
+        let malformed = decode_json_response::<ExactReviewSourceResponse>(
+            Some(json!({
+                "comparison": comparison_json(),
+                "old_path": "src/old.rs"
+            })),
+            "exact review source",
+        )
+        .expect_err("source path without content must fail");
+        assert!(malformed.starts_with("Invalid exact review source response:"));
+    }
+
+    #[test]
+    fn exact_source_responses_match_full_comparison_and_paths() {
+        for (old_path, new_path, old_content, new_content) in [
+            (
+                Some("src/old.rs"),
+                Some("src/new.rs"),
+                Some("old source\n"),
+                Some("new source\n"),
+            ),
+            (None, Some("src/added.rs"), None, Some("")),
+            (Some("src/deleted.rs"), None, Some("deleted\n"), None),
+        ] {
+            let expected = source_request(old_path, new_path);
+            let response = ExactReviewSourceResponse::new(
+                expected.clone(),
+                old_content.map(str::to_owned),
+                new_content.map(str::to_owned),
+            )
+            .expect("valid exact source response");
+            require_exact_source_match(
+                expected.comparison(),
+                expected.old_path(),
+                expected.new_path(),
+                &response,
+            )
+            .expect("matching exact source response");
+        }
+    }
+
+    #[test]
+    fn exact_source_rejects_same_identity_with_different_comparison() {
+        let expected = source_request(Some("src/old.rs"), Some("src/new.rs"));
+        let mut different_comparison = comparison_json_for('4', '5', '6');
+        different_comparison["identity"] = json!(comparison_identity());
+        let different_request: ReviewSourceRequest = serde_json::from_value(json!({
+            "comparison": different_comparison,
+            "old_path": "src/old.rs",
+            "new_path": "src/new.rs"
+        }))
+        .expect("comparison identity is opaque rather than recomputed by the model");
+        let response = ExactReviewSourceResponse::new(
+            different_request,
+            Some("old source\n".to_string()),
+            Some("new source\n".to_string()),
+        )
+        .expect("valid exact source response");
+        assert_eq!(
+            expected.comparison().identity(),
+            response.comparison().identity()
+        );
+        assert_ne!(expected.comparison(), response.comparison());
+
+        let error = require_exact_source_match(
+            expected.comparison(),
+            expected.old_path(),
+            expected.new_path(),
+            &response,
+        )
+        .expect_err("matching opaque identity must not hide a different comparison");
+        assert_source_mismatch_is_bounded_and_redacted(&error);
+    }
+
+    #[test]
+    fn exact_source_rejects_path_mismatch() {
+        let expected = source_request(Some("src/old.rs"), Some("src/new.rs"));
+        let response = ExactReviewSourceResponse::new(
+            source_request(Some("src/other.rs"), Some("src/new.rs")),
+            Some("old source\n".to_string()),
+            Some("new source\n".to_string()),
+        )
+        .expect("valid response with a different old path");
+        let error = require_exact_source_match(
+            expected.comparison(),
+            expected.old_path(),
+            expected.new_path(),
+            &response,
+        )
+        .expect_err("different response path must fail");
+        assert_source_mismatch_is_bounded_and_redacted(&error);
+    }
+
+    fn assert_source_mismatch_is_bounded_and_redacted(error: &str) {
+        assert_eq!(
+            error,
+            "Exact review source response did not match the requested comparison and paths"
+        );
+        assert!(error.len() < 128);
+        for sensitive in [
+            "1".repeat(40),
+            "4".repeat(40),
+            "origin/main".to_string(),
+            "feature/review".to_string(),
+            "src/old.rs".to_string(),
+            "src/other.rs".to_string(),
+            "old source".to_string(),
+        ] {
+            assert!(!error.contains(&sensitive));
+        }
     }
 
     #[test]
@@ -704,6 +913,13 @@ mod tests {
             smol::block_on(provider.get_review_diff(request()))
                 .expect_err("unsupported exact diff"),
             "Exact review diff is not supported by this provider"
+        );
+        assert_eq!(
+            smol::block_on(
+                provider.get_review_source(source_request(Some("src/old.rs"), Some("src/new.rs"),))
+            )
+            .expect_err("unsupported exact source"),
+            "Exact review source is not supported by this provider"
         );
         assert_eq!(
             smol::block_on(provider.get_review_structure(request()))
