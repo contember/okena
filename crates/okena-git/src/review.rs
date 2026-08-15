@@ -13,10 +13,10 @@ use okena_core::process::{
     OutputLimits,
 };
 use okena_core::review::{
-    ComparisonStrategy, FactProvenance, FileClassification, FileRole, GitObjectId,
-    ImmutableResolvedComparison, ResolvedComparison, ReviewChangeTotals, ReviewCommitFact,
-    ReviewComparisonId, ReviewCoverage, ReviewDiffRequest, ReviewFileFact, ReviewFileStatus,
-    ReviewInventory, ReviewSnapshot, ReviewSourceRequest, ReviewSubmoduleChange,
+    ComparisonStrategy, ExactReviewSourceResponse, FactProvenance, FileClassification, FileRole,
+    GitObjectId, ImmutableResolvedComparison, ResolvedComparison, ReviewChangeTotals,
+    ReviewCommitFact, ReviewComparisonId, ReviewCoverage, ReviewDiffRequest, ReviewFileFact,
+    ReviewFileStatus, ReviewInventory, ReviewSnapshot, ReviewSourceRequest, ReviewSubmoduleChange,
 };
 use okena_core::types::DiffMode;
 use serde::{Deserialize, Serialize};
@@ -393,6 +393,36 @@ pub fn get_exact_review_source_with_control(
         old_content,
         new_content,
     })
+}
+
+/// Load exact source and pair it with the immutable request that produced it.
+pub fn get_exact_review_source_response(
+    path: &Path,
+    request: &ReviewSourceRequest,
+    budget: ReviewSourceBudget,
+) -> GitResult<ExactReviewSourceResponse> {
+    get_exact_review_source_response_with_control(
+        path,
+        request,
+        budget,
+        &ReviewGitControl::new(Default::default()),
+    )
+}
+
+/// Load a paired exact source response using one request-scoped Git control.
+pub fn get_exact_review_source_response_with_control(
+    path: &Path,
+    request: &ReviewSourceRequest,
+    budget: ReviewSourceBudget,
+    control: &ReviewGitControl,
+) -> GitResult<ExactReviewSourceResponse> {
+    let contents = get_exact_review_source_with_control(path, request, budget, control)?;
+    ExactReviewSourceResponse::new(request.clone(), contents.old_content, contents.new_content)
+        .map_err(|error| {
+            GitError::ParseError(format!(
+                "exact source response did not match its request: {error}"
+            ))
+        })
 }
 
 /// Build deterministic facts over one immutable resolved comparison.
@@ -1707,7 +1737,7 @@ mod tests {
         )
         .unwrap();
         let source_before =
-            get_exact_review_source(&repo, &source_request, source_budget()).unwrap();
+            get_exact_review_source_response(&repo, &source_request, source_budget()).unwrap();
 
         git_in(&repo, &["branch", "-f", "feature", "main"]);
         assert_eq!(
@@ -1715,11 +1745,14 @@ mod tests {
             serde_json::to_value(before).unwrap()
         );
         assert_eq!(
-            get_exact_review_source(&repo, &source_request, source_budget()).unwrap(),
+            get_exact_review_source_response(&repo, &source_request, source_budget()).unwrap(),
             source_before
         );
-        assert_eq!(source_before.old_content.as_deref(), Some("x"));
-        assert_eq!(source_before.new_content.as_deref(), Some("feature two\n"));
+        assert_eq!(source_before.comparison(), source_request.comparison());
+        assert_eq!(source_before.old_path(), Some("file.txt"));
+        assert_eq!(source_before.new_path(), Some("file.txt"));
+        assert_eq!(source_before.old_content(), Some("x"));
+        assert_eq!(source_before.new_content(), Some("feature two\n"));
 
         let inventory = get_review_inventory(&repo, &immutable(comparison)).unwrap();
         assert_eq!(inventory.commits.len(), 2);
@@ -1903,9 +1936,12 @@ mod tests {
         let old_request =
             ReviewSourceRequest::new(comparison.clone(), Some("file.txt".to_string()), None)
                 .unwrap();
-        let old_error =
-            get_exact_review_source(&repo, &old_request, ReviewSourceBudget::new(7, 64).unwrap())
-                .unwrap_err();
+        let old_error = get_exact_review_source_response(
+            &repo,
+            &old_request,
+            ReviewSourceBudget::new(7, 64).unwrap(),
+        )
+        .unwrap_err();
         assert!(matches!(
             old_error,
             GitError::ReviewSourceBudgetExceeded {
@@ -1917,7 +1953,7 @@ mod tests {
 
         let new_request =
             ReviewSourceRequest::new(comparison, None, Some("file.txt".to_string())).unwrap();
-        let new_error = get_exact_review_source(
+        let new_error = get_exact_review_source_response(
             &repo,
             &new_request,
             ReviewSourceBudget::new(11, 64).unwrap(),
@@ -1958,9 +1994,12 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            get_exact_review_source(&repo, &request, ReviewSourceBudget::new(64, 19).unwrap())
-                .unwrap_err();
+        let error = get_exact_review_source_response(
+            &repo,
+            &request,
+            ReviewSourceBudget::new(64, 19).unwrap(),
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             GitError::ReviewSourceBudgetExceeded {
@@ -2074,44 +2113,40 @@ mod tests {
                 .all(|file| file.classification.role() == FileRole::Unclassified)
         );
 
-        let renamed_source = get_exact_review_source(
-            &repo,
-            &ReviewSourceRequest::new(
-                comparison.clone(),
-                Some("old.rs".to_string()),
-                Some("new.rs".to_string()),
-            )
-            .unwrap(),
-            source_budget(),
+        let rename_request = ReviewSourceRequest::new(
+            comparison.clone(),
+            Some("old.rs".to_string()),
+            Some("new.rs".to_string()),
         )
         .unwrap();
-        assert_eq!(
-            renamed_source.old_content.as_deref(),
-            Some(original.as_str())
-        );
-        assert_eq!(
-            renamed_source.new_content.as_deref(),
-            Some(changed.as_str())
-        );
+        let renamed_source =
+            get_exact_review_source_response(&repo, &rename_request, source_budget()).unwrap();
+        assert_eq!(renamed_source.comparison(), rename_request.comparison());
+        assert_eq!(renamed_source.old_path(), Some("old.rs"));
+        assert_eq!(renamed_source.new_path(), Some("new.rs"));
+        assert_eq!(renamed_source.old_content(), Some(original.as_str()));
+        assert_eq!(renamed_source.new_content(), Some(changed.as_str()));
 
-        let addition = get_exact_review_source(
-            &repo,
-            &ReviewSourceRequest::new(comparison.clone(), None, Some("added.txt".to_string()))
-                .unwrap(),
-            source_budget(),
-        )
-        .unwrap();
-        assert_eq!(addition.old_content, None);
-        assert_eq!(addition.new_content.as_deref(), Some("added\n"));
+        let addition_request =
+            ReviewSourceRequest::new(comparison.clone(), None, Some("added.txt".to_string()))
+                .unwrap();
+        let addition =
+            get_exact_review_source_response(&repo, &addition_request, source_budget()).unwrap();
+        assert_eq!(addition.comparison(), addition_request.comparison());
+        assert_eq!(addition.old_path(), None);
+        assert_eq!(addition.new_path(), Some("added.txt"));
+        assert_eq!(addition.old_content(), None);
+        assert_eq!(addition.new_content(), Some("added\n"));
 
-        let deletion = get_exact_review_source(
-            &repo,
-            &ReviewSourceRequest::new(comparison, Some("deleted.txt".to_string()), None).unwrap(),
-            source_budget(),
-        )
-        .unwrap();
-        assert_eq!(deletion.old_content.as_deref(), Some("deleted\n"));
-        assert_eq!(deletion.new_content, None);
+        let deletion_request =
+            ReviewSourceRequest::new(comparison, Some("deleted.txt".to_string()), None).unwrap();
+        let deletion =
+            get_exact_review_source_response(&repo, &deletion_request, source_budget()).unwrap();
+        assert_eq!(deletion.comparison(), deletion_request.comparison());
+        assert_eq!(deletion.old_path(), Some("deleted.txt"));
+        assert_eq!(deletion.new_path(), None);
+        assert_eq!(deletion.old_content(), Some("deleted\n"));
+        assert_eq!(deletion.new_content(), None);
     }
 
     #[cfg(unix)]

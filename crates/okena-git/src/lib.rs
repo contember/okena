@@ -32,8 +32,9 @@ pub use review::{
     ExactReviewDiffResponse, ReviewGitBudget, ReviewGitControl, ReviewSourceBudget,
     ReviewSourceContents, get_exact_review_diff, get_exact_review_diff_response,
     get_exact_review_diff_response_with_control, get_exact_review_diff_with_control,
-    get_exact_review_source, get_exact_review_source_with_control, get_review_inventory,
-    get_review_inventory_with_control, resolve_review_comparison,
+    get_exact_review_source, get_exact_review_source_response,
+    get_exact_review_source_response_with_control, get_exact_review_source_with_control,
+    get_review_inventory, get_review_inventory_with_control, resolve_review_comparison,
     resolve_review_comparison_with_control,
 };
 

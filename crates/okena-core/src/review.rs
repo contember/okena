@@ -888,6 +888,102 @@ impl ReviewSourceRequest {
     }
 }
 
+/// Exact source contents paired with the immutable request that produced them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ExactReviewSourceResponseWire")]
+pub struct ExactReviewSourceResponse {
+    comparison: ImmutableResolvedComparison,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    new_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    old_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    new_content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExactReviewSourceResponseWire {
+    comparison: ImmutableResolvedComparison,
+    #[serde(default)]
+    old_path: Option<String>,
+    #[serde(default)]
+    new_path: Option<String>,
+    #[serde(default)]
+    old_content: Option<String>,
+    #[serde(default)]
+    new_content: Option<String>,
+}
+
+impl TryFrom<ExactReviewSourceResponseWire> for ExactReviewSourceResponse {
+    type Error = ReviewModelError;
+
+    fn try_from(value: ExactReviewSourceResponseWire) -> Result<Self, Self::Error> {
+        let request =
+            ReviewSourceRequest::from_immutable(value.comparison, value.old_path, value.new_path)?;
+        Self::new(request, value.old_content, value.new_content)
+    }
+}
+
+impl ExactReviewSourceResponse {
+    pub fn new(
+        request: ReviewSourceRequest,
+        old_content: Option<String>,
+        new_content: Option<String>,
+    ) -> Result<Self, ReviewModelError> {
+        if request.old_path.is_some() != old_content.is_some() {
+            return Err(ReviewModelError::new(
+                "exact source response must contain content for exactly the requested old side",
+            ));
+        }
+        if request.new_path.is_some() != new_content.is_some() {
+            return Err(ReviewModelError::new(
+                "exact source response must contain content for exactly the requested new side",
+            ));
+        }
+        Ok(Self {
+            comparison: request.comparison,
+            old_path: request.old_path,
+            new_path: request.new_path,
+            old_content,
+            new_content,
+        })
+    }
+
+    pub fn comparison(&self) -> &ImmutableResolvedComparison {
+        &self.comparison
+    }
+
+    pub fn old_path(&self) -> Option<&str> {
+        self.old_path.as_deref()
+    }
+
+    pub fn new_path(&self) -> Option<&str> {
+        self.new_path.as_deref()
+    }
+
+    pub fn old_content(&self) -> Option<&str> {
+        self.old_content.as_deref()
+    }
+
+    pub fn new_content(&self) -> Option<&str> {
+        self.new_content.as_deref()
+    }
+
+    pub fn into_parts(self) -> (ReviewSourceRequest, Option<String>, Option<String>) {
+        (
+            ReviewSourceRequest {
+                comparison: self.comparison,
+                old_path: self.old_path,
+                new_path: self.new_path,
+            },
+            self.old_content,
+            self.new_content,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -1295,6 +1391,126 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn exact_source_response_json_shapes_are_stable() {
+        let rename = ExactReviewSourceResponse::new(
+            ReviewSourceRequest::new(
+                branch_comparison(),
+                Some("src/old.rs".to_string()),
+                Some("src/new.rs".to_string()),
+            )
+            .unwrap(),
+            Some("old source\n".to_string()),
+            Some("new source\n".to_string()),
+        )
+        .unwrap();
+        let rename_json = json!({
+            "comparison": branch_comparison_json(),
+            "old_path": "src/old.rs",
+            "new_path": "src/new.rs",
+            "old_content": "old source\n",
+            "new_content": "new source\n"
+        });
+        assert_eq!(serde_json::to_value(&rename).unwrap(), rename_json);
+        assert_eq!(
+            serde_json::from_value::<ExactReviewSourceResponse>(rename_json).unwrap(),
+            rename
+        );
+
+        let addition = ExactReviewSourceResponse::new(
+            ReviewSourceRequest::new(branch_comparison(), None, Some("src/added.rs".to_string()))
+                .unwrap(),
+            None,
+            Some(String::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(addition).unwrap(),
+            json!({
+                "comparison": branch_comparison_json(),
+                "new_path": "src/added.rs",
+                "new_content": ""
+            })
+        );
+
+        let deletion = ExactReviewSourceResponse::new(
+            ReviewSourceRequest::new(
+                branch_comparison(),
+                Some("src/deleted.rs".to_string()),
+                None,
+            )
+            .unwrap(),
+            Some("deleted source\n".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(deletion).unwrap(),
+            json!({
+                "comparison": branch_comparison_json(),
+                "old_path": "src/deleted.rs",
+                "old_content": "deleted source\n"
+            })
+        );
+
+        let (request, old_content, new_content) = rename.into_parts();
+        assert_eq!(request.old_path(), Some("src/old.rs"));
+        assert_eq!(request.new_path(), Some("src/new.rs"));
+        assert_eq!(old_content.as_deref(), Some("old source\n"));
+        assert_eq!(new_content.as_deref(), Some("new source\n"));
+    }
+
+    #[test]
+    fn exact_source_response_rejects_malformed_or_mutable_sides() {
+        let comparison = branch_comparison_json();
+        for malformed in [
+            json!({
+                "comparison": comparison,
+                "old_path": "src/old.rs"
+            }),
+            json!({
+                "comparison": branch_comparison_json(),
+                "new_path": "src/new.rs",
+                "old_content": "unexpected",
+                "new_content": "new"
+            }),
+            json!({
+                "comparison": branch_comparison_json()
+            }),
+        ] {
+            assert!(serde_json::from_value::<ExactReviewSourceResponse>(malformed).is_err());
+        }
+
+        let staged = ResolvedComparison::new(
+            DiffMode::Staged,
+            Some(oid(MERGE_BASE_OID)),
+            None,
+            ComparisonStrategy::HeadToIndex,
+            ReviewSnapshot::Commit {
+                oid: oid(MERGE_BASE_OID),
+            },
+            ReviewSnapshot::Index {
+                fingerprint: "index-v1".to_string(),
+            },
+            None,
+            ReviewComparisonId("staged:index-v1".to_string()),
+        )
+        .unwrap();
+        assert!(
+            serde_json::from_value::<ExactReviewSourceResponse>(json!({
+                "comparison": serde_json::to_value(staged).unwrap(),
+                "new_path": "src/new.rs",
+                "new_content": "new"
+            }))
+            .is_err()
+        );
+
+        let request =
+            ReviewSourceRequest::new(branch_comparison(), Some("src/old.rs".to_string()), None)
+                .unwrap();
+        assert!(ExactReviewSourceResponse::new(request, None, None).is_err());
     }
 
     #[test]
