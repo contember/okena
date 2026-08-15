@@ -10,6 +10,7 @@ mod nav;
 pub mod provider;
 mod render;
 pub(crate) mod review;
+mod review_render;
 mod scrollbar;
 mod search;
 mod selection_ops;
@@ -136,6 +137,9 @@ pub struct DiffViewer {
     pub(super) search_sig: Option<DiffSearchSig>,
     /// Independently loaded immutable review datasets and exact file source.
     pub(super) smart_review: review::SmartReviewState,
+    pub(super) review_render_cache: Vec<review_render::ReviewRenderCache>,
+    pub(super) review_scroll_handle: UniformListScrollHandle,
+    pub(super) review_sidebar_scroll_handle: UniformListScrollHandle,
 }
 
 impl DiffViewer {
@@ -201,6 +205,9 @@ impl DiffViewer {
             search: None,
             search_sig: None,
             smart_review: review::SmartReviewState::default(),
+            review_render_cache: Vec::new(),
+            review_scroll_handle: UniformListScrollHandle::new(),
+            review_sidebar_scroll_handle: UniformListScrollHandle::new(),
         };
 
         if !provider.is_git_repo() {

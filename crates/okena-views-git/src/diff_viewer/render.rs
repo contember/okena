@@ -1,5 +1,7 @@
 //! Render trait impl and helper methods for the diff viewer.
 
+use super::review::{ReviewLens, is_smart_mode};
+use super::review_render::SmartDiffViewState;
 use super::types::DiffViewMode;
 use super::{Cancel, DiffViewer};
 use gpui::prelude::*;
@@ -35,13 +37,15 @@ impl DiffViewer {
         needs_controls: bool,
         is_maximized: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let is_working = *diff_mode == DiffMode::WorkingTree;
         let hide_mode_toggle = matches!(
             diff_mode,
             DiffMode::Commit(_) | DiffMode::BranchCompare { .. }
         );
         let is_unified = self.view_mode == DiffViewMode::Unified;
+        let show_view_toggle =
+            !is_smart_mode(diff_mode) || self.smart_review.lens == ReviewLens::Diff;
         let detached = self.is_detached;
 
         div()
@@ -198,19 +202,23 @@ impl DiffViewer {
                                     .child("Whitespace"),
                             ),
                     )
-                    // Separator
-                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
-                    // View mode toggle
-                    .child(
-                        div()
-                            .id("view-mode-toggle")
-                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_view_mode(cx)))
-                            .child(segmented_toggle(
-                                &[("Unified", is_unified), ("Split", !is_unified)],
-                                t,
-                                cx,
-                            )),
-                    )
+                    .when(show_view_toggle, |d| {
+                        d.child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
+                            .child(
+                                div()
+                                    .id("view-mode-toggle")
+                                    .on_click(
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.toggle_view_mode(cx)
+                                        }),
+                                    )
+                                    .child(segmented_toggle(
+                                        &[("Unified", is_unified), ("Split", !is_unified)],
+                                        t,
+                                        cx,
+                                    )),
+                            )
+                    })
                     // Diff mode toggle (hidden for commit/branch compare diffs)
                     .when(!hide_mode_toggle, |d| {
                         d.child(
@@ -279,6 +287,7 @@ impl DiffViewer {
                             ),
                     ),
             )
+            .into_any_element()
     }
 
     /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
@@ -794,6 +803,8 @@ impl DiffViewer {
 
     pub(super) fn render_footer(&self, t: &ThemeColors, cx: &App) -> impl IntoElement {
         let has_commits = self.has_commits();
+        let smart = is_smart_mode(&self.diff_mode);
+        let show_split = !smart || self.smart_review.lens == ReviewLens::Diff;
         div()
             .px(px(16.0))
             .py(px(8.0))
@@ -806,10 +817,12 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t, cx))
-                    .when(!has_commits, |d| {
+                    .when(!smart && !has_commits, |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
-                    .child(self.render_hint("S", "split", t, cx))
+                    .when(show_split, |d| {
+                        d.child(self.render_hint("S", "split", t, cx))
+                    })
                     .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
                     .when(has_commits, |d| {
                         d.child(self.render_hint("[ ]", "commits", t, cx))
@@ -987,6 +1000,7 @@ impl Render for DiffViewer {
         let has_error = self.error_message.is_some();
         let error_message = self.error_message.clone();
         let diff_mode = self.diff_mode.clone();
+        let is_smart = is_smart_mode(&diff_mode);
         let has_files = !self.file_stats.is_empty();
         // Gutter: two number columns + separator, matching render_line layout
         let char_width = self.char_width();
@@ -1055,9 +1069,19 @@ impl Render for DiffViewer {
                     "f" if modifiers.platform || modifiers.control => {
                         this.open_search(window, cx);
                     }
-                    "tab" => this.toggle_mode(cx),
-                    "s" => this.toggle_view_mode(cx),
+                    "tab" if !is_smart_mode(&this.diff_mode) => this.toggle_mode(cx),
+                    "s" if !is_smart_mode(&this.diff_mode)
+                        || this.smart_review.lens == ReviewLens::Diff =>
+                    {
+                        this.toggle_view_mode(cx)
+                    }
                     "w" => this.toggle_ignore_whitespace(cx),
+                    "up" if is_smart_mode(&this.diff_mode) => {
+                        this.select_adjacent_smart_file(false, cx)
+                    }
+                    "down" if is_smart_mode(&this.diff_mode) => {
+                        this.select_adjacent_smart_file(true, cx)
+                    }
                     "up" => this.prev_file(cx),
                     "down" => this.next_file(cx),
                     "left" => {
@@ -1129,22 +1153,60 @@ impl Render for DiffViewer {
             .when(self.has_commits(), |d| {
                 d.child(self.render_commit_info_bar(&t, cx))
             })
-            .child(self.render_content(
-                &t,
-                self.loading,
-                has_error,
-                error_message,
-                has_files,
-                is_binary,
-                file_path,
-                line_count,
-                gutter_width,
-                tree_elements,
-                theme_colors,
-                cx,
-            ))
+            .child(if is_smart {
+                let strip = self.render_review_lens_strip(&t, cx);
+                let coverage = self.render_review_coverage(&t, cx);
+                let selection = self.render_review_selection(&t, cx);
+                let sidebar = self.render_review_sidebar(&t, cx);
+                let body = if self.smart_review.lens == ReviewLens::Diff {
+                    let state = self.smart_diff_view_state();
+                    if state == SmartDiffViewState::Ready {
+                        self.render_diff_pane(
+                            &t,
+                            is_binary,
+                            file_path,
+                            line_count,
+                            gutter_width,
+                            theme_colors,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        self.render_smart_diff_state(state, &t, cx)
+                    }
+                } else {
+                    self.render_review_lens_body(cx)
+                };
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(strip)
+                    .child(coverage)
+                    .child(selection)
+                    .child(div().flex_1().min_h_0().flex().child(sidebar).child(body))
+                    .into_any_element()
+            } else {
+                self.render_content(
+                    &t,
+                    self.loading,
+                    has_error,
+                    error_message,
+                    has_files,
+                    is_binary,
+                    file_path,
+                    line_count,
+                    gutter_width,
+                    tree_elements,
+                    theme_colors,
+                    cx,
+                )
+                .into_any_element()
+            })
             .child(self.render_footer(&t, cx))
             .children(self.render_context_overlays(&t, cx))
+            .into_any_element()
     }
 }
 

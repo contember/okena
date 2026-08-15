@@ -1,7 +1,8 @@
 //! Pure state for coordinating immutable smart-review datasets.
 
 use okena_core::review::{
-    ExactReviewSourceResponse, ImmutableResolvedComparison, ReviewDiffRequest, ReviewInventory,
+    ExactReviewSourceResponse, FileRole, ImmutableResolvedComparison, ReviewDiffRequest,
+    ReviewInventory,
 };
 use okena_git::{DiffMode, ExactReviewDiffResponse, FileDiff};
 use okena_review::ReviewStructure;
@@ -37,6 +38,26 @@ impl ReviewFileKey {
             old_path: file.old_path.clone(),
             new_path: file.new_path.clone(),
         }
+    }
+
+    pub(crate) fn from_inventory(file: &okena_core::review::ReviewFileFact) -> Self {
+        Self {
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
+        }
+    }
+
+    pub(crate) fn display(&self) -> String {
+        match (&self.old_path, &self.new_path) {
+            (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
+            (_, Some(new)) => new.clone(),
+            (Some(old), None) => old.clone(),
+            (None, None) => "(no file)".into(),
+        }
+    }
+
+    pub(crate) fn matches_inventory(&self, file: &okena_core::review::ReviewFileFact) -> bool {
+        self.old_path == file.old_path && self.new_path == file.new_path
     }
 
     pub(crate) fn matches_source(&self, source: &ExactReviewSourceResponse) -> bool {
@@ -157,8 +178,12 @@ impl FileViewState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SmartReviewState {
     epoch: ReviewEpoch,
+    content_revision: u64,
+    selection_revision: u64,
     pub(crate) mode: Option<DiffMode>,
     pub(crate) lens: ReviewLens,
+    pub(crate) role_filter: Option<FileRole>,
+    pub(crate) selected_file: Option<ReviewFileKey>,
     pub(crate) inventory: LoadState<ReviewInventory>,
     pub(crate) diff: LoadState<DiffDataset>,
     pub(crate) structure: LoadState<ReviewStructure>,
@@ -166,24 +191,58 @@ pub(crate) struct SmartReviewState {
 }
 
 impl SmartReviewState {
+    fn bump_content_revision(&mut self) {
+        self.content_revision = self.content_revision.wrapping_add(1);
+        if self.content_revision == 0 {
+            self.content_revision = 1;
+        }
+    }
+
+    fn bump_selection_revision(&mut self) {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        if self.selection_revision == 0 {
+            self.selection_revision = 1;
+        }
+    }
+
+    pub(crate) fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    pub(crate) fn selection_revision(&self) -> u64 {
+        self.selection_revision
+    }
+
+    pub(crate) fn changed(&mut self) {
+        self.bump_content_revision();
+    }
+
     pub(crate) fn begin(&mut self, mode: DiffMode) -> ReviewEpoch {
         let epoch = self.epoch.next();
         self.mode = Some(mode);
         self.lens = ReviewLens::Inventory;
+        self.role_filter = None;
+        self.selected_file = None;
         self.inventory = LoadState::Loading;
         self.diff = LoadState::Idle;
         self.structure = LoadState::Idle;
         self.file.clear();
+        self.bump_content_revision();
+        self.bump_selection_revision();
         epoch
     }
 
     pub(crate) fn disable(&mut self) -> ReviewEpoch {
         let epoch = self.epoch.next();
         self.mode = None;
+        self.role_filter = None;
+        self.selected_file = None;
         self.inventory = LoadState::Idle;
         self.diff = LoadState::Idle;
         self.structure = LoadState::Idle;
         self.file.clear();
+        self.bump_content_revision();
+        self.bump_selection_revision();
         epoch
     }
 
@@ -202,6 +261,7 @@ impl SmartReviewState {
         self.diff = LoadState::Loading;
         self.structure = LoadState::Loading;
         self.file.clear();
+        self.bump_content_revision();
         Some((epoch, comparison))
     }
 
@@ -211,6 +271,53 @@ impl SmartReviewState {
 
     pub(crate) fn is_current(&self, epoch: ReviewEpoch) -> bool {
         self.epoch == epoch
+    }
+
+    pub(crate) fn set_lens(&mut self, lens: ReviewLens) {
+        self.lens = lens;
+    }
+
+    pub(crate) fn set_role_filter(&mut self, role: Option<FileRole>) {
+        if self.role_filter != role {
+            self.role_filter = role;
+            self.bump_content_revision();
+        }
+    }
+
+    pub(crate) fn set_inventory(
+        &mut self,
+        inventory: ReviewInventory,
+        preferred_path: Option<&str>,
+    ) {
+        let retained = self.selected_file.as_ref().filter(|selected| {
+            inventory
+                .files
+                .iter()
+                .any(|file| selected.matches_inventory(file))
+        });
+        let selected = retained.cloned().or_else(|| {
+            preferred_path
+                .and_then(|path| {
+                    inventory.files.iter().find(|file| {
+                        file.old_path.as_deref() == Some(path)
+                            || file.new_path.as_deref() == Some(path)
+                    })
+                })
+                .or_else(|| inventory.files.first())
+                .map(ReviewFileKey::from_inventory)
+        });
+        self.selected_file = selected;
+        self.inventory = LoadState::Ready(inventory);
+        self.bump_content_revision();
+        self.bump_selection_revision();
+    }
+
+    pub(crate) fn set_selected_file(&mut self, key: ReviewFileKey) {
+        if self.selected_file.as_ref() != Some(&key) {
+            self.selected_file = Some(key);
+            self.file.clear();
+            self.bump_selection_revision();
+        }
     }
 
     pub(crate) fn comparison(&self) -> Option<ImmutableResolvedComparison> {
@@ -236,12 +343,14 @@ impl SmartReviewState {
             Ok(response) => response,
             Err(error) => {
                 self.diff = LoadState::Failed(error.clone());
+                self.bump_content_revision();
                 return Some(Err(error));
             }
         };
         if response.comparison() != expected {
             let error = "Exact review diff returned a different comparison".to_string();
             self.diff = LoadState::Failed(error.clone());
+            self.bump_content_revision();
             return Some(Err(error));
         }
         let (comparison, diff) = response.into_parts();
@@ -250,6 +359,7 @@ impl SmartReviewState {
             comparison,
             files: files.clone(),
         });
+        self.bump_content_revision();
         Some(Ok(self
             .diff
             .ready()
@@ -270,15 +380,18 @@ impl SmartReviewState {
             Ok(structure) => structure,
             Err(error) => {
                 self.structure = LoadState::Failed(error.clone());
+                self.bump_content_revision();
                 return Some(Err(error));
             }
         };
         if structure.comparison() != expected {
             let error = "Structured review returned a different comparison".to_string();
             self.structure = LoadState::Failed(error.clone());
+            self.bump_content_revision();
             return Some(Err(error));
         }
         self.structure = LoadState::Ready(structure);
+        self.bump_content_revision();
         Some(Ok(()))
     }
 }
@@ -300,6 +413,29 @@ pub(crate) fn derived_requests(
 
 pub(crate) fn theme_requires_rehighlight(requested_dark: bool, current_dark: bool) -> bool {
     requested_dark != current_dark
+}
+
+pub(crate) fn adjacent_inventory_file(
+    inventory: &ReviewInventory,
+    selected: Option<&ReviewFileKey>,
+    forward: bool,
+) -> Option<ReviewFileKey> {
+    let index = selected
+        .and_then(|selected| {
+            inventory
+                .files
+                .iter()
+                .position(|file| selected.matches_inventory(file))
+        })
+        .unwrap_or(0);
+    let next = if forward {
+        index
+            .saturating_add(1)
+            .min(inventory.files.len().saturating_sub(1))
+    } else {
+        index.saturating_sub(1)
+    };
+    inventory.files.get(next).map(ReviewFileKey::from_inventory)
 }
 
 #[cfg(test)]
@@ -360,6 +496,33 @@ mod tests {
             "coverage": coverage_json()
         }))
         .unwrap()
+    }
+
+    fn inventory_with_files() -> ReviewInventory {
+        let mut value = serde_json::to_value(inventory()).unwrap();
+        value["totals"]["files"] = json!(2);
+        value["totals"]["files_added"] = json!(1);
+        value["totals"]["files_modified"] = json!(1);
+        value["files"] = json!([
+            {
+                "new_path": "src/lib.rs", "status": "added", "lines_added": 1,
+                "lines_deleted": 0, "binary": false,
+                "classification": { "role": "implementation", "rule_id": "extension.rs" },
+                "provenance": { "source": "git" }
+            },
+            {
+                "old_path": "tests/lib.rs", "new_path": "tests/lib.rs",
+                "status": "modified", "lines_added": 1, "lines_deleted": 1,
+                "binary": false,
+                "classification": { "role": "test", "rule_id": "path.tests" },
+                "provenance": { "source": "git" }
+            }
+        ]);
+        value["coverage"] = json!({
+            "total_items": 2, "analyzed_items": 2, "pending_items": 0,
+            "skipped_items": 0, "unsupported_items": 0, "failed_items": 0
+        });
+        serde_json::from_value(value).unwrap()
     }
 
     fn exact_diff() -> ExactReviewDiffResponse {
@@ -490,6 +653,97 @@ mod tests {
         state.lens = ReviewLens::CallDiff;
         state.begin(DiffMode::Commit("abc".into()));
         assert_eq!(state.lens, ReviewLens::Inventory);
+    }
+
+    #[test]
+    fn lens_and_role_changes_do_not_reload_ready_datasets() {
+        let mut state = SmartReviewState::default();
+        state.begin(DiffMode::Commit("abc".into()));
+        let inventory = inventory();
+        state.inventory = LoadState::Ready(inventory.clone());
+
+        state.set_lens(ReviewLens::Structure);
+        state.set_role_filter(Some(FileRole::Test));
+
+        assert_eq!(state.lens, ReviewLens::Structure);
+        assert_eq!(state.role_filter, Some(FileRole::Test));
+        assert_eq!(state.inventory.ready(), Some(&inventory));
+    }
+
+    #[test]
+    fn inventory_selection_survives_diff_failure_and_derived_reload() {
+        let mode = DiffMode::Commit("abc".into());
+        let inventory = inventory_with_files();
+        let comparison =
+            ImmutableResolvedComparison::try_from(inventory.comparison.clone()).unwrap();
+        let mut state = SmartReviewState::default();
+        let epoch = state.begin(mode.clone());
+        state.set_inventory(inventory, None);
+        assert_eq!(
+            state.selected_file.as_ref().unwrap().new_path.as_deref(),
+            Some("src/lib.rs")
+        );
+
+        state.set_selected_file(ReviewFileKey {
+            old_path: Some("tests/lib.rs".into()),
+            new_path: Some("tests/lib.rs".into()),
+        });
+        assert!(
+            state
+                .accept_diff(epoch, &mode, &comparison, Err("diff failed".into()))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            state.selected_file.as_ref().unwrap().new_path.as_deref(),
+            Some("tests/lib.rs")
+        );
+
+        state.begin_derived_reload(&mode).unwrap();
+        assert_eq!(
+            state.selected_file.as_ref().unwrap().new_path.as_deref(),
+            Some("tests/lib.rs")
+        );
+    }
+
+    #[test]
+    fn content_and_selection_revisions_invalidate_independent_cache_scopes() {
+        let mut state = SmartReviewState::default();
+        state.begin(DiffMode::Commit("abc".into()));
+        let initial_content = state.content_revision();
+        let initial_selection = state.selection_revision();
+        state.set_inventory(inventory_with_files(), None);
+        let after_data_content = state.content_revision();
+        let after_data_selection = state.selection_revision();
+        assert!(after_data_content > initial_content);
+        assert!(after_data_selection > initial_selection);
+        state.set_lens(ReviewLens::Structure);
+        assert_eq!(state.content_revision(), after_data_content);
+        assert_eq!(state.selection_revision(), after_data_selection);
+        state.set_role_filter(Some(FileRole::Test));
+        let after_filter = state.content_revision();
+        assert!(after_filter > after_data_content);
+        assert_eq!(state.selection_revision(), after_data_selection);
+        state.set_selected_file(ReviewFileKey {
+            old_path: Some("tests/lib.rs".into()),
+            new_path: Some("tests/lib.rs".into()),
+        });
+        assert_eq!(state.content_revision(), after_filter);
+        assert!(state.selection_revision() > after_data_selection);
+    }
+
+    #[test]
+    fn keyboard_adjacency_returns_canonical_inventory_pairs() {
+        let inventory = inventory_with_files();
+        let first = adjacent_inventory_file(&inventory, None, false).unwrap();
+        assert_eq!(first.new_path.as_deref(), Some("src/lib.rs"));
+        let second = adjacent_inventory_file(&inventory, Some(&first), true).unwrap();
+        assert_eq!(second.old_path.as_deref(), Some("tests/lib.rs"));
+        assert_eq!(second.new_path.as_deref(), Some("tests/lib.rs"));
+        assert_eq!(
+            adjacent_inventory_file(&inventory, Some(&second), false),
+            Some(first)
+        );
     }
 
     #[test]

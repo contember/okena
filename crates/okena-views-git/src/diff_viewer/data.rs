@@ -3,8 +3,8 @@
 
 use super::DiffViewer;
 use super::review::{
-    LoadState, ReviewEpoch, ReviewFileKey, ReviewLens, derived_requests, is_smart_mode,
-    theme_requires_rehighlight,
+    LoadState, ReviewEpoch, ReviewFileKey, ReviewLens, adjacent_inventory_file, derived_requests,
+    is_smart_mode, theme_requires_rehighlight,
 };
 use super::syntax::process_file;
 use super::types::{DiffDisplayFile, DisplayItem, FileStats, FileTreeNode};
@@ -148,6 +148,7 @@ impl DiffViewer {
                                     .to_string(),
                             );
                             this.loading = false;
+                            this.smart_review.changed();
                             this.error_message = Some(
                                 "Review inventory returned a different comparison".to_string(),
                             );
@@ -164,19 +165,23 @@ impl DiffViewer {
                                 );
                                 this.smart_review.inventory = LoadState::Failed(message.clone());
                                 this.loading = false;
+                                this.smart_review.changed();
                                 this.error_message = Some(message);
                                 cx.notify();
                                 return;
                             }
                         };
-                        this.smart_review.inventory = LoadState::Ready(inventory);
+                        this.smart_review
+                            .set_inventory(inventory, selected.as_deref());
                         this.smart_review.diff = LoadState::Loading;
                         this.smart_review.structure = LoadState::Loading;
+                        this.smart_review.changed();
                         this.start_smart_derived(epoch, mode, comparison, selected, cx);
                     }
                     Err(error) => {
                         this.smart_review.inventory = LoadState::Failed(error.clone());
                         this.loading = false;
+                        this.smart_review.changed();
                         this.error_message = Some(error);
                     }
                 }
@@ -191,7 +196,7 @@ impl DiffViewer {
         epoch: ReviewEpoch,
         mode: DiffMode,
         comparison: ImmutableResolvedComparison,
-        select_file: Option<String>,
+        _select_file: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let (diff_request, structure_request) =
@@ -215,16 +220,9 @@ impl DiffViewer {
                         if !diff.is_empty() {
                             this.store_diff_result(diff);
                             this.build_file_tree();
-                            if let Some(ref file_path) = select_file
-                                && let Some(index) = this.file_stats.iter().position(|file| {
-                                    file.path == *file_path
-                                        || file.old_path.as_deref() == Some(file_path.as_str())
-                                        || file.new_path.as_deref() == Some(file_path.as_str())
-                                })
-                            {
-                                this.selected_file_index = index;
-                            }
-                            this.process_current_file_async(cx);
+                            this.reconcile_smart_selection(cx);
+                        } else {
+                            this.smart_review.file.clear();
                         }
                     }
                     Some(Err(error)) => {
@@ -256,6 +254,41 @@ impl DiffViewer {
             });
         })
         .detach();
+    }
+
+    pub(super) fn select_smart_file(&mut self, key: ReviewFileKey, cx: &mut Context<Self>) {
+        self.smart_review.set_selected_file(key);
+        self.reconcile_smart_selection(cx);
+        cx.notify();
+    }
+
+    pub(super) fn select_adjacent_smart_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(inventory) = self.smart_review.inventory.ready() else {
+            return;
+        };
+        let Some(key) =
+            adjacent_inventory_file(inventory, self.smart_review.selected_file.as_ref(), forward)
+        else {
+            return;
+        };
+        self.select_smart_file(key, cx);
+    }
+
+    fn reconcile_smart_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.smart_review.selected_file.clone() else {
+            self.smart_review.file.clear();
+            return;
+        };
+        let Some(index) = self
+            .file_stats
+            .iter()
+            .position(|file| file.old_path == key.old_path && file.new_path == key.new_path)
+        else {
+            self.smart_review.file.clear();
+            return;
+        };
+        self.selected_file_index = index;
+        self.process_current_file_async(cx);
     }
 
     /// Store raw diff data and extract lightweight stats (no syntax highlighting).
