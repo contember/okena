@@ -20,7 +20,7 @@ use std::collections::HashMap;
 const PANEL_WIDTH: Pixels = px(520.0);
 /// Gap between the file header and the panel hanging off the `outline` link.
 const PANEL_GAP: Pixels = px(6.0);
-const PANEL_HEIGHT: Pixels = px(420.0);
+const PANEL_HEIGHT: Pixels = px(520.0);
 /// One nesting step, in pixels; deeper nesting stops moving right.
 const INDENT: f32 = 12.0;
 const MAX_INDENT_DEPTH: usize = 8;
@@ -50,24 +50,32 @@ pub(super) fn render(
         .right(px(16.0))
         .w(PANEL_WIDTH)
         .max_h(PANEL_HEIGHT)
-        .overflow_hidden()
         .flex()
         // The panel only dismisses on a click outside it, either button.
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(
-            h_flex()
-                .w_full()
-                .gap(px(12.0))
-                .items_start()
-                .child(column("review-outline-base", BASE_TITLE, base, None, t, cx))
-                .child(column(
-                    "review-outline-head",
-                    HEAD_TITLE,
-                    head,
-                    Some(key),
-                    t,
-                    cx,
-                )),
+            // Both outlines scroll together, so a symbol stays level with its
+            // counterpart on the other side.
+            div()
+                .id("review-outline-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(12.0))
+                        .items_start()
+                        .child(column("review-outline-base", BASE_TITLE, base, None, t, cx))
+                        .child(column(
+                            "review-outline-head",
+                            HEAD_TITLE,
+                            head,
+                            Some(key),
+                            t,
+                            cx,
+                        )),
+                ),
         );
 
     // Occludes, so the dismissing click never also lands on the diff underneath.
@@ -161,8 +169,7 @@ fn outline_row(
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_color(rgb(name_color))
                 .child(row.name.clone()),
         )
