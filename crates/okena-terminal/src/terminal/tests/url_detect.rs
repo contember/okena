@@ -374,6 +374,30 @@ fn detect_url_not_extended_by_prose_word() {
 }
 
 #[test]
+fn detect_url_not_extended_when_next_line_is_longer() {
+    // A genuine mid-token wrap fills the row to the layout edge, so a
+    // continuation row can never be wider than the row it continues.
+    // Here the URL ends a short line and the next line is 6 cols longer —
+    // a word break, not a wrap.  Reproduces Claude Code's PR output:
+    // "https://…/pull/4" / "(docs/data-flow-findings-and-system-audit → main)."
+    let links = detect_urls_in(
+        "  https://github.com/NPI-Cloud/npi-docs/pull/4\r\n  (docs/data-flow-findings-and-system-audit \u{2192} main).\r\n",
+        60,
+    );
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.is_url).collect();
+    assert_eq!(
+        url_links.len(),
+        1,
+        "Branch name on the next line must not be absorbed: {:?}",
+        links
+    );
+    assert_eq!(
+        url_links[0].text,
+        "https://github.com/NPI-Cloud/npi-docs/pull/4"
+    );
+}
+
+#[test]
 fn detect_url_uuid_continuation_with_trailing_prose() {
     // URL wraps mid-UUID, continuation line has prose after the UUID
     // fragment.  The UUID part (digits + hex letters + dashes) must

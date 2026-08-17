@@ -327,6 +327,7 @@ impl Terminal {
                 // ── Extension loop ──
                 let mut extended_url = matches[last_idx].text.clone();
                 let mut current_row = m_line;
+                let mut url_end_col = m_col + m_len;
 
                 loop {
                     let next_row = current_row + 1;
@@ -336,6 +337,14 @@ impl Terminal {
 
                     let next_row_text = read_row(next_row);
                     let next_rtrimmed = next_row_text.trim_end();
+
+                    // A mid-token wrap fills the row to the layout edge, so a
+                    // continuation can never be wider than the row it
+                    // continues.  A wider next row means the break was a word
+                    // break — the URL ended on its own line.
+                    if next_rtrimmed.chars().count() > url_end_col + 3 {
+                        break;
+                    }
 
                     // Strip leading whitespace (TUI indentation).
                     let content = next_rtrimmed.trim_start_matches(' ');
@@ -440,6 +449,7 @@ impl Terminal {
                         break;
                     }
 
+                    url_end_col = indent + ext_char_len;
                     current_row = next_row;
                 }
 
