@@ -46,6 +46,10 @@ const HELP_ROWS: &[HelpRow] = &[
         action: "Roles menu",
     },
     HelpRow {
+        keys: &["e"],
+        action: "Outline: changed symbols and their changes, inline in the file tree",
+    },
+    HelpRow {
         keys: &["o"],
         action: "Back to the overview",
     },

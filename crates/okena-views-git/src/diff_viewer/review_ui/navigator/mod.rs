@@ -19,6 +19,7 @@ use super::state::{NavRowId, NavigatorMode, RolePreset};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use gpui_component::tooltip::Tooltip;
 use okena_core::theme::ThemeColors;
 use okena_ui::simple_input::SimpleInput;
 use okena_ui::tokens::{RADIUS_MD, RADIUS_STD, ui_text_ms, ui_text_sm};
@@ -77,14 +78,9 @@ impl DiffViewer {
         };
         let state = &self.review_ui;
         match state.navigator {
-            NavigatorMode::Files => rows::row_ids(&rows::nav_rows(
-                model,
-                &state.role_filter,
-                &state.filter_text,
-                &state.expanded_dirs,
-                state.flatten,
-                state.expanded_initialized,
-            )),
+            NavigatorMode::Files => {
+                rows::row_ids(&rows::nav_rows(model, &rows::TreeArgs::of(state)))
+            }
             NavigatorMode::Attention => items::row_ids(&items::attention_rows(
                 model,
                 &state.attention_filter,
@@ -263,17 +259,27 @@ impl DiffViewer {
                     }),
             )
             .when(self.review_ui.navigator == NavigatorMode::Files, |d| {
+                let outline = self.review_ui.outline_inline;
                 d.child(
-                    div()
-                        .id("review-flatten")
-                        .cursor_pointer()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(if flatten { t.term_blue } else { t.text_muted }))
-                        .hover(|s| s.text_color(rgb(t.text_primary)))
-                        .child(words::FLATTEN)
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.review_set_flatten(!flatten, cx);
-                        })),
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(10.0))
+                        .child(
+                            tree_switch("review-outline", words::OUTLINE, outline, t, cx)
+                                .tooltip(|window, cx| {
+                                    Tooltip::new(words::OUTLINE_HINT).build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.review_set_outline(!outline, cx);
+                                })),
+                        )
+                        .child(
+                            tree_switch("review-flatten", words::FLATTEN, flatten, t, cx).on_click(
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.review_set_flatten(!flatten, cx);
+                                }),
+                            ),
+                        ),
                 )
             })
             .into_any_element()
@@ -296,6 +302,9 @@ impl DiffViewer {
                     self.review_file_total(),
                     role_label.as_deref(),
                     self.review_not_analyzed_total(),
+                    self.review_ui
+                        .outline_inline
+                        .then(|| self.review_visible_symbols()),
                 ),
                 None,
             ),
@@ -363,6 +372,19 @@ impl DiffViewer {
                 )
             })
             .into_any_element()
+    }
+
+    /// Changed symbols the outline currently lists — how long the scroll is.
+    fn review_visible_symbols(&self) -> usize {
+        let Some(model) = self.review_ui.model.as_deref() else {
+            return 0;
+        };
+        let state = &self.review_ui;
+        rows::visible_files(model, &state.role_filter, &state.filter_text)
+            .iter()
+            .filter_map(|index| model.files.get(*index))
+            .map(|entry| entry.symbols.len())
+            .sum()
     }
 
     fn review_file_total(&self) -> usize {
@@ -449,6 +471,24 @@ impl DiffViewer {
         }
         self.review_ui.nav_reveal = None;
     }
+}
+
+/// A text switch over the tree — `outline`, `flatten`; on reads in the accent.
+fn tree_switch(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    t: &ThemeColors,
+    cx: &App,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .flex_shrink_0()
+        .text_size(ui_text_ms(cx))
+        .text_color(rgb(if on { t.term_blue } else { t.text_muted }))
+        .hover(|s| s.text_color(rgb(t.text_primary)))
+        .child(label)
 }
 
 fn nav_tab(
@@ -541,6 +581,18 @@ fn churn_cell(added: u64, deleted: u64, t: &ThemeColors, cx: &App) -> Div {
 /// renamed or re-filtered row keeps its element id, and its scroll state.
 fn nav_element_id(prefix: &str, id: &NavRowId) -> ElementId {
     ElementId::Name(format!("{prefix}-{}", row_key(id)).into())
+}
+
+/// A detail line has no `NavRowId`; its element id is the symbol's plus the
+/// line's position, so it stays stable across re-renders.
+fn detail_element_id(target: &AttentionTarget, position: usize) -> ElementId {
+    ElementId::Name(
+        format!(
+            "review-detail-{}-{position}",
+            row_key(&NavRowId::Item(target.clone()))
+        )
+        .into(),
+    )
 }
 
 fn row_key(id: &NavRowId) -> String {

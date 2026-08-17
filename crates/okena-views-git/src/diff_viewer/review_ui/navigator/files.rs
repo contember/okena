@@ -2,19 +2,28 @@
 
 use super::super::super::DiffViewer;
 use super::super::labels::nav as words;
-use super::rows::{self, DirRow, FileRow, NavRow, NavRowKind};
+use super::super::labels::{self as labels, glyph};
+use super::super::model::AttentionTarget;
+use super::super::state::SymbolRef;
+use super::rows::{self, DetailKind, DetailRow, DirRow, FileRow, NavRow, NavRowKind, SymbolRow};
 use super::{TREE_ROW_HEIGHT, chip, chip_tone, churn_cell, selection_bar};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::tooltip::Tooltip;
 use okena_core::theme::ThemeColors;
+use okena_review::CallChangeKind;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ICON_SM, RADIUS_MD, ui_text_ms, ui_text_sm};
 use std::sync::Arc;
 
 /// How far one tree level indents.
 const INDENT: f32 = 12.0;
+/// The kind glyph column of a symbol row; its detail lines start after it.
+const GLYPH_WIDTH: f32 = 13.0;
+/// The marker column of a detail line — `sig` is the widest thing in it, and
+/// every line's text has to start at the same x.
+const MARKER_WIDTH: f32 = 20.0;
 
 impl DiffViewer {
     pub(crate) fn render_files_tree(
@@ -26,19 +35,11 @@ impl DiffViewer {
             return div().flex_1().into_any_element();
         };
         let state = &self.review_ui;
-        let tree = Arc::new(rows::nav_rows(
-            &model,
-            &state.role_filter,
-            &state.filter_text,
-            &state.expanded_dirs,
-            state.flatten,
-            state.expanded_initialized,
-        ));
+        let tree = Arc::new(rows::nav_rows(&model, &rows::TreeArgs::of(state)));
         if tree.is_empty() {
             return super::empty_state(words::NO_FILE_MATCH, t, cx).into_any_element();
         }
-        let ids: Vec<Option<super::NavRowId>> =
-            tree.iter().map(|row| Some(row.id.clone())).collect();
+        let ids: Vec<Option<super::NavRowId>> = tree.iter().map(|row| row.id.clone()).collect();
         let scroll = self.review_ui.tree_scroll.clone();
         self.review_reveal_cursor(&ids, &scroll);
 
@@ -67,6 +68,8 @@ impl DiffViewer {
         match &row.kind {
             NavRowKind::Dir(dir) => self.render_dir_row(row, dir, t, cx),
             NavRowKind::File(file) => self.render_file_row(row, file, t, cx),
+            NavRowKind::Symbol(symbol) => self.render_symbol_row(row, symbol, t, cx),
+            NavRowKind::Detail(detail) => self.render_detail_row(row, detail, t, cx),
         }
     }
 
@@ -77,13 +80,13 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let super::NavRowId::Dir(path) = &row.id else {
+        let Some(id @ super::NavRowId::Dir(path)) = &row.id else {
             return div().into_any_element();
         };
-        let cursor = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(id);
         let for_click = path.clone();
         tree_row(
-            super::nav_element_id("review-row", &row.id),
+            super::nav_element_id("review-row", id),
             row.depth,
             cursor,
             false,
@@ -143,10 +146,10 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let super::NavRowId::File(key) = &row.id else {
+        let Some(id @ super::NavRowId::File(key)) = &row.id else {
             return div().into_any_element();
         };
-        let cursor = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(id);
         let open = self.smart_review.selected_file.as_ref() == Some(key);
         let name_color = if file.dimmed {
             t.text_muted
@@ -156,7 +159,7 @@ impl DiffViewer {
         let for_click = key.clone();
         let tooltip = file.tooltip.clone();
         tree_row(
-            super::nav_element_id("review-row", &row.id),
+            super::nav_element_id("review-row", id),
             row.depth,
             cursor,
             open,
@@ -187,6 +190,131 @@ impl DiffViewer {
         }))
         .into_any_element()
     }
+
+    /// One changed symbol under its file — spec §7. The fill marks the symbol
+    /// the content area currently shows.
+    fn render_symbol_row(
+        &self,
+        row: &NavRow,
+        symbol: &SymbolRow,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(id) = row.id.as_ref() else {
+            return div().into_any_element();
+        };
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(id);
+        let open = matches!(&symbol.target, AttentionTarget::Symbol { file, change_index }
+            if self.review_ui.selected_symbol
+                == Some(SymbolRef { file: file.clone(), change_index: *change_index }));
+        let tooltip = SharedString::from(symbol.tooltip.clone());
+        let target = symbol.target.clone();
+        tree_row(
+            super::nav_element_id("review-symbol", id),
+            row.depth,
+            cursor,
+            open,
+            t,
+        )
+        .child(
+            div()
+                .w(px(GLYPH_WIDTH))
+                .flex_shrink_0()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(glyph(symbol.glyph)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_primary))
+                .child(symbol.name.clone()),
+        )
+        .children(symbol.markers.iter().map(|marker| {
+            chip(marker.label.clone(), chip_tone(marker.kind), t, cx).into_any_element()
+        }))
+        .child(div().flex_1())
+        .child(churn_cell(symbol.added, symbol.deleted, t, cx))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.review_ui.nav_cursor = Some(super::NavRowId::Item(target.clone()));
+            this.review_open_item(target.clone(), cx);
+        }))
+        .into_any_element()
+    }
+
+    /// One line of what changed inside a symbol: the signature pair, or a call.
+    /// It opens the symbol like the row above it, but `↑` `↓` step over it.
+    fn render_detail_row(
+        &self,
+        row: &NavRow,
+        detail: &DetailRow,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tooltip = SharedString::from(detail.text.clone());
+        let target = detail.target.clone();
+        tree_row(
+            super::detail_element_id(&detail.target, detail.position),
+            row.depth,
+            false,
+            false,
+            t,
+        )
+        .child(div().w(px(GLYPH_WIDTH)).flex_shrink_0())
+        .child(detail_marker(detail.kind, t, cx))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .when(detail.kind != DetailKind::More, |d| {
+                    d.font_family("monospace")
+                })
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(if detail.kind == DetailKind::More {
+                    t.text_muted
+                } else {
+                    t.text_secondary
+                }))
+                .child(detail.text.clone()),
+        )
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.review_ui.nav_cursor = Some(super::NavRowId::Item(target.clone()));
+            this.review_open_item(target.clone(), cx);
+        }))
+        .into_any_element()
+    }
+}
+
+/// `sig` for a signature change, `+` `−` `~` for a call; nothing for the
+/// `… 4 more` line, whose own words say what it is.
+fn detail_marker(kind: DetailKind, t: &ThemeColors, cx: &App) -> Div {
+    let (text, color) = match kind {
+        DetailKind::Signature => (words::SIGNATURE_LINE, t.warning),
+        DetailKind::Call(CallChangeKind::Added) => (
+            labels::calls::call_marker(CallChangeKind::Added),
+            t.diff_added_fg,
+        ),
+        DetailKind::Call(CallChangeKind::Removed) => (
+            labels::calls::call_marker(CallChangeKind::Removed),
+            t.diff_removed_fg,
+        ),
+        DetailKind::Call(CallChangeKind::Modified) => (
+            labels::calls::call_marker(CallChangeKind::Modified),
+            t.term_blue,
+        ),
+        DetailKind::More => ("", t.text_muted),
+    };
+    div()
+        .w(px(MARKER_WIDTH))
+        .flex_shrink_0()
+        .font_family("monospace")
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(color))
+        .child(text)
 }
 
 /// `Tests` / `Docs` … — outlined, so it reads as a label and not a reason.

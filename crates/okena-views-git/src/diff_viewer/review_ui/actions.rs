@@ -184,6 +184,21 @@ impl DiffViewer {
         cx.notify();
     }
 
+    /// Inline every file's changed symbols, or fold them all away again.
+    pub(crate) fn review_set_outline(&mut self, outline: bool, cx: &mut Context<Self>) {
+        self.review_ui.outline_inline = outline;
+        if !outline {
+            // The cursor may be sitting on a symbol row that just disappeared.
+            if let Some(NavRowId::Item(AttentionTarget::Symbol { file, .. })) =
+                self.review_ui.nav_cursor.clone()
+            {
+                self.review_ui.nav_cursor = Some(NavRowId::File(file));
+            }
+        }
+        self.review_ui.nav_reveal = Some(ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
     pub(crate) fn review_set_role_filter(&mut self, filter: RoleFilter, cx: &mut Context<Self>) {
         self.review_ui.role_filter = filter;
         cx.notify();

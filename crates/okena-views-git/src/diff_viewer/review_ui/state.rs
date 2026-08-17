@@ -312,7 +312,10 @@ pub(crate) struct ReviewUiState {
     pub filter_text: String,
     pub roles_menu_open: bool,
     pub status_popover_open: bool,
+    /// The outline popover over the open file.
     pub outline_open: bool,
+    /// Files mode inlines every file's changed symbols and what changed in them.
+    pub outline_inline: bool,
     pub help_open: bool,
     /// Overview: commit ledger expanded under the Commits fact.
     pub ledger_open: bool,
@@ -355,6 +358,7 @@ impl ReviewUiState {
             roles_menu_open: false,
             status_popover_open: false,
             outline_open: false,
+            outline_inline: false,
             help_open: false,
             ledger_open: false,
             model: None,

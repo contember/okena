@@ -45,6 +45,7 @@ pub(crate) enum ReviewCommand {
     SetNavigator(NavigatorMode),
     FocusFilter,
     ToggleRoles,
+    ToggleOutline,
     OpenOverview,
     StepQueue(i32),
     StepSymbol(i32),
@@ -71,7 +72,7 @@ pub(crate) enum ReviewCommand {
 /// Keys the review owns. A modified variant of one of them is unbound and must
 /// not reach the legacy diff shortcuts, which match on the key alone.
 const REVIEW_KEYS: &[&str] = &[
-    "1", "2", "/", "?", "r", "o", "d", "w", "y", "s", "n", "N", "[", "]", "{", "}",
+    "1", "2", "/", "?", "r", "e", "o", "d", "w", "y", "s", "n", "N", "[", "]", "{", "}",
 ];
 
 /// Layouts report a shifted character either as the character itself or as the
@@ -146,6 +147,7 @@ fn single_key(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
         "/" => Some(ReviewCommand::FocusFilter),
         "?" => Some(ReviewCommand::ToggleHelp),
         "r" => Some(ReviewCommand::ToggleRoles),
+        "e" => Some(ReviewCommand::ToggleOutline),
         "o" => Some(ReviewCommand::OpenOverview),
         "w" => Some(ReviewCommand::ToggleWhitespace),
         "d" => on_file.then_some(ReviewCommand::ToggleDetails),
@@ -436,6 +438,10 @@ impl DiffViewer {
             ReviewCommand::SetNavigator(mode) => self.review_set_navigator(mode, cx),
             ReviewCommand::FocusFilter => self.review_focus_filter(window, cx),
             ReviewCommand::ToggleRoles => self.review_toggle_roles_menu(cx),
+            ReviewCommand::ToggleOutline => {
+                let outline = self.review_ui.outline_inline;
+                self.review_set_outline(!outline, cx);
+            }
             ReviewCommand::OpenOverview => self.review_return_to_overview(cx),
             ReviewCommand::StepQueue(delta) => self.review_step_queue(delta, cx),
             ReviewCommand::StepSymbol(delta) => self.review_step_symbol(delta, cx),

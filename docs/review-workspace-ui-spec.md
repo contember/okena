@@ -147,6 +147,16 @@ markers (`sig N`, `calls`, `removed`, `new`, `moved N %`), +/− right-aligned; 
 role is not implementation; directory-level `no tests` marker; **not-analyzed files are dimmed** (not
 badged), reason on hover. Selection highlight must actually paint (accent left border + selection bg).
 
+**Outline** (`outline` switch next to `flatten`, key `e`) — one switch inlines every visible file's
+changed symbols and, under each of them, what changed inside: no per-file clicking, the whole change
+reads by scrolling. Symbol rows: kind glyph, name (qualified on hover), the markers the lines below do
+*not* already state (`new`, `removed`, `public`, `moved N %` — never `body` or `calls`), +/−; clicking
+one opens the symbol. Detail lines, one line each and truncated with the full text on hover: `sig
+<old> → <new>` first, then the calls (`+` `−` `~`, the call text, then the branch it sits in, so a
+narrow column cuts the branch first), at most six of them and then `… N more`. Identical occurrences
+share one line with `×4`. Detail lines open their symbol on click but `↑` `↓` step over them. The
+footer counts what the switch added: `89 files · 4 122 changed symbols · dimmed = not analyzed (8)`.
+
 **Attention mode** — the full ordered list (Start here is its top). Reason chips at the top act as OR
 filters (`sig 12`, `removed 14`, `calls 18`, `new 89`, `no tests 2`, `git facts 24`, `tests` toggle).
 Tier separators (`CONTRACT`, `BEHAVIOUR`, `VOLUME`, `GIT FACTS`, `REST`). Two-line rows: kind glyph +
@@ -235,6 +245,7 @@ current screen.
 | `1` `2` | navigator mode Files / Attention |
 | `/` | focus filter box (`Esc` clears and returns) |
 | `r` | Roles menu |
+| `e` | outline: changed symbols and their changes, inline in the file tree |
 | `o` | Overview |
 | `]` `[` | next / previous item in Attention order (from any file; keeps queue position) |
 | `}` `{` | next / previous changed symbol in the open file |

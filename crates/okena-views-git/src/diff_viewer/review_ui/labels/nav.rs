@@ -16,6 +16,11 @@ pub(crate) const ROLES: &str = "Roles";
 pub(crate) const CLEAR_GLYPH: &str = "\u{2715}";
 pub(crate) const CHEVRON_DOWN: &str = "\u{25BE}";
 pub(crate) const FLATTEN: &str = "flatten";
+pub(crate) const OUTLINE: &str = "outline";
+pub(crate) const OUTLINE_HINT: &str =
+    "Changed symbols and what changed in them, inline under every file";
+/// The label on a detail line that states a signature change.
+pub(crate) const SIGNATURE_LINE: &str = "sig";
 pub(crate) const SHOW_ALL: &str = "show all";
 pub(crate) const GROUP_BY_FILE: &str = "group by file";
 pub(crate) const ORDERED_LIST: &str = "ordered list";
@@ -76,6 +81,22 @@ pub(crate) fn file_marker(kind: ReasonKind, label: &str, signatures: usize) -> O
         ReasonKind::PublicRemoved | ReasonKind::Removed | ReasonKind::DeletedImpl => {
             Some("removed".to_string())
         }
+        _ => Some(short_chip(label).to_string()),
+    }
+}
+
+/// The marker word for a symbol row in the outline; `None` when the detail
+/// lines under the row already state it.
+pub(crate) fn symbol_marker(kind: ReasonKind, label: &str) -> Option<String> {
+    match kind {
+        // The lines under the row are the calls and the signature themselves.
+        ReasonKind::Calls => None,
+        // Every edited symbol has a changed body; the churn cell says as much.
+        ReasonKind::Body => None,
+        ReasonKind::NotAnalyzed => None,
+        // The signature line shows the change but not who depends on it.
+        ReasonKind::PublicSignature => Some("public".to_string()),
+        ReasonKind::ExportedSignature => Some("exported".to_string()),
         _ => Some(short_chip(label).to_string()),
     }
 }
@@ -146,6 +167,14 @@ pub(crate) fn files_phrase(count: usize) -> String {
     }
 }
 
+/// `312 changed symbols` / `1 changed symbol`.
+pub(crate) fn symbols_phrase(count: usize) -> String {
+    match count {
+        1 => "1 changed symbol".to_string(),
+        other => format!("{} changed symbols", format_lines(wide(other))),
+    }
+}
+
 /// `236 items` / `1 item`.
 pub(crate) fn items_phrase(count: usize) -> String {
     match count {
@@ -162,16 +191,23 @@ pub(crate) struct FooterLine {
     pub action: Option<&'static str>,
 }
 
-/// `385 files · dimmed = not analyzed (185)` / `113 of 385 files · Review code`.
+/// `385 files · 312 changed symbols · dimmed = not analyzed (185)` /
+/// `113 of 385 files · Review code`. `symbols` is `None` unless the outline
+/// is on, and then it says how long the list the user scrolls really is.
 pub(crate) fn files_footer(
     visible: usize,
     total: usize,
     role_label: Option<&str>,
     not_analyzed: usize,
+    symbols: Option<usize>,
 ) -> FooterLine {
     let narrowed = visible != total || role_label.is_some();
     if !narrowed {
         let mut text = files_phrase(total);
+        if let Some(symbols) = symbols {
+            text.push_str(DOT);
+            text.push_str(&symbols_phrase(symbols));
+        }
         if not_analyzed > 0 {
             text.push_str(DOT);
             text.push_str(&format!(
@@ -182,6 +218,10 @@ pub(crate) fn files_footer(
         return FooterLine { text, action: None };
     }
     let mut text = format!("{} of {}", format_lines(wide(visible)), files_phrase(total));
+    if let Some(symbols) = symbols {
+        text.push_str(DOT);
+        text.push_str(&symbols_phrase(symbols));
+    }
     if let Some(role_label) = role_label {
         text.push_str(DOT);
         text.push_str(role_label);
@@ -220,7 +260,7 @@ mod tests {
     use super::super::super::model::{ReasonKind, Tier};
     use super::{
         attention_footer, file_marker, files_footer, rename_display, short_chip, signature_marker,
-        tier_label,
+        symbol_marker, tier_label,
     };
 
     #[test]
@@ -312,21 +352,49 @@ mod tests {
 
     #[test]
     fn the_files_footer_names_the_filter_and_offers_the_way_back() {
-        let plain = files_footer(385, 385, None, 185);
+        let plain = files_footer(385, 385, None, 185, None);
         assert_eq!(plain.text, "385 files \u{00B7} dimmed = not analyzed (185)");
         assert_eq!(plain.action, None);
 
-        let analyzed = files_footer(12, 12, None, 0);
+        let analyzed = files_footer(12, 12, None, 0, None);
         assert_eq!(analyzed.text, "12 files");
         assert_eq!(analyzed.action, None);
 
-        let filtered = files_footer(113, 385, Some("Review code"), 185);
+        let filtered = files_footer(113, 385, Some("Review code"), 185, None);
         assert_eq!(filtered.text, "113 of 385 files \u{00B7} Review code");
         assert_eq!(filtered.action, Some("show all"));
 
-        let text_only = files_footer(3, 385, None, 0);
+        let text_only = files_footer(3, 385, None, 0, None);
         assert_eq!(text_only.text, "3 of 385 files");
         assert_eq!(text_only.action, Some("show all"));
+    }
+
+    #[test]
+    fn a_symbol_marker_never_repeats_the_lines_below_it() {
+        // The call and signature lines under the row state these themselves.
+        assert_eq!(symbol_marker(ReasonKind::Calls, "6 calls"), None);
+        assert_eq!(symbol_marker(ReasonKind::Body, "body"), None);
+        assert_eq!(
+            symbol_marker(ReasonKind::PublicSignature, "public signature").as_deref(),
+            Some("public")
+        );
+        assert_eq!(
+            symbol_marker(ReasonKind::NewPublic, "new \u{00B7} exported").as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn the_outline_footer_says_how_long_the_list_really_is() {
+        let outlined = files_footer(88, 88, None, 8, Some(312));
+        assert_eq!(
+            outlined.text,
+            "88 files \u{00B7} 312 changed symbols \u{00B7} dimmed = not analyzed (8)"
+        );
+
+        let one = files_footer(1, 88, None, 0, Some(1));
+        assert_eq!(one.text, "1 of 88 files \u{00B7} 1 changed symbol");
+        assert_eq!(one.action, Some("show all"));
     }
 
     #[test]

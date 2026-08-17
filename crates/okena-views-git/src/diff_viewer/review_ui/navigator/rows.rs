@@ -7,11 +7,15 @@
 //! `expanded_dirs` from [`default_expanded_dirs`] and flips the flag, so both
 //! answers agree for the row the user first sees.
 
+use super::super::labels::calls::{self, CALL_TEXT_CHARS};
 use super::super::labels::nav as words;
 use super::super::labels::role_short;
-use super::super::model::{DirNode, FileEntry, Reason, ReasonKind, ReviewModel};
-use super::super::state::{NavRowId, RoleFilter};
+use super::super::model::{
+    AttentionTarget, DirNode, FileEntry, KindGlyph, Reason, ReasonKind, ReviewModel, SymbolEntry,
+};
+use super::super::state::{NavRowId, ReviewUiState, RoleFilter};
 use okena_core::review::{FileRole, ReviewFileStatus};
+use okena_review::CallChangeKind;
 use std::collections::{BTreeMap, HashSet};
 
 /// Visible files at or below which the whole tree opens — spec §7.
@@ -20,9 +24,13 @@ pub(crate) const EXPAND_ALL_LIMIT: usize = 40;
 /// A file row shows the two loudest reasons and no more — spec §7.
 const MAX_MARKERS: usize = 2;
 
+/// Call lines one symbol contributes to the outline; the rest are counted.
+const MAX_OUTLINE_CALLS: usize = 6;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NavRow {
-    pub id: NavRowId,
+    /// `None` on a detail line: it is read, not walked by `↑` `↓`.
+    pub id: Option<NavRowId>,
     pub depth: usize,
     pub kind: NavRowKind,
 }
@@ -31,6 +39,42 @@ pub(crate) struct NavRow {
 pub(crate) enum NavRowKind {
     Dir(DirRow),
     File(FileRow),
+    Symbol(SymbolRow),
+    Detail(DetailRow),
+}
+
+/// One changed symbol, inlined under its file — spec §7.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SymbolRow {
+    pub name: String,
+    pub glyph: KindGlyph,
+    pub added: u64,
+    pub deleted: u64,
+    /// At most [`MAX_MARKERS`]; the detail lines below say the rest.
+    pub markers: Vec<Reason>,
+    /// The qualified name — the row itself has one line for the short one.
+    pub tooltip: String,
+    pub target: AttentionTarget,
+}
+
+/// What one detail line under a symbol states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DetailKind {
+    Signature,
+    Call(CallChangeKind),
+    /// `… 4 more` — the calls the outline left out; the details bar has them.
+    More,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DetailRow {
+    pub kind: DetailKind,
+    /// One line: the signature pair, or the call and the branch it sits in.
+    pub text: String,
+    /// The symbol the line belongs to; a click opens it.
+    pub target: AttentionTarget,
+    /// Position under the symbol, so the element id stays unique.
+    pub position: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,23 +152,41 @@ pub(crate) fn not_analyzed_count(model: &ReviewModel) -> usize {
         .count()
 }
 
-/// The ids `↑` `↓` walk; every tree row opens something, so none is dropped.
+/// The ids `↑` `↓` walk; a detail line has none, so the cursor skips it.
 pub(crate) fn row_ids(rows: &[NavRow]) -> Vec<NavRowId> {
-    rows.iter().map(|row| row.id.clone()).collect()
+    rows.iter().filter_map(|row| row.id.clone()).collect()
+}
+
+/// What the tree is built from; every field is client state, never the model.
+#[derive(Clone, Copy)]
+pub(crate) struct TreeArgs<'a> {
+    pub role_filter: &'a RoleFilter,
+    pub filter_text: &'a str,
+    pub expanded_dirs: &'a HashSet<String>,
+    pub flatten: bool,
+    pub expanded_initialized: bool,
+    /// Inline every file's changed symbols and what changed in them.
+    pub outline: bool,
+}
+
+impl<'a> TreeArgs<'a> {
+    pub(crate) fn of(state: &'a ReviewUiState) -> Self {
+        Self {
+            role_filter: &state.role_filter,
+            filter_text: &state.filter_text,
+            expanded_dirs: &state.expanded_dirs,
+            flatten: state.flatten,
+            expanded_initialized: state.expanded_initialized,
+            outline: state.outline_inline,
+        }
+    }
 }
 
 /// Every visible row of the Files tree, in display order.
-pub(crate) fn nav_rows(
-    model: &ReviewModel,
-    role_filter: &RoleFilter,
-    filter_text: &str,
-    expanded_dirs: &HashSet<String>,
-    flatten: bool,
-    expanded_initialized: bool,
-) -> Vec<NavRow> {
-    let visible = visible_files(model, role_filter, filter_text);
-    if flatten {
-        return flat_rows(model, &visible);
+pub(crate) fn nav_rows(model: &ReviewModel, args: &TreeArgs<'_>) -> Vec<NavRow> {
+    let visible = visible_files(model, args.role_filter, args.filter_text);
+    if args.flatten {
+        return flat_rows(model, &visible, args.outline);
     }
     let root = build_tree(model, &visible);
     let untested = untested_dirs(&model.root);
@@ -134,10 +196,11 @@ pub(crate) fn nav_rows(
         depth: 0,
         model,
         untested: &untested,
-        expanded_dirs,
-        expanded_initialized,
+        expanded_dirs: args.expanded_dirs,
+        expanded_initialized: args.expanded_initialized,
         total: visible.len(),
         badged: false,
+        outline: args.outline,
         out: &mut out,
     });
     out
@@ -338,6 +401,7 @@ struct Emit<'a> {
     total: usize,
     /// A directory above already carries the role badge.
     badged: bool,
+    outline: bool,
     out: &'a mut Vec<NavRow>,
 }
 
@@ -352,6 +416,7 @@ fn emit(args: Emit<'_>) {
         expanded_initialized,
         total,
         badged,
+        outline,
         out,
     } = args;
     for child in &dir.dirs {
@@ -366,7 +431,7 @@ fn emit(args: Emit<'_>) {
             child.uniform_role.and_then(role_badge)
         };
         out.push(NavRow {
-            id: NavRowId::Dir(child.path.clone()),
+            id: Some(NavRowId::Dir(child.path.clone())),
             depth,
             kind: NavRowKind::Dir(DirRow {
                 name: child.name.clone(),
@@ -388,6 +453,7 @@ fn emit(args: Emit<'_>) {
                 expanded_initialized,
                 total,
                 badged: badged || role_badge.is_some(),
+                outline,
                 out,
             });
         }
@@ -395,11 +461,14 @@ fn emit(args: Emit<'_>) {
     for index in &dir.files {
         if let Some(entry) = model.files.get(*index) {
             out.push(file_nav_row(entry, depth, false, badged));
+            if outline {
+                push_outline(entry, depth.saturating_add(1), out);
+            }
         }
     }
 }
 
-fn flat_rows(model: &ReviewModel, visible: &[usize]) -> Vec<NavRow> {
+fn flat_rows(model: &ReviewModel, visible: &[usize], outline: bool) -> Vec<NavRow> {
     let mut indices = visible.to_vec();
     indices.sort_by(|left, right| {
         let path = |index: &usize| {
@@ -411,11 +480,100 @@ fn flat_rows(model: &ReviewModel, visible: &[usize]) -> Vec<NavRow> {
         };
         path(left).cmp(&path(right))
     });
-    indices
-        .iter()
-        .filter_map(|index| model.files.get(*index))
-        .map(|entry| file_nav_row(entry, 0, true, false))
+    let mut out = Vec::new();
+    for entry in indices.iter().filter_map(|index| model.files.get(*index)) {
+        out.push(file_nav_row(entry, 0, true, false));
+        if outline {
+            push_outline(entry, 1, &mut out);
+        }
+    }
+    out
+}
+
+// -- outline rows ------------------------------------------------------------
+
+/// Every changed symbol of one file, each followed by what changed in it.
+/// Source order, the order the file itself reads in.
+fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
+    for symbol in &entry.symbols {
+        let target = AttentionTarget::Symbol {
+            file: entry.key.clone(),
+            change_index: symbol.change_index,
+        };
+        out.push(NavRow {
+            id: Some(NavRowId::Item(target.clone())),
+            depth,
+            kind: NavRowKind::Symbol(symbol_row(symbol, target.clone())),
+        });
+        for detail in detail_rows(symbol, &target) {
+            out.push(NavRow {
+                id: None,
+                depth,
+                kind: NavRowKind::Detail(detail),
+            });
+        }
+    }
+}
+
+fn symbol_row(symbol: &SymbolEntry, target: AttentionTarget) -> SymbolRow {
+    let candidates = symbol.reasons.iter().filter_map(|reason| {
+        words::symbol_marker(reason.kind, &reason.label).map(|label| {
+            (
+                words::marker_rank(reason.kind),
+                Reason {
+                    kind: reason.kind,
+                    label,
+                },
+            )
+        })
+    });
+    SymbolRow {
+        name: symbol.name.clone(),
+        glyph: symbol.glyph,
+        added: u64::from(symbol.lines_added),
+        deleted: u64::from(symbol.lines_deleted),
+        markers: top_markers(candidates),
+        tooltip: symbol.qualified.clone(),
+        target,
+    }
+}
+
+/// The signature change first — it is the contract — then the calls.
+fn detail_rows(symbol: &SymbolEntry, target: &AttentionTarget) -> Vec<DetailRow> {
+    let mut lines: Vec<(DetailKind, String)> = Vec::new();
+    if let Some((old, new)) = symbol.signature.as_ref() {
+        lines.push((
+            DetailKind::Signature,
+            calls::signature_pair(old, new, CALL_TEXT_CHARS),
+        ));
+    }
+    let calls = calls::call_lines(&symbol.calls, MAX_OUTLINE_CALLS);
+    for line in &calls.shown {
+        lines.push((DetailKind::Call(line.change), call_line_text(line)));
+    }
+    if let Some(note) = calls.hidden_note() {
+        lines.push((DetailKind::More, note));
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(position, (kind, text))| DetailRow {
+            kind,
+            text,
+            target: target.clone(),
+            position,
+        })
         .collect()
+}
+
+/// `cx.notify()  in error branch` — one line, so the column truncates the
+/// branch before the callee.
+fn call_line_text(line: &calls::CallLine) -> String {
+    let text = line.text_with_count();
+    match line.context.as_deref() {
+        Some(context) => format!("{text}  {context}"),
+        None => text,
+    }
 }
 
 // -- file rows ---------------------------------------------------------------
@@ -437,7 +595,7 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool, badged: bool) ->
         None => entry.display_path.clone(),
     };
     NavRow {
-        id: NavRowId::File(entry.key.clone()),
+        id: Some(NavRowId::File(entry.key.clone())),
         depth,
         kind: NavRowKind::File(FileRow {
             name_display,
@@ -497,7 +655,7 @@ fn markers(entry: &FileEntry) -> Vec<Reason> {
             )
         })
         .count();
-    let mut candidates: Vec<(u8, Reason)> = entry
+    let candidates = entry
         .reasons
         .iter()
         .chain(symbol_reasons)
@@ -511,8 +669,13 @@ fn markers(entry: &FileEntry) -> Vec<Reason> {
                     },
                 )
             })
-        })
-        .collect();
+        });
+    top_markers(candidates)
+}
+
+/// The loudest [`MAX_MARKERS`] distinct markers of a row.
+fn top_markers(candidates: impl Iterator<Item = (u8, Reason)>) -> Vec<Reason> {
+    let mut candidates: Vec<(u8, Reason)> = candidates.collect();
     candidates.sort_by_key(|(rank, _)| *rank);
     let mut out: Vec<Reason> = Vec::with_capacity(MAX_MARKERS);
     for (_, reason) in candidates {
@@ -538,10 +701,27 @@ mod tests {
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::super::super::state::{NavRowId, RoleFilter, RolePreset};
     use super::{
-        DirRow, FileRow, NavRow, NavRowKind, covers_untested, default_expanded, nav_rows,
-        not_analyzed, not_analyzed_count, row_ids, visible_files,
+        AttentionTarget, CallChangeKind, DetailKind, DetailRow, DirRow, FileRow, NavRow,
+        NavRowKind, SymbolRow, TreeArgs, covers_untested, default_expanded, nav_rows, not_analyzed,
+        not_analyzed_count, row_ids, visible_files,
     };
     use std::collections::HashSet;
+
+    fn args<'a>(
+        filter: &'a RoleFilter,
+        text: &'a str,
+        expanded: &'a HashSet<String>,
+        flatten: bool,
+    ) -> TreeArgs<'a> {
+        TreeArgs {
+            role_filter: filter,
+            filter_text: text,
+            expanded_dirs: expanded,
+            flatten,
+            expanded_initialized: false,
+            outline: false,
+        }
+    }
 
     fn tree(
         filter: &RoleFilter,
@@ -550,13 +730,29 @@ mod tests {
         flatten: bool,
     ) -> Vec<NavRow> {
         let model = fixtures::model();
-        nav_rows(&model, filter, text, expanded, flatten, false)
+        nav_rows(&model, &args(filter, text, expanded, flatten))
+    }
+
+    /// The same tree with every file's changed symbols inlined.
+    fn outlined(flatten: bool) -> Vec<NavRow> {
+        let model = fixtures::model();
+        let filter = RoleFilter::everything();
+        let expanded = HashSet::new();
+        nav_rows(
+            &model,
+            &TreeArgs {
+                outline: true,
+                ..args(&filter, "", &expanded, flatten)
+            },
+        )
     }
 
     fn dir<'a>(rows: &'a [NavRow], path: &str) -> &'a DirRow {
         rows.iter()
             .find_map(|row| match (&row.id, &row.kind) {
-                (NavRowId::Dir(candidate), NavRowKind::Dir(dir)) if candidate == path => Some(dir),
+                (Some(NavRowId::Dir(candidate)), NavRowKind::Dir(dir)) if candidate == path => {
+                    Some(dir)
+                }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no directory row for {path}"))
@@ -576,6 +772,8 @@ mod tests {
             .map(|row| match &row.kind {
                 NavRowKind::Dir(dir) => dir.name.clone(),
                 NavRowKind::File(file) => file.name_display.clone(),
+                NavRowKind::Symbol(symbol) => symbol.name.clone(),
+                NavRowKind::Detail(detail) => detail.text.clone(),
             })
             .collect()
     }
@@ -744,7 +942,7 @@ mod tests {
         // The tree lists `tests/lib.rs` right after its directory row.
         let tests_row = rows
             .iter()
-            .position(|row| row.id == NavRowId::Dir("tests".into()))
+            .position(|row| row.id == Some(NavRowId::Dir("tests".into())))
             .unwrap();
         let NavRowKind::File(inner) = &rows[tests_row + 1].kind else {
             panic!("expected the file under tests/");
@@ -805,11 +1003,10 @@ mod tests {
         expanded.insert("worker".to_string());
         let rows = nav_rows(
             &model,
-            &RoleFilter::everything(),
-            "",
-            &expanded,
-            false,
-            true,
+            &TreeArgs {
+                expanded_initialized: true,
+                ..args(&RoleFilter::everything(), "", &expanded, false)
+            },
         );
         assert!(
             !names(&rows).contains(&"engine.rs".to_string()),
@@ -854,22 +1051,160 @@ mod tests {
     #[test]
     fn every_tree_row_is_reachable_from_the_cursor() {
         let model = fixtures::model();
+        let filter = RoleFilter::everything();
+        let expanded = HashSet::new();
         for flatten in [false, true] {
-            let rows = nav_rows(
-                &model,
-                &RoleFilter::everything(),
-                "",
-                &HashSet::new(),
-                flatten,
-                false,
-            );
+            let rows = nav_rows(&model, &args(&filter, "", &expanded, flatten));
             assert!(!rows.is_empty());
             assert_eq!(
                 row_ids(&rows),
-                rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+                rows.iter()
+                    .filter_map(|row| row.id.clone())
+                    .collect::<Vec<_>>(),
                 "the Files tree has no separator rows, so no row is skipped"
             );
         }
+    }
+
+    /// The symbol rows the outline emits directly under one file row.
+    fn symbols_under<'a>(rows: &'a [NavRow], file: &str) -> Vec<&'a SymbolRow> {
+        let start = rows
+            .iter()
+            .position(
+                |row| matches!(&row.kind, NavRowKind::File(entry) if entry.name_display == file),
+            )
+            .unwrap_or_else(|| panic!("no file row named {file}"));
+        let depth = rows[start].depth;
+        rows[start.saturating_add(1)..]
+            .iter()
+            .take_while(|row| row.depth > depth)
+            .filter_map(|row| match &row.kind {
+                NavRowKind::Symbol(symbol) => Some(symbol),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The detail lines that follow one symbol row.
+    fn details_of<'a>(rows: &'a [NavRow], symbol: &str) -> Vec<&'a DetailRow> {
+        let start = rows
+            .iter()
+            .position(|row| matches!(&row.kind, NavRowKind::Symbol(entry) if entry.name == symbol))
+            .unwrap_or_else(|| panic!("no symbol row named {symbol}"));
+        rows[start.saturating_add(1)..]
+            .iter()
+            .map_while(|row| match &row.kind {
+                NavRowKind::Detail(detail) => Some(detail),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_outline_inlines_every_changed_symbol_under_its_file() {
+        let plain = tree(&RoleFilter::everything(), "", &HashSet::new(), false);
+        assert!(
+            !plain
+                .iter()
+                .any(|row| matches!(row.kind, NavRowKind::Symbol(_))),
+            "the outline is off by default"
+        );
+
+        let model = fixtures::model();
+        let entry = model
+            .files
+            .iter()
+            .find(|entry| entry.display_path == "src/engine.rs")
+            .expect("the fixture analyses src/engine.rs");
+        let expected: Vec<&str> = entry
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+
+        for flatten in [false, true] {
+            let rows = outlined(flatten);
+            let name = if flatten {
+                "src/engine.rs"
+            } else {
+                "engine.rs"
+            };
+            let names: Vec<&str> = symbols_under(&rows, name)
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect();
+            assert_eq!(names, expected, "source order, the order the file reads in");
+        }
+    }
+
+    #[test]
+    fn a_symbol_row_carries_its_churn_and_only_the_markers_the_lines_lack() {
+        let rows = outlined(false);
+        let run = symbols_under(&rows, "engine.rs")
+            .into_iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("Engine::run changed");
+        assert_eq!(run.tooltip, "Engine::run");
+        assert!(run.added > 0 || run.deleted > 0);
+        let labels: Vec<&str> = run
+            .markers
+            .iter()
+            .map(|marker| marker.label.as_str())
+            .collect();
+        assert!(labels.contains(&"public"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label.contains("call")),
+            "the call lines below say it: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn detail_lines_state_the_signature_change_and_then_the_calls() {
+        let rows = outlined(false);
+        let details = details_of(&rows, "run");
+        assert_eq!(
+            details.iter().map(|detail| detail.kind).collect::<Vec<_>>(),
+            vec![
+                DetailKind::Signature,
+                DetailKind::Call(CallChangeKind::Removed),
+                DetailKind::Call(CallChangeKind::Modified),
+            ],
+            "the contract first, then what changed behind it"
+        );
+        assert!(
+            details[0].text.contains('\u{2192}'),
+            "the signature reads old → new: {}",
+            details[0].text
+        );
+        assert!(
+            details[1].text.starts_with("validate(input)"),
+            "{}",
+            details[1].text
+        );
+        assert!(
+            details[1].text.ends_with("in error branch"),
+            "the branch comes last, so a narrow column cuts it first: {}",
+            details[1].text
+        );
+    }
+
+    #[test]
+    fn the_cursor_walks_the_symbols_and_steps_over_their_detail_lines() {
+        let rows = outlined(false);
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row.kind, NavRowKind::Detail(_)))
+        );
+        for row in &rows {
+            let walkable = !matches!(row.kind, NavRowKind::Detail(_));
+            assert_eq!(row.id.is_some(), walkable);
+        }
+        let ids = row_ids(&rows);
+        assert!(
+            ids.iter()
+                .any(|id| matches!(id, NavRowId::Item(AttentionTarget::Symbol { .. }))),
+            "a symbol row opens the symbol"
+        );
     }
 
     #[test]
@@ -951,16 +1286,12 @@ mod tests {
         assert_eq!(not_analyzed_count(&loading), 0);
         let rows = nav_rows(
             &loading,
-            &RoleFilter::everything(),
-            "",
-            &HashSet::new(),
-            true,
-            false,
+            &args(&RoleFilter::everything(), "", &HashSet::new(), true),
         );
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|row| match &row.kind {
             NavRowKind::File(file) => !file.dimmed,
-            NavRowKind::Dir(_) => true,
+            _ => true,
         }));
     }
 }
