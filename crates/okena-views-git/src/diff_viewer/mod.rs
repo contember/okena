@@ -11,7 +11,7 @@ pub mod provider;
 mod render;
 pub(crate) mod review;
 mod review_nav;
-mod review_render;
+mod review_ui;
 mod scrollbar;
 mod search;
 mod selection_ops;
@@ -138,9 +138,8 @@ pub struct DiffViewer {
     pub(super) search_sig: Option<DiffSearchSig>,
     /// Independently loaded immutable review datasets and exact file source.
     pub(super) smart_review: review::SmartReviewState,
-    pub(super) review_render_cache: Vec<review_render::ReviewRenderCache>,
-    pub(super) review_scroll_handle: UniformListScrollHandle,
-    pub(super) review_sidebar_scroll_handle: UniformListScrollHandle,
+    /// Review workspace UI state (navigator, filters, derived model).
+    pub(super) review_ui: review_ui::state::ReviewUiState,
     pub(super) review_navigation: review_nav::ReviewNavigationState,
 }
 
@@ -161,6 +160,7 @@ impl DiffViewer {
         let view_mode = gs.diff_view_mode;
         let ignore_whitespace = gs.diff_ignore_whitespace;
         let is_dark = gs.is_dark;
+        let review_ui = review_ui::state::ReviewUiState::new(cx);
 
         let mut viewer = Self {
             focus_handle,
@@ -207,9 +207,7 @@ impl DiffViewer {
             search: None,
             search_sig: None,
             smart_review: review::SmartReviewState::default(),
-            review_render_cache: Vec::new(),
-            review_scroll_handle: UniformListScrollHandle::new(),
-            review_sidebar_scroll_handle: UniformListScrollHandle::new(),
+            review_ui,
             review_navigation: review_nav::ReviewNavigationState::default(),
         };
 

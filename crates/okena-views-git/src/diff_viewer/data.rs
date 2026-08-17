@@ -3,9 +3,10 @@
 
 use super::DiffViewer;
 use super::review::{
-    LoadState, ReviewEpoch, ReviewFileKey, ReviewLens, adjacent_inventory_file, derived_requests,
-    is_smart_mode, theme_requires_rehighlight,
+    LoadState, ReviewEpoch, ReviewFileKey, adjacent_inventory_file, derived_requests, is_smart_mode,
+    theme_requires_rehighlight,
 };
+use super::review_ui::ContentView;
 use super::syntax::process_file;
 use super::types::{DiffDisplayFile, DisplayItem, FileStats, FileTreeNode};
 
@@ -129,8 +130,11 @@ impl DiffViewer {
         }
 
         let epoch = self.smart_review.begin(mode.clone());
+        self.review_reset_for_comparison();
         if explicit_selection {
-            self.smart_review.lens = ReviewLens::Diff;
+            // The caller already chose the file, so the small-change auto-open must not.
+            self.review_ui.content = ContentView::File;
+            self.review_ui.small_change_applied = true;
         }
         self.reset_diff_display(mode.clone());
         cx.notify();
@@ -150,6 +154,7 @@ impl DiffViewer {
                             );
                             this.loading = false;
                             this.smart_review.changed();
+                            this.review_rebuild_model(cx);
                             this.error_message = Some(
                                 "Review inventory returned a different comparison".to_string(),
                             );
@@ -167,6 +172,7 @@ impl DiffViewer {
                                 this.smart_review.inventory = LoadState::Failed(message.clone());
                                 this.loading = false;
                                 this.smart_review.changed();
+                                this.review_rebuild_model(cx);
                                 this.error_message = Some(message);
                                 cx.notify();
                                 return;
@@ -177,12 +183,14 @@ impl DiffViewer {
                         this.smart_review.diff = LoadState::Loading;
                         this.smart_review.structure = LoadState::Loading;
                         this.smart_review.changed();
+                        this.review_rebuild_model(cx);
                         this.start_smart_derived(epoch, mode, comparison, selected, cx);
                     }
                     Err(error) => {
                         this.smart_review.inventory = LoadState::Failed(error.clone());
                         this.loading = false;
                         this.smart_review.changed();
+                        this.review_rebuild_model(cx);
                         this.error_message = Some(error);
                     }
                 }
@@ -234,6 +242,7 @@ impl DiffViewer {
                     }
                     None => return,
                 }
+                this.review_rebuild_model(cx);
                 this.resume_review_navigation(cx);
                 cx.notify();
             });
@@ -248,12 +257,18 @@ impl DiffViewer {
                 .get_review_structure(structure_request)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let _ = this.smart_review.accept_structure(
-                    epoch,
-                    &structure_mode,
-                    &expected_structure_comparison,
-                    result,
-                );
+                if this
+                    .smart_review
+                    .accept_structure(
+                        epoch,
+                        &structure_mode,
+                        &expected_structure_comparison,
+                        result,
+                    )
+                    .is_some()
+                {
+                    this.review_rebuild_model(cx);
+                }
                 cx.notify();
             });
         })
@@ -261,6 +276,8 @@ impl DiffViewer {
     }
 
     pub(super) fn select_smart_file(&mut self, key: ReviewFileKey, cx: &mut Context<Self>) {
+        // Choosing a file always lands in the file view — spec §2.
+        self.review_ui.content = ContentView::File;
         self.review_navigation.invalidate();
         self.smart_review.set_selected_file(key);
         self.reconcile_smart_selection(cx);

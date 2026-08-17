@@ -6563,6 +6563,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-review",
+ "okena-syntax",
  "okena-transport",
  "okena-ui",
  "okena-workspace",

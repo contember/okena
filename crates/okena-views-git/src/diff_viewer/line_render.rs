@@ -277,13 +277,17 @@ impl DiffViewer {
             .map(|n| format!("{:>width$}", n, width = self.line_num_width))
             .unwrap_or_else(|| " ".repeat(self.line_num_width));
 
-        let (line_bg, _, accent_color) = self.line_colors(line.line_type, t);
+        let (line_bg, _, mut accent_color) = self.line_colors(line.line_type, t);
         let semantic_highlight = line
             .old_line_num
             .is_some_and(|line| self.semantic_highlight_matches(ComparisonSide::Base, line))
             || line
                 .new_line_num
                 .is_some_and(|line| self.semantic_highlight_matches(ComparisonSide::Head, line));
+        if semantic_highlight {
+            // The selected symbol claims the accent bar for as long as it stays selected.
+            accent_color = Some(rgba(t.border_active, 1.0));
+        }
 
         let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
         // In-page search highlights (cell id = item index in unified view).

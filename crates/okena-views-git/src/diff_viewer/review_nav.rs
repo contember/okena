@@ -1,14 +1,14 @@
 //! Exact evidence navigation and pure diff-row mapping.
 
 use super::DiffViewer;
-use super::review::{FileGeneration, ReviewFileKey, ReviewLens, SmartReviewState};
+use super::review::{FileGeneration, ReviewFileKey, SmartReviewState};
+use super::review_ui::ContentView;
 use super::types::{DisplayItem, ExpanderRow, SideBySideLine};
 use gpui::{Context, ScrollStrategy, UniformListScrollHandle};
 use okena_core::review::{ComparisonSide, ReviewNavigationTarget};
 use okena_core::types::DiffViewMode;
 use okena_git::FileDiff;
 use std::fmt;
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NavigationToken(u64);
@@ -31,19 +31,10 @@ pub(crate) struct PendingNavigation {
     pub(crate) source_started: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SemanticHighlight {
-    pub(crate) token: NavigationToken,
-    pub(crate) file: ReviewFileKey,
-    pub(crate) side: ComparisonSide,
-    pub(crate) line: u32,
-}
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ReviewNavigationState {
     next_token: NavigationToken,
     pub(crate) pending: Option<PendingNavigation>,
-    pub(crate) highlight: Option<SemanticHighlight>,
     pub(crate) unavailable: Option<NavigationUnavailable>,
 }
 
@@ -60,7 +51,6 @@ impl ReviewNavigationState {
             target,
             source_started: false,
         });
-        self.highlight = None;
         self.unavailable = None;
         token
     }
@@ -68,7 +58,6 @@ impl ReviewNavigationState {
     pub(crate) fn invalidate(&mut self) {
         self.next_token.next();
         self.pending = None;
-        self.highlight = None;
         self.unavailable = None;
     }
 
@@ -87,26 +76,13 @@ impl ReviewNavigationState {
 
     pub(crate) fn fail_current(&mut self, error: NavigationUnavailable) {
         self.pending = None;
-        self.highlight = None;
         self.unavailable = Some(error);
     }
 
-    pub(crate) fn finish(&mut self, highlight: SemanticHighlight) {
+    /// The navigation landed; the row marker now comes from the selected symbol.
+    pub(crate) fn finish(&mut self) {
         self.pending = None;
         self.unavailable = None;
-        self.highlight = Some(highlight);
-    }
-
-    pub(crate) fn clear_highlight_if(&mut self, token: NavigationToken) -> bool {
-        if self
-            .highlight
-            .as_ref()
-            .is_some_and(|highlight| highlight.token == token)
-        {
-            self.highlight = None;
-            return true;
-        }
-        false
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -116,6 +92,8 @@ impl ReviewNavigationState {
 
 impl DiffViewer {
     pub(super) fn navigate_to_evidence(&mut self, target: EvidenceTarget, cx: &mut Context<Self>) {
+        // Evidence always lands in the diff, so the content area follows it.
+        self.review_ui.content = ContentView::File;
         if preflight_evidence_navigation(
             &mut self.smart_review,
             &mut self.review_navigation,
@@ -273,32 +251,12 @@ impl DiffViewer {
             }
         };
         request_strict_center(&self.scroll_handle, row);
-        let highlight = SemanticHighlight {
-            token: pending.token,
-            file: pending.target.file,
-            side,
-            line,
-        };
-        self.review_navigation.finish(highlight);
-        let token = pending.token;
-        cx.spawn(async move |this, cx| {
-            smol::Timer::after(Duration::from_secs(2)).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.review_navigation.clear_highlight_if(token) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.review_navigation.finish();
     }
 
+    /// The selected symbol's marker; it stays until another symbol is selected.
     pub(super) fn semantic_highlight_matches(&self, side: ComparisonSide, line: usize) -> bool {
-        let Some(highlight) = self.review_navigation.highlight.as_ref() else {
-            return false;
-        };
-        self.smart_review.selected_file.as_ref() == Some(&highlight.file)
-            && highlight.side == side
-            && usize::try_from(highlight.line) == Ok(line)
+        self.review_marker_matches(side, line)
     }
 }
 
@@ -309,7 +267,6 @@ fn preflight_evidence_navigation(
 ) -> Result<(), NavigationUnavailable> {
     navigation.invalidate();
     smart_review.set_selected_file(target.file.clone());
-    smart_review.set_lens(ReviewLens::Diff);
     validate_evidence_target(target).inspect_err(|error| {
         navigation.unavailable = Some(error.clone());
     })
@@ -816,14 +773,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_preflight_switches_to_diff_and_keeps_the_exact_pair_visible() {
+    fn invalid_preflight_keeps_the_exact_pair_visible() {
         let key = ReviewFileKey {
             old_path: None,
             new_path: Some("new.rs".into()),
         };
         let invalid = target(key.clone(), ComparisonSide::Base, "new.rs", 1);
         let mut smart_review = SmartReviewState::default();
-        smart_review.set_lens(ReviewLens::Structure);
         let mut navigation = ReviewNavigationState::default();
 
         assert_eq!(
@@ -832,7 +788,6 @@ mod tests {
                 side: ComparisonSide::Base,
             })
         );
-        assert_eq!(smart_review.lens, ReviewLens::Diff);
         assert_eq!(smart_review.selected_file.as_ref(), Some(&key));
         assert_eq!(
             navigation.unavailable,
@@ -914,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_tokens_protect_highlights_and_pending_generations() {
+    fn newer_tokens_and_generations_retire_the_pending_navigation() {
         let key = ReviewFileKey {
             old_path: Some("a.rs".into()),
             new_path: Some("a.rs".into()),
@@ -926,28 +881,18 @@ mod tests {
             generation,
             target(key.clone(), ComparisonSide::Head, "a.rs", 2),
         );
-        state.finish(SemanticHighlight {
-            token: first,
-            file: key.clone(),
-            side: ComparisonSide::Head,
-            line: 2,
-        });
+        assert!(state.accepts(first, generation, &key));
+
         let second_generation = file.begin(key.clone());
         let second = state.begin(
             second_generation,
-            target(key, ComparisonSide::Base, "a.rs", 3),
+            target(key.clone(), ComparisonSide::Base, "a.rs", 3),
         );
-        assert!(!state.clear_highlight_if(first));
-        state.finish(SemanticHighlight {
-            token: second,
-            file: ReviewFileKey {
-                old_path: Some("a.rs".into()),
-                new_path: Some("a.rs".into()),
-            },
-            side: ComparisonSide::Base,
-            line: 3,
-        });
-        assert!(!state.clear_highlight_if(first));
-        assert!(state.clear_highlight_if(second));
+        assert!(!state.accepts(first, generation, &key));
+        assert!(state.accepts(second, second_generation, &key));
+
+        state.finish();
+        assert!(!state.has_pending());
+        assert!(!state.accepts(second, second_generation, &key));
     }
 }
