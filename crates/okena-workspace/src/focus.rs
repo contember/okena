@@ -183,7 +183,7 @@ impl FocusManager {
 
     /// Get fullscreen state as (project_id, terminal_id) if in fullscreen
     pub fn fullscreen_state(&self) -> Option<(&str, &str)> {
-        if self.context != FocusContext::Fullscreen {
+        if !self.has_fullscreen_context() {
             return None;
         }
         self.current_focus.as_ref().and_then(|f| {
@@ -201,16 +201,26 @@ impl FocusManager {
 
     /// Check if any terminal is in fullscreen mode
     pub fn has_fullscreen(&self) -> bool {
-        self.context == FocusContext::Fullscreen
-            && self
-                .current_focus
-                .as_ref()
-                .is_some_and(|f| f.terminal_id.is_some())
+        self.fullscreen_state().is_some()
     }
 
     /// Get the project ID of the fullscreened terminal (if any)
     pub fn fullscreen_project_id(&self) -> Option<&str> {
         self.fullscreen_state().map(|(pid, _)| pid)
+    }
+
+    /// Modals own keyboard focus without changing the presentation beneath them.
+    fn has_fullscreen_context(&self) -> bool {
+        match self.context {
+            FocusContext::Fullscreen => true,
+            FocusContext::Modal => self
+                .focus_stack
+                .iter()
+                .rev()
+                .find(|entry| entry.context != FocusContext::Modal)
+                .is_some_and(|entry| entry.context == FocusContext::Fullscreen),
+            FocusContext::Terminal => false,
+        }
     }
 
     // --- Focus actions ---
@@ -513,6 +523,24 @@ mod tests {
         assert_eq!(*fm.context(), FocusContext::Terminal);
         let target = restored.unwrap();
         assert_eq!(target.project_id, "proj1");
+    }
+
+    #[test]
+    fn modal_preserves_fullscreen_presentation() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+
+        fm.enter_modal();
+
+        assert!(fm.is_modal());
+        assert!(fm.has_fullscreen());
+        assert_eq!(fm.fullscreen_project_id(), Some("proj1"));
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+
+        fm.exit_modal();
+        assert_eq!(*fm.context(), FocusContext::Fullscreen);
+        assert!(fm.has_fullscreen());
     }
 
     #[test]
