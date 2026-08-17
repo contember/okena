@@ -311,6 +311,8 @@ pub(crate) struct ReviewUiState {
     pub status_popover_open: bool,
     pub outline_open: bool,
     pub help_open: bool,
+    /// Overview: commit ledger expanded under the Commits fact.
+    pub ledger_open: bool,
     pub model: Option<Arc<ReviewModel>>,
     pub small_change_applied: bool,
     pub marker: Option<MarkerSpan>,
@@ -350,6 +352,7 @@ impl ReviewUiState {
             status_popover_open: false,
             outline_open: false,
             help_open: false,
+            ledger_open: false,
             model: None,
             small_change_applied: false,
             marker: None,

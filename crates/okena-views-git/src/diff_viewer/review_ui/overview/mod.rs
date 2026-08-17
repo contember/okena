@@ -4,14 +4,14 @@ mod facts;
 mod glance;
 mod start_here;
 
-use self::facts::{FactLine, FactLink, also_roles, fact_sentences};
+use self::facts::{FactLine, FactLink, also_roles, fact_sentences, ledger_rows};
 use self::glance::{Headline, headline, is_narrow, legend_rows};
 use self::start_here::{ChipTone, caveat, chip_tone, row_tone, start_here};
 use super::super::DiffViewer;
 use super::labels::facts as words;
 use super::labels::status as status_words;
-use super::labels::{format_lines, format_signed, glyph, role_label};
-use super::model::{AttentionItem, AttentionTarget, Reason, ReviewModel, VolumeRow};
+use super::labels::{format_lines, format_signed, glyph, relative_time, role_label};
+use super::model::{AttentionItem, AttentionTarget, CommitRow, Reason, ReviewModel, VolumeRow};
 use super::state::{NavigatorMode, RoleFilter, RolePreset, RoleSet};
 use gpui::prelude::*;
 use gpui::*;
@@ -154,11 +154,38 @@ impl DiffViewer {
     }
 
     fn render_facts(&self, model: &ReviewModel, t: &ThemeColors, cx: &mut Context<Self>) -> Div {
-        v_flex().gap(px(10.0)).children(
-            fact_sentences(&model.facts, &model.coverage)
-                .into_iter()
-                .enumerate()
-                .map(|(index, line)| self.render_fact_line(index, line, t, cx)),
+        v_flex()
+            .gap(px(10.0))
+            .children(
+                fact_sentences(&model.facts, &model.coverage)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, line)| self.render_fact_line(index, line, t, cx)),
+            )
+            .children(self.render_ledger(model, t, cx))
+    }
+
+    /// The commit ledger, inline under the facts while `show ledger` is on.
+    fn render_ledger(
+        &self,
+        model: &ReviewModel,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if !self.review_ui.ledger_open || model.commits.is_empty() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .pt(px(4.0))
+                .gap(px(3.0))
+                .border_t_1()
+                .border_color(rgb(t.border))
+                .children(
+                    ledger_rows(&model.commits)
+                        .into_iter()
+                        .map(|commit| render_ledger_row(commit, t, cx)),
+                ),
         )
     }
 
@@ -216,7 +243,7 @@ impl DiffViewer {
             .text_size(ui_text_ms(cx))
             .text_color(rgb(t.term_blue))
             .hover(|style| style.text_color(rgb(t.text_primary)))
-            .child(link.label())
+            .child(link.label(self.review_ui.ledger_open))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.review_follow_fact_link(&link, cx);
             }))
@@ -231,6 +258,7 @@ impl DiffViewer {
                 self.review_open_item(AttentionTarget::Directory(path.clone()), cx);
             }
             FactLink::MechanicalMoves => self.review_set_saved_filter(Some(true), None, cx),
+            FactLink::CommitLedger => self.review_toggle_commit_ledger(cx),
             FactLink::Also => {
                 let roles = self
                     .review_ui
@@ -479,6 +507,58 @@ fn signed_count(text: String, color: u32, cx: &App) -> Div {
         .text_size(ui_text_sm(cx))
         .text_color(rgb(color))
         .child(text)
+}
+
+/// `a1b2c3d · subject · Ada · 6d ago`; no per-commit diff to open yet.
+fn render_ledger_row(commit: &CommitRow, t: &ThemeColors, cx: &App) -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_shrink_0()
+                .font_family("monospace")
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(commit.short_sha.clone()),
+        )
+        .when(commit.is_merge, |row| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(4.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(t.bg_secondary))
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(words::MERGE_BADGE),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_secondary))
+                .child(commit.subject.clone()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(commit.author.clone()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(relative_time(commit.timestamp)),
+        )
+        .into_any_element()
 }
 
 fn render_chip(reason: &Reason, t: &ThemeColors, cx: &App) -> AnyElement {

@@ -2,7 +2,9 @@
 //! to — spec §8. Pure; the render pass turns a link into a click.
 
 use super::super::labels::facts as words;
-use super::super::model::{CoverageSummary, Facts, FileEntry, ReasonKind, ReviewModel};
+use super::super::model::{
+    CommitRow, CoverageSummary, Facts, FileEntry, ReasonKind, ReviewModel,
+};
 use super::super::state::RoleSet;
 
 /// One fact line: label, sentence, and the link that ends it.
@@ -22,15 +24,19 @@ pub(crate) enum FactLink {
     Directory(String),
     /// Narrow the file filter to the moves that only moved.
     MechanicalMoves,
+    /// The commit ledger, inline under the facts.
+    CommitLedger,
     /// The files this comparison also touched, by role.
     Also,
 }
 
 impl FactLink {
-    pub(crate) fn label(&self) -> &'static str {
+    /// Link text. Only the ledger has two states, so only it reads `ledger_open`.
+    pub(crate) fn label(&self, ledger_open: bool) -> &'static str {
         match self {
             Self::Attention => words::ATTENTION_LINK,
             Self::MechanicalMoves => words::FILTER_LINK,
+            Self::CommitLedger => words::ledger_link(ledger_open),
             Self::Directory(_) | Self::Also => words::SHOW_LINK,
         }
     }
@@ -74,12 +80,11 @@ pub(crate) fn fact_sentences(facts: &Facts, coverage: &CoverageSummary) -> Vec<F
         });
     }
 
-    // The ledger needs a toggle `ReviewUiState` does not have, so the line has no link.
     if let Some(fact) = facts.commits.as_ref() {
         lines.push(FactLine {
             label: words::COMMITS,
             text: words::commits_sentence(fact),
-            link: None,
+            link: Some(FactLink::CommitLedger),
         });
     }
 
@@ -95,6 +100,14 @@ pub(crate) fn fact_sentences(facts: &Facts, coverage: &CoverageSummary) -> Vec<F
     }
 
     lines
+}
+
+/// The ledger, oldest commit first — the order the branch was written in.
+pub(crate) fn ledger_rows(commits: &[CommitRow]) -> Vec<&CommitRow> {
+    let mut rows: Vec<&CommitRow> = commits.iter().collect();
+    // Stable, so commits that share a timestamp keep their inventory order.
+    rows.sort_by_key(|commit| commit.timestamp);
+    rows
 }
 
 /// A file the "Also" fact counts — the same set `also_fact` sums up.
@@ -123,7 +136,7 @@ mod tests {
     use super::super::super::fixtures;
     use super::super::super::model::{CoverageSummary, Facts, ReviewModel};
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
-    use super::{FactLink, FactLine, also_roles, fact_sentences};
+    use super::{FactLink, FactLine, also_roles, fact_sentences, ledger_rows};
     use okena_core::review::{FileRole, ReviewInventory};
     use okena_git::DiffMode;
 
@@ -156,6 +169,7 @@ mod tests {
         assert_eq!(line(&lines, "Public API").link, Some(FactLink::Attention));
         assert_eq!(line(&lines, "Moves").link, Some(FactLink::MechanicalMoves));
         assert_eq!(line(&lines, "Also").link, Some(FactLink::Also));
+        assert_eq!(line(&lines, "Commits").link, Some(FactLink::CommitLedger));
         assert!(
             matches!(line(&lines, "Tests").link, Some(FactLink::Directory(_))),
             "the tests link opens the directory it names"
@@ -169,10 +183,33 @@ mod tests {
 
     #[test]
     fn every_link_carries_the_wording_the_spec_gives_it() {
-        assert_eq!(FactLink::Attention.label(), "\u{2192} Attention");
-        assert_eq!(FactLink::MechanicalMoves.label(), "filter");
-        assert_eq!(FactLink::Also.label(), "show");
-        assert_eq!(FactLink::Directory("src".into()).label(), "show");
+        assert_eq!(FactLink::Attention.label(false), "\u{2192} Attention");
+        assert_eq!(FactLink::MechanicalMoves.label(false), "filter");
+        assert_eq!(FactLink::Also.label(false), "show");
+        assert_eq!(FactLink::Directory("src".into()).label(false), "show");
+    }
+
+    #[test]
+    fn only_the_ledger_link_changes_with_the_open_state() {
+        assert_eq!(FactLink::CommitLedger.label(false), "show ledger");
+        assert_eq!(FactLink::CommitLedger.label(true), "hide ledger");
+        assert_eq!(FactLink::Also.label(true), "show");
+    }
+
+    #[test]
+    fn the_ledger_runs_oldest_first() {
+        let model = fixtures::model();
+        let rows = ledger_rows(&model.commits);
+        assert_eq!(rows.len(), model.commits.len());
+        assert!(
+            rows.windows(2)
+                .all(|pair| pair[0].timestamp <= pair[1].timestamp),
+            "the ledger reads in the order the branch was written"
+        );
+        assert!(
+            rows.iter().any(|commit| commit.is_merge),
+            "the fixture has a merge commit to mark"
+        );
     }
 
     #[test]

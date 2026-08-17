@@ -32,6 +32,10 @@ pub(crate) const ALSO: &str = "Also";
 pub(crate) const ATTENTION_LINK: &str = "\u{2192} Attention";
 pub(crate) const SHOW_LINK: &str = "show";
 pub(crate) const FILTER_LINK: &str = "filter";
+const SHOW_LEDGER_LINK: &str = "show ledger";
+const HIDE_LEDGER_LINK: &str = "hide ledger";
+/// Marks a commit with more than one parent in the ledger.
+pub(crate) const MERGE_BADGE: &str = "merge";
 pub(crate) const NO_SUPPORTED_LANGUAGE: &str = "no supported language in this comparison";
 /// A directory row with no path of its own — the comparison touched the root.
 const REPOSITORY_ROOT: &str = "repository root";
@@ -329,6 +333,15 @@ pub(crate) fn caveat_sentence(
     )
 }
 
+/// The commit-ledger link says what the click does next.
+pub(crate) fn ledger_link(open: bool) -> &'static str {
+    if open {
+        HIDE_LEDGER_LINK
+    } else {
+        SHOW_LEDGER_LINK
+    }
+}
+
 /// `all 236 → Attention` — the link to the whole ordered list.
 pub(crate) fn all_attention(count: usize) -> String {
     format!("all {} {ATTENTION_LINK}", format_count(count))
@@ -339,8 +352,8 @@ mod tests {
     use super::super::super::model::{AlsoFact, CommitsFact, DirRef, MovesFact, PublicApiFact, TestsFact};
     use super::{
         all_attention, also_sentence, caveat_sentence, commits_sentence, headline_files,
-        headline_lines, headline_share_of_files, headline_share_of_lines, moves_sentence,
-        percent_label, public_api_sentence, tests_sentence,
+        headline_lines, headline_share_of_files, headline_share_of_lines, ledger_link,
+        moves_sentence, percent_label, public_api_sentence, tests_sentence,
     };
 
     fn public_api(removed: u64, signatures: u64, added: u64, lower_bound: bool) -> PublicApiFact {
@@ -585,5 +598,11 @@ mod tests {
     fn the_attention_link_counts_the_whole_list() {
         assert_eq!(all_attention(236), "all 236 \u{2192} Attention");
         assert_eq!(all_attention(1_236), "all 1\u{2009}236 \u{2192} Attention");
+    }
+
+    #[test]
+    fn the_ledger_link_names_the_next_state() {
+        assert_eq!(ledger_link(false), "show ledger");
+        assert_eq!(ledger_link(true), "hide ledger");
     }
 }

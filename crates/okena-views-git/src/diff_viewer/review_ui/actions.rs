@@ -60,6 +60,7 @@ impl DiffViewer {
         state.status_popover_open = false;
         state.outline_open = false;
         state.help_open = false;
+        state.ledger_open = false;
     }
 
     /// Indices into `ReviewModel::files` that pass the role filter and the text filter.
@@ -401,6 +402,11 @@ impl DiffViewer {
 
     pub(crate) fn review_toggle_help(&mut self, cx: &mut Context<Self>) {
         self.review_ui.help_open = !self.review_ui.help_open;
+        cx.notify();
+    }
+
+    pub(crate) fn review_toggle_commit_ledger(&mut self, cx: &mut Context<Self>) {
+        self.review_ui.ledger_open = !self.review_ui.ledger_open;
         cx.notify();
     }
 
