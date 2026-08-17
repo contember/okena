@@ -12,8 +12,9 @@ mod roles_menu;
 mod rows;
 
 use super::super::DiffViewer;
+use super::super::review::ReviewFileKey;
 use super::labels::nav as words;
-use super::model::ReasonKind;
+use super::model::{AttentionTarget, ReasonKind};
 use super::state::{FocusRegion, NavRowId, NavigatorMode, RolePreset};
 use gpui::prelude::*;
 use gpui::*;
@@ -76,26 +77,20 @@ impl DiffViewer {
         };
         let state = &self.review_ui;
         match state.navigator {
-            NavigatorMode::Files => rows::nav_rows(
+            NavigatorMode::Files => rows::row_ids(&rows::nav_rows(
                 model,
                 &state.role_filter,
                 &state.filter_text,
                 &state.expanded_dirs,
                 state.flatten,
                 state.expanded_initialized,
-            )
-            .into_iter()
-            .map(|row| row.id)
-            .collect(),
-            NavigatorMode::Attention => items::attention_rows(
+            )),
+            NavigatorMode::Attention => items::row_ids(&items::attention_rows(
                 model,
                 &state.attention_filter,
                 &state.role_filter,
                 &state.filter_text,
-            )
-            .into_iter()
-            .filter_map(|row| row.id)
-            .collect(),
+            )),
         }
     }
 
@@ -260,7 +255,7 @@ impl DiffViewer {
                                 .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_muted))
                                 .hover(|s| s.text_color(rgb(t.text_primary)))
-                                .child(words::CLEAR)
+                                .child(words::CLEAR_GLYPH)
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.review_clear_role_filter(cx);
                                 })),
@@ -387,18 +382,10 @@ impl DiffViewer {
 
     /// Files structure never reached; the footer explains why rows are dim.
     fn review_not_analyzed_total(&self) -> usize {
-        self.review_ui.model.as_ref().map_or(0, |model| {
-            model
-                .files
-                .iter()
-                .filter(|entry| {
-                    entry
-                        .reasons
-                        .iter()
-                        .any(|reason| reason.kind == ReasonKind::NotAnalyzed)
-                })
-                .count()
-        })
+        self.review_ui
+            .model
+            .as_ref()
+            .map_or(0, |model| rows::not_analyzed_count(model))
     }
 
     fn review_active_chip_words(&self) -> Vec<&'static str> {
@@ -421,6 +408,22 @@ impl DiffViewer {
 
     fn review_clear_role_filter(&mut self, cx: &mut Context<Self>) {
         self.review_apply_preset(RolePreset::Everything, cx);
+    }
+
+    /// The empty Attention list's way out: drop every filter that hides rows.
+    /// The `tests` chip stays as it is — spec §6 excludes tests by default.
+    fn review_clear_attention_filters(&mut self, cx: &mut Context<Self>) {
+        let kinds: Vec<ReasonKind> = self
+            .review_ui
+            .attention_filter
+            .kinds
+            .iter()
+            .copied()
+            .collect();
+        for kind in kinds {
+            self.review_toggle_reason_filter(kind, cx);
+        }
+        self.review_show_all(cx);
     }
 
     /// Scroll the cursor row back into view while the navigator drives the keys.
@@ -532,6 +535,47 @@ fn churn_cell(added: u64, deleted: u64, t: &ThemeColors, cx: &App) -> Div {
         .when(deleted > 0, |d| {
             d.child(div().text_color(rgb(t.diff_removed_fg)).child(minus))
         })
+}
+
+/// Rows are keyed on what they open, never on the text they display: a
+/// renamed or re-filtered row keeps its element id, and its scroll state.
+fn nav_element_id(prefix: &str, id: &NavRowId) -> ElementId {
+    ElementId::Name(format!("{prefix}-{}", row_key(id)).into())
+}
+
+fn row_key(id: &NavRowId) -> String {
+    match id {
+        NavRowId::Dir(path) => format!("d:{path}"),
+        NavRowId::File(key) => format!("f:{}", file_key(key)),
+        NavRowId::Item(target) => match target {
+            AttentionTarget::Symbol { file, change_index } => {
+                format!("s:{}#{change_index}", file_key(file))
+            }
+            AttentionTarget::File(key) => format!("i:{}", file_key(key)),
+            AttentionTarget::Directory(path) => format!("t:{path}"),
+        },
+    }
+}
+
+fn file_key(key: &ReviewFileKey) -> String {
+    format!(
+        "{}>{}",
+        key.old_path.as_deref().unwrap_or_default(),
+        key.new_path.as_deref().unwrap_or_default()
+    )
+}
+
+/// What a list says when every row is filtered away.
+fn empty_state(message: &'static str, t: &ThemeColors, cx: &App) -> Div {
+    h_flex()
+        .flex_1()
+        .min_h_0()
+        .items_start()
+        .gap(px(6.0))
+        .px(px(COLUMN_PADDING))
+        .text_size(ui_text_ms(cx))
+        .text_color(rgb(t.text_muted))
+        .child(message)
 }
 
 /// The selection accent is its own child, never a border: a later

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 /// How far an item indents under its file header in the grouped variant.
 const GROUP_INDENT: f32 = 12.0;
+const DOT: &str = "\u{00B7}";
 
 impl DiffViewer {
     pub(crate) fn render_attention_list(
@@ -39,24 +40,46 @@ impl DiffViewer {
         let colors = *t;
         let view = cx.entity().clone();
         let count = rows.len();
+        let body = if count == 0 {
+            self.render_attention_empty(t, cx)
+        } else {
+            uniform_list("review-attention-list", count, move |range, _window, cx| {
+                view.update(cx, |this, cx| {
+                    range
+                        .filter_map(|index| rows.get(index))
+                        .map(|row| this.render_attention_row(row, &colors, cx))
+                        .collect::<Vec<AnyElement>>()
+                })
+            })
+            .flex_1()
+            .min_h_0()
+            .track_scroll(&self.review_ui.attention_scroll)
+            .into_any_element()
+        };
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
+            // The chips stay on screen; one of them is usually what emptied the list.
             .child(self.render_reason_chips(&chips, t, cx))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_attention_empty(&self, t: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        super::empty_state(words::NO_ITEM_MATCH, t, cx)
+            .child(DOT)
             .child(
-                uniform_list("review-attention-list", count, move |range, _window, cx| {
-                    view.update(cx, |this, cx| {
-                        range
-                            .filter_map(|index| rows.get(index))
-                            .map(|row| this.render_attention_row(row, &colors, cx))
-                            .collect::<Vec<AnyElement>>()
-                    })
-                })
-                .flex_1()
-                .min_h_0()
-                .track_scroll(&self.review_ui.attention_scroll),
+                div()
+                    .id("review-attention-clear")
+                    .cursor_pointer()
+                    .text_color(rgb(t.term_blue))
+                    .hover(|s| s.text_color(rgb(t.text_primary)))
+                    .child(words::CLEAR)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.review_clear_attention_filters(cx);
+                    })),
             )
             .into_any_element()
     }
@@ -119,18 +142,28 @@ impl DiffViewer {
         }
     }
 
+    /// A header *is* its file: it paints and opens like a tree file row.
     fn render_group_row(
         &self,
         group: &GroupRow,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let id = super::NavRowId::File(group.key.clone());
+        let selected = self.review_ui.nav_cursor.as_ref() == Some(&id)
+            || self.smart_review.selected_file.as_ref() == Some(&group.key);
+        let for_click = group.key.clone();
         h_flex()
+            .id(super::nav_element_id("review-group", &id))
             .h(px(ITEM_ROW_HEIGHT))
             .w_full()
             .items_center()
             .gap(px(4.0))
-            .px(px(super::COLUMN_PADDING))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(rgb(t.bg_selection)))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(selection_bar(selected, t))
+            .child(div().w(px(4.0)).flex_shrink_0())
             .child(file_icon(basename(&group.path), t, cx).flex_shrink_0())
             .child(
                 div()
@@ -145,10 +178,16 @@ impl DiffViewer {
             .child(
                 div()
                     .flex_shrink_0()
+                    .pr(px(super::COLUMN_PADDING))
                     .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(group.count.to_string()),
             )
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                // The pointer moves the cursor too, so `↑` `↓` carry on from here.
+                this.review_ui.nav_cursor = Some(super::NavRowId::File(for_click.clone()));
+                this.review_open_file(for_click.clone(), cx);
+            }))
             .into_any_element()
     }
 
@@ -172,8 +211,9 @@ impl DiffViewer {
         let indent = if item.nested { GROUP_INDENT } else { 0.0 };
         let target = item.target.clone();
         h_flex()
-            .id(ElementId::Name(
-                format!("review-item-{}-{}", item.path, item.name).into(),
+            .id(super::nav_element_id(
+                "review-item",
+                &super::NavRowId::Item(item.target.clone()),
             ))
             .h(px(ITEM_ROW_HEIGHT))
             .w_full()

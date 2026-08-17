@@ -86,6 +86,30 @@ pub(crate) fn matches_filter(haystack: &str, lowercase_needle: &str) -> bool {
     lowercase_needle.is_empty() || haystack.to_lowercase().contains(lowercase_needle)
 }
 
+/// The navigator's one reading of "not analyzed": structure landed and did not
+/// reach this file. The ranking already gates that on structure being present,
+/// so its `NotAnalyzed` reason is the authority — while structure is still
+/// loading no file is dim and nothing is counted.
+pub(crate) fn not_analyzed(entry: &FileEntry) -> bool {
+    entry
+        .reasons
+        .iter()
+        .any(|reason| reason.kind == ReasonKind::NotAnalyzed)
+}
+
+pub(crate) fn not_analyzed_count(model: &ReviewModel) -> usize {
+    model
+        .files
+        .iter()
+        .filter(|entry| not_analyzed(entry))
+        .count()
+}
+
+/// The ids `↑` `↓` walk; every tree row opens something, so none is dropped.
+pub(crate) fn row_ids(rows: &[NavRow]) -> Vec<NavRowId> {
+    rows.iter().map(|row| row.id.clone()).collect()
+}
+
 /// Every visible row of the Files tree, in display order.
 pub(crate) fn nav_rows(
     model: &ReviewModel,
@@ -264,6 +288,15 @@ fn untested_dirs(root: &DirNode) -> HashSet<String> {
     out
 }
 
+/// A joined chain stands for several directories at once, so the flag may sit
+/// on any of them — the visible tree joins differently than the model's does.
+fn covers_untested(name: &str, path: &str, untested: &HashSet<String>) -> bool {
+    let joined = name.split('/').count();
+    let segments: Vec<&str> = path.split('/').collect();
+    let first = segments.len().saturating_sub(joined);
+    (first..segments.len()).any(|last| untested.contains(&segments[..=last].join("/")))
+}
+
 fn collect_untested(node: &DirNode, out: &mut HashSet<String>) {
     if node.no_test_changes {
         out.insert(node.path.clone());
@@ -312,7 +345,7 @@ fn emit(args: Emit<'_>) {
                 added: child.added,
                 deleted: child.deleted,
                 expanded,
-                no_tests: untested.contains(&child.path),
+                no_tests: covers_untested(&child.name, &child.path, untested),
             }),
         });
         if expanded {
@@ -364,11 +397,11 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool) -> NavRow {
         _ if flatten => tree_path(entry).to_string(),
         _ => basename(tree_path(entry)).to_string(),
     };
-    let not_analyzed = entry
+    let unreached = entry
         .reasons
         .iter()
         .find(|reason| reason.kind == ReasonKind::NotAnalyzed);
-    let tooltip = match not_analyzed {
+    let tooltip = match unreached {
         Some(reason) => format!("{} \u{00B7} {}", entry.display_path, reason.label),
         None => entry.display_path.clone(),
     };
@@ -382,7 +415,7 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool) -> NavRow {
             deleted: entry.lines_deleted,
             markers: markers(entry),
             role_badge: role_badge(entry.role),
-            dimmed: not_analyzed.is_some(),
+            dimmed: not_analyzed(entry),
             is_rename,
             tooltip,
         }),
@@ -453,8 +486,12 @@ pub(crate) fn basename(path: &str) -> &str {
 mod tests {
     use super::super::super::fixtures;
     use super::super::super::model::{FileEntry, ReasonKind};
+    use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::super::super::state::{NavRowId, RoleFilter, RolePreset};
-    use super::{DirRow, FileRow, NavRow, NavRowKind, default_expanded, nav_rows, visible_files};
+    use super::{
+        DirRow, FileRow, NavRow, NavRowKind, covers_untested, default_expanded, nav_rows,
+        not_analyzed, not_analyzed_count, row_ids, visible_files,
+    };
     use std::collections::HashSet;
 
     fn tree(
@@ -734,5 +771,118 @@ mod tests {
             ["src/lib.rs"]
         );
         assert_eq!(paths(&RoleFilter::everything(), "").len(), 13);
+    }
+
+    #[test]
+    fn every_tree_row_is_reachable_from_the_cursor() {
+        let model = fixtures::model();
+        for flatten in [false, true] {
+            let rows = nav_rows(
+                &model,
+                &RoleFilter::everything(),
+                "",
+                &HashSet::new(),
+                flatten,
+                false,
+            );
+            assert!(!rows.is_empty());
+            assert_eq!(
+                row_ids(&rows),
+                rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+                "the Files tree has no separator rows, so no row is skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_joined_chain_carries_the_flag_of_every_directory_it_swallowed() {
+        let untested: HashSet<String> = HashSet::from(["packages/workers".to_string()]);
+        assert!(
+            covers_untested("workers/src", "packages/workers/src", &untested),
+            "the joined row stands for packages/workers too"
+        );
+        assert!(covers_untested(
+            "packages/workers",
+            "packages/workers",
+            &untested
+        ));
+        assert!(
+            !covers_untested("src", "packages/workers/src", &untested),
+            "an unjoined child never borrows its parent's flag"
+        );
+        assert!(!covers_untested(
+            "packages/core",
+            "packages/core",
+            &untested
+        ));
+    }
+
+    #[test]
+    fn the_no_tests_flag_reads_the_comparison_not_the_filter() {
+        // Hiding the test files must not turn every directory into an untested one.
+        let review_code = tree(
+            &RoleFilter::preset(RolePreset::ReviewCode),
+            "",
+            &HashSet::new(),
+            false,
+        );
+        assert!(dir(&review_code, "src").no_tests);
+        assert!(
+            !dir(&review_code, "worker").no_tests,
+            "worker/ changed a test next to its implementation, filtered or not"
+        );
+    }
+
+    #[test]
+    fn not_analyzed_means_structure_landed_and_missed_the_file() {
+        let model = fixtures::model();
+        for entry in &model.files {
+            assert_eq!(
+                not_analyzed(entry),
+                !entry.analysis.is_analyzed(),
+                "{} disagrees with the saved filter",
+                entry.display_path
+            );
+        }
+        let mut narrow = RoleFilter::everything();
+        narrow.not_analyzed_only = true;
+        assert_eq!(
+            not_analyzed_count(&model),
+            model
+                .files
+                .iter()
+                .filter(|entry| narrow.allows(entry))
+                .count()
+        );
+        assert!(not_analyzed_count(&model) > 0);
+    }
+
+    #[test]
+    fn nothing_is_dim_while_structure_is_still_loading() {
+        let inventory = fixtures::inventory();
+        let loading = build_review_model(ModelInputs {
+            inventory: Some(&inventory),
+            inventory_error: None,
+            structure: None,
+            structure_state: StructureLoad::Loading,
+            diff_mode: &okena_git::DiffMode::BranchCompare {
+                base: "main".into(),
+                head: "feature".into(),
+            },
+        });
+        assert_eq!(not_analyzed_count(&loading), 0);
+        let rows = nav_rows(
+            &loading,
+            &RoleFilter::everything(),
+            "",
+            &HashSet::new(),
+            true,
+            false,
+        );
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| match &row.kind {
+            NavRowKind::File(file) => !file.dimmed,
+            NavRowKind::Dir(_) => true,
+        }));
     }
 }

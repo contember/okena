@@ -86,7 +86,7 @@ pub(crate) fn roles_menu(model: &ReviewModel, filter: &RoleFilter) -> RolesMenu 
             SavedRow {
                 filter: SavedFilter::NotAnalyzed,
                 label: super::super::labels::nav::NOT_ANALYZED_ONLY,
-                note: not_analyzed_count(model).to_string(),
+                note: super::rows::not_analyzed_count(model).to_string(),
                 checked: filter.not_analyzed_only,
             },
         ],
@@ -113,14 +113,6 @@ fn moves_note(model: &ReviewModel) -> String {
     } else {
         format!("{moves} moves")
     }
-}
-
-fn not_analyzed_count(model: &ReviewModel) -> usize {
-    model
-        .files
-        .iter()
-        .filter(|entry| !entry.analysis.is_analyzed())
-        .count()
 }
 
 #[cfg(test)]

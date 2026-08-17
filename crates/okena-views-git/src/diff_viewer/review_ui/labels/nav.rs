@@ -13,7 +13,7 @@ pub(crate) const FILTER_PLACEHOLDER_ITEMS: &str = "Filter\u{2026}";
 /// The key that focuses the filter box, shown inside it — spec §11.
 pub(crate) const FILTER_KEY_HINT: &str = "/";
 pub(crate) const ROLES: &str = "Roles";
-pub(crate) const CLEAR: &str = "\u{2715}";
+pub(crate) const CLEAR_GLYPH: &str = "\u{2715}";
 pub(crate) const CHEVRON_DOWN: &str = "\u{25BE}";
 pub(crate) const FLATTEN: &str = "flatten";
 pub(crate) const SHOW_ALL: &str = "show all";
@@ -21,6 +21,10 @@ pub(crate) const GROUP_BY_FILE: &str = "group by file";
 pub(crate) const ORDERED_LIST: &str = "ordered list";
 pub(crate) const TESTS_EXCLUDED: &str = "tests excluded";
 pub(crate) const TESTS_CHIP: &str = "tests";
+pub(crate) const NO_FILE_MATCH: &str = "No file matches the filter";
+pub(crate) const NO_ITEM_MATCH: &str = "No item matches the filters";
+/// The way out of an empty list, next to the sentence that explains it.
+pub(crate) const CLEAR: &str = "clear";
 pub(crate) const NO_TESTS_MARKER: &str = "no tests";
 
 pub(crate) const PRESETS_TITLE: &str = "PRESETS";

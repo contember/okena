@@ -35,7 +35,7 @@ impl DiffViewer {
             state.expanded_initialized,
         ));
         if tree.is_empty() {
-            return empty_list("No file matches the filter", t, cx);
+            return super::empty_state(words::NO_FILE_MATCH, t, cx).into_any_element();
         }
         let ids: Vec<Option<super::NavRowId>> =
             tree.iter().map(|row| Some(row.id.clone())).collect();
@@ -82,7 +82,7 @@ impl DiffViewer {
         let selected = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
         let for_click = path.clone();
         tree_row(
-            ElementId::Name(format!("review-dir-{path}").into()),
+            super::nav_element_id("review-row", &row.id),
             row.depth,
             selected,
             t,
@@ -154,7 +154,7 @@ impl DiffViewer {
         let for_click = key.clone();
         let tooltip = file.tooltip.clone();
         tree_row(
-            ElementId::Name(format!("review-file-{}", file.tooltip).into()),
+            super::nav_element_id("review-row", &row.id),
             row.depth,
             selected,
             t,
@@ -211,15 +211,4 @@ fn tree_row(id: ElementId, depth: usize, selected: bool, t: &ThemeColors) -> Sta
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(selection_bar(selected, t))
         .child(div().w(px(indent)).flex_shrink_0())
-}
-
-fn empty_list(message: &'static str, t: &ThemeColors, cx: &App) -> AnyElement {
-    div()
-        .flex_1()
-        .min_h_0()
-        .px(px(super::COLUMN_PADDING))
-        .text_size(ui_text_ms(cx))
-        .text_color(rgb(t.text_muted))
-        .child(message)
-        .into_any_element()
 }

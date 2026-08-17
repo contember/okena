@@ -4,6 +4,7 @@
 //! filters; the grouped variant re-buckets the same rows by file without
 //! reordering them.
 
+use super::super::super::review::ReviewFileKey;
 use super::super::labels::nav as words;
 use super::super::model::{AttentionTarget, KindGlyph, Reason, ReasonKind, ReviewModel, Tier};
 use super::super::state::{AttentionFilter, NavRowId, RoleFilter};
@@ -28,6 +29,8 @@ pub(crate) enum AttentionRowKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupRow {
+    /// The header opens its file, so it carries the file's identity.
+    pub key: ReviewFileKey,
     pub path: String,
     pub count: usize,
 }
@@ -116,47 +119,57 @@ fn ordered_rows(model: &ReviewModel, visible: &[usize]) -> Vec<AttentionRow> {
                 kind: AttentionRowKind::Tier(words::tier_label(item.tier)),
             });
         }
-        out.push(item_row(model, *index, false));
+        out.extend(item_row(model, *index, false));
     }
     out
 }
 
 /// The same rows bucketed by file; a file keeps the rank of its first item.
 fn grouped_rows(model: &ReviewModel, visible: &[usize]) -> Vec<AttentionRow> {
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut groups: Vec<(ReviewFileKey, String, Vec<usize>)> = Vec::new();
     let mut loose: Vec<usize> = Vec::new();
     for index in visible {
         let Some(item) = model.attention.get(*index) else {
             continue;
         };
         // Directory rows belong to no file, so they stay in the flat order.
-        if item.target.file().is_none() {
+        let Some(key) = item.target.file() else {
             loose.push(*index);
             continue;
-        }
-        match groups.iter_mut().find(|(path, _)| *path == item.path) {
-            Some((_, members)) => members.push(*index),
-            None => groups.push((item.path.clone(), vec![*index])),
+        };
+        match groups.iter_mut().find(|(candidate, _, _)| candidate == key) {
+            Some((_, _, members)) => members.push(*index),
+            None => groups.push((key.clone(), item.path.clone(), vec![*index])),
         }
     }
     let mut out = Vec::new();
-    for (path, members) in groups {
+    for (key, path, members) in groups {
         out.push(AttentionRow {
-            id: Some(NavRowId::Dir(path.clone())),
+            // A header is its file: `↑` `↓` and `↵` open it like a tree row.
+            id: Some(NavRowId::File(key.clone())),
             kind: AttentionRowKind::Group(GroupRow {
+                key,
                 path,
                 count: members.len(),
             }),
         });
-        out.extend(members.iter().map(|index| item_row(model, *index, true)));
+        out.extend(
+            members
+                .iter()
+                .filter_map(|index| item_row(model, *index, true)),
+        );
     }
-    out.extend(loose.iter().map(|index| item_row(model, *index, false)));
+    out.extend(
+        loose
+            .iter()
+            .filter_map(|index| item_row(model, *index, false)),
+    );
     out
 }
 
-fn item_row(model: &ReviewModel, index: usize, nested: bool) -> AttentionRow {
-    let item = &model.attention[index];
-    AttentionRow {
+fn item_row(model: &ReviewModel, index: usize, nested: bool) -> Option<AttentionRow> {
+    let item = model.attention.get(index)?;
+    Some(AttentionRow {
         id: Some(NavRowId::Item(item.target.clone())),
         kind: AttentionRowKind::Item(ItemRow {
             target: item.target.clone(),
@@ -169,7 +182,12 @@ fn item_row(model: &ReviewModel, index: usize, nested: bool) -> AttentionRow {
             dimmed: item.dimmed,
             nested,
         }),
-    }
+    })
+}
+
+/// The ids `↑` `↓` walk: every row except the tier separators, in order.
+pub(crate) fn row_ids(rows: &[AttentionRow]) -> Vec<NavRowId> {
+    rows.iter().filter_map(|row| row.id.clone()).collect()
 }
 
 /// The two chips that say the most; `body` never displaces a measurement.
@@ -300,7 +318,7 @@ mod tests {
     use super::super::super::state::{AttentionFilter, NavRowId, RoleFilter, RolePreset};
     use super::{
         AttentionRow, AttentionRowKind, active_chip_words, attention_rows, chip_toggle_kinds,
-        reason_chips, visible_attention,
+        reason_chips, row_ids, visible_attention,
     };
     use std::collections::BTreeSet;
 
@@ -477,7 +495,7 @@ mod tests {
                     assert_eq!(counted, expected, "the previous header miscounted");
                     counted = 0;
                     expected = group.count;
-                    assert!(matches!(row.id, Some(NavRowId::Dir(_))));
+                    assert!(matches!(row.id, Some(NavRowId::File(_))));
                 }
                 AttentionRowKind::Item(item) if item.nested => counted += 1,
                 _ => {}
@@ -587,5 +605,66 @@ mod tests {
             ["no tests"]
         );
         assert!(directory.path.contains("implementation files"));
+    }
+
+    #[test]
+    fn a_file_header_is_its_file_so_the_keys_open_it() {
+        let model = fixtures::model();
+        let filter = AttentionFilter {
+            grouped_by_file: true,
+            ..AttentionFilter::default()
+        };
+        let rows = attention_rows(&model, &filter, &RoleFilter::everything(), "");
+        let (id, group) = rows
+            .iter()
+            .find_map(|row| match &row.kind {
+                AttentionRowKind::Group(group) => Some((row.id.clone(), group)),
+                _ => None,
+            })
+            .expect("the grouped list opens with a header");
+        assert_eq!(
+            id,
+            Some(NavRowId::File(group.key.clone())),
+            "the header id is the file id, not a directory path"
+        );
+
+        // The key is the one the items under it carry.
+        let first_item = rows
+            .iter()
+            .find_map(|row| match &row.kind {
+                AttentionRowKind::Item(item) if item.nested => Some(item),
+                _ => None,
+            })
+            .expect("the header has rows under it");
+        assert_eq!(first_item.target.file(), Some(&group.key));
+    }
+
+    #[test]
+    fn the_cursor_walks_every_row_except_the_tier_separators() {
+        let model = fixtures::model();
+        for grouped in [false, true] {
+            let filter = AttentionFilter {
+                grouped_by_file: grouped,
+                ..AttentionFilter::default()
+            };
+            let rows = attention_rows(&model, &filter, &RoleFilter::everything(), "");
+            let expected: Vec<NavRowId> = rows
+                .iter()
+                .filter(|row| !matches!(row.kind, AttentionRowKind::Tier(_)))
+                .map(|row| row.id.clone().expect("only separators lack an id"))
+                .collect();
+            assert_eq!(row_ids(&rows), expected);
+            assert_eq!(
+                row_ids(&rows).len() + separators(&rows),
+                rows.len(),
+                "grouped={grouped}"
+            );
+        }
+    }
+
+    fn separators(rows: &[AttentionRow]) -> usize {
+        rows.iter()
+            .filter(|row| matches!(row.kind, AttentionRowKind::Tier(_)))
+            .count()
     }
 }
