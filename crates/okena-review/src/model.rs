@@ -952,6 +952,9 @@ pub enum CallChangeKind {
 pub enum CallPairingStrategy {
     /// The comparator found exactly one matching occurrence inside each enclosing range.
     UniqueOccurrenceWithinEnclosingRange,
+    /// The callee repeats, but once the occurrences identical on both sides were cancelled
+    /// exactly one changed occurrence remained inside each enclosing range.
+    UniqueChangedOccurrenceWithinEnclosingRange,
 }
 
 /// Evidence for pairing two call occurrences across snapshots.

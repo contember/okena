@@ -315,9 +315,20 @@ pub fn compare_indexed_calls_controlled(
             |left, right, checkpoint| compare_facts_controlled(left, right, checkpoint),
             &mut || check(checkpoint),
         )?;
+        // Repeated callees: an occurrence that reads the same on both sides
+        // (arguments, control context, provenance) is unchanged whatever its
+        // ordinal, so it drops out before the uniqueness test below. Nothing
+        // here pairs by position; the leftovers still degrade to added/removed.
+        let (old_count, new_count) = (group.old.len(), group.new.len());
+        cancel_identical_controlled(&mut group.old, &mut group.new, checkpoint)?;
         if let ([old], [new]) = (group.old.as_slice(), group.new.as_slice())
             && old.provenance() == new.provenance()
         {
+            let strategy = if old_count == 1 && new_count == 1 {
+                CallPairingStrategy::UniqueOccurrenceWithinEnclosingRange
+            } else {
+                CallPairingStrategy::UniqueChangedOccurrenceWithinEnclosingRange
+            };
             let arguments_changed = old.argument_text() != new.argument_text();
             let control_context_changed = !contexts_equal_controlled(
                 old.control_context(),
@@ -328,7 +339,7 @@ pub fn compare_indexed_calls_controlled(
                 continue;
             }
             let pairing = CallPairingEvidence::new(
-                CallPairingStrategy::UniqueOccurrenceWithinEnclosingRange,
+                strategy,
                 old.call_site_range(),
                 new.call_site_range(),
                 input.old_enclosing_range,
@@ -380,6 +391,41 @@ pub fn compare_indexed_calls_controlled(
         check(checkpoint)
     })?;
     Ok(changes)
+}
+
+/// Drop every old/new occurrence pair that is identical in argument text,
+/// control context and provenance; each old call cancels at most one new call.
+fn cancel_identical_controlled<'a>(
+    old: &mut Vec<&'a CallFact>,
+    new: &mut Vec<&'a CallFact>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<(), ControlledCallDiffError> {
+    let mut kept_old = Vec::with_capacity(old.len());
+    for candidate in old.drain(..) {
+        check(checkpoint)?;
+        let mut matched = None;
+        for (index, other) in new.iter().enumerate() {
+            if candidate.argument_text() == other.argument_text()
+                && candidate.provenance() == other.provenance()
+                && contexts_equal_controlled(
+                    candidate.control_context(),
+                    other.control_context(),
+                    checkpoint,
+                )?
+            {
+                matched = Some(index);
+                break;
+            }
+        }
+        match matched {
+            Some(index) => {
+                new.remove(index);
+            }
+            None => kept_old.push(candidate),
+        }
+    }
+    *old = kept_old;
+    Ok(())
 }
 
 fn validate_paths(old_path: &str, new_path: &str) -> Result<(), CallDiffError> {
@@ -751,8 +797,8 @@ mod tests {
         assert!(one_sided.iter().all(|change| change.pairing().is_none()));
 
         let two_new = vec![
-            call("load", "(first)", 50, 6, &enclosing, Vec::new()),
-            call("load", "(second)", 70, 8, &enclosing, Vec::new()),
+            call("load", "(third)", 50, 6, &enclosing, Vec::new()),
+            call("load", "(fourth)", 70, 8, &enclosing, Vec::new()),
         ];
         let both_sides = compare(&enclosing, &old, &two_new);
         assert_eq!(both_sides.len(), 4);
@@ -761,6 +807,70 @@ mod tests {
                 .iter()
                 .all(|change| change.kind() != CallChangeKind::Modified)
         );
+    }
+
+    #[test]
+    fn identical_repeated_calls_cancel_out_whatever_their_ordinal() {
+        let enclosing = key(&[], "review");
+        let old = vec![
+            call("useState", "(false)", 10, 2, &enclosing, Vec::new()),
+            call("useState", "(true)", 30, 4, &enclosing, Vec::new()),
+            call("useState", "(false)", 50, 6, &enclosing, Vec::new()),
+        ];
+        // Same three occurrences, moved down by an unrelated edit above them.
+        let moved = vec![
+            call("useState", "(false)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(true)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        assert!(compare(&enclosing, &old, &moved).is_empty());
+
+        // One occurrence changed: the identical ones drop out, the rest still
+        // degrade to added/removed — never a positional Modified pair.
+        let edited = vec![
+            call("useState", "(false)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(1)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &edited);
+        assert_eq!(changes.len(), 1);
+        let change = &changes[0];
+        assert_eq!(change.kind(), CallChangeKind::Modified);
+        assert_eq!(change.old().map(CallFact::argument_text), Some("(true)"));
+        assert_eq!(change.new_fact().map(CallFact::argument_text), Some("(1)"));
+        assert_eq!(
+            change.pairing().map(CallPairingEvidence::strategy),
+            Some(CallPairingStrategy::UniqueChangedOccurrenceWithinEnclosingRange)
+        );
+
+        // Two changed occurrences per side stay ambiguous: added and removed.
+        let two_edited = vec![
+            call("useState", "(1)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(2)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &two_edited);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().all(|change| change.pairing().is_none()));
+
+        // Control context is part of identity: the same call inside a loop is
+        // a different occurrence from the one outside it.
+        let in_loop = vec![
+            call(
+                "useState",
+                "(false)",
+                90,
+                8,
+                &enclosing,
+                vec![ControlContext::Loop],
+            ),
+            call("useState", "(true)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &in_loop);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind(), CallChangeKind::Modified);
+        assert!(changes[0].control_context_changed());
     }
 
     #[test]
