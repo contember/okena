@@ -2,9 +2,7 @@
 //! to — spec §8. Pure; the render pass turns a link into a click.
 
 use super::super::labels::facts as words;
-use super::super::model::{
-    CommitRow, CoverageSummary, Facts, FileEntry, ReasonKind, ReviewModel,
-};
+use super::super::model::{CommitRow, CoverageSummary, Facts, FileEntry, ReasonKind, ReviewModel};
 use super::super::state::RoleSet;
 
 /// One fact line: label, sentence, and the link that ends it.
@@ -136,7 +134,7 @@ mod tests {
     use super::super::super::fixtures;
     use super::super::super::model::{CoverageSummary, Facts, ReviewModel};
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
-    use super::{FactLink, FactLine, also_roles, fact_sentences, ledger_rows};
+    use super::{FactLine, FactLink, also_roles, fact_sentences, ledger_rows};
     use okena_core::review::{FileRole, ReviewInventory};
     use okena_git::DiffMode;
 

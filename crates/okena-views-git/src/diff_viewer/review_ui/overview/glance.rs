@@ -63,16 +63,15 @@ fn headline_row(model: &ReviewModel) -> Option<&VolumeRow> {
 }
 
 fn deletions_dominate(model: &ReviewModel, role: FileRole) -> bool {
-    let (added, deleted) = model
-        .files
-        .iter()
-        .filter(|entry| entry.role == role)
-        .fold((0u64, 0u64), |(added, deleted), entry| {
+    let (added, deleted) = model.files.iter().filter(|entry| entry.role == role).fold(
+        (0u64, 0u64),
+        |(added, deleted), entry| {
             (
                 added.saturating_add(entry.lines_added),
                 deleted.saturating_add(entry.lines_deleted),
             )
-        });
+        },
+    );
     deleted > added
 }
 
@@ -85,8 +84,8 @@ pub(crate) fn legend_rows(model: &ReviewModel) -> Vec<&VolumeRow> {
 #[cfg(test)]
 mod tests {
     use super::super::super::fixtures;
-    use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::super::super::model::ReviewModel;
+    use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::{headline, is_narrow, legend_rows};
     use okena_core::review::{FileRole, ReviewInventory};
     use okena_git::DiffMode;

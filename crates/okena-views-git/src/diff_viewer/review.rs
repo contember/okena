@@ -417,7 +417,9 @@ pub(crate) fn adjacent_inventory_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff_viewer::review_ui::fixtures::{empty_inventory, exact_diff, inventory, structure};
+    use crate::diff_viewer::review_ui::fixtures::{
+        empty_inventory, exact_diff, inventory, structure,
+    };
 
     #[test]
     fn stale_mode_and_file_generations_are_rejected() {
@@ -493,7 +495,8 @@ mod tests {
 
     #[test]
     fn derived_requests_share_the_full_comparison_and_whitespace_flag() {
-        let comparison = ImmutableResolvedComparison::try_from(empty_inventory().comparison).unwrap();
+        let comparison =
+            ImmutableResolvedComparison::try_from(empty_inventory().comparison).unwrap();
         let (diff, structure) = derived_requests(&comparison, true);
         assert_eq!(diff, structure);
         assert_eq!(diff.comparison, comparison);

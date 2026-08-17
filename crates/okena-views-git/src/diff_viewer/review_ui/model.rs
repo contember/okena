@@ -30,7 +30,9 @@ impl ReviewModel {
     }
 
     pub(crate) fn attention_index(&self, target: &AttentionTarget) -> Option<usize> {
-        self.attention.iter().position(|item| &item.target == target)
+        self.attention
+            .iter()
+            .position(|item| &item.target == target)
     }
 
     pub(crate) fn first_attention_for_file(&self, key: &ReviewFileKey) -> Option<usize> {

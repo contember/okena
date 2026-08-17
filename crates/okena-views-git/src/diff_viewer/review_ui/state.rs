@@ -365,10 +365,8 @@ impl ReviewUiState {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ALL_ROLES, ComparisonSide, FileRole, MarkerSpan, RoleFilter, RolePreset, RoleSet,
-    };
     use super::super::model::{FileAnalysis, FileEntry, Tier};
+    use super::{ALL_ROLES, ComparisonSide, FileRole, MarkerSpan, RoleFilter, RolePreset, RoleSet};
     use crate::diff_viewer::review::ReviewFileKey;
     use okena_core::review::ReviewFileStatus;
 

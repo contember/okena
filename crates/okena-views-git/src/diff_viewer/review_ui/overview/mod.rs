@@ -27,7 +27,11 @@ const NAME_WIDTH: Pixels = px(240.0);
 const HEADLINE_SIZE: f32 = 17.0;
 
 impl DiffViewer {
-    pub(crate) fn render_overview(&mut self, t: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_overview(
+        &mut self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(model) = self.review_ui.model.clone() else {
             return div()
                 .flex_1()
@@ -71,11 +75,14 @@ impl DiffViewer {
             .gap(px(12.0))
             .child(render_headline(&headline(model), t, cx))
             .child(render_bar(model, t))
-            .child(v_flex().gap(px(1.0)).children(
-                legend_rows(model).into_iter().enumerate().map(
-                    |(index, row)| self.render_legend_row(index, row, t, cx),
+            .child(
+                v_flex().gap(px(1.0)).children(
+                    legend_rows(model)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, row)| self.render_legend_row(index, row, t, cx)),
                 ),
-            ));
+            );
         let facts = self.render_facts(model, t, cx);
         let body = if narrow {
             v_flex().gap(px(20.0)).child(volume).child(facts)
@@ -142,7 +149,12 @@ impl DiffViewer {
                     .text_color(rgb(t.text_secondary))
                     .child(role_label(role)),
             )
-            .child(numeric(words::legend_files(row.files), 72.0, t.text_muted, cx))
+            .child(numeric(
+                words::legend_files(row.files),
+                72.0,
+                t.text_muted,
+                cx,
+            ))
             .child(numeric(lines, 72.0, t.text_secondary, cx))
             .child(numeric(
                 words::percent_label(row.percent),
@@ -591,10 +603,9 @@ fn role_color(role: FileRole, t: &ThemeColors) -> u32 {
         FileRole::Fixture | FileRole::Snapshot | FileRole::Example => t.text_secondary,
         FileRole::Documentation => t.term_magenta,
         FileRole::Configuration => t.warning,
-        FileRole::Lockfile
-        | FileRole::Generated
-        | FileRole::Vendored
-        | FileRole::Unclassified => t.term_bright_black,
+        FileRole::Lockfile | FileRole::Generated | FileRole::Vendored | FileRole::Unclassified => {
+            t.term_bright_black
+        }
     }
 }
 

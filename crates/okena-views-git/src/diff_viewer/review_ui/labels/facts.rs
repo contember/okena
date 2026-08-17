@@ -15,8 +15,7 @@ const AT_LEAST: &str = "\u{2265} ";
 pub(crate) const GLANCE_HEADER: &str = "CHANGE AT A GLANCE";
 pub(crate) const GLANCE_HINT: &str = "changed lines = added + deleted";
 pub(crate) const START_HERE_HEADER: &str = "START HERE";
-pub(crate) const START_HERE_HINT: &str =
-    "one ordered list \u{00B7} every row names its reasons";
+pub(crate) const START_HERE_HINT: &str = "one ordered list \u{00B7} every row names its reasons";
 pub(crate) const TIERS_FOOTER: &str = "Tiers: contract \u{2192} behaviour \u{2192} volume \
      \u{2192} git facts \u{2192} everything else. Same order in the navigator's Attention \
      mode; ] steps through it from any file.";
@@ -84,7 +83,11 @@ pub(crate) fn headline_share_of_lines(percent: f32, total_lines: u64, files: usi
 
 /// `40 % of 30 files`.
 pub(crate) fn headline_share_of_files(percent: f32, total_files: usize) -> String {
-    format!("{} of {}", rounded_percent(percent), count_files(total_files))
+    format!(
+        "{} of {}",
+        rounded_percent(percent),
+        count_files(total_files)
+    )
 }
 
 /// Headline share, without the decimal the legend carries.
@@ -180,7 +183,11 @@ pub(crate) fn tests_sentence(fact: &TestsFact) -> String {
 }
 
 fn directory_name(path: &str) -> &str {
-    if path.is_empty() { REPOSITORY_ROOT } else { path }
+    if path.is_empty() {
+        REPOSITORY_ROOT
+    } else {
+        path
+    }
 }
 
 /// `21 high-similarity moves · 17 likely mechanical (≤ 20 residual lines) ·
@@ -349,7 +356,9 @@ pub(crate) fn all_attention(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::model::{AlsoFact, CommitsFact, DirRef, MovesFact, PublicApiFact, TestsFact};
+    use super::super::super::model::{
+        AlsoFact, CommitsFact, DirRef, MovesFact, PublicApiFact, TestsFact,
+    };
     use super::{
         all_attention, also_sentence, caveat_sentence, commits_sentence, headline_files,
         headline_lines, headline_share_of_files, headline_share_of_lines, ledger_link,
@@ -381,7 +390,10 @@ mod tests {
             headline_share_of_lines(45.3, 34_640, 97),
             "45 % of 34\u{2009}640 \u{00B7} 97 files"
         );
-        assert_eq!(headline_lines("Documentation", 1, false), "Documentation 1 line");
+        assert_eq!(
+            headline_lines("Documentation", 1, false),
+            "Documentation 1 line"
+        );
     }
 
     #[test]
@@ -394,7 +406,10 @@ mod tests {
 
     #[test]
     fn a_comparison_without_line_counts_falls_back_to_files() {
-        assert_eq!(headline_files("Implementation", 12), "Implementation 12 files");
+        assert_eq!(
+            headline_files("Implementation", 12),
+            "Implementation 12 files"
+        );
         assert_eq!(headline_files("Unclassified", 1), "Unclassified 1 file");
         assert_eq!(headline_share_of_files(40.0, 30), "40 % of 30 files");
     }

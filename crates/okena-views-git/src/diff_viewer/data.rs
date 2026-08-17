@@ -3,8 +3,8 @@
 
 use super::DiffViewer;
 use super::review::{
-    LoadState, ReviewEpoch, ReviewFileKey, adjacent_inventory_file, derived_requests, is_smart_mode,
-    theme_requires_rehighlight,
+    LoadState, ReviewEpoch, ReviewFileKey, adjacent_inventory_file, derived_requests,
+    is_smart_mode, theme_requires_rehighlight,
 };
 use super::review_ui::ContentView;
 use super::syntax::process_file;

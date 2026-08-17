@@ -20,9 +20,7 @@ pub(crate) fn caveat(coverage: &CoverageSummary) -> Option<String> {
         return None;
     }
     // The reached subset is biased only when analysis took files in path order.
-    let path_order = coverage
-        .path_order_bias
-        .then_some(coverage.analyzed_files);
+    let path_order = coverage.path_order_bias.then_some(coverage.analyzed_files);
     if coverage.impl_total > 0 {
         let reached = u64::try_from(coverage.impl_analyzed).unwrap_or(u64::MAX);
         let total = u64::try_from(coverage.impl_total).unwrap_or(u64::MAX);
@@ -131,9 +129,12 @@ mod tests {
         if higher >= START_HERE_ROWS {
             assert_eq!(shown_rest, 0);
         } else {
-            assert_eq!(shown_rest, START_HERE_ROWS.saturating_sub(higher).min(
-                model.attention.len().saturating_sub(higher)
-            ));
+            assert_eq!(
+                shown_rest,
+                START_HERE_ROWS
+                    .saturating_sub(higher)
+                    .min(model.attention.len().saturating_sub(higher))
+            );
         }
     }
 
