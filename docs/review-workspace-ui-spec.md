@@ -156,7 +156,9 @@ one opens the symbol. Detail lines, one line each and truncated with the full te
 <old> → <new>` first, then the calls (`+` `−` `~`, the call text, then the branch it sits in, so a
 narrow column cuts the branch first), at most six of them and then `… N more`. Identical occurrences
 share one line with `×4`. A file with a block under it is filled like a header, its symbols sit one
-level in and their detail lines one level further, under the symbol's own glyph column. Detail lines
+level in and their detail lines one level further, under the symbol's own glyph column. A member whose
+enclosing symbol changed too sits one level under it, so a class reads as its own outline; a member of
+a symbol that was *removed* whole is left out, since the parent's row already says it went. Detail lines
 open their symbol on click but `↑` `↓` step over them. The
 footer counts what the switch added: `89 files · 4 122 changed symbols · dimmed = not analyzed (8)`.
 

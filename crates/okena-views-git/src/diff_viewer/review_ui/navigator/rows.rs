@@ -15,7 +15,7 @@ use super::super::model::{
 };
 use super::super::state::{NavRowId, ReviewUiState, RoleFilter};
 use okena_core::review::{FileRole, ReviewFileStatus};
-use okena_review::CallChangeKind;
+use okena_review::{CallChangeKind, SymbolChangeKind};
 use std::collections::{BTreeMap, HashSet};
 
 /// Visible files at or below which the whole tree opens — spec §7.
@@ -26,6 +26,9 @@ const MAX_MARKERS: usize = 2;
 
 /// Call lines one symbol contributes to the outline; the rest are counted.
 const MAX_OUTLINE_CALLS: usize = 6;
+
+/// What `SymbolKey::qualified_name` puts between a symbol and its scope.
+const QUALIFIER: &str = "::";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NavRow {
@@ -498,9 +501,25 @@ fn flat_rows(model: &ReviewModel, visible: &[usize], outline: bool) -> Vec<NavRo
 // -- outline rows ------------------------------------------------------------
 
 /// Every changed symbol of one file, each followed by what changed in it.
-/// Source order, the order the file itself reads in.
+/// Source order, the order the file itself reads in; a member sits under the
+/// type it belongs to, so a class reads as its own outline.
 fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
+    let present: HashSet<&str> = entry
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified.as_str())
+        .collect();
+    let removed: HashSet<&str> = entry
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.change == SymbolChangeKind::Removed)
+        .map(|symbol| symbol.qualified.as_str())
+        .collect();
     for symbol in &entry.symbols {
+        let Some(level) = scope_level(&symbol.qualified, &present, &removed) else {
+            continue;
+        };
+        let depth = depth.saturating_add(level);
         let target = AttentionTarget::Symbol {
             file: entry.key.clone(),
             change_index: symbol.change_index,
@@ -520,6 +539,23 @@ fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
             });
         }
     }
+}
+
+/// How far under its file a symbol sits: one level per enclosing symbol that
+/// changed too. `None` when one of those was removed whole — the member went
+/// with it, and its own row would only repeat that.
+fn scope_level(qualified: &str, present: &HashSet<&str>, removed: &HashSet<&str>) -> Option<usize> {
+    let mut level: usize = 0;
+    for (index, _) in qualified.match_indices(QUALIFIER) {
+        let ancestor = &qualified[..index];
+        if removed.contains(ancestor) {
+            return None;
+        }
+        if present.contains(ancestor) {
+            level = level.saturating_add(1);
+        }
+    }
+    Some(level)
 }
 
 fn symbol_row(symbol: &SymbolEntry, target: AttentionTarget) -> SymbolRow {
@@ -717,7 +753,7 @@ mod tests {
     use super::{
         AttentionTarget, CallChangeKind, DetailKind, DetailRow, DirRow, FileRow, NavRow,
         NavRowKind, SymbolRow, TreeArgs, covers_untested, default_expanded, nav_rows, not_analyzed,
-        not_analyzed_count, row_ids, visible_files,
+        not_analyzed_count, row_ids, scope_level, visible_files,
     };
     use std::collections::HashSet;
 
@@ -1200,6 +1236,42 @@ mod tests {
             "the branch comes last, so a narrow column cuts it first: {}",
             details[1].text
         );
+    }
+
+    #[test]
+    fn a_member_sits_under_the_type_it_changed_with() {
+        let present = HashSet::from(["Registry", "Registry::add", "free", "Gone"]);
+        let removed = HashSet::from(["Gone"]);
+        let level = |qualified| scope_level(qualified, &present, &removed);
+
+        assert_eq!(level("Registry"), Some(0));
+        assert_eq!(
+            level("Registry::add"),
+            Some(1),
+            "a member of a changed type"
+        );
+        assert_eq!(
+            level("Registry::add::inner"),
+            Some(2),
+            "one level per enclosing symbol that changed too"
+        );
+        assert_eq!(
+            level("Untouched::method"),
+            Some(0),
+            "a type that did not change is not a level"
+        );
+        assert_eq!(level("free"), Some(0));
+    }
+
+    #[test]
+    fn a_member_of_a_removed_type_is_left_out() {
+        let present = HashSet::from(["Gone", "Gone::field", "Gone::Inner", "Gone::Inner::x"]);
+        let removed = HashSet::from(["Gone"]);
+        let level = |qualified| scope_level(qualified, &present, &removed);
+
+        assert_eq!(level("Gone"), Some(0), "the removal itself is the news");
+        assert_eq!(level("Gone::field"), None);
+        assert_eq!(level("Gone::Inner::x"), None, "however deep it sits");
     }
 
     #[test]
