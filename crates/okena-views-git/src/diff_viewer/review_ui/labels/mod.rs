@@ -3,6 +3,7 @@
 // Frozen surface: the wave-1 view units call these.
 #![allow(dead_code)]
 
+pub(crate) mod calls;
 pub(crate) mod facts;
 pub(crate) mod nav;
 pub(crate) mod reasons;

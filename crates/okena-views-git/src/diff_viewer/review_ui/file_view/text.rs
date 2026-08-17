@@ -2,10 +2,7 @@
 //! enum reaches the screen through `labels`, never through `{:?}`.
 
 use super::super::labels::{format_signed, language_from_path};
-use super::super::model::{
-    AttentionTarget, CallRow, FileAnalysis, FileEntry, PublicApiFact, ReviewModel,
-};
-use okena_review::CallChangeKind;
+use super::super::model::{AttentionTarget, FileAnalysis, FileEntry, PublicApiFact, ReviewModel};
 
 pub(super) const DOT: &str = " \u{00B7} ";
 pub(super) const ARROW: &str = "\u{2192}";
@@ -13,8 +10,6 @@ pub(super) const AT_LEAST: &str = "\u{2265} ";
 /// Stands in for the position when the queue target is filtered out of view.
 const UNPLACED: &str = "\u{2014}";
 const BINARY: &str = "binary";
-/// A call outside every branch, when the other side of a move had one.
-const TOP_LEVEL: &str = "top level";
 
 /// Directory (with its trailing slash) and basename; the header dims the first.
 pub(super) fn split_path(path: &str) -> (&str, &str) {
@@ -148,110 +143,13 @@ pub(super) fn queue_label(
     })
 }
 
+/// The call wording the details bar prints lives in `labels::calls`; the
+/// navigator's inline outline reads the same functions.
+pub(super) use super::super::labels::calls::{CallLine, call_lines, call_marker};
+
 /// `changed symbol 1 of 4`.
 pub(super) fn symbol_counter(index: usize, total: usize) -> String {
     format!("changed symbol {} of {total}", index.saturating_add(1))
-}
-
-/// `+`, `−` or `~` — which way the call went.
-pub(super) fn call_marker(change: CallChangeKind) -> &'static str {
-    match change {
-        CallChangeKind::Added => "+",
-        CallChangeKind::Removed => "\u{2212}",
-        CallChangeKind::Modified => "~",
-    }
-}
-
-/// `retry(3) → (retries)` for a modified call whose arguments changed,
-/// `callee(args)` otherwise — a call that only moved between branches keeps
-/// its one text, and `call_context` tells the move.
-pub(super) fn call_text(row: &CallRow) -> String {
-    let old = row.old_args.as_deref().unwrap_or_default();
-    let new = row.new_args.as_deref().unwrap_or_default();
-    match row.change {
-        CallChangeKind::Added => format!("{}{new}", row.callee),
-        CallChangeKind::Removed => format!("{}{old}", row.callee),
-        CallChangeKind::Modified if old == new => format!("{}{new}", row.callee),
-        CallChangeKind::Modified => format!("{}{old} {ARROW} {new}", row.callee),
-    }
-}
-
-/// `in condition` — the branch the call sits in, outermost first; a call that
-/// moved reads `in loop → loop · closure`. Top level on both sides says nothing.
-pub(super) fn call_context(row: &CallRow) -> Option<String> {
-    let stack = |context: &[String]| {
-        if context.is_empty() {
-            TOP_LEVEL.to_string()
-        } else {
-            context.join(DOT)
-        }
-    };
-    match row.old_context.as_deref() {
-        Some(old) => Some(format!("in {} {ARROW} {}", stack(old), stack(&row.context))),
-        None if row.context.is_empty() => None,
-        None => Some(format!("in {}", stack(&row.context))),
-    }
-}
-
-/// Widest a call reads in the details block before it is cut.
-const CALL_TEXT_CHARS: usize = 96;
-const ELLIPSIS: char = '\u{2026}';
-
-/// One call as the details block lists it: one line, whatever the source did.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct CallLine {
-    pub change: CallChangeKind,
-    pub text: String,
-    pub context: Option<String>,
-}
-
-/// The lines the details block shows, and how many it left out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct CallLines {
-    pub shown: Vec<CallLine>,
-    pub hidden: usize,
-}
-
-impl CallLines {
-    /// `… 12 more`, or nothing when every call is listed.
-    pub(super) fn hidden_note(&self) -> Option<String> {
-        (self.hidden > 0).then(|| format!("{ELLIPSIS} {} more", self.hidden))
-    }
-}
-
-/// Removed and modified calls first — they are what changed behaviour; then
-/// added, each side in source order. At most `limit` lines.
-pub(super) fn call_lines(calls: &[CallRow], limit: usize) -> CallLines {
-    let mut ordered: Vec<&CallRow> = calls.iter().collect();
-    ordered.sort_by_key(|row| match row.change {
-        CallChangeKind::Removed => 0,
-        CallChangeKind::Modified => 1,
-        CallChangeKind::Added => 2,
-    });
-    let shown = ordered
-        .iter()
-        .take(limit)
-        .map(|row| CallLine {
-            change: row.change,
-            text: one_line(&call_text(row), CALL_TEXT_CHARS),
-            context: call_context(row),
-        })
-        .collect();
-    CallLines {
-        shown,
-        hidden: ordered.len().saturating_sub(limit),
-    }
-}
-
-/// Collapse every whitespace run to one space and cut at `max_chars`.
-fn one_line(text: &str, max_chars: usize) -> String {
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if joined.chars().count() <= max_chars {
-        return joined;
-    }
-    let mut out: String = joined.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push(ELLIPSIS);
-    out
 }
 
 /// `base 120–168 · head 120–190` — the outermost lines the symbol's hunks
@@ -282,15 +180,13 @@ pub(super) fn line_span(old: &[(u32, u32)], new: &[(u32, u32)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::super::fixtures;
-    use super::super::super::model::{AttentionTarget, CallRow, ReviewModel};
+    use super::super::super::model::{AttentionTarget, ReviewModel};
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::{
-        analysis_label, call_context, call_lines, call_marker, call_text, churn_words,
-        header_summary, line_span, one_line, queue_label, queue_position, split_path,
-        symbol_counter,
+        analysis_label, churn_words, header_summary, line_span, queue_label, queue_position,
+        split_path, symbol_counter,
     };
     use okena_git::DiffMode;
-    use okena_review::CallChangeKind;
 
     fn mode() -> DiffMode {
         DiffMode::BranchCompare {
@@ -435,112 +331,6 @@ mod tests {
     fn the_symbol_counter_is_one_based() {
         assert_eq!(symbol_counter(0, 4), "changed symbol 1 of 4");
         assert_eq!(symbol_counter(3, 4), "changed symbol 4 of 4");
-    }
-
-    #[test]
-    fn call_rows_read_as_signed_lines_with_their_branch() {
-        let row = |change, old: Option<&str>, new: Option<&str>, context: Vec<String>| CallRow {
-            change,
-            callee: "retry".into(),
-            old_args: old.map(str::to_string),
-            new_args: new.map(str::to_string),
-            context,
-            old_context: None,
-        };
-
-        let added = row(CallChangeKind::Added, None, Some("(value)"), Vec::new());
-        assert_eq!(call_marker(added.change), "+");
-        assert_eq!(call_text(&added), "retry(value)");
-        assert_eq!(call_context(&added), None);
-
-        let removed = row(
-            CallChangeKind::Removed,
-            Some("(input)"),
-            None,
-            vec!["error branch".into()],
-        );
-        assert_eq!(call_marker(removed.change), "\u{2212}");
-        assert_eq!(call_text(&removed), "retry(input)");
-        assert_eq!(call_context(&removed), Some("in error branch".to_string()));
-
-        let modified = row(
-            CallChangeKind::Modified,
-            Some("(3)"),
-            Some("(retries)"),
-            vec!["condition".into(), "loop".into()],
-        );
-        assert_eq!(call_marker(modified.change), "~");
-        assert_eq!(call_text(&modified), "retry(3) \u{2192} (retries)");
-        assert_eq!(
-            call_context(&modified),
-            Some("in condition \u{00B7} loop".to_string())
-        );
-
-        // Same arguments, moved into a closure: one text, the move in the context.
-        let mut moved = row(
-            CallChangeKind::Modified,
-            Some("(3)"),
-            Some("(3)"),
-            vec!["loop".into(), "closure".into()],
-        );
-        moved.old_context = Some(vec!["loop".into()]);
-        assert_eq!(call_text(&moved), "retry(3)");
-        assert_eq!(
-            call_context(&moved),
-            Some("in loop \u{2192} loop \u{00B7} closure".to_string())
-        );
-        moved.old_context = Some(Vec::new());
-        assert_eq!(
-            call_context(&moved),
-            Some("in top level \u{2192} loop \u{00B7} closure".to_string())
-        );
-    }
-
-    #[test]
-    fn call_lines_read_one_line_each_and_list_what_changed_first() {
-        let row = |change: CallChangeKind, callee: &str, args: &str| CallRow {
-            change,
-            callee: callee.to_string(),
-            old_args: Some(args.to_string()),
-            new_args: Some(args.to_string()),
-            context: Vec::new(),
-            old_context: None,
-        };
-        let calls = vec![
-            row(CallChangeKind::Added, "log", "(a)"),
-            row(
-                CallChangeKind::Removed,
-                "result.set",
-                "(name, {\n    fields: [],\n})",
-            ),
-            row(CallChangeKind::Added, "warn", "(b)"),
-            row(CallChangeKind::Modified, "retry", "(3)"),
-        ];
-        let lines = call_lines(&calls, 3);
-        assert_eq!(lines.hidden, 1);
-        assert_eq!(lines.hidden_note().as_deref(), Some("\u{2026} 1 more"));
-        assert_eq!(
-            lines
-                .shown
-                .iter()
-                .map(|line| line.change)
-                .collect::<Vec<_>>(),
-            vec![
-                CallChangeKind::Removed,
-                CallChangeKind::Modified,
-                CallChangeKind::Added
-            ]
-        );
-        assert_eq!(lines.shown[0].text, "result.set(name, { fields: [], })");
-        assert_eq!(lines.shown[2].text, "log(a)");
-        assert_eq!(call_lines(&calls, 8).hidden_note(), None);
-    }
-
-    #[test]
-    fn one_line_collapses_whitespace_and_cuts_with_an_ellipsis() {
-        assert_eq!(one_line("a  b\n\t c", 10), "a b c");
-        assert_eq!(one_line("abcdefghij", 10), "abcdefghij");
-        assert_eq!(one_line("abcdefghijk", 10), "abcdefghi\u{2026}");
     }
 
     #[test]
