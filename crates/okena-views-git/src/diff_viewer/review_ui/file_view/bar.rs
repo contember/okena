@@ -350,7 +350,7 @@ fn call_line(row: &text::CallLine, t: &ThemeColors, cx: &App) -> AnyElement {
                 .font_family("monospace")
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
-                .child(row.text.clone()),
+                .child(row.text_with_count()),
         )
         .when_some(row.context.clone(), |d, context| {
             d.child(

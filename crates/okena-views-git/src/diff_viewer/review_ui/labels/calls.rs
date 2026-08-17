@@ -60,6 +60,18 @@ pub(crate) struct CallLine {
     pub change: CallChangeKind,
     pub text: String,
     pub context: Option<String>,
+    /// How many identical occurrences this one line stands for.
+    pub count: usize,
+}
+
+impl CallLine {
+    /// `emit(value) ×4` — the count only when the call repeats.
+    pub(crate) fn text_with_count(&self) -> String {
+        if self.count <= 1 {
+            return self.text.clone();
+        }
+        format!("{} \u{00D7}{}", self.text, self.count)
+    }
 }
 
 /// The lines the details block shows, and how many it left out.
@@ -77,7 +89,9 @@ impl CallLines {
 }
 
 /// Removed and modified calls first — they are what changed behaviour; then
-/// added, each side in source order. At most `limit` lines.
+/// added, each side in source order. Occurrences that read identically share
+/// one line with a count, so a callee used four times is one line and not
+/// four. At most `limit` lines; `hidden` counts the lines left out.
 pub(crate) fn call_lines(calls: &[CallRow], limit: usize) -> CallLines {
     let mut ordered: Vec<&CallRow> = calls.iter().collect();
     ordered.sort_by_key(|row| match row.change {
@@ -85,18 +99,26 @@ pub(crate) fn call_lines(calls: &[CallRow], limit: usize) -> CallLines {
         CallChangeKind::Modified => 1,
         CallChangeKind::Added => 2,
     });
-    let shown = ordered
-        .iter()
-        .take(limit)
-        .map(|row| CallLine {
+    let mut lines: Vec<CallLine> = Vec::new();
+    for row in ordered {
+        let line = CallLine {
             change: row.change,
             text: one_line(&call_text(row), CALL_TEXT_CHARS),
             context: call_context(row),
-        })
-        .collect();
+            count: 1,
+        };
+        match lines.iter_mut().find(|kept| {
+            kept.change == line.change && kept.text == line.text && kept.context == line.context
+        }) {
+            Some(kept) => kept.count = kept.count.saturating_add(1),
+            None => lines.push(line),
+        }
+    }
+    let hidden = lines.len().saturating_sub(limit);
+    lines.truncate(limit);
     CallLines {
-        shown,
-        hidden: ordered.len().saturating_sub(limit),
+        shown: lines,
+        hidden,
     }
 }
 
@@ -227,6 +249,33 @@ mod tests {
         assert_eq!(one_line("a  b\n\t c", 10), "a b c");
         assert_eq!(one_line("abcdefghij", 10), "abcdefghij");
         assert_eq!(one_line("abcdefghijk", 10), "abcdefghi\u{2026}");
+    }
+
+    #[test]
+    fn identical_occurrences_share_one_line_with_a_count() {
+        let call = |callee: &str| CallRow {
+            change: CallChangeKind::Added,
+            callee: callee.to_string(),
+            old_args: None,
+            new_args: Some("(&project_id)".to_string()),
+            context: vec!["match arm".into()],
+            old_context: None,
+        };
+        let calls = vec![call("strip"), call("strip"), call("strip"), call("keep")];
+        let lines = call_lines(&calls, 6);
+        assert_eq!(lines.shown.len(), 2, "three of them are the same call");
+        assert_eq!(lines.shown[0].count, 3);
+        assert_eq!(
+            lines.shown[0].text_with_count(),
+            "strip(&project_id) \u{00D7}3"
+        );
+        assert_eq!(lines.shown[1].text_with_count(), "keep(&project_id)");
+        assert_eq!(lines.hidden, 0);
+
+        // The limit counts lines, not occurrences.
+        let one = call_lines(&calls, 1);
+        assert_eq!(one.shown.len(), 1);
+        assert_eq!(one.hidden, 1);
     }
 
     #[test]
