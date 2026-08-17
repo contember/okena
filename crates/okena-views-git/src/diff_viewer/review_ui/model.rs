@@ -174,8 +174,11 @@ pub(crate) struct CallRow {
     pub callee: String,
     pub old_args: Option<String>,
     pub new_args: Option<String>,
-    /// Control-context stack, outermost first, already worded.
+    /// Control-context stack, outermost first, already worded — head side,
+    /// or base side for a removed call.
     pub context: Vec<String>,
+    /// The base-side stack when a modified call moved between contexts.
+    pub old_context: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -665,6 +665,15 @@ fn call_rows(call_diff: &[&CallDiffChange]) -> Vec<CallRow> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                old_context: change
+                    .old()
+                    .filter(|_| change.control_context_changed())
+                    .map(|old| {
+                        old.control_context()
+                            .iter()
+                            .map(control_context_word)
+                            .collect()
+                    }),
             }
         })
         .collect()

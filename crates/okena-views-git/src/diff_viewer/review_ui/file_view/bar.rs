@@ -23,10 +23,16 @@ const NEXT_HINT: &str = "} next";
 const DETAILS_WORD: &str = " details";
 const COLLAPSED_ARROW: &str = "\u{25B8}";
 const EXPANDED_ARROW: &str = "\u{25BE}";
-const SIGNATURE_TITLE: &str = "Signature (normalized)";
-const CALLS_TITLE: &str = "Calls changed in this function";
-const CALLS_CAVEAT: &str = "\u{2014} same file, syntactic; callers are not tracked";
+const REASONS_TITLE: &str = "Reasons";
+const LINES_TITLE: &str = "Lines";
+const SIGNATURE_TITLE: &str = "Signature";
+const CALLS_TITLE: &str = "Calls";
+const CALLS_CAVEAT: &str = "same file, syntactic \u{00B7} callers are not tracked";
 const COMPLEXITY_TITLE: &str = "Complexity";
+/// The details label column.
+const LABEL_WIDTH: Pixels = px(72.0);
+/// Calls listed before `… n more`; the diff underneath has the rest.
+const MAX_CALL_ROWS: usize = 8;
 
 pub(super) fn render(
     view: &DiffViewer,
@@ -94,7 +100,7 @@ pub(super) fn render(
         v_flex()
             .flex_none()
             .child(bar)
-            .child(details(symbol, t, cx))
+            .child(details(symbol, chip_limit, t, cx))
             .into_any_element(),
     )
 }
@@ -128,7 +134,9 @@ fn details_toggle(
         .into_any_element()
 }
 
-fn details(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> AnyElement {
+/// The details block: a label column and one row per fact the symbol has.
+/// It always has at least the line span, so opening it never shows nothing.
+fn details(symbol: &SymbolEntry, shown_chips: usize, t: &ThemeColors, cx: &App) -> AnyElement {
     let complex = symbol
         .reasons
         .iter()
@@ -138,18 +146,85 @@ fn details(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> AnyElement {
         .min_w_0()
         .px(px(16.0))
         .py(px(8.0))
-        .gap(px(10.0))
+        .gap(px(6.0))
         .overflow_hidden()
         .bg(rgb(t.bg_secondary))
         .border_b_1()
         .border_color(rgb(t.border))
+        // Every reason, when the bar could not fit them all.
+        .when(symbol.reasons.len() > shown_chips, |d| {
+            d.child(detail_row(
+                REASONS_TITLE,
+                h_flex()
+                    .flex_wrap()
+                    .gap(px(4.0))
+                    .children(symbol.reasons.iter().map(|reason| chip(reason, t, cx)))
+                    .into_any_element(),
+                t,
+                cx,
+            ))
+        })
+        .child(detail_row(
+            LINES_TITLE,
+            plain(
+                text::line_span(&symbol.old_hunks, &symbol.new_hunks),
+                t.text_secondary,
+                cx,
+            ),
+            t,
+            cx,
+        ))
         .when_some(symbol.signature.as_ref(), |d, (old, new)| {
-            d.child(signature_block(old, new, t, cx))
+            d.child(detail_row(
+                SIGNATURE_TITLE,
+                signature_block(old, new, t, cx),
+                t,
+                cx,
+            ))
         })
         .when(!symbol.calls.is_empty(), |d| {
-            d.child(calls_block(&symbol.calls, t, cx))
+            d.child(detail_row(
+                CALLS_TITLE,
+                calls_block(&symbol.calls, t, cx),
+                t,
+                cx,
+            ))
         })
-        .when(complex, |d| d.children(metrics_block(symbol, t, cx)))
+        .when(complex, |d| {
+            d.children(
+                metrics_text(symbol).map(|line| {
+                    detail_row(COMPLEXITY_TITLE, plain(line, t.text_secondary, cx), t, cx)
+                }),
+            )
+        })
+        .into_any_element()
+}
+
+/// `label   content` — the label column keeps every row aligned.
+fn detail_row(title: &'static str, content: AnyElement, t: &ThemeColors, cx: &App) -> AnyElement {
+    h_flex()
+        .items_start()
+        .gap(px(12.0))
+        .min_w_0()
+        .child(
+            div()
+                .flex_none()
+                .w(LABEL_WIDTH)
+                .pt(px(1.0))
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(title),
+        )
+        .child(div().flex_1().min_w_0().child(content))
+        .into_any_element()
+}
+
+fn plain(text: String, color: u32, cx: &App) -> AnyElement {
+    div()
+        .min_w_0()
+        .text_size(ui_text_ms(cx))
+        .text_color(rgb(color))
+        .child(text)
         .into_any_element()
 }
 
@@ -159,7 +234,6 @@ fn signature_block(old: &str, new: &str, t: &ThemeColors, cx: &App) -> AnyElemen
         .min_w_0()
         .gap(px(2.0))
         .overflow_hidden()
-        .child(caption(SIGNATURE_TITLE, t, cx))
         .child(signature_line(
             "\u{2212}",
             t.diff_removed_fg,
@@ -225,52 +299,64 @@ fn signature_line(
 }
 
 fn calls_block(calls: &[CallRow], t: &ThemeColors, cx: &App) -> AnyElement {
+    let rows = text::call_lines(calls, MAX_CALL_ROWS);
     v_flex()
         .min_w_0()
-        .gap(px(4.0))
+        .gap(px(2.0))
         .overflow_hidden()
+        .children(rows.shown.iter().map(|row| call_line(row, t, cx)))
+        .when_some(rows.hidden_note(), |d, note| {
+            d.child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(note),
+            )
+        })
         .child(
-            h_flex()
-                .gap(px(6.0))
-                .items_center()
-                .child(caption(CALLS_TITLE, t, cx))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(CALLS_CAVEAT),
-                ),
-        )
-        .child(
-            h_flex()
-                .flex_wrap()
-                .gap(px(14.0))
-                .children(calls.iter().map(|row| call_element(row, t, cx))),
+            div()
+                .pt(px(2.0))
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(CALLS_CAVEAT),
         )
         .into_any_element()
 }
 
-fn call_element(row: &CallRow, t: &ThemeColors, cx: &App) -> AnyElement {
+/// `− parse(x)          in loop` — marker, one-line call text, context.
+fn call_line(row: &text::CallLine, t: &ThemeColors, cx: &App) -> AnyElement {
     let tone = match row.change {
         CallChangeKind::Added => t.diff_added_fg,
         CallChangeKind::Removed => t.diff_removed_fg,
         CallChangeKind::Modified => t.warning,
     };
     h_flex()
-        .flex_none()
-        .gap(px(4.0))
+        .min_w_0()
+        .gap(px(8.0))
         .items_center()
-        .text_size(ui_text_ms(cx))
-        .child(div().flex_none().text_color(rgb(tone)).child(format!(
-            "{} {}",
-            text::call_marker(row.change),
-            text::call_text(row)
-        )))
-        .when_some(text::call_context(row), |d, context| {
+        .child(
+            div()
+                .flex_none()
+                .w(px(8.0))
+                .font_family("monospace")
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(tone))
+                .child(text::call_marker(row.change)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family("monospace")
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_secondary))
+                .child(row.text.clone()),
+        )
+        .when_some(row.context.clone(), |d, context| {
             d.child(
                 div()
                     .flex_none()
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(context),
             )
@@ -279,7 +365,7 @@ fn call_element(row: &CallRow, t: &ThemeColors, cx: &App) -> AnyElement {
 }
 
 /// What made the symbol complex; only shown when complexity is a reason — §9.
-fn metrics_block(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> Option<AnyElement> {
+fn metrics_text(symbol: &SymbolEntry) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(depth) = symbol.metrics.depth {
         parts.push(words::nesting_label(depth));
@@ -293,28 +379,5 @@ fn metrics_block(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> Option<AnyE
     if let Some(members) = symbol.metrics.members {
         parts.push(words::members_label(members));
     }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(
-        v_flex()
-            .gap(px(2.0))
-            .child(caption(COMPLEXITY_TITLE, t, cx))
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(parts.join(text::DOT)),
-            )
-            .into_any_element(),
-    )
-}
-
-fn caption(title: &'static str, t: &ThemeColors, cx: &App) -> AnyElement {
-    div()
-        .flex_none()
-        .text_size(ui_text_sm(cx))
-        .text_color(rgb(t.text_muted))
-        .child(title)
-        .into_any_element()
+    (!parts.is_empty()).then(|| parts.join(text::DOT))
 }
