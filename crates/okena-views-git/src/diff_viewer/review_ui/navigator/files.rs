@@ -39,7 +39,8 @@ impl DiffViewer {
         }
         let ids: Vec<Option<super::NavRowId>> =
             tree.iter().map(|row| Some(row.id.clone())).collect();
-        self.review_keep_cursor_visible(&ids, &self.review_ui.tree_scroll);
+        let scroll = self.review_ui.tree_scroll.clone();
+        self.review_reveal_cursor(&ids, &scroll);
 
         let colors = *t;
         let view = cx.entity().clone();
@@ -79,12 +80,13 @@ impl DiffViewer {
         let super::NavRowId::Dir(path) = &row.id else {
             return div().into_any_element();
         };
-        let selected = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
         let for_click = path.clone();
         tree_row(
             super::nav_element_id("review-row", &row.id),
             row.depth,
-            selected,
+            cursor,
+            false,
             t,
         )
         .child(
@@ -108,8 +110,7 @@ impl DiffViewer {
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_primary))
                 .child(dir.name.clone()),
@@ -117,6 +118,7 @@ impl DiffViewer {
         .when(dir.no_tests, |d| {
             d.child(chip(words::NO_TESTS_MARKER, super::ChipTone::Warn, t, cx))
         })
+        .when_some(dir.role_badge, |d, badge| d.child(role_badge(badge, t, cx)))
         .child(div().flex_1())
         .child(
             div()
@@ -144,8 +146,8 @@ impl DiffViewer {
         let super::NavRowId::File(key) = &row.id else {
             return div().into_any_element();
         };
-        let selected = self.review_ui.nav_cursor.as_ref() == Some(&row.id)
-            || self.smart_review.selected_file.as_ref() == Some(key);
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(&row.id);
+        let open = self.smart_review.selected_file.as_ref() == Some(key);
         let name_color = if file.dimmed {
             t.text_muted
         } else {
@@ -156,7 +158,8 @@ impl DiffViewer {
         tree_row(
             super::nav_element_id("review-row", &row.id),
             row.depth,
-            selected,
+            cursor,
+            open,
             t,
         )
         .child(div().w(ICON_SM).flex_shrink_0())
@@ -164,8 +167,7 @@ impl DiffViewer {
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(name_color))
                 .child(file.name_display.clone()),
@@ -174,17 +176,7 @@ impl DiffViewer {
             chip(marker.label.clone(), chip_tone(marker.kind), t, cx).into_any_element()
         }))
         .when_some(file.role_badge, |d, badge| {
-            d.child(
-                div()
-                    .flex_shrink_0()
-                    .px(px(4.0))
-                    .rounded(RADIUS_MD)
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(badge),
-            )
+            d.child(role_badge(badge, t, cx))
         })
         .child(div().flex_1())
         .child(churn_cell(file.added, file.deleted, t, cx))
@@ -197,8 +189,28 @@ impl DiffViewer {
     }
 }
 
+/// `Tests` / `Docs` … — outlined, so it reads as a label and not a reason.
+fn role_badge(badge: &'static str, t: &ThemeColors, cx: &App) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(4.0))
+        .rounded(RADIUS_MD)
+        .border_1()
+        .border_color(rgb(t.border))
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(t.text_muted))
+        .child(badge)
+}
+
 /// One row of the tree: the accent stripe, the indent, then the content.
-fn tree_row(id: ElementId, depth: usize, selected: bool, t: &ThemeColors) -> Stateful<Div> {
+/// The stripe marks the keyboard cursor, the fill the file that is open.
+fn tree_row(
+    id: ElementId,
+    depth: usize,
+    cursor: bool,
+    open: bool,
+    t: &ThemeColors,
+) -> Stateful<Div> {
     let indent = f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * INDENT;
     h_flex()
         .id(id)
@@ -207,8 +219,9 @@ fn tree_row(id: ElementId, depth: usize, selected: bool, t: &ThemeColors) -> Sta
         .items_center()
         .gap(px(4.0))
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(t.bg_selection)))
+        .when(open, |d| d.bg(rgb(t.bg_selection)))
+        .when(cursor && !open, |d| d.bg(rgb(t.bg_hover)))
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        .child(selection_bar(selected, t))
+        .child(selection_bar(cursor, t))
         .child(div().w(px(indent)).flex_shrink_0())
 }

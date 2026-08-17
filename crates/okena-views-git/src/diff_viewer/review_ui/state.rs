@@ -6,7 +6,7 @@ use super::super::DiffViewer;
 use super::super::review::ReviewFileKey;
 use super::labels::role_short;
 use super::model::{AttentionTarget, FileEntry, ReasonKind, ReviewModel};
-use gpui::{AppContext as _, Context, Entity, UniformListScrollHandle};
+use gpui::{AppContext as _, Context, Entity, ScrollStrategy, UniformListScrollHandle};
 use okena_core::review::{ComparisonSide, FileRole, ReviewFileStatus};
 use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
 use std::collections::{BTreeSet, HashSet};
@@ -296,6 +296,9 @@ pub(crate) struct ReviewUiState {
     pub content: ContentView,
     pub focus_region: FocusRegion,
     pub nav_cursor: Option<NavRowId>,
+    /// Scroll the cursor row into view on the next render, then forget it —
+    /// re-asserting every frame would fight the wheel.
+    pub nav_reveal: Option<ScrollStrategy>,
     pub selected_symbol: Option<SymbolRef>,
     /// Position in the Attention queue, kept by identity rather than index.
     pub queue_target: Option<AttentionTarget>,
@@ -338,6 +341,7 @@ impl ReviewUiState {
             content: ContentView::default(),
             focus_region: FocusRegion::default(),
             nav_cursor: None,
+            nav_reveal: None,
             selected_symbol: None,
             queue_target: None,
             role_filter: RoleFilter::everything(),

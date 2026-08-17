@@ -35,7 +35,8 @@ impl DiffViewer {
             &state.filter_text,
         ));
         let ids: Vec<Option<super::NavRowId>> = rows.iter().map(|row| row.id.clone()).collect();
-        self.review_keep_cursor_visible(&ids, &self.review_ui.attention_scroll);
+        let scroll = self.review_ui.attention_scroll.clone();
+        self.review_reveal_cursor(&ids, &scroll);
 
         let colors = *t;
         let view = cx.entity().clone();
@@ -150,8 +151,8 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = super::NavRowId::File(group.key.clone());
-        let selected = self.review_ui.nav_cursor.as_ref() == Some(&id)
-            || self.smart_review.selected_file.as_ref() == Some(&group.key);
+        let cursor = self.review_ui.nav_cursor.as_ref() == Some(&id);
+        let open = self.smart_review.selected_file.as_ref() == Some(&group.key);
         let for_click = group.key.clone();
         h_flex()
             .id(super::nav_element_id("review-group", &id))
@@ -160,16 +161,16 @@ impl DiffViewer {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(selected, |d| d.bg(rgb(t.bg_selection)))
+            .when(open, |d| d.bg(rgb(t.bg_selection)))
+            .when(cursor && !open, |d| d.bg(rgb(t.bg_hover)))
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(selection_bar(selected, t))
+            .child(selection_bar(cursor, t))
             .child(div().w(px(4.0)).flex_shrink_0())
             .child(file_icon(basename(&group.path), t, cx).flex_shrink_0())
             .child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
                     .child(group.path.clone()),
@@ -198,11 +199,12 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = row
+        // The stripe is the keyboard cursor; the fill is what the content shows.
+        let cursor = row
             .id
             .as_ref()
-            .is_some_and(|id| self.review_ui.nav_cursor.as_ref() == Some(id))
-            || self.review_ui.queue_target.as_ref() == Some(&item.target);
+            .is_some_and(|id| self.review_ui.nav_cursor.as_ref() == Some(id));
+        let open = self.review_ui.queue_target.as_ref() == Some(&item.target);
         let name_color = if item.dimmed {
             t.text_muted
         } else {
@@ -220,9 +222,10 @@ impl DiffViewer {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(selected, |d| d.bg(rgb(t.bg_selection)))
+            .when(open, |d| d.bg(rgb(t.bg_selection)))
+            .when(cursor && !open, |d| d.bg(rgb(t.bg_hover)))
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(selection_bar(selected, t))
+            .child(selection_bar(cursor, t))
             .child(div().w(px(indent)).flex_shrink_0())
             .child(
                 div()
@@ -246,8 +249,7 @@ impl DiffViewer {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
+                                    .truncate()
                                     .text_size(ui_text_ms(cx))
                                     .text_color(rgb(name_color))
                                     .child(item.name.clone()),
@@ -265,8 +267,7 @@ impl DiffViewer {
                             .child(
                                 div()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
+                                    .truncate()
                                     .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(item.path.clone()),

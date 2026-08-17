@@ -10,7 +10,7 @@ use super::super::DiffViewer;
 use super::super::review::ReviewFileKey;
 use super::model::{AttentionTarget, ReviewModel};
 use super::state::{ContentView, FocusRegion, NavRowId, NavigatorMode};
-use gpui::{App, ClipboardItem, Context, KeyDownEvent, Modifiers, Window};
+use gpui::{App, ClipboardItem, Context, KeyDownEvent, Modifiers, ScrollStrategy, Window};
 use okena_core::review::ComparisonSide;
 
 /// Everything the key table branches on, gathered once per event.
@@ -479,6 +479,7 @@ impl DiffViewer {
             return;
         };
         self.review_ui.nav_cursor = Some(row.clone());
+        self.review_ui.nav_reveal = Some(ScrollStrategy::Nearest);
         self.review_open_row(row, cx);
     }
 

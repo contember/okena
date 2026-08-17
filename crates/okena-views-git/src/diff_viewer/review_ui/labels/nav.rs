@@ -66,6 +66,8 @@ pub(crate) fn file_marker(kind: ReasonKind, label: &str, signatures: usize) -> O
     match kind {
         // Dimming already says it; a badge would read as an error state.
         ReasonKind::NotAnalyzed => None,
+        // Every edited function has a changed body; the churn cell says as much.
+        ReasonKind::Body => None,
         ReasonKind::PublicSignature | ReasonKind::ExportedSignature => {
             Some(signature_marker(signatures))
         }

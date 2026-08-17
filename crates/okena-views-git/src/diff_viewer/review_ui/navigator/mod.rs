@@ -15,7 +15,7 @@ use super::super::DiffViewer;
 use super::super::review::ReviewFileKey;
 use super::labels::nav as words;
 use super::model::{AttentionTarget, ReasonKind};
-use super::state::{FocusRegion, NavRowId, NavigatorMode, RolePreset};
+use super::state::{NavRowId, NavigatorMode, RolePreset};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -329,8 +329,7 @@ impl DiffViewer {
             .child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(line.text),
@@ -426,28 +425,29 @@ impl DiffViewer {
         self.review_show_all(cx);
     }
 
-    /// Scroll the cursor row back into view while the navigator drives the keys.
+    /// Scroll the cursor row into view once, when something moved it.
     ///
-    /// Re-asserted every render, so with the navigator focused the wheel cannot
-    /// leave the cursor off screen; edge-triggering it would need one bit of
-    /// state the frozen `ReviewUiState` does not have.
-    fn review_keep_cursor_visible(
-        &self,
+    /// Edge-triggered on purpose: re-asserting it every render would undo the
+    /// wheel the moment the cursor left the viewport.
+    fn review_reveal_cursor(
+        &mut self,
         rows: &[Option<NavRowId>],
         scroll: &UniformListScrollHandle,
     ) {
-        if self.review_ui.focus_region != FocusRegion::Navigator {
+        let Some(strategy) = self.review_ui.nav_reveal else {
             return;
-        }
+        };
         let Some(cursor) = self.review_ui.nav_cursor.as_ref() else {
+            self.review_ui.nav_reveal = None;
             return;
         };
         if let Some(index) = rows
             .iter()
             .position(|row| row.as_ref().is_some_and(|id| id == cursor))
         {
-            scroll.scroll_to_item(index, ScrollStrategy::Center);
+            scroll.scroll_to_item(index, strategy);
         }
+        self.review_ui.nav_reveal = None;
     }
 }
 

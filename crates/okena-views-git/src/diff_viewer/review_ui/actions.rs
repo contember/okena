@@ -54,6 +54,7 @@ impl DiffViewer {
         state.queue_target = None;
         state.marker = None;
         state.nav_cursor = None;
+        state.nav_reveal = None;
         state.small_change_applied = false;
         state.expanded_dirs.clear();
         state.expanded_initialized = false;
@@ -117,13 +118,17 @@ impl DiffViewer {
         self.review_ui.navigator = mode;
         match mode {
             NavigatorMode::Attention => self.review_reveal_selected_in_attention(),
-            NavigatorMode::Files => self.review_expand_to_selected_file(),
+            NavigatorMode::Files => self.review_reveal_selected_in_files(),
         }
         cx.notify();
     }
 
-    /// Scroll Attention to the first item of the open file.
-    fn review_reveal_selected_in_attention(&self) {
+    /// Put the cursor on the open file's first Attention row and scroll to it
+    /// once; with nothing open the list stays where it was.
+    fn review_reveal_selected_in_attention(&mut self) {
+        if self.review_ui.content != ContentView::File {
+            return;
+        }
         let Some(model) = self.review_ui.model.as_ref() else {
             return;
         };
@@ -134,23 +139,21 @@ impl DiffViewer {
             return;
         };
         let target = model.attention[index].target.clone();
-        // Rendered rows interleave tier separators and group headers, so map
-        // through the navigator's row list, not the visible-item list.
-        let state = &self.review_ui;
-        let rows = super::navigator::items::attention_rows(
-            model,
-            &state.attention_filter,
-            &state.role_filter,
-            &state.filter_text,
-        );
-        if let Some(row) = rows
-            .iter()
-            .position(|row| row.id.as_ref() == Some(&NavRowId::Item(target.clone())))
-        {
-            self.review_ui
-                .attention_scroll
-                .scroll_to_item(row, ScrollStrategy::Center);
+        self.review_ui.nav_cursor = Some(NavRowId::Item(target));
+        self.review_ui.nav_reveal = Some(ScrollStrategy::Center);
+    }
+
+    /// Same for the tree: expand down to the open file, park the cursor on it.
+    fn review_reveal_selected_in_files(&mut self) {
+        self.review_expand_to_selected_file();
+        if self.review_ui.content != ContentView::File {
+            return;
         }
+        let Some(key) = self.smart_review.selected_file.clone() else {
+            return;
+        };
+        self.review_ui.nav_cursor = Some(NavRowId::File(key));
+        self.review_ui.nav_reveal = Some(ScrollStrategy::Center);
     }
 
     /// Expand every directory above the open file so its tree row is reachable.
@@ -343,7 +346,24 @@ impl DiffViewer {
         else {
             return;
         };
+        self.review_follow_queue_target(&target);
         self.review_open_item(target, cx);
+    }
+
+    /// `]` `[` keep the navigator's cursor on the item they land on, so the
+    /// list scrolls along and `↑` `↓` continue from there.
+    fn review_follow_queue_target(&mut self, target: &AttentionTarget) {
+        let cursor = match self.review_ui.navigator {
+            NavigatorMode::Attention => NavRowId::Item(target.clone()),
+            NavigatorMode::Files => match target {
+                AttentionTarget::Symbol { file, .. } | AttentionTarget::File(file) => {
+                    NavRowId::File(file.clone())
+                }
+                AttentionTarget::Directory(path) => NavRowId::Dir(path.clone()),
+            },
+        };
+        self.review_ui.nav_cursor = Some(cursor);
+        self.review_ui.nav_reveal = Some(ScrollStrategy::Nearest);
     }
 
     /// Move along the open file's changed symbols in source order; clamps.

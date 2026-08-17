@@ -42,6 +42,9 @@ pub(crate) struct DirRow {
     pub deleted: u64,
     pub expanded: bool,
     pub no_tests: bool,
+    /// Every file under it shares one role worth naming (`Tests`, `Docs`…),
+    /// so the directory carries the badge once and its files carry none.
+    pub role_badge: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +137,7 @@ pub(crate) fn nav_rows(
         expanded_dirs,
         expanded_initialized,
         total: visible.len(),
+        badged: false,
         out: &mut out,
     });
     out
@@ -179,6 +183,8 @@ struct Dir {
     file_count: usize,
     added: u64,
     deleted: u64,
+    /// The one role every file under this directory has, when there is one.
+    uniform_role: Option<FileRole>,
 }
 
 #[derive(Debug, Default)]
@@ -258,6 +264,13 @@ fn finish(builder: DirBuilder, model: &ReviewModel) -> Dir {
         added = added.saturating_add(child.added);
         deleted = deleted.saturating_add(child.deleted);
     }
+    let uniform_role = uniform_role(
+        files
+            .iter()
+            .filter_map(|index| model.files.get(*index))
+            .map(|entry| Some(entry.role))
+            .chain(dirs.iter().map(|child| child.uniform_role)),
+    );
     Dir {
         name: builder.name,
         path: builder.path,
@@ -266,7 +279,15 @@ fn finish(builder: DirBuilder, model: &ReviewModel) -> Dir {
         file_count,
         added,
         deleted,
+        uniform_role,
     }
+}
+
+/// `Some(role)` when every member agrees on one; a `None` member (a mixed
+/// child directory) or two different roles make the whole mixed.
+fn uniform_role(mut members: impl Iterator<Item = Option<FileRole>>) -> Option<FileRole> {
+    let first = members.next()??;
+    members.all(|member| member == Some(first)).then_some(first)
 }
 
 /// Collapse `a` → `b` → `c` into one `a/b/c` row.
@@ -315,6 +336,8 @@ struct Emit<'a> {
     expanded_dirs: &'a HashSet<String>,
     expanded_initialized: bool,
     total: usize,
+    /// A directory above already carries the role badge.
+    badged: bool,
     out: &'a mut Vec<NavRow>,
 }
 
@@ -328,6 +351,7 @@ fn emit(args: Emit<'_>) {
         expanded_dirs,
         expanded_initialized,
         total,
+        badged,
         out,
     } = args;
     for child in &dir.dirs {
@@ -335,6 +359,11 @@ fn emit(args: Emit<'_>) {
             expanded_dirs.contains(&child.path)
         } else {
             default_expanded(total, depth)
+        };
+        let role_badge = if badged {
+            None
+        } else {
+            child.uniform_role.and_then(role_badge)
         };
         out.push(NavRow {
             id: NavRowId::Dir(child.path.clone()),
@@ -346,6 +375,7 @@ fn emit(args: Emit<'_>) {
                 deleted: child.deleted,
                 expanded,
                 no_tests: covers_untested(&child.name, &child.path, untested),
+                role_badge,
             }),
         });
         if expanded {
@@ -357,13 +387,14 @@ fn emit(args: Emit<'_>) {
                 expanded_dirs,
                 expanded_initialized,
                 total,
+                badged: badged || role_badge.is_some(),
                 out,
             });
         }
     }
     for index in &dir.files {
         if let Some(entry) = model.files.get(*index) {
-            out.push(file_nav_row(entry, depth, false));
+            out.push(file_nav_row(entry, depth, false, badged));
         }
     }
 }
@@ -383,13 +414,13 @@ fn flat_rows(model: &ReviewModel, visible: &[usize]) -> Vec<NavRow> {
     indices
         .iter()
         .filter_map(|index| model.files.get(*index))
-        .map(|entry| file_nav_row(entry, 0, true))
+        .map(|entry| file_nav_row(entry, 0, true, false))
         .collect()
 }
 
 // -- file rows ---------------------------------------------------------------
 
-fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool) -> NavRow {
+fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool, badged: bool) -> NavRow {
     let is_rename = entry.status == ReviewFileStatus::Renamed
         || matches!((&entry.old_path, &entry.new_path), (Some(old), Some(new)) if old != new);
     let name_display = match (&entry.old_path, &entry.new_path) {
@@ -414,7 +445,7 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool) -> NavRow {
             added: entry.lines_added,
             deleted: entry.lines_deleted,
             markers: markers(entry),
-            role_badge: role_badge(entry.role).filter(|_| !markers_name_the_role(entry)),
+            role_badge: role_badge(entry.role).filter(|_| !badged && !markers_name_the_role(entry)),
             dimmed: not_analyzed(entry),
             is_rename,
             tooltip,
@@ -442,7 +473,19 @@ fn role_badge(role: FileRole) -> Option<&'static str> {
 }
 
 /// The loudest two reasons of the file and of the symbols inside it — spec §7.
+///
+/// A new file's symbols are all new, so their reasons add nothing to `new`;
+/// only the file's own reasons mark it.
 fn markers(entry: &FileEntry) -> Vec<Reason> {
+    let is_new = entry
+        .reasons
+        .iter()
+        .any(|reason| reason.kind == ReasonKind::New);
+    let symbol_reasons = entry
+        .symbols
+        .iter()
+        .filter(|_| !is_new)
+        .flat_map(|symbol| symbol.reasons.iter());
     let signatures = entry
         .symbols
         .iter()
@@ -457,12 +500,7 @@ fn markers(entry: &FileEntry) -> Vec<Reason> {
     let mut candidates: Vec<(u8, Reason)> = entry
         .reasons
         .iter()
-        .chain(
-            entry
-                .symbols
-                .iter()
-                .flat_map(|symbol| symbol.reasons.iter()),
-        )
+        .chain(symbol_reasons)
         .filter_map(|reason| {
             words::file_marker(reason.kind, &reason.label, signatures).map(|label| {
                 (
@@ -697,6 +735,28 @@ mod tests {
                 .any(|reason| reason.kind == ReasonKind::CiConfig)
         );
         assert_eq!(file(&rows, "handler_test.rs").role_badge, Some("Tests"));
+    }
+
+    #[test]
+    fn a_directory_of_one_role_carries_the_badge_for_its_files() {
+        let rows = tree(&RoleFilter::everything(), "", &HashSet::new(), false);
+        assert_eq!(dir(&rows, "tests").role_badge, Some("Tests"));
+        // The tree lists `tests/lib.rs` right after its directory row.
+        let tests_row = rows
+            .iter()
+            .position(|row| row.id == NavRowId::Dir("tests".into()))
+            .unwrap();
+        let NavRowKind::File(inner) = &rows[tests_row + 1].kind else {
+            panic!("expected the file under tests/");
+        };
+        assert_eq!(inner.name_display, "lib.rs");
+        assert_eq!(inner.role_badge, None);
+        // Mixed directories badge nothing; their files keep their own.
+        assert_eq!(dir(&rows, "src").role_badge, None);
+        assert_eq!(dir(&rows, "worker").role_badge, None);
+        // Flattened, there is no directory to carry it.
+        let flat = tree(&RoleFilter::everything(), "", &HashSet::new(), true);
+        assert_eq!(file(&flat, "tests/lib.rs").role_badge, Some("Tests"));
     }
 
     #[test]
