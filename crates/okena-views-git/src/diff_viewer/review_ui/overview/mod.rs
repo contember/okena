@@ -23,14 +23,11 @@ use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 
 /// The page stops growing here; a wider window gets margin, not longer rows.
 const CONTENT_WIDTH: Pixels = px(1080.0);
-/// Right column of the two-column layout; the facts never grow past it.
-const FACTS_WIDTH: Pixels = px(360.0);
-/// The legend's role column; the numbers sit right after it, not at the far edge.
-const LEGEND_LABEL_WIDTH: Pixels = px(150.0);
-/// Widest a "Start here" name may get before it is ellipsized.
-const NAME_WIDTH: Pixels = px(240.0);
-/// Name plus file of a "Start here" row; the reasons start at one x on every row.
-const START_WHO_WIDTH: Pixels = px(430.0);
+/// The sidebar holding the composition and the facts; the list takes the rest.
+const SIDE_WIDTH: Pixels = px(380.0);
+/// The legend stops here even when the block is wider: a role and its numbers
+/// belong to each other, and a full-width row pulls them apart.
+const LEGEND_WIDTH: Pixels = px(420.0);
 const HEADLINE_SIZE: f32 = 17.0;
 
 impl DiffViewer {
@@ -49,7 +46,19 @@ impl DiffViewer {
                 .child(status_words::LOADING_INVENTORY)
                 .into_any_element();
         };
-        let narrow = is_narrow(self.review_ui.content_width);
+        let glance = self.render_glance(&model, t, cx);
+        let start_here = self.render_start_here(&model, t, cx);
+        // The ordered list is the page and reads down the left; the composition
+        // is its sidebar. Too narrow for both and the sidebar goes on top.
+        let body = if is_narrow(self.review_ui.content_width) {
+            v_flex().gap(px(26.0)).child(glance).child(start_here)
+        } else {
+            h_flex()
+                .items_start()
+                .gap(px(36.0))
+                .child(start_here.flex_1().min_w_0())
+                .child(glance.w(SIDE_WIDTH).flex_shrink_0())
+        };
         div()
             .id("review-overview")
             .flex_1()
@@ -60,66 +69,40 @@ impl DiffViewer {
             .child(
                 v_flex()
                     // A wide window does not stretch the page: past this the
-                    // legend numbers and the facts would drift away from their
-                    // labels.
+                    // rows would only grow their empty middle.
                     .max_w(CONTENT_WIDTH)
                     .px(px(28.0))
                     .py(px(18.0))
-                    .gap(px(26.0))
-                    .child(self.render_glance(&model, narrow, t, cx))
-                    .child(self.render_start_here(&model, t, cx)),
+                    .child(body),
             )
             .into_any_element()
     }
 
-    /// Block 1: the headline number, the stacked bar, the legend, the facts.
-    fn render_glance(
-        &self,
-        model: &ReviewModel,
-        narrow: bool,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let volume = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap(px(12.0))
+    /// The sidebar: the headline number, the stacked bar, the legend, the facts.
+    fn render_glance(&self, model: &ReviewModel, t: &ThemeColors, cx: &mut Context<Self>) -> Div {
+        v_flex()
+            .gap(px(14.0))
+            .child(stacked_header(
+                words::GLANCE_HEADER,
+                words::GLANCE_HINT,
+                t,
+                cx,
+            ))
             .child(render_headline(&headline(model), t, cx))
             .child(render_bar(model, t))
             .child(
-                v_flex().gap(px(1.0)).children(
+                v_flex().gap(px(1.0)).max_w(LEGEND_WIDTH).children(
                     legend_rows(model)
                         .into_iter()
                         .enumerate()
                         .map(|(index, row)| self.render_legend_row(index, row, t, cx)),
                 ),
-            );
-        // A comparison with no facts gives the volume the whole width.
-        let body = match self.render_facts(model, t, cx) {
-            None => volume.into_any_element(),
-            Some(facts) if narrow => v_flex()
-                .gap(px(20.0))
-                .child(volume)
-                .child(facts)
-                .into_any_element(),
-            Some(facts) => h_flex()
-                .items_start()
-                .gap(px(40.0))
-                .child(volume)
-                .child(facts.w(FACTS_WIDTH).flex_shrink_0())
-                .into_any_element(),
-        };
-        v_flex()
-            .gap(px(12.0))
-            .child(section_header(
-                words::GLANCE_HEADER,
-                words::GLANCE_HINT,
-                None,
-                t,
-                cx,
-            ))
-            .child(body)
-            .into_any_element()
+            )
+            // A rule, so the facts read as facts and not as more legend.
+            .children(
+                self.render_facts(model, t, cx)
+                    .map(|facts| facts.pt(px(14.0)).border_t_1().border_color(rgb(t.border))),
+            )
     }
 
     /// One legend row; clicking it narrows the navigator to that role alone.
@@ -159,8 +142,8 @@ impl DiffViewer {
             )
             .child(
                 div()
-                    .w(LEGEND_LABEL_WIDTH)
-                    .flex_shrink_0()
+                    .flex_1()
+                    .min_w_0()
                     .truncate()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
@@ -168,14 +151,14 @@ impl DiffViewer {
             )
             .child(numeric(
                 words::legend_files(row.files),
-                72.0,
+                64.0,
                 t.text_muted,
                 cx,
             ))
-            .child(numeric(lines, 72.0, t.text_secondary, cx))
+            .child(numeric(lines, 60.0, t.text_secondary, cx))
             .child(numeric(
                 words::percent_label(row.percent),
-                56.0,
+                48.0,
                 t.text_muted,
                 cx,
             ))
@@ -321,13 +304,13 @@ impl DiffViewer {
         }
     }
 
-    /// Block 2: the ordered list, ten rows of it.
+    /// The page's own column: the ordered list, two lines to a row.
     fn render_start_here(
         &self,
         model: &ReviewModel,
         t: &ThemeColors,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Div {
         let all = div()
             .id("review-start-here-all")
             .cursor_pointer()
@@ -346,14 +329,16 @@ impl DiffViewer {
                 .text_color(rgb(t.text_muted))
                 .child(sentence)
         });
-        let rows: Vec<AnyElement> = start_here(model)
+        let items = start_here(model);
+        let last = items.len().saturating_sub(1);
+        let rows: Vec<AnyElement> = items
             .iter()
             .enumerate()
-            .map(|(index, item)| self.render_start_row(index, item, t, cx))
+            .map(|(index, item)| self.render_start_row(index, item, index == last, t, cx))
             .collect();
 
         v_flex()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .child(section_header(
                 words::START_HERE_HEADER,
                 words::START_HERE_HINT,
@@ -362,21 +347,23 @@ impl DiffViewer {
                 cx,
             ))
             .children(caveat_line)
-            .child(v_flex().gap(px(1.0)).children(rows))
+            .child(v_flex().children(rows))
             .child(
                 div()
-                    .pt(px(4.0))
+                    .pt(px(6.0))
                     .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(words::TIERS_FOOTER),
             )
-            .into_any_element()
     }
 
+    /// A row is two lines: what changed and by how much, then where it lives
+    /// and why it is here.
     fn render_start_row(
         &self,
         index: usize,
         item: &AttentionItem,
+        last: bool,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -393,11 +380,12 @@ impl DiffViewer {
         h_flex()
             .id(SharedString::from(format!("review-start-here-{index}")))
             .cursor_pointer()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(4.0))
-            .py(px(3.0))
-            .rounded(px(3.0))
+            .items_start()
+            .gap(px(10.0))
+            .px(px(6.0))
+            .py(px(8.0))
+            // A hairline, so two-line rows do not run into each other.
+            .when(!last, |row| row.border_b_1().border_color(rgb(t.border)))
             .hover(|style| style.bg(rgb(t.bg_hover)))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.review_open_item(target.clone(), cx);
@@ -421,50 +409,52 @@ impl DiffViewer {
                     .child(glyph(item.glyph)),
             )
             .child(
-                h_flex()
-                    .w(START_WHO_WIDTH)
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .gap(px(8.0))
-                    .items_baseline()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            // A qualified symbol name may be long; it still may
-                            // not push the file off the row.
-                            .max_w(NAME_WIDTH)
-                            .truncate()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(name_color))
-                            .child(item.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_text_sm(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(where_text),
-                    ),
-            )
-            .child(
-                h_flex()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .flex_wrap()
                     .gap(px(4.0))
-                    .children(item.reasons.iter().map(|reason| render_chip(reason, t, cx))),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap(px(6.0))
-                    .when(item.lines_added > 0, |row| {
-                        row.child(signed_count(added, t.diff_added_fg, cx))
-                    })
-                    .when(item.lines_deleted > 0, |row| {
-                        row.child(signed_count(deleted, t.diff_removed_fg, cx))
-                    }),
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(name_color))
+                                    .child(item.name.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_shrink_0()
+                                    .gap(px(6.0))
+                                    .when(item.lines_added > 0, |row| {
+                                        row.child(signed_count(added, t.diff_added_fg, cx))
+                                    })
+                                    .when(item.lines_deleted > 0, |row| {
+                                        row.child(signed_count(deleted, t.diff_removed_fg, cx))
+                                    }),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.0))
+                            .when(!where_text.is_empty(), |line| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(where_text),
+                                )
+                            })
+                            .children(item.reasons.iter().map(|reason| render_chip(reason, t, cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -568,6 +558,25 @@ fn section_header(
                 .child(hint),
         )
         .children(right)
+}
+
+/// The sidebar has no room for a title and its hint side by side.
+fn stacked_header(title: &'static str, hint: &'static str, t: &ThemeColors, cx: &App) -> Div {
+    v_flex()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(ui_text_sm(cx))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(t.text_secondary))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(hint),
+        )
 }
 
 /// A right-aligned number column; the digits line up across rows.

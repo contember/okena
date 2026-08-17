@@ -160,7 +160,9 @@ file selected in Files scrolls Attention to its first item.
 
 ## 8. Overview
 
-Two blocks, then nothing else.
+Two blocks, then nothing else. Side by side: *Start here* is the page and takes the left column, *Change
+at a glance* and the facts are its sidebar on the right (380 px). Content width < 1 000 px stacks them,
+the sidebar on top.
 
 **Change at a glance** — headline `Implementation 15 692 lines · 45 % of 34 640 · 97 files` (hint:
 “changed lines = added + deleted”); stacked bar by role; legend rows (swatch, role, files, lines, %),
@@ -179,8 +181,9 @@ Facts (one line each, omitted when empty, never zeros):
 
 **Start here** — header `Start here · one ordered list · every row names its reasons`, right link
 `all N → Attention`, caveat line under it: `structure reached 63 of 97 implementation files (first 200 in
-path order) — the rest ranked from git facts` (only when partial). Ten rows: index, kind glyph, name +
-dimmed path, reason chips, +/−. Unanalyzed rows dimmed. Footer sentence: tiers and `]` steps through it.
+path order) — the rest ranked from git facts` (only when partial). Ten rows of two lines, hairline
+separated: index and kind glyph in the gutter, then name with +/− right-aligned, then the dimmed path
+with the reason chips after it. Unanalyzed rows dimmed. Footer sentence: tiers and `]` steps through it.
 
 While structure is loading, git-fact rows are shown immediately (no skeleton); symbol rows are inserted
 when structure lands. If structure fails, the list stays and the pill turns red.
