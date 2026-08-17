@@ -18,12 +18,13 @@ use okena_core::review::{
     ReviewInventory,
 };
 use okena_git::DiffMode;
+use okena_review::classification;
 use okena_review::{
     CallChangeKind, CallDiffChange, FileAnalysisStatus, OmittedFileGroup, OmittedFileReason,
     ReviewStructure, StructuralHotspot, StructuralMetric, StructuredFile, SymbolChange,
     SymbolChangeKind,
 };
-use okena_syntax::{ControlContext, SymbolKey, SymbolVisibility};
+use okena_syntax::{ControlContext, SymbolKey, SymbolKind, SymbolVisibility};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Comparisons at or below either bound skip the Overview — spec §12.
@@ -249,6 +250,14 @@ fn file_entry(fact: &ReviewFileFact, index: &StructureIndex<'_>) -> FileEntry {
     let analysis = file_analysis(structured, path);
     let symbols = structured.map(symbol_entries).unwrap_or_default();
     let reasons = file_reasons(fact, role, &analysis, index.is_loaded(), path);
+    let is_test = role == FileRole::Test;
+    // A test file's lines are already test lines; only an implementation file
+    // hides tests inside it.
+    let inline_test_lines = if is_test {
+        0
+    } else {
+        inline_test_lines(&symbols)
+    };
 
     FileEntry {
         display_path: key.display(),
@@ -265,10 +274,39 @@ fn file_entry(fact: &ReviewFileFact, index: &StructureIndex<'_>) -> FileEntry {
         analysis,
         tier: tier_of(&reasons),
         reasons: chips(reasons),
-        is_test: role == FileRole::Test,
+        is_test,
+        has_test_changes: is_test || symbols.iter().any(|symbol| symbol.in_test_scope),
+        inline_test_lines,
         symbols,
         structure_index,
     }
+}
+
+/// Changed lines inside the file's test scopes, counted once: a `mod tests`
+/// change already covers the tests inside it, so a nested symbol whose scope
+/// changed too must not be added a second time.
+fn inline_test_lines(symbols: &[SymbolEntry]) -> u64 {
+    let scopes: HashSet<&str> = symbols
+        .iter()
+        .filter(|symbol| symbol.in_test_scope)
+        .map(|symbol| symbol.qualified.as_str())
+        .collect();
+    symbols
+        .iter()
+        .filter(|symbol| symbol.in_test_scope)
+        .filter(|symbol| !enclosed_by(&symbol.qualified, &scopes))
+        .fold(0u64, |lines, symbol| {
+            lines
+                .saturating_add(u64::from(symbol.lines_added))
+                .saturating_add(u64::from(symbol.lines_deleted))
+        })
+}
+
+/// Whether an enclosing symbol of `qualified` is in `scopes`.
+fn enclosed_by(qualified: &str, scopes: &HashSet<&str>) -> bool {
+    qualified
+        .match_indices("::")
+        .any(|(index, _)| scopes.contains(&qualified[..index]))
 }
 
 fn file_analysis(structured: Option<&StructuredFile>, path: &str) -> FileAnalysis {
@@ -481,6 +519,11 @@ fn symbol_entry(
             )
         });
     let glyph = symbol_glyph(&key.kind());
+    let in_test_scope = key
+        .qualified_path()
+        .iter()
+        .any(|scope| classification::is_test_scope(scope))
+        || (key.kind() == SymbolKind::Module && classification::is_test_scope(key.name()));
     let changes = index.calls(key);
     let calls = call_rows(changes);
     let metrics = symbol_metrics(index.hotspots(key));
@@ -502,6 +545,7 @@ fn symbol_entry(
         glyph,
         change: change.kind(),
         public,
+        in_test_scope,
         signature: change.signature_change().map(|signature| {
             (
                 signature.old_signature().to_string(),
@@ -813,10 +857,11 @@ fn join_chain(mut node: DirNode) -> DirNode {
 /// `nested` says an ancestor is already an implementation directory, so this
 /// one is a child of the row the reader will see.
 fn mark_test_coverage(node: &mut DirNode, files: &[FileEntry], nested: bool) -> bool {
-    let mut has_test = node
-        .files
-        .iter()
-        .any(|index| files.get(*index).is_some_and(|entry| entry.is_test));
+    let mut has_test = node.files.iter().any(|index| {
+        files
+            .get(*index)
+            .is_some_and(|entry| entry.has_test_changes)
+    });
     let inside = nested || node.is_implementation_dir;
     for child in &mut node.children {
         has_test |= mark_test_coverage(child, files, inside);
@@ -874,6 +919,15 @@ fn count_implementation(
 // -- volume ------------------------------------------------------------------
 
 fn volume_rows(files: &[FileEntry], total_changed_lines: u64) -> Vec<VolumeRow> {
+    // Tests written inside the file they test belong to the Tests row, not to
+    // the role of the file that happens to hold them — spec §8.
+    let inline_tests: u64 = files.iter().fold(0u64, |lines, entry| {
+        lines.saturating_add(entry.inline_test_lines)
+    });
+    let inline_files = files
+        .iter()
+        .filter(|entry| entry.inline_test_lines > 0)
+        .count();
     let mut counts = Vec::with_capacity(ALL_ROLES.len());
     for role in ALL_ROLES {
         let mut role_files = 0usize;
@@ -881,6 +935,10 @@ fn volume_rows(files: &[FileEntry], total_changed_lines: u64) -> Vec<VolumeRow> 
         for entry in files.iter().filter(|entry| entry.role == role) {
             role_files += 1;
             lines = lines.saturating_add(entry.changed_lines());
+            lines = lines.saturating_sub(entry.inline_test_lines);
+        }
+        if role == FileRole::Test {
+            lines = lines.saturating_add(inline_tests);
         }
         counts.push((role, role_files, lines));
     }
@@ -903,6 +961,11 @@ fn volume_rows(files: &[FileEntry], total_changed_lines: u64) -> Vec<VolumeRow> 
         .map(|((role, role_files, lines), permille)| VolumeRow {
             role,
             files: role_files,
+            inline_files: if role == FileRole::Test {
+                inline_files
+            } else {
+                0
+            },
             lines,
             percent: f32::from(permille) / 10.0,
         })
@@ -1029,7 +1092,7 @@ fn symbol_row(entry: &FileEntry, symbol: &SymbolEntry, source: usize) -> Ranked 
             lines_added: u64::from(symbol.lines_added),
             lines_deleted: u64::from(symbol.lines_deleted),
             dimmed: false,
-            is_test: entry.is_test,
+            is_test: entry.is_test || symbol.in_test_scope,
         },
         sub_rank: symbol_sub_rank(symbol),
         implementation: is_implementation_like(entry.role),
@@ -1504,7 +1567,7 @@ mod tests {
         AnalysisStatus, AttentionTarget, DirNode, KindGlyph, ReasonKind, ReviewModel, Tier,
     };
     use super::{ModelInputs, StructureLoad, apportion, build_review_model};
-    use okena_core::review::ReviewInventory;
+    use okena_core::review::{FileRole, ReviewInventory};
     use okena_git::DiffMode;
     use okena_review::ReviewStructure;
     use serde_json::{Value, json};
@@ -1529,6 +1592,88 @@ mod tests {
             structure_state: state,
             diff_mode: &mode,
         })
+    }
+
+    /// The model over the file that keeps its tests inside it.
+    fn inline_tests_model() -> ReviewModel {
+        let inventory = fixtures::inventory_inline_tests();
+        let structure = fixtures::structure_inline_tests();
+        model_of(&inventory, Some(&structure), StructureLoad::Ready)
+    }
+
+    #[test]
+    fn tests_written_inside_the_file_they_test_count_as_tests() {
+        let model = inline_tests_model();
+        let entry = model.files.first().expect("one file changed");
+        assert!(!entry.is_test, "the file itself is implementation");
+        assert!(
+            entry.has_test_changes,
+            "its `mod tests` changed, so tests changed here"
+        );
+        // The module's own 30 lines cover the test function inside it; counting
+        // both would claim 42 test lines out of 54 changed.
+        assert_eq!(entry.inline_test_lines, 30);
+    }
+
+    #[test]
+    fn inline_test_lines_move_from_implementation_to_tests() {
+        let model = inline_tests_model();
+        let row = |role: FileRole| {
+            *model
+                .volume
+                .iter()
+                .find(|row| row.role == role)
+                .expect("every role has a row")
+        };
+        let implementation = row(FileRole::Implementation);
+        let tests = row(FileRole::Test);
+        assert_eq!(implementation.files, 1);
+        assert_eq!(implementation.lines, 24, "54 changed, 30 of them tests");
+        assert_eq!(tests.files, 0, "no file is a test file");
+        assert_eq!(tests.lines, 30);
+        assert_eq!(
+            tests.inline_files, 1,
+            "the row is one implementation file's inline tests"
+        );
+        assert!(
+            (tests.percent - 55.6).abs() < 0.2,
+            "shares follow the lines: {}",
+            tests.percent
+        );
+    }
+
+    #[test]
+    fn an_implementation_directory_with_inline_tests_is_not_untested() {
+        let model = inline_tests_model();
+        assert!(
+            model.facts.tests.is_none()
+                || model.root.children.iter().all(|dir| !dir.no_test_changes),
+            "src/ changed its own tests"
+        );
+        assert!(
+            !model.attention.iter().any(|item| item
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::NoTestChanges)),
+            "nothing may claim the tests are missing"
+        );
+    }
+
+    #[test]
+    fn a_test_symbol_follows_the_tests_filter() {
+        let model = inline_tests_model();
+        let item = model
+            .attention
+            .iter()
+            .find(|item| item.name.contains("bumps_once"))
+            .expect("the test function is ranked");
+        assert!(item.is_test, "a symbol in `mod tests` is a test");
+        let bump = model
+            .attention
+            .iter()
+            .find(|item| item.name == "bump")
+            .expect("the implementation function is ranked");
+        assert!(!bump.is_test);
     }
 
     /// Every attention row as `name | tier | reason kinds`.
@@ -1817,7 +1962,7 @@ mod tests {
         );
         let row = &model.attention[find(&model, "src")];
         assert_eq!(row.path, "6 implementation files");
-        assert_eq!(row.reasons[0].label, "no test files changed next to it");
+        assert_eq!(row.reasons[0].label, "no tests changed next to it");
         assert!(
             !model
                 .root

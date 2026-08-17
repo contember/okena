@@ -26,6 +26,7 @@ use std::num::NonZeroU32;
 /// The only file the fixture analyses; everything else stays a git fact.
 const ENGINE: &str = "src/engine.rs";
 const DELETED: &str = "src/legacy.rs";
+const COUNTER: &str = "src/counter.rs";
 const MOVED_OLD: &str = "src/motion_old.rs";
 const MOVED_NEW: &str = "src/motion_new.rs";
 const UNSUPPORTED: &str = "src/app.js";
@@ -1015,6 +1016,112 @@ pub(crate) fn structure_empty() -> ReviewStructure {
         Vec::new(),
     )
     .expect("empty structure fixture")
+}
+
+/// One implementation file with its tests inside it, the way Rust writes them:
+/// `mod tests` and one test function in it — spec §5 on inline tests.
+pub(crate) fn inventory_inline_tests() -> ReviewInventory {
+    let mut totals = totals_json();
+    totals["files"] = json!(1);
+    totals["files_modified"] = json!(1);
+    totals["lines_added"] = json!(52);
+    totals["lines_deleted"] = json!(2);
+    serde_json::from_value(json!({
+        "comparison": comparison_json(),
+        "totals": totals,
+        "commits": [],
+        "files": [
+            { "old_path": COUNTER, "new_path": COUNTER, "status": "modified",
+              "lines_added": 52, "lines_deleted": 2, "binary": false,
+              "classification": implementation(), "provenance": git() }
+        ],
+        "coverage": coverage_json(1, 1, 0)
+    }))
+    .expect("inline-tests inventory fixture")
+}
+
+pub(crate) fn structure_inline_tests() -> ReviewStructure {
+    ReviewStructure::new(
+        comparison(),
+        vec![counter_file()],
+        ReviewCoverage::new(1, 1, 0, 0, 0, 0, None).expect("fixture inline coverage"),
+        rust_coverage(1),
+        Vec::new(),
+    )
+    .expect("inline-tests structure fixture")
+}
+
+/// `src/counter.rs`: one changed function, and a `mod tests` whose own change
+/// covers the test function inside it.
+fn counter_file() -> StructuredFile {
+    let bump = key(&[], SymbolKind::Function, "bump");
+    let tests_mod = key(&[], SymbolKind::Module, "tests");
+    let case = key(&["tests"], SymbolKind::Function, "bumps_once");
+    let nav_counter = |line: u32| nav_at(COUNTER, ComparisonSide::Head, line);
+    fn spec<'a>(key: &'a SymbolKey, full: (u32, u32), signature: &'a str) -> FactSpec<'a> {
+        FactSpec {
+            key,
+            visibility: SymbolVisibility::Private,
+            full,
+            signature_line: full.0,
+            body: (full.0.saturating_add(1), full.1),
+            signature,
+            params: 0,
+            depth: 1,
+        }
+    }
+    let bump_change = SymbolChange::new(
+        SymbolChangeKind::Modified,
+        Some(fact(spec(&bump, (5, 6), "fn bump()"))),
+        Some(fact(spec(&bump, (5, 14), "fn bump()"))),
+        None,
+        true,
+        vec![hunk(Some((5, 6)), Some((5, 14)))],
+        nav_counter(5),
+    )
+    .expect("fixture bump change");
+    let tests_change = SymbolChange::new(
+        SymbolChangeKind::Added,
+        None,
+        Some(fact(spec(&tests_mod, (100, 129), "mod tests"))),
+        None,
+        false,
+        vec![hunk(None, Some((100, 129)))],
+        nav_counter(100),
+    )
+    .expect("fixture tests module change");
+    let case_change = SymbolChange::new(
+        SymbolChangeKind::Added,
+        None,
+        Some(fact(spec(&case, (110, 121), "fn bumps_once()"))),
+        None,
+        false,
+        // The whole module arrived in one hunk; the symbol's own span is what
+        // makes its 12 lines out of the module's 30.
+        vec![hunk(None, Some((100, 129)))],
+        nav_counter(110),
+    )
+    .expect("fixture test case change");
+    StructuredFile::new(
+        Some(COUNTER.to_string()),
+        Some(COUNTER.to_string()),
+        Some(SyntaxLanguage::Rust),
+        Some(rust()),
+        Some(rust()),
+        FileAnalysisStatus::Parsed,
+        Vec::new(),
+        Vec::new(),
+        vec![bump_change, tests_change, case_change],
+        Vec::new(),
+        Vec::new(),
+        vec![
+            hunk(Some((5, 6)), Some((5, 14))),
+            hunk(None, Some((100, 129))),
+        ],
+        Vec::new(),
+        None,
+    )
+    .expect("fixture counter file")
 }
 
 /// The ranking over [`inventory`] and [`structure`] — the shared golden model.

@@ -57,6 +57,9 @@ pub(crate) struct SymbolRow {
     pub markers: Vec<Reason>,
     /// The qualified name — the row itself has one line for the short one.
     pub tooltip: String,
+    /// `Tests` on the outermost test scope, so inline tests are visible for
+    /// what they are without badging every case inside them.
+    pub role_badge: Option<&'static str>,
     pub target: AttentionTarget,
 }
 
@@ -504,22 +507,13 @@ fn flat_rows(model: &ReviewModel, visible: &[usize], outline: bool) -> Vec<NavRo
 /// Source order, the order the file itself reads in; a member sits under the
 /// type it belongs to, so a class reads as its own outline.
 fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
-    let present: HashSet<&str> = entry
-        .symbols
-        .iter()
-        .map(|symbol| symbol.qualified.as_str())
-        .collect();
-    let removed: HashSet<&str> = entry
-        .symbols
-        .iter()
-        .filter(|symbol| symbol.change == SymbolChangeKind::Removed)
-        .map(|symbol| symbol.qualified.as_str())
-        .collect();
+    let scopes = Scopes::of(&entry.symbols);
     for symbol in &entry.symbols {
-        let Some(level) = scope_level(&symbol.qualified, &present, &removed) else {
+        let Some(level) = scopes.level(&symbol.qualified) else {
             continue;
         };
         let depth = depth.saturating_add(level);
+        let badge = symbol.in_test_scope && !scopes.under_test(&symbol.qualified);
         let target = AttentionTarget::Symbol {
             file: entry.key.clone(),
             change_index: symbol.change_index,
@@ -527,7 +521,7 @@ fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
         out.push(NavRow {
             id: Some(NavRowId::Item(target.clone())),
             depth,
-            kind: NavRowKind::Symbol(symbol_row(symbol, target.clone())),
+            kind: NavRowKind::Symbol(symbol_row(symbol, badge, target.clone())),
         });
         for detail in detail_rows(symbol, &target) {
             out.push(NavRow {
@@ -541,24 +535,56 @@ fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
     }
 }
 
-/// How far under its file a symbol sits: one level per enclosing symbol that
-/// changed too. `None` when one of those was removed whole — the member went
-/// with it, and its own row would only repeat that.
-fn scope_level(qualified: &str, present: &HashSet<&str>, removed: &HashSet<&str>) -> Option<usize> {
-    let mut level: usize = 0;
-    for (index, _) in qualified.match_indices(QUALIFIER) {
-        let ancestor = &qualified[..index];
-        if removed.contains(ancestor) {
-            return None;
-        }
-        if present.contains(ancestor) {
-            level = level.saturating_add(1);
-        }
-    }
-    Some(level)
+/// The changed symbols of one file, by qualified name — what a row needs to
+/// know about the symbols enclosing it.
+struct Scopes<'a> {
+    present: HashSet<&'a str>,
+    removed: HashSet<&'a str>,
+    tests: HashSet<&'a str>,
 }
 
-fn symbol_row(symbol: &SymbolEntry, target: AttentionTarget) -> SymbolRow {
+impl<'a> Scopes<'a> {
+    fn of(symbols: &'a [SymbolEntry]) -> Self {
+        let names = |keep: fn(&SymbolEntry) -> bool| -> HashSet<&'a str> {
+            symbols
+                .iter()
+                .filter(|symbol| keep(symbol))
+                .map(|symbol| symbol.qualified.as_str())
+                .collect()
+        };
+        Self {
+            present: names(|_| true),
+            removed: names(|symbol| symbol.change == SymbolChangeKind::Removed),
+            tests: names(|symbol| symbol.in_test_scope),
+        }
+    }
+
+    /// How far under its file a symbol sits: one level per enclosing symbol
+    /// that changed too. `None` when one of those was removed whole — the
+    /// member went with it, and its own row would only repeat that.
+    fn level(&self, qualified: &str) -> Option<usize> {
+        let mut level: usize = 0;
+        for (index, _) in qualified.match_indices(QUALIFIER) {
+            let ancestor = &qualified[..index];
+            if self.removed.contains(ancestor) {
+                return None;
+            }
+            if self.present.contains(ancestor) {
+                level = level.saturating_add(1);
+            }
+        }
+        Some(level)
+    }
+
+    /// A test scope above this one already carries the badge.
+    fn under_test(&self, qualified: &str) -> bool {
+        qualified
+            .match_indices(QUALIFIER)
+            .any(|(index, _)| self.tests.contains(&qualified[..index]))
+    }
+}
+
+fn symbol_row(symbol: &SymbolEntry, badge: bool, target: AttentionTarget) -> SymbolRow {
     let candidates = symbol.reasons.iter().filter_map(|reason| {
         words::symbol_marker(reason.kind, &reason.label).map(|label| {
             (
@@ -577,6 +603,7 @@ fn symbol_row(symbol: &SymbolEntry, target: AttentionTarget) -> SymbolRow {
         deleted: u64::from(symbol.lines_deleted),
         markers: top_markers(candidates),
         tooltip: symbol.qualified.clone(),
+        role_badge: badge.then(|| role_short(FileRole::Test)),
         target,
     }
 }
@@ -752,8 +779,8 @@ mod tests {
     use super::super::super::state::{NavRowId, RoleFilter, RolePreset};
     use super::{
         AttentionTarget, CallChangeKind, DetailKind, DetailRow, DirRow, FileRow, NavRow,
-        NavRowKind, SymbolRow, TreeArgs, covers_untested, default_expanded, nav_rows, not_analyzed,
-        not_analyzed_count, row_ids, scope_level, visible_files,
+        NavRowKind, Scopes, SymbolRow, TreeArgs, covers_untested, default_expanded, nav_rows,
+        not_analyzed, not_analyzed_count, row_ids, visible_files,
     };
     use std::collections::HashSet;
 
@@ -1240,9 +1267,12 @@ mod tests {
 
     #[test]
     fn a_member_sits_under_the_type_it_changed_with() {
-        let present = HashSet::from(["Registry", "Registry::add", "free", "Gone"]);
-        let removed = HashSet::from(["Gone"]);
-        let level = |qualified| scope_level(qualified, &present, &removed);
+        let scopes = Scopes {
+            present: HashSet::from(["Registry", "Registry::add", "free", "Gone"]),
+            removed: HashSet::from(["Gone"]),
+            tests: HashSet::new(),
+        };
+        let level = |qualified| scopes.level(qualified);
 
         assert_eq!(level("Registry"), Some(0));
         assert_eq!(
@@ -1265,13 +1295,28 @@ mod tests {
 
     #[test]
     fn a_member_of_a_removed_type_is_left_out() {
-        let present = HashSet::from(["Gone", "Gone::field", "Gone::Inner", "Gone::Inner::x"]);
-        let removed = HashSet::from(["Gone"]);
-        let level = |qualified| scope_level(qualified, &present, &removed);
+        let scopes = Scopes {
+            present: HashSet::from(["Gone", "Gone::field", "Gone::Inner", "Gone::Inner::x"]),
+            removed: HashSet::from(["Gone"]),
+            tests: HashSet::new(),
+        };
+        let level = |qualified| scopes.level(qualified);
 
         assert_eq!(level("Gone"), Some(0), "the removal itself is the news");
         assert_eq!(level("Gone::field"), None);
         assert_eq!(level("Gone::Inner::x"), None, "however deep it sits");
+    }
+
+    #[test]
+    fn only_the_outermost_test_scope_carries_the_badge() {
+        let scopes = Scopes {
+            present: HashSet::from(["tests", "tests::case", "bump"]),
+            removed: HashSet::new(),
+            tests: HashSet::from(["tests", "tests::case"]),
+        };
+        assert!(!scopes.under_test("tests"), "the module is the outermost");
+        assert!(scopes.under_test("tests::case"));
+        assert!(!scopes.under_test("bump"));
     }
 
     #[test]

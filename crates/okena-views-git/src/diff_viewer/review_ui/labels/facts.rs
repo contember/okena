@@ -118,6 +118,17 @@ pub(crate) fn legend_files(files: usize) -> String {
     count_files(files)
 }
 
+/// The legend's file cell. Lines that came from inside files of another role —
+/// tests written in the file they test — say so rather than claiming files:
+/// `in 12 files`, or `4 files + 12` when the role also has files of its own.
+pub(crate) fn legend_file_cell(files: usize, inline_files: usize) -> String {
+    match (files, inline_files) {
+        (_, 0) => count_files(files),
+        (0, inline) => format!("in {}", count_files(inline)),
+        (_, inline) => format!("{} + {}", count_files(files), format_count(inline)),
+    }
+}
+
 /// `≥ 3 removed · ≥ 12 signatures changed · ≥ 34 added — analyzed subset, TS/TSX`.
 /// Empty when the fact carries nothing worth a line.
 pub(crate) fn public_api_sentence(fact: &PublicApiFact) -> String {
@@ -167,8 +178,11 @@ fn language_slashes(languages: &[String]) -> String {
         .join("/")
 }
 
-/// `Test files changed next to 4 of 6 implementation directories · none next to
+/// `Tests changed next to 4 of 6 implementation directories · none next to
 /// packages/workers/src (26 files, 6 118 lines)`.
+///
+/// "tests" and not "test files": in Rust they usually live in the file they
+/// test, and those count here too.
 pub(crate) fn tests_sentence(fact: &TestsFact) -> String {
     let unit = if fact.impl_dirs == 1 {
         "directory"
@@ -179,12 +193,12 @@ pub(crate) fn tests_sentence(fact: &TestsFact) -> String {
     let none_at_all = fact.with_tests == 0;
     let head = if none_at_all {
         format!(
-            "no test files changed next to any of the {} implementation {unit}",
+            "no tests changed next to any of the {} implementation {unit}",
             format_count(fact.impl_dirs)
         )
     } else {
         format!(
-            "Test files changed next to {} of {} implementation {unit}",
+            "Tests changed next to {} of {} implementation {unit}",
             format_count(fact.with_tests),
             format_count(fact.impl_dirs)
         )
@@ -534,7 +548,7 @@ mod tests {
         };
         assert_eq!(
             tests_sentence(&fact),
-            "Test files changed next to 4 of 6 implementation directories \u{00B7} none next to \
+            "Tests changed next to 4 of 6 implementation directories \u{00B7} none next to \
              packages/workers/src (26 files, 6\u{2009}118 lines) and 1 more"
         );
     }
@@ -560,7 +574,7 @@ mod tests {
         let sentence = tests_sentence(&fact);
         assert_eq!(
             sentence,
-            "no test files changed next to any of the 3 implementation directories \u{00B7} \
+            "no tests changed next to any of the 3 implementation directories \u{00B7} \
              largest packages/workers/src (26 files, 6\u{2009}118 lines)"
         );
         assert!(!sentence.contains("0 of "), "{sentence}");
@@ -575,7 +589,7 @@ mod tests {
         };
         assert_eq!(
             tests_sentence(&fact),
-            "Test files changed next to 1 of 1 implementation directory"
+            "Tests changed next to 1 of 1 implementation directory"
         );
     }
 

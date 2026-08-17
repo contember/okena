@@ -83,7 +83,14 @@ pub(crate) struct FileEntry {
     pub analysis: FileAnalysis,
     pub reasons: Vec<Reason>,
     pub tier: Tier,
+    /// The whole file is a test file, by its path.
     pub is_test: bool,
+    /// Tests changed here: the file is one, or a test scope inside it changed —
+    /// in Rust the tests usually live in the file they test.
+    pub has_test_changes: bool,
+    /// Changed lines that sit inside a test scope of an otherwise
+    /// non-test file; counted once, on the outermost test scope.
+    pub inline_test_lines: u64,
     pub symbols: Vec<SymbolEntry>,
     /// Index into `ReviewStructure::files` when structure reached this file.
     pub structure_index: Option<usize>,
@@ -133,6 +140,8 @@ pub(crate) struct SymbolEntry {
     pub glyph: KindGlyph,
     pub change: SymbolChangeKind,
     pub public: bool,
+    /// The symbol is a test scope or sits in one (`mod tests`, `describe`).
+    pub in_test_scope: bool,
     /// Normalized `(old, new)` signature pair when the signature changed.
     pub signature: Option<(String, String)>,
     pub body_changed: bool,
@@ -201,6 +210,9 @@ pub(crate) struct DirNode {
 pub(crate) struct VolumeRow {
     pub role: FileRole,
     pub files: usize,
+    /// Files that gave this role lines without carrying it — inline tests in
+    /// implementation files. They are counted in their own role's `files` too.
+    pub inline_files: usize,
     pub lines: u64,
     pub percent: f32,
 }

@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(short_chip("public signature"), "sig");
         assert_eq!(short_chip("exported signature"), "sig");
         assert_eq!(short_chip("new \u{00B7} exported"), "new");
-        assert_eq!(short_chip("no test files changed next to it"), "no tests");
+        assert_eq!(short_chip("no tests changed next to it"), "no tests");
         assert_eq!(short_chip("240 lines"), "240 lines");
         assert_eq!(
             short_chip("2 calls \u{00B7} error branch"),

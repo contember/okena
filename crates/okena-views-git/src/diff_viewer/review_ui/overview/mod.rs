@@ -150,7 +150,7 @@ impl DiffViewer {
                     .child(role_label(role)),
             )
             .child(numeric(
-                words::legend_files(row.files),
+                words::legend_file_cell(row.files, row.inline_files),
                 64.0,
                 t.text_muted,
                 cx,

@@ -83,12 +83,18 @@ pane's `file_stats` order. No GPUI types.
   reasons (see §6), tier, changed symbols (from structure), churn.
 - **Directory aggregation**: tree of directories with file count and summed +/− over all files (the navigator
   recomputes totals over the visible subset);
-  single-child chains joined; `no test files changed next to it` flag on implementation directories
-  (an implementation directory = contains ≥ 1 implementation-role file; “next to it” = any test-role
-  file under the same directory subtree; computed on the top-most directory that has both kinds where
-  applicable — see §6 tier 4).
+  single-child chains joined; `no tests changed next to it` flag on implementation directories
+  (an implementation directory = contains ≥ 1 implementation-role file; “next to it” = a test-role
+  file under the same directory subtree **or a test scope inside one of its files**; computed on the
+  top-most directory that has both kinds where applicable — see §6 tier 4).
+- **Inline tests**: a symbol whose scope chain contains a test scope (`mod tests`, `describe`, by the
+  same names the path rules use) is a test change even though its file is implementation — the usual
+  shape in Rust. Its lines count once, on the outermost such scope, so a changed `mod tests` does not
+  count its cases twice. A file carries `has_test_changes` and `inline_test_lines`.
 - **Volume by role**: files and changed lines (added + deleted) per role, percentage of total changed
-  lines; all 11 roles listed, roles with 0 files omitted from display but present in the model.
+  lines; inline test lines are subtracted from the file's own role and added to Tests, so a role may
+  have lines without files of its own (`in 47 files`); all 11 roles listed, roles with neither files
+  nor lines omitted from display but present in the model.
 - **Facts**: Public API (`removed`, `signatures changed`, `added` counts of Public/Exported symbols;
   `lower_bound: bool` when coverage < total), Tests (implementation directories with / without test
   changes), Moves (renames split into likely mechanical = residual ≤ 20 lines vs with edits), Commits
@@ -129,7 +135,7 @@ were analyzed; unanalyzed files rank from git facts and carry `not analyzed · <
   `NotAnalyzed{lang}`, `LargeChurn`.
 - Chip wording: `public symbol removed`, `public signature`, `exported signature`, `body`,
   `2 calls · error branch`, `new · exported`, `240 lines`, `nesting 6`, `moved 98 %`, `86 residual lines`,
-  `no test files changed next to it`, `CI config`, `not analyzed · JS`.
+  `no tests changed next to it`, `CI config`, `not analyzed · JS`.
 
 ## 7. Navigator
 
@@ -156,7 +162,8 @@ one opens the symbol. Detail lines, one line each and truncated with the full te
 <old> → <new>` first, then the calls (`+` `−` `~`, the call text, then the branch it sits in, so a
 narrow column cuts the branch first), at most six of them and then `… N more`. Identical occurrences
 share one line with `×4`. A file with a block under it is filled like a header, its symbols sit one
-level in and their detail lines one level further, under the symbol's own glyph column. A member whose
+level in and their detail lines one level further, under the symbol's own glyph column. The outermost
+symbol of a test scope carries the `Tests` badge, so inline tests read as tests. A member whose
 enclosing symbol changed too sits one level under it, so a class reads as its own outline; a member of
 a symbol that was *removed* whole is left out, since the parent's row already says it went. Detail lines
 open their symbol on click but `↑` `↓` step over them. The
@@ -187,7 +194,7 @@ deletion-heavy comparisons the sign is visible.
 Facts (one line each, omitted when empty, never zeros):
 - **Public API** — `≥ 3 removed · ≥ 12 signatures changed · ≥ 34 added — analyzed subset, TS/TSX → Attention`
   (`≥` only when coverage is partial; “no supported language in this comparison” when applicable).
-- **Tests** — `Test files changed next to 4 of 6 implementation directories · none next to packages/workers/src (26 files, +6 118) → show`.
+- **Tests** — `Tests changed next to 4 of 6 implementation directories · none next to packages/workers/src (26 files, +6 118) → show`. “Tests”, not “test files”: a `mod tests` inside an implementation file counts.
 - **Moves** — `21 high-similarity moves · 17 likely mechanical (≤ 20 residual lines) · 4 with edits, ranked below → filter`.
 - **Commits** — `14 · 1 merge · <author> · 6 days · <first sha> … <last sha> → show ledger` (ledger: relative
   dates via `okena_git::format_relative_time`, SHA, subject, author). “Open commit diff” per row needs an

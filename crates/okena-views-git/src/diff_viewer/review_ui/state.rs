@@ -404,6 +404,8 @@ mod tests {
             reasons: Vec::new(),
             tier: Tier::Rest,
             is_test: role == FileRole::Test,
+            has_test_changes: role == FileRole::Test,
+            inline_test_lines: 0,
             symbols: Vec::new(),
             structure_index: None,
         }

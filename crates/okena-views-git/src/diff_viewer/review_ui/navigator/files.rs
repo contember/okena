@@ -241,6 +241,9 @@ impl DiffViewer {
         .children(symbol.markers.iter().map(|marker| {
             chip(marker.label.clone(), chip_tone(marker.kind), t, cx).into_any_element()
         }))
+        .when_some(symbol.role_badge, |d, badge| {
+            d.child(role_badge(badge, t, cx))
+        })
         .child(div().flex_1())
         .child(churn_cell(symbol.added, symbol.deleted, t, cx))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))

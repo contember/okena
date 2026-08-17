@@ -63,6 +63,13 @@ pub fn classify_file_fact(
 /// Rules use this fixed precedence:
 /// Generated, Vendored, Lockfile, Snapshot, Fixture, Test, Documentation,
 /// Example, Configuration, Implementation, Unclassified.
+/// Whether a scope *inside* a file reads as a test scope — a Rust `mod tests`,
+/// a `describe` named `spec`. Same vocabulary as the path rules use for
+/// directories, so "what counts as a test" has one answer.
+pub fn is_test_scope(name: &str) -> bool {
+    TEST_SEGMENTS.contains(&name.to_ascii_lowercase().as_str())
+}
+
 pub fn classify_paths(
     old_path: Option<&str>,
     new_path: Option<&str>,
@@ -365,6 +372,16 @@ mod tests {
             )
             .unwrap(),
             provenance: FactProvenance::Git,
+        }
+    }
+
+    #[test]
+    fn a_scope_inside_a_file_reads_as_a_test_by_the_same_names() {
+        for name in ["tests", "Tests", "test", "spec", "__tests__"] {
+            assert!(is_test_scope(name), "{name}");
+        }
+        for name in ["testing", "attest", "fixtures", "helpers"] {
+            assert!(!is_test_scope(name), "{name}");
         }
     }
 

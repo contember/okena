@@ -76,10 +76,15 @@ fn deletions_dominate(model: &ReviewModel, role: FileRole) -> bool {
     deleted > added
 }
 
-/// The legend rows worth a line: the model keeps all 11 roles, display drops the
-/// ones nothing touched — spec §5.
+/// The legend rows worth a line: the model keeps all 11 roles, display drops
+/// the ones nothing touched — spec §5. A role can have lines without files of
+/// its own: tests written inside the file they test.
 pub(crate) fn legend_rows(model: &ReviewModel) -> Vec<&VolumeRow> {
-    model.volume.iter().filter(|row| row.files > 0).collect()
+    model
+        .volume
+        .iter()
+        .filter(|row| row.files > 0 || row.lines > 0)
+        .collect()
 }
 
 #[cfg(test)]
@@ -178,13 +183,35 @@ mod tests {
         let rows = legend_rows(&model);
         assert!(!rows.is_empty());
         assert!(
-            rows.iter().all(|row| row.files > 0),
-            "a zero-file role has nothing to show"
+            rows.iter().all(|row| row.files > 0 || row.lines > 0),
+            "a role with neither files nor lines has nothing to show"
         );
         assert!(
             rows.len() < model.volume.len(),
             "the model keeps all 11 roles"
         );
+    }
+
+    #[test]
+    fn a_role_with_lines_but_no_files_of_its_own_keeps_its_row() {
+        let inventory = fixtures::inventory_inline_tests();
+        let structure = fixtures::structure_inline_tests();
+        let model = build_review_model(ModelInputs {
+            inventory: Some(&inventory),
+            inventory_error: None,
+            structure: Some(&structure),
+            structure_state: StructureLoad::Ready,
+            diff_mode: &DiffMode::BranchCompare {
+                base: "main".into(),
+                head: "feature".into(),
+            },
+        });
+        let tests = legend_rows(&model)
+            .into_iter()
+            .find(|row| row.role == FileRole::Test)
+            .expect("the inline tests earn a legend row");
+        assert_eq!(tests.files, 0);
+        assert!(tests.lines > 0, "and the lines are what earned it");
     }
 
     #[test]
