@@ -126,8 +126,7 @@ fn path_text(path: &str, t: &ThemeColors, cx: &App) -> AnyElement {
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_color(rgb(t.text_primary))
                 .child(base.to_string()),
         )

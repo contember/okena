@@ -189,8 +189,7 @@ fn render_row(row: &PopoverRow, t: &ThemeColors, cx: &App) -> AnyElement {
         .child(
             div()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(detail_color))
                 .child(row.detail.clone()),

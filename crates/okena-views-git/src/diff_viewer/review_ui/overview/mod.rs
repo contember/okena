@@ -15,15 +15,22 @@ use super::model::{AttentionItem, AttentionTarget, CommitRow, Reason, ReviewMode
 use super::state::{NavigatorMode, RoleFilter, RolePreset, RoleSet};
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::review::FileRole;
 use okena_core::theme::ThemeColors;
 use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 
+/// The page stops growing here; a wider window gets margin, not longer rows.
+const CONTENT_WIDTH: Pixels = px(1080.0);
 /// Right column of the two-column layout; the facts never grow past it.
 const FACTS_WIDTH: Pixels = px(360.0);
+/// The legend's role column; the numbers sit right after it, not at the far edge.
+const LEGEND_LABEL_WIDTH: Pixels = px(150.0);
 /// Widest a "Start here" name may get before it is ellipsized.
 const NAME_WIDTH: Pixels = px(240.0);
+/// Name plus file of a "Start here" row; the reasons start at one x on every row.
+const START_WHO_WIDTH: Pixels = px(430.0);
 const HEADLINE_SIZE: f32 = 17.0;
 
 impl DiffViewer {
@@ -52,6 +59,10 @@ impl DiffViewer {
             .overflow_y_scroll()
             .child(
                 v_flex()
+                    // A wide window does not stretch the page: past this the
+                    // legend numbers and the facts would drift away from their
+                    // labels.
+                    .max_w(CONTENT_WIDTH)
                     .px(px(28.0))
                     .py(px(18.0))
                     .gap(px(26.0))
@@ -148,8 +159,9 @@ impl DiffViewer {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .w(LEGEND_LABEL_WIDTH)
+                    .flex_shrink_0()
+                    .truncate()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
                     .child(role_label(role)),
@@ -376,6 +388,8 @@ impl DiffViewer {
             t.text_primary
         };
         let (added, deleted) = format_signed(item.lines_added, item.lines_deleted);
+        let full_path = SharedString::from(item.path.clone());
+        let where_text = short_path(&item.path, &item.target);
         h_flex()
             .id(SharedString::from(format!("review-start-here-{index}")))
             .cursor_pointer()
@@ -388,6 +402,7 @@ impl DiffViewer {
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.review_open_item(target.clone(), cx);
             }))
+            .tooltip(move |window, cx| Tooltip::new(full_path.clone()).build(window, cx))
             .child(
                 div()
                     .w(px(16.0))
@@ -406,25 +421,31 @@ impl DiffViewer {
                     .child(glyph(item.glyph)),
             )
             .child(
-                div()
+                h_flex()
+                    .w(START_WHO_WIDTH)
                     .flex_shrink_0()
-                    // A qualified symbol name may be long; it still may not push
-                    // the counts off the row.
-                    .max_w(NAME_WIDTH)
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(name_color))
-                    .child(item.name.clone()),
-            )
-            .child(
-                div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(item.path.clone()),
+                    .gap(px(8.0))
+                    .items_baseline()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            // A qualified symbol name may be long; it still may
+                            // not push the file off the row.
+                            .max_w(NAME_WIDTH)
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(name_color))
+                            .child(item.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(where_text),
+                    ),
             )
             .child(
                 h_flex()
@@ -447,6 +468,32 @@ impl DiffViewer {
             )
             .into_any_element()
     }
+}
+
+/// What the muted column after the name says about where the row lives.
+///
+/// A symbol row: its file, cut to `…/dir/file.rs`. A file row: its directory,
+/// cut the same way — the name is the basename already. A directory row's
+/// `path` is its "n implementation files" text and stays whole. Every row's
+/// tooltip carries the full path.
+fn short_path(path: &str, target: &AttentionTarget) -> String {
+    match target {
+        AttentionTarget::Symbol { .. } => tail(path, 2),
+        AttentionTarget::File(_) => match path.rfind('/') {
+            Some(index) => tail(&path[..index], 2),
+            None => String::new(),
+        },
+        AttentionTarget::Directory(_) => path.to_string(),
+    }
+}
+
+/// The last `keep` segments of a path, `…/` marking what was cut.
+fn tail(path: &str, keep: usize) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() <= keep {
+        return path.to_string();
+    }
+    format!("\u{2026}/{}", segments[segments.len() - keep..].join("/"))
 }
 
 fn render_headline(head: &Headline, t: &ThemeColors, cx: &App) -> AnyElement {
@@ -572,8 +619,7 @@ fn render_ledger_row(commit: &CommitRow, t: &ThemeColors, cx: &App) -> AnyElemen
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.text_secondary))
                 .child(commit.subject.clone()),
@@ -641,5 +687,49 @@ fn role_set_filter(roles: RoleSet) -> RoleFilter {
         preset: RolePreset::Custom,
         likely_mechanical_only: false,
         not_analyzed_only: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::review::ReviewFileKey;
+    use super::super::model::AttentionTarget;
+    use super::{short_path, tail};
+
+    #[test]
+    fn paths_keep_their_tail_and_mark_the_cut() {
+        assert_eq!(tail("a/b/c/d.rs", 2), "\u{2026}/c/d.rs");
+        assert_eq!(tail("c/d.rs", 2), "c/d.rs");
+        assert_eq!(tail("d.rs", 2), "d.rs");
+    }
+
+    #[test]
+    fn the_where_column_depends_on_what_the_row_is() {
+        let key = ReviewFileKey {
+            old_path: None,
+            new_path: Some("x".into()),
+        };
+        let symbol = AttentionTarget::Symbol {
+            file: key.clone(),
+            change_index: 0,
+        };
+        assert_eq!(
+            short_path("packages/worker/src/storage/repo.ts", &symbol),
+            "\u{2026}/storage/repo.ts"
+        );
+        assert_eq!(
+            short_path(
+                "packages/worker/src/storage/repo.ts",
+                &AttentionTarget::File(key)
+            ),
+            "\u{2026}/src/storage"
+        );
+        assert_eq!(
+            short_path(
+                "26 implementation files",
+                &AttentionTarget::Directory("a".into())
+            ),
+            "26 implementation files"
+        );
     }
 }

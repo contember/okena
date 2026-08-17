@@ -104,8 +104,7 @@ impl DiffViewer {
             .child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(preset.hint.clone()),
@@ -211,8 +210,7 @@ fn menu_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                .truncate()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_primary))
                 .child(label),
