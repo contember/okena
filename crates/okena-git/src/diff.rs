@@ -149,6 +149,17 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             None => continue,
         };
 
+        // Binary additions and deletions do not include `---`/`+++` markers.
+        // Clear the synthetic path inherited from the `diff --git` header.
+        if line.starts_with("new file mode ") {
+            file.old_path = None;
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            file.new_path = None;
+            continue;
+        }
+
         // Parse rename/copy headers. A pure rename (100% similarity) emits
         // `rename from <old>` / `rename to <new>` with no `---`/`+++` lines;
         // copies emit `copy from`/`copy to` analogously. These override the
@@ -1086,6 +1097,28 @@ Binary files a/image.png and b/image.png differ
         assert_eq!(result.files.len(), 1);
         assert!(result.files[0].is_binary);
         assert!(result.files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn binary_addition_and_deletion_clear_the_absent_side() {
+        let diff = r#"diff --git a/added.png b/added.png
+new file mode 100644
+index 0000000..1234567
+Binary files /dev/null and b/added.png differ
+diff --git a/deleted.png b/deleted.png
+deleted file mode 100644
+index 7654321..0000000
+Binary files a/deleted.png and /dev/null differ
+"#;
+
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(result.files[0].old_path, None);
+        assert_eq!(result.files[0].new_path.as_deref(), Some("added.png"));
+        assert!(result.files[0].is_binary);
+        assert_eq!(result.files[1].old_path.as_deref(), Some("deleted.png"));
+        assert_eq!(result.files[1].new_path, None);
+        assert!(result.files[1].is_binary);
     }
 
     #[test]

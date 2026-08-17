@@ -2625,6 +2625,43 @@ mod tests {
     }
 
     #[test]
+    fn binary_addition_and_deletion_pair_with_inventory() {
+        let repo = TestRepo::new();
+        std::fs::create_dir_all(repo.0.join("assets")).unwrap();
+        std::fs::write(repo.0.join("assets/deleted.png"), [0_u8, 1, 2]).unwrap();
+        repo.commit_all("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        std::fs::remove_file(repo.0.join("assets/deleted.png")).unwrap();
+        std::fs::write(repo.0.join("assets/added.png"), [0_u8, 3, 4]).unwrap();
+        repo.commit_all("replace binary asset");
+
+        let git_control = ReviewGitControl::new(Default::default());
+        let resolved = resolve_review_comparison_with_control(
+            &repo.0,
+            DiffMode::BranchCompare {
+                base: "main".into(),
+                head: "feature".into(),
+            },
+            &git_control,
+        )
+        .unwrap();
+        let request = ReviewDiffRequest::new(resolved, false).unwrap();
+        let structure = build_structure(
+            &repo.0,
+            request,
+            &git_control,
+            &ReviewWorkerControl::default(),
+        )
+        .unwrap();
+
+        assert!(structure.files().is_empty());
+        assert_eq!(structure.omissions().len(), 1);
+        assert_eq!(structure.omissions()[0].reason(), OmittedFileReason::Binary);
+        assert_eq!(structure.omissions()[0].count(), 2);
+        assert_eq!(structure.coverage().unsupported_items(), 2);
+    }
+
+    #[test]
     fn supported_cross_grammar_rename_is_an_explicit_failed_file() {
         let repo = TestRepo::new();
         repo.write(
