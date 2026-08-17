@@ -74,6 +74,10 @@ impl DiffViewer {
         if !self.review_ui.status_popover_open {
             return None;
         }
+        // Only the `details` link opens this; states without one have nothing to add.
+        if !pill_view(&self.review_status()).has_details {
+            return None;
+        }
         let model = self.review_ui.model.as_ref()?;
         let rows: Vec<AnyElement> = popover_rows(model)
             .into_iter()
@@ -94,7 +98,7 @@ impl DiffViewer {
                     .pb(px(4.0))
                     .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
-                    .child(words::POPOVER_TITLE.to_uppercase()),
+                    .child(words::POPOVER_TITLE),
             )
             .children(rows)
             .child(
@@ -108,13 +112,19 @@ impl DiffViewer {
                     }),
             );
 
+        // Occludes, so the dismissing click never also lands on the row underneath.
         Some(
             div()
                 .id("review-status-backdrop")
+                .occlude()
                 .absolute()
                 .inset_0()
                 .on_mouse_down(
                     MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.review_toggle_status_popover(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
                     cx.listener(|this, _, _window, cx| this.review_toggle_status_popover(cx)),
                 )
                 .child(panel)
@@ -155,7 +165,11 @@ fn tone_marker(tone: PillTone, t: &ThemeColors, cx: &App) -> AnyElement {
 }
 
 fn render_row(row: &PopoverRow, t: &ThemeColors, cx: &App) -> AnyElement {
-    let color = if row.warn { t.warning } else { t.text_secondary };
+    let color = if row.warn {
+        t.warning
+    } else {
+        t.text_secondary
+    };
     let detail_color = if row.warn { t.warning } else { t.text_muted };
     h_flex()
         .py(px(4.0))
@@ -174,6 +188,9 @@ fn render_row(row: &PopoverRow, t: &ThemeColors, cx: &App) -> AnyElement {
         )
         .child(
             div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(detail_color))
                 .child(row.detail.clone()),

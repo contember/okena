@@ -48,11 +48,11 @@ pub(crate) fn pill_view(status: &AnalysisStatus) -> PillView {
             text: words::failures_sentence(*failed),
             has_details: true,
         },
-        // The message is too long for the header; hover and the popover carry it.
+        // The message is too long for the header; the hover tooltip carries it.
         AnalysisStatus::Unavailable { .. } => PillView {
             tone: PillTone::Red,
             text: words::UNAVAILABLE.to_string(),
-            has_details: true,
+            has_details: false,
         },
     }
 }
@@ -114,7 +114,7 @@ mod tests {
             (
                 PillTone::Red,
                 "Structure unavailable \u{00B7} diff still works",
-                true,
+                false,
             ),
         ];
         for (status, (tone, text, has_details)) in all_states().iter().zip(expected) {
@@ -149,6 +149,19 @@ mod tests {
             languages: vec!["Rust".into(), "TSX".into()],
         });
         assert!(view.text.ends_with("Rust, TSX"), "{}", view.text);
+    }
+
+    #[test]
+    fn the_failure_message_stays_out_of_the_header() {
+        let view = pill_view(&AnalysisStatus::Unavailable {
+            message: "tree-sitter query failed".into(),
+        });
+        assert!(
+            !view.text.contains("tree-sitter query failed"),
+            "{}",
+            view.text
+        );
+        assert_eq!(view.text, "Structure unavailable \u{00B7} diff still works");
     }
 
     #[test]

@@ -9,9 +9,11 @@ pub(crate) const LOADING_INVENTORY: &str = "Loading inventory\u{2026}";
 pub(crate) const ANALYZING_STRUCTURE: &str = "Analyzing structure\u{2026}";
 pub(crate) const UNAVAILABLE: &str = "Structure unavailable \u{00B7} diff still works";
 pub(crate) const DETAILS_LINK: &str = "details";
-pub(crate) const POPOVER_TITLE: &str = "Structure analysis \u{00B7} this comparison";
+/// Spec §10 wording, already in the caps the popover header wears.
+pub(crate) const POPOVER_TITLE: &str = "STRUCTURE ANALYSIS \u{00B7} THIS COMPARISON";
 pub(crate) const ANALYZED_ROW: &str = "Analyzed";
-pub(crate) const FAILED_ROW: &str = "Structure analysis failed";
+/// Same noun as the pill: one state is never named two ways.
+pub(crate) const UNAVAILABLE_ROW: &str = "Structure unavailable";
 pub(crate) const FOOTER: &str = "Not analyzed files stay in the tree (dimmed), open as a plain \
      diff, and are ranked from git facts.";
 

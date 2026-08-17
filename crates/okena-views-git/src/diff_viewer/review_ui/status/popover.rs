@@ -25,7 +25,7 @@ pub(crate) fn popover_rows(model: &ReviewModel) -> Vec<PopoverRow> {
     // The pill only says "diff still works"; the reason lives here.
     if let AnalysisStatus::Unavailable { message } = &model.status {
         rows.push(PopoverRow {
-            sentence: words::FAILED_ROW.to_string(),
+            sentence: words::UNAVAILABLE_ROW.to_string(),
             detail: message.clone(),
             warn: true,
         });
@@ -120,8 +120,7 @@ mod tests {
         assert!(!rows[0].warn);
         assert!(rows[1].warn && rows[2].warn);
         assert_eq!(
-            rows[2].detail,
-            "3 files \u{00B7} parsing: unexpected token",
+            rows[2].detail, "3 files \u{00B7} parsing: unexpected token",
             "failure rows keep their stage and message"
         );
         assert!(!rows[3].warn && !rows[4].warn);
@@ -138,7 +137,7 @@ mod tests {
         model.coverage.analyzed_files = 0;
         let rows = popover_rows(&model);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].sentence, "Structure analysis failed");
+        assert_eq!(rows[0].sentence, "Structure unavailable");
         assert_eq!(rows[0].detail, "tree-sitter query failed");
         assert!(rows[0].warn);
     }
@@ -171,7 +170,11 @@ mod tests {
         for status in states {
             for row in popover_rows(&model(status, Vec::new())) {
                 for name in DEBUG_NAMES {
-                    assert!(!row.sentence.contains(name), "{} leaks {name}", row.sentence);
+                    assert!(
+                        !row.sentence.contains(name),
+                        "{} leaks {name}",
+                        row.sentence
+                    );
                     assert!(!row.detail.contains(name), "{} leaks {name}", row.detail);
                 }
             }
