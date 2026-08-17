@@ -169,14 +169,15 @@ impl DiffViewer {
                                 ),
                         )
                     })
-                    .children(merge_base)
-                    .children(status_pill),
+                    .children(merge_base),
             )
             // Drag-to-move spacer (only when detached)
             .child(window_drag_spacer(detached))
             .child(
                 h_flex()
                     .gap(px(8.0))
+                    // Analysis status pill sits with the controls so its popover anchors right
+                    .children(status_pill)
                     // Whitespace toggle
                     .child(
                         div()
@@ -1095,6 +1096,7 @@ impl Render for DiffViewer {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if is_smart_mode(&this.diff_mode) && this.handle_review_key(event, window, cx) {
+                    cx.stop_propagation();
                     return;
                 }
                 let key = event.keystroke.key.as_str();
@@ -1188,8 +1190,9 @@ impl Render for DiffViewer {
             })
             .child(if is_smart {
                 // The Overview reflows below 1000 px, so the shell needs its own width.
-                self.review_ui.content_width =
-                    (f32::from(window.viewport_size().width) - self.sidebar_resize.width()).max(0.0);
+                self.review_ui.content_width = (f32::from(window.viewport_size().width)
+                    - self.sidebar_resize.width())
+                .max(0.0);
                 self.render_review_shell(
                     &t,
                     DiffPaneArgs {

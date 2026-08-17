@@ -6,7 +6,7 @@
 
 mod attention;
 mod files;
-mod items;
+pub(super) mod items;
 mod roles;
 mod roles_menu;
 mod rows;

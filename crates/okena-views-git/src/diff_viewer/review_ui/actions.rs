@@ -8,7 +8,8 @@ use super::super::review_nav::EvidenceTarget;
 use super::model::{AttentionTarget, ReasonKind};
 use super::ranking::{ModelInputs, StructureLoad, build_review_model};
 use super::state::{
-    ContentView, FocusRegion, MarkerSpan, NavigatorMode, RoleFilter, RolePreset, SymbolRef,
+    ContentView, FocusRegion, MarkerSpan, NavRowId, NavigatorMode, RoleFilter, RolePreset,
+    SymbolRef,
 };
 use gpui::{App, ClipboardItem, Context, ScrollStrategy, Window};
 use okena_core::review::{ComparisonSide, FileRole};
@@ -132,10 +133,19 @@ impl DiffViewer {
         let Some(index) = model.first_attention_for_file(key) else {
             return;
         };
-        if let Some(row) = self
-            .review_visible_attention()
+        let target = model.attention[index].target.clone();
+        // Rendered rows interleave tier separators and group headers, so map
+        // through the navigator's row list, not the visible-item list.
+        let state = &self.review_ui;
+        let rows = super::navigator::items::attention_rows(
+            model,
+            &state.attention_filter,
+            &state.role_filter,
+            &state.filter_text,
+        );
+        if let Some(row) = rows
             .iter()
-            .position(|visible| *visible == index)
+            .position(|row| row.id.as_ref() == Some(&NavRowId::Item(target.clone())))
         {
             self.review_ui
                 .attention_scroll
@@ -362,7 +372,10 @@ impl DiffViewer {
         let Some(position) = step_index(entry.symbols.len(), current, delta) else {
             return;
         };
-        let Some(change_index) = entry.symbols.get(position).map(|symbol| symbol.change_index)
+        let Some(change_index) = entry
+            .symbols
+            .get(position)
+            .map(|symbol| symbol.change_index)
         else {
             return;
         };
@@ -489,8 +502,7 @@ impl DiffViewer {
         let Some(marker) = self.review_ui.marker.as_ref() else {
             return false;
         };
-        self.smart_review.selected_file.as_ref() == Some(&marker.file)
-            && marker.matches(side, line)
+        self.smart_review.selected_file.as_ref() == Some(&marker.file) && marker.matches(side, line)
     }
 
     /// The unified/split toggle only applies while a diff is on screen.
