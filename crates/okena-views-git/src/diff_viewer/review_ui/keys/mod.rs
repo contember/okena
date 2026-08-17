@@ -7,7 +7,8 @@ mod footer;
 mod help;
 
 use super::super::DiffViewer;
-use super::model::AttentionTarget;
+use super::super::review::ReviewFileKey;
+use super::model::{AttentionTarget, ReviewModel};
 use super::state::{ContentView, FocusRegion, NavRowId, NavigatorMode};
 use gpui::{App, ClipboardItem, Context, KeyDownEvent, Modifiers, Window};
 use okena_core::review::ComparisonSide;
@@ -59,7 +60,6 @@ pub(crate) enum ReviewCommand {
     CopyNavigatorRow,
     CopySelection,
     ToggleHelp,
-    FocusRegionSwitch(FocusRegion),
     CycleRegion,
     MoveCursor(CursorMove),
     ExpandCursor,
@@ -68,68 +68,57 @@ pub(crate) enum ReviewCommand {
     ActivateCursor,
 }
 
+/// Keys the review owns. A modified variant of one of them is unbound and must
+/// not reach the legacy diff shortcuts, which match on the key alone.
+const REVIEW_KEYS: &[&str] = &[
+    "1", "2", "/", "?", "r", "o", "d", "w", "y", "s", "n", "N", "[", "]", "{", "}",
+];
+
+/// Layouts report a shifted character either as the character itself or as the
+/// unshifted key plus `shift`. Returns the canonical key and whether `shift`
+/// was consumed by the mapping.
+fn normalize_key(key: &str, shift: bool) -> (&str, bool) {
+    if !shift {
+        return (key, false);
+    }
+    match key {
+        "/" => ("?", true),
+        "]" => ("}", true),
+        "[" => ("{", true),
+        "n" => ("N", true),
+        other => (other, false),
+    }
+}
+
 /// The key table of spec §11. `None` means the legacy diff handler may run.
 pub(crate) fn dispatch(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
     let modifiers = ctx.modifiers;
-    let accelerator = modifiers.platform || modifiers.control;
 
-    // Region switching stays reachable from inside a text field.
+    // The only region switch the review owns — `Ctrl+1` / `Ctrl+2` are global
+    // app bindings. It answers from inside a field and under any modifier.
     if key == "f6" {
         return Some(ReviewCommand::CycleRegion);
-    }
-    if modifiers.control && key == "1" {
-        return Some(ReviewCommand::FocusRegionSwitch(FocusRegion::Navigator));
-    }
-    if modifiers.control && key == "2" {
-        return Some(ReviewCommand::FocusRegionSwitch(FocusRegion::Content));
     }
     // A focused field owns the key; swallowing stops the legacy single-letter
     // shortcuts from firing while the user types.
     if ctx.input_focused {
         return Some(ReviewCommand::Swallow);
     }
-    // Shifted punctuation arrives as the literal character; accept the
-    // unshifted form too for layouts that report it that way.
-    if key == "?" || (key == "/" && modifiers.shift) {
-        return Some(ReviewCommand::ToggleHelp);
-    }
-    if key == "}" || (key == "]" && modifiers.shift) {
-        return ctx.has_symbols.then_some(ReviewCommand::StepSymbol(1));
-    }
-    if key == "{" || (key == "[" && modifiers.shift) {
-        return ctx.has_symbols.then_some(ReviewCommand::StepSymbol(-1));
-    }
-    if accelerator {
+    // Accelerators resolve first, so `Cmd+?` / `Cmd+}` never hit the key table.
+    if modifiers.platform || modifiers.control {
         return accelerator_key(ctx, key);
     }
 
-    match key {
-        "1" => Some(ReviewCommand::SetNavigator(NavigatorMode::Files)),
-        "2" => Some(ReviewCommand::SetNavigator(NavigatorMode::Attention)),
-        "/" => Some(ReviewCommand::FocusFilter),
-        "r" => Some(ReviewCommand::ToggleRoles),
-        "o" => Some(ReviewCommand::OpenOverview),
-        "d" => Some(ReviewCommand::ToggleDetails),
-        "w" => Some(ReviewCommand::ToggleWhitespace),
-        "y" => Some(ReviewCommand::CopyPathLine),
-        "s" => ctx.split_available.then_some(ReviewCommand::ToggleSplit),
-        "n" if ctx.search_open => Some(if modifiers.shift {
-            ReviewCommand::SearchPrev
-        } else {
-            ReviewCommand::SearchNext
-        }),
-        "]" => Some(if ctx.has_commits {
-            ReviewCommand::NextCommit
-        } else {
-            ReviewCommand::StepQueue(1)
-        }),
-        "[" => Some(if ctx.has_commits {
-            ReviewCommand::PrevCommit
-        } else {
-            ReviewCommand::StepQueue(-1)
-        }),
-        _ => navigator_key(ctx, key),
+    let (key, shift_used) = normalize_key(key, modifiers.shift);
+    let modified = modifiers.alt || modifiers.function || (modifiers.shift && !shift_used);
+    if !modified {
+        if let Some(command) = single_key(ctx, key) {
+            return Some(command);
+        }
+    } else if REVIEW_KEYS.contains(&key) {
+        return Some(ReviewCommand::Swallow);
     }
+    navigator_key(ctx, key)
 }
 
 fn accelerator_key(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
@@ -148,22 +137,60 @@ fn accelerator_key(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
     }
 }
 
+/// The single-key table; keys that act on the open file stay on the file screen.
+fn single_key(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
+    let on_file = ctx.screen == ContentView::File;
+    match key {
+        "1" => Some(ReviewCommand::SetNavigator(NavigatorMode::Files)),
+        "2" => Some(ReviewCommand::SetNavigator(NavigatorMode::Attention)),
+        "/" => Some(ReviewCommand::FocusFilter),
+        "?" => Some(ReviewCommand::ToggleHelp),
+        "r" => Some(ReviewCommand::ToggleRoles),
+        "o" => Some(ReviewCommand::OpenOverview),
+        "w" => Some(ReviewCommand::ToggleWhitespace),
+        "d" => on_file.then_some(ReviewCommand::ToggleDetails),
+        "y" => on_file.then_some(ReviewCommand::CopyPathLine),
+        "s" => ctx.split_available.then_some(ReviewCommand::ToggleSplit),
+        "}" => (on_file && ctx.has_symbols).then_some(ReviewCommand::StepSymbol(1)),
+        "{" => (on_file && ctx.has_symbols).then_some(ReviewCommand::StepSymbol(-1)),
+        "n" => ctx.search_open.then_some(ReviewCommand::SearchNext),
+        "N" => ctx.search_open.then_some(ReviewCommand::SearchPrev),
+        "]" => Some(if ctx.has_commits {
+            ReviewCommand::NextCommit
+        } else {
+            ReviewCommand::StepQueue(1)
+        }),
+        "[" => Some(if ctx.has_commits {
+            ReviewCommand::PrevCommit
+        } else {
+            ReviewCommand::StepQueue(-1)
+        }),
+        _ => None,
+    }
+}
+
 /// Arrows belong to the navigator; in the content they keep scrolling the diff.
 fn navigator_key(ctx: KeyContext, key: &str) -> Option<ReviewCommand> {
+    let command = match key {
+        "up" => ReviewCommand::MoveCursor(CursorMove::Prev),
+        "down" => ReviewCommand::MoveCursor(CursorMove::Next),
+        "home" => ReviewCommand::MoveCursor(CursorMove::First),
+        "end" => ReviewCommand::MoveCursor(CursorMove::Last),
+        "left" => ReviewCommand::CollapseCursor,
+        "right" => ReviewCommand::ExpandCursor,
+        "space" => ReviewCommand::ToggleCursorNode,
+        "enter" => ReviewCommand::ActivateCursor,
+        _ => return None,
+    };
+    // `Alt+↑` / `Alt+↓` are reserved for hunk stepping, which has no helper yet.
+    // Swallowing keeps them from stepping files through the legacy handler.
+    if ctx.modifiers.alt {
+        return Some(ReviewCommand::Swallow);
+    }
     if ctx.focus != FocusRegion::Navigator {
         return None;
     }
-    match key {
-        "up" => Some(ReviewCommand::MoveCursor(CursorMove::Prev)),
-        "down" => Some(ReviewCommand::MoveCursor(CursorMove::Next)),
-        "home" => Some(ReviewCommand::MoveCursor(CursorMove::First)),
-        "end" => Some(ReviewCommand::MoveCursor(CursorMove::Last)),
-        "left" => Some(ReviewCommand::CollapseCursor),
-        "right" => Some(ReviewCommand::ExpandCursor),
-        "space" => Some(ReviewCommand::ToggleCursorNode),
-        "enter" => Some(ReviewCommand::ActivateCursor),
-        _ => None,
-    }
+    Some(command)
 }
 
 /// What `Esc` is currently for.
@@ -209,6 +236,27 @@ pub(crate) fn cancel_step(flags: CancelFlags) -> CancelStep {
     }
 }
 
+/// Mirrors the set [`DiffViewer::dismiss_transient_ui`] closes; kept separate so
+/// the ladder input is testable without a viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LegacyTransients {
+    pub delete_confirm: bool,
+    pub discard_confirm: bool,
+    pub context_menu: bool,
+    pub commit_hash_menu: bool,
+    pub selection_context_menu: bool,
+}
+
+impl LegacyTransients {
+    pub(crate) fn any_open(self) -> bool {
+        self.delete_confirm
+            || self.discard_confirm
+            || self.context_menu
+            || self.commit_hash_menu
+            || self.selection_context_menu
+    }
+}
+
 /// Clamped cursor step within `len` rows; no cursor starts at the first row.
 fn next_cursor_index(len: usize, current: Option<usize>, movement: CursorMove) -> Option<usize> {
     if len == 0 {
@@ -221,6 +269,45 @@ fn next_cursor_index(len: usize, current: Option<usize>, movement: CursorMove) -
         CursorMove::Prev => current.map_or(0, |index| index.saturating_sub(1)),
         CursorMove::Next => current.map_or(0, |index| index.saturating_add(1).min(last)),
     })
+}
+
+/// The row the cursor lands on. A cursor the rows no longer contain restarts.
+fn next_cursor(
+    rows: &[NavRowId],
+    cursor: Option<&NavRowId>,
+    movement: CursorMove,
+) -> Option<NavRowId> {
+    let current = cursor.and_then(|cursor| rows.iter().position(|row| row == cursor));
+    let index = next_cursor_index(rows.len(), current, movement)?;
+    rows.get(index).cloned()
+}
+
+/// What `Ctrl+C` copies from a navigator row: a path, or a qualified symbol.
+fn cursor_row_text(cursor: &NavRowId, model: Option<&ReviewModel>) -> Option<String> {
+    match cursor {
+        NavRowId::Dir(path) | NavRowId::Item(AttentionTarget::Directory(path)) => {
+            Some(path.clone())
+        }
+        NavRowId::File(key) | NavRowId::Item(AttentionTarget::File(key)) => file_path(key),
+        NavRowId::Item(AttentionTarget::Symbol { file, change_index }) => {
+            let model = model?;
+            let entry = model
+                .file_index(file)
+                .and_then(|index| model.files.get(index))?;
+            entry
+                .symbols
+                .iter()
+                .find(|symbol| symbol.change_index == *change_index)
+                .map(|symbol| symbol.qualified.clone())
+        }
+    }
+}
+
+/// The side that still exists; renames copy as the head path.
+fn file_path(key: &ReviewFileKey) -> Option<String> {
+    key.path(ComparisonSide::Head)
+        .or_else(|| key.path(ComparisonSide::Base))
+        .map(str::to_owned)
 }
 
 impl DiffViewer {
@@ -252,7 +339,7 @@ impl DiffViewer {
                 || self.review_ui.outline_open,
             filter_focused: self.review_filter_focused(window, cx),
             search_open: self.search.is_some(),
-            legacy_transient: self.has_legacy_transient(),
+            legacy_transient: self.legacy_transients().any_open(),
             content_is_file: self.review_ui.content == ContentView::File,
         };
         match cancel_step(flags) {
@@ -272,7 +359,7 @@ impl DiffViewer {
             }
             CancelStep::DismissLegacy => self.dismiss_transient_ui(cx),
             CancelStep::BackToOverview => {
-                self.review_open_overview(cx);
+                self.review_return_to_overview(cx);
                 true
             }
             CancelStep::Unhandled => false,
@@ -328,13 +415,14 @@ impl DiffViewer {
             .is_some_and(|entry| !entry.symbols.is_empty())
     }
 
-    /// Mirrors the set [`DiffViewer::dismiss_transient_ui`] closes.
-    fn has_legacy_transient(&self) -> bool {
-        self.delete_confirm.is_some()
-            || self.discard_confirm.is_some()
-            || self.context_menu.is_some()
-            || self.commit_hash_menu.is_some()
-            || self.selection_context_menu.is_some()
+    fn legacy_transients(&self) -> LegacyTransients {
+        LegacyTransients {
+            delete_confirm: self.delete_confirm.is_some(),
+            discard_confirm: self.discard_confirm.is_some(),
+            context_menu: self.context_menu.is_some(),
+            commit_hash_menu: self.commit_hash_menu.is_some(),
+            selection_context_menu: self.selection_context_menu.is_some(),
+        }
     }
 
     fn run_review_command(
@@ -348,7 +436,7 @@ impl DiffViewer {
             ReviewCommand::SetNavigator(mode) => self.review_set_navigator(mode, cx),
             ReviewCommand::FocusFilter => self.review_focus_filter(window, cx),
             ReviewCommand::ToggleRoles => self.review_toggle_roles_menu(cx),
-            ReviewCommand::OpenOverview => self.review_open_overview(cx),
+            ReviewCommand::OpenOverview => self.review_return_to_overview(cx),
             ReviewCommand::StepQueue(delta) => self.review_step_queue(delta, cx),
             ReviewCommand::StepSymbol(delta) => self.review_step_symbol(delta, cx),
             ReviewCommand::PrevCommit => self.prev_commit(cx),
@@ -363,7 +451,6 @@ impl DiffViewer {
             ReviewCommand::CopyNavigatorRow => self.review_copy_cursor_row(cx),
             ReviewCommand::CopySelection => self.copy_selection(cx),
             ReviewCommand::ToggleHelp => self.review_toggle_help(cx),
-            ReviewCommand::FocusRegionSwitch(region) => self.review_set_focus_region(region, cx),
             ReviewCommand::CycleRegion => {
                 let next = match self.review_ui.focus_region {
                     FocusRegion::Navigator => FocusRegion::Content,
@@ -379,18 +466,16 @@ impl DiffViewer {
         }
     }
 
+    /// The overview is navigator-driven, so focus comes back with it.
+    fn review_return_to_overview(&mut self, cx: &mut Context<Self>) {
+        self.review_open_overview(cx);
+        self.review_set_focus_region(FocusRegion::Navigator, cx);
+    }
+
     /// Move the navigator cursor and open whatever it lands on.
     fn review_move_cursor(&mut self, movement: CursorMove, cx: &mut Context<Self>) {
         let rows = self.navigator_row_ids();
-        let current = self
-            .review_ui
-            .nav_cursor
-            .as_ref()
-            .and_then(|cursor| rows.iter().position(|row| row == cursor));
-        let Some(index) = next_cursor_index(rows.len(), current, movement) else {
-            return;
-        };
-        let Some(row) = rows.get(index).cloned() else {
+        let Some(row) = next_cursor(&rows, self.review_ui.nav_cursor.as_ref(), movement) else {
             return;
         };
         self.review_ui.nav_cursor = Some(row.clone());
@@ -441,47 +526,27 @@ impl DiffViewer {
     }
 
     fn review_copy_cursor_row(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = self.review_cursor_row_text() else {
+        let text = self
+            .review_ui
+            .nav_cursor
+            .as_ref()
+            .and_then(|cursor| cursor_row_text(cursor, self.review_ui.model.as_deref()));
+        let Some(text) = text else {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-    }
-
-    fn review_cursor_row_text(&self) -> Option<String> {
-        match self.review_ui.nav_cursor.as_ref()? {
-            NavRowId::Dir(path) | NavRowId::Item(AttentionTarget::Directory(path)) => {
-                Some(path.clone())
-            }
-            NavRowId::File(key) | NavRowId::Item(AttentionTarget::File(key)) => {
-                self.review_file_path(key)
-            }
-            NavRowId::Item(AttentionTarget::Symbol { file, change_index }) => {
-                let model = self.review_ui.model.as_ref()?;
-                let entry = model
-                    .file_index(file)
-                    .and_then(|index| model.files.get(index))?;
-                entry
-                    .symbols
-                    .iter()
-                    .find(|symbol| symbol.change_index == *change_index)
-                    .map(|symbol| symbol.qualified.clone())
-            }
-        }
-    }
-
-    /// The side that still exists; renames copy as the head path.
-    fn review_file_path(&self, key: &super::super::review::ReviewFileKey) -> Option<String> {
-        key.path(ComparisonSide::Head)
-            .or_else(|| key.path(ComparisonSide::Base))
-            .map(str::to_owned)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixtures;
+    use super::super::model::AttentionTarget;
+    use super::super::state::NavRowId;
     use super::{
-        CancelFlags, CancelStep, ContentView, CursorMove, FocusRegion, KeyContext, NavigatorMode,
-        ReviewCommand, cancel_step, dispatch, next_cursor_index,
+        CancelFlags, CancelStep, ContentView, CursorMove, FocusRegion, KeyContext,
+        LegacyTransients, NavigatorMode, ReviewCommand, ReviewFileKey, cancel_step,
+        cursor_row_text, dispatch, next_cursor, next_cursor_index,
     };
     use gpui::Modifiers;
 
@@ -498,9 +563,20 @@ mod tests {
         }
     }
 
+    fn with(modifiers: Modifiers, ctx: KeyContext) -> KeyContext {
+        KeyContext { modifiers, ..ctx }
+    }
+
     fn control() -> Modifiers {
         Modifiers {
             control: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn platform() -> Modifiers {
+        Modifiers {
+            platform: true,
             ..Modifiers::default()
         }
     }
@@ -509,6 +585,27 @@ mod tests {
         Modifiers {
             shift: true,
             ..Modifiers::default()
+        }
+    }
+
+    fn alt() -> Modifiers {
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn function() -> Modifiers {
+        Modifiers {
+            function: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn key(path: &str) -> ReviewFileKey {
+        ReviewFileKey {
+            old_path: Some(path.to_string()),
+            new_path: Some(path.to_string()),
         }
     }
 
@@ -527,9 +624,7 @@ mod tests {
         assert_eq!(dispatch(ctx, "r"), Some(ReviewCommand::ToggleRoles));
         assert_eq!(dispatch(ctx, "o"), Some(ReviewCommand::OpenOverview));
         assert_eq!(dispatch(ctx, "?"), Some(ReviewCommand::ToggleHelp));
-        assert_eq!(dispatch(ctx, "d"), Some(ReviewCommand::ToggleDetails));
         assert_eq!(dispatch(ctx, "w"), Some(ReviewCommand::ToggleWhitespace));
-        assert_eq!(dispatch(ctx, "y"), Some(ReviewCommand::CopyPathLine));
     }
 
     #[test]
@@ -540,6 +635,24 @@ mod tests {
         assert_eq!(dispatch(ctx, "]"), Some(ReviewCommand::StepQueue(1)));
         assert_eq!(dispatch(ctx, "["), Some(ReviewCommand::StepQueue(-1)));
         assert_eq!(dispatch(ctx, "s"), Some(ReviewCommand::ToggleSplit));
+        assert_eq!(dispatch(ctx, "d"), Some(ReviewCommand::ToggleDetails));
+        assert_eq!(dispatch(ctx, "y"), Some(ReviewCommand::CopyPathLine));
+    }
+
+    #[test]
+    fn keys_that_act_on_the_open_file_stay_on_the_file_screen() {
+        // The overview must never act on whatever file was open last.
+        let ctx = KeyContext {
+            has_symbols: true,
+            ..overview()
+        };
+        for pressed in ["d", "y", "}", "{"] {
+            assert_eq!(
+                dispatch(ctx, pressed),
+                None,
+                "{pressed} has no meaning on the overview"
+            );
+        }
     }
 
     #[test]
@@ -559,14 +672,10 @@ mod tests {
 
     #[test]
     fn shifted_punctuation_is_accepted_in_both_reported_forms() {
-        let ctx = file_screen();
-        let shifted = KeyContext {
-            modifiers: shift(),
-            ..ctx
-        };
-        assert_eq!(dispatch(shifted, "]"), Some(ReviewCommand::StepSymbol(1)));
-        assert_eq!(dispatch(shifted, "["), Some(ReviewCommand::StepSymbol(-1)));
-        assert_eq!(dispatch(shifted, "/"), Some(ReviewCommand::ToggleHelp));
+        let ctx = with(shift(), file_screen());
+        assert_eq!(dispatch(ctx, "]"), Some(ReviewCommand::StepSymbol(1)));
+        assert_eq!(dispatch(ctx, "["), Some(ReviewCommand::StepSymbol(-1)));
+        assert_eq!(dispatch(ctx, "/"), Some(ReviewCommand::ToggleHelp));
     }
 
     #[test]
@@ -588,44 +697,103 @@ mod tests {
             ..file_screen()
         };
         assert_eq!(dispatch(open, "n"), Some(ReviewCommand::SearchNext));
-        let back = KeyContext {
-            modifiers: shift(),
-            ..open
-        };
-        assert_eq!(dispatch(back, "n"), Some(ReviewCommand::SearchPrev));
+        assert_eq!(
+            dispatch(with(shift(), open), "n"),
+            Some(ReviewCommand::SearchPrev)
+        );
     }
 
     #[test]
     fn find_opens_the_diff_search_only_on_the_file_screen() {
-        let on_file = KeyContext {
-            modifiers: control(),
-            ..file_screen()
-        };
-        assert_eq!(dispatch(on_file, "f"), Some(ReviewCommand::OpenSearch));
-
-        let on_overview = KeyContext {
-            modifiers: control(),
-            ..overview()
-        };
-        assert_eq!(dispatch(on_overview, "f"), Some(ReviewCommand::FocusFilter));
+        assert_eq!(
+            dispatch(with(control(), file_screen()), "f"),
+            Some(ReviewCommand::OpenSearch)
+        );
+        assert_eq!(
+            dispatch(with(platform(), file_screen()), "f"),
+            Some(ReviewCommand::OpenSearch)
+        );
+        assert_eq!(
+            dispatch(with(control(), overview()), "f"),
+            Some(ReviewCommand::FocusFilter)
+        );
     }
 
     #[test]
     fn copy_follows_the_focused_region() {
-        let navigator = KeyContext {
-            modifiers: control(),
-            ..file_screen()
-        };
+        let navigator = with(control(), file_screen());
         assert_eq!(
             dispatch(navigator, "c"),
             Some(ReviewCommand::CopyNavigatorRow)
         );
-
         let content = KeyContext {
             focus: FocusRegion::Content,
             ..navigator
         };
         assert_eq!(dispatch(content, "c"), Some(ReviewCommand::CopySelection));
+    }
+
+    #[test]
+    fn an_accelerator_never_triggers_a_plain_review_shortcut() {
+        // `Cmd+?` and `Cmd+}` used to fall into the punctuation block.
+        for modifiers in [control(), platform()] {
+            let ctx = with(modifiers, file_screen());
+            for pressed in [
+                "?", "}", "{", "/", "]", "[", "1", "2", "r", "o", "d", "w", "y", "s",
+            ] {
+                assert_eq!(
+                    dispatch(ctx, pressed),
+                    None,
+                    "an accelerator plus {pressed} is not a review binding"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alt_and_function_variants_of_review_keys_do_nothing() {
+        for modifiers in [alt(), function()] {
+            let ctx = with(modifiers, file_screen());
+            for pressed in [
+                "w", "s", "]", "[", "}", "{", "1", "2", "r", "o", "d", "y", "/",
+            ] {
+                assert_eq!(
+                    dispatch(ctx, pressed),
+                    Some(ReviewCommand::Swallow),
+                    "{pressed} must not reach the legacy shortcut"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alt_arrows_are_reserved_and_never_move_the_cursor() {
+        for focus in [FocusRegion::Navigator, FocusRegion::Content] {
+            let ctx = KeyContext {
+                focus,
+                modifiers: alt(),
+                ..file_screen()
+            };
+            for pressed in ["up", "down", "left", "right"] {
+                assert_eq!(
+                    dispatch(ctx, pressed),
+                    Some(ReviewCommand::Swallow),
+                    "{pressed} with alt must not step files either"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_letters_are_not_plain_shortcuts() {
+        let ctx = with(shift(), file_screen());
+        for pressed in ["w", "s", "d", "y", "r", "o", "1", "2"] {
+            assert_eq!(
+                dispatch(ctx, pressed),
+                Some(ReviewCommand::Swallow),
+                "shift plus {pressed} is unbound"
+            );
+        }
     }
 
     #[test]
@@ -659,11 +827,11 @@ mod tests {
             focus: FocusRegion::Content,
             ..ctx
         };
-        for key in ["up", "down", "left", "right", "home", "end", "enter"] {
+        for pressed in ["up", "down", "left", "right", "home", "end", "enter"] {
             assert_eq!(
-                dispatch(content, key),
+                dispatch(content, pressed),
                 None,
-                "{key} must fall through to the diff pane"
+                "{pressed} must fall through to the diff pane"
             );
         }
     }
@@ -675,49 +843,45 @@ mod tests {
             search_open: true,
             ..file_screen()
         };
-        for key in [
+        for pressed in [
             "1", "2", "r", "o", "d", "w", "s", "y", "n", "/", "?", "[", "]", "{", "}", "up",
             "down", "left", "right", "space", "enter",
         ] {
             assert_eq!(
-                dispatch(ctx, key),
+                dispatch(ctx, pressed),
                 Some(ReviewCommand::Swallow),
-                "{key} must not act while a field has focus"
+                "{pressed} must not act while a field has focus"
             );
         }
-        let with_control = KeyContext {
-            modifiers: control(),
-            ..ctx
-        };
         assert_eq!(
-            dispatch(with_control, "f"),
+            dispatch(with(control(), ctx), "f"),
             Some(ReviewCommand::Swallow),
             "even find stays out of a focused field"
         );
     }
 
     #[test]
-    fn the_region_switches_work_from_anywhere() {
+    fn f6_is_the_only_region_switch_that_reaches_the_review() {
         for base in [overview(), file_screen()] {
             for input_focused in [false, true] {
                 let ctx = KeyContext {
                     input_focused,
-                    modifiers: control(),
                     ..base
                 };
                 assert_eq!(
-                    dispatch(ctx, "1"),
-                    Some(ReviewCommand::FocusRegionSwitch(FocusRegion::Navigator))
+                    dispatch(ctx, "f6"),
+                    Some(ReviewCommand::CycleRegion),
+                    "F6 works even from inside a field"
                 );
-                assert_eq!(
-                    dispatch(ctx, "2"),
-                    Some(ReviewCommand::FocusRegionSwitch(FocusRegion::Content))
-                );
-                let plain = KeyContext {
-                    input_focused,
-                    ..base
+                // `Ctrl+1` / `Ctrl+2` are global app bindings; the review must
+                // not claim them. A focused field still swallows them first.
+                let expected = if input_focused {
+                    Some(ReviewCommand::Swallow)
+                } else {
+                    None
                 };
-                assert_eq!(dispatch(plain, "f6"), Some(ReviewCommand::CycleRegion));
+                assert_eq!(dispatch(with(control(), ctx), "1"), expected);
+                assert_eq!(dispatch(with(control(), ctx), "2"), expected);
             }
         }
     }
@@ -746,12 +910,8 @@ mod tests {
         assert_eq!(dispatch(ctx, "tab"), None);
         assert_eq!(dispatch(ctx, "escape"), None);
         assert_eq!(dispatch(ctx, "q"), None);
-        let with_control = KeyContext {
-            modifiers: control(),
-            ..ctx
-        };
         assert_eq!(
-            dispatch(with_control, "a"),
+            dispatch(with(control(), ctx), "a"),
             None,
             "select-all stays with the diff pane"
         );
@@ -812,6 +972,43 @@ mod tests {
     }
 
     #[test]
+    fn every_legacy_transient_reaches_the_ladder() {
+        assert!(!LegacyTransients::default().any_open());
+        let each = [
+            LegacyTransients {
+                delete_confirm: true,
+                ..LegacyTransients::default()
+            },
+            LegacyTransients {
+                discard_confirm: true,
+                ..LegacyTransients::default()
+            },
+            LegacyTransients {
+                context_menu: true,
+                ..LegacyTransients::default()
+            },
+            LegacyTransients {
+                commit_hash_menu: true,
+                ..LegacyTransients::default()
+            },
+            LegacyTransients {
+                selection_context_menu: true,
+                ..LegacyTransients::default()
+            },
+        ];
+        for transient in each {
+            assert!(transient.any_open(), "{transient:?} must stop Esc");
+            assert_eq!(
+                cancel_step(CancelFlags {
+                    legacy_transient: transient.any_open(),
+                    ..CancelFlags::default()
+                }),
+                CancelStep::DismissLegacy
+            );
+        }
+    }
+
+    #[test]
     fn cursor_steps_clamp_at_both_ends() {
         assert_eq!(next_cursor_index(0, None, CursorMove::Next), None);
         assert_eq!(next_cursor_index(3, None, CursorMove::Next), Some(0));
@@ -821,5 +1018,102 @@ mod tests {
         assert_eq!(next_cursor_index(3, Some(2), CursorMove::Next), Some(2));
         assert_eq!(next_cursor_index(3, Some(1), CursorMove::First), Some(0));
         assert_eq!(next_cursor_index(3, Some(1), CursorMove::Last), Some(2));
+    }
+
+    #[test]
+    fn a_cursor_the_rows_no_longer_hold_restarts_at_the_top() {
+        let rows = vec![
+            NavRowId::Dir("src".into()),
+            NavRowId::File(key("src/a.rs")),
+            NavRowId::File(key("src/b.rs")),
+        ];
+        let gone = NavRowId::File(key("dropped.rs"));
+        assert_eq!(
+            next_cursor(&rows, Some(&gone), CursorMove::Next),
+            Some(rows[0].clone()),
+            "a filtered-out cursor must not silently jump to the last row"
+        );
+        assert_eq!(
+            next_cursor(&rows, Some(&gone), CursorMove::Prev),
+            Some(rows[0].clone())
+        );
+        assert_eq!(
+            next_cursor(&rows, Some(&rows[1]), CursorMove::Next),
+            Some(rows[2].clone())
+        );
+        assert_eq!(next_cursor(&[], None, CursorMove::Next), None);
+    }
+
+    #[test]
+    fn a_cursor_row_copies_its_path_or_its_qualified_symbol() {
+        assert_eq!(
+            cursor_row_text(&NavRowId::Dir("packages/core".into()), None).as_deref(),
+            Some("packages/core")
+        );
+        assert_eq!(
+            cursor_row_text(
+                &NavRowId::Item(AttentionTarget::Directory("packages/core".into())),
+                None
+            )
+            .as_deref(),
+            Some("packages/core")
+        );
+        assert_eq!(
+            cursor_row_text(&NavRowId::File(key("src/lib.rs")), None).as_deref(),
+            Some("src/lib.rs"),
+            "the head path, not the `old → new` label"
+        );
+        let deleted = ReviewFileKey {
+            old_path: Some("src/gone.rs".into()),
+            new_path: None,
+        };
+        assert_eq!(
+            cursor_row_text(&NavRowId::Item(AttentionTarget::File(deleted)), None).as_deref(),
+            Some("src/gone.rs"),
+            "a deletion falls back to the base side"
+        );
+        assert_eq!(
+            cursor_row_text(
+                &NavRowId::Item(AttentionTarget::Symbol {
+                    file: key("src/lib.rs"),
+                    change_index: 0,
+                }),
+                None
+            ),
+            None,
+            "a symbol needs the model to name it"
+        );
+    }
+
+    #[test]
+    fn a_symbol_row_copies_the_name_the_model_qualified() {
+        let model = fixtures::model();
+        let (file, symbol) = model
+            .files
+            .iter()
+            .find_map(|entry| entry.symbols.first().map(|symbol| (entry, symbol)))
+            .expect("the fixture reaches structure for at least one file");
+        assert_eq!(
+            cursor_row_text(
+                &NavRowId::Item(AttentionTarget::Symbol {
+                    file: file.key.clone(),
+                    change_index: symbol.change_index,
+                }),
+                Some(&model)
+            )
+            .as_deref(),
+            Some(symbol.qualified.as_str())
+        );
+        assert_eq!(
+            cursor_row_text(
+                &NavRowId::Item(AttentionTarget::Symbol {
+                    file: file.key.clone(),
+                    change_index: usize::MAX,
+                }),
+                Some(&model)
+            ),
+            None,
+            "an index the file no longer has copies nothing"
+        );
     }
 }

@@ -15,7 +15,7 @@ struct HelpRow {
     action: &'static str,
 }
 
-/// The whole §11 table, in spec order.
+/// Every binding the review answers to, in spec order.
 const HELP_ROWS: &[HelpRow] = &[
     HelpRow {
         keys: &[UP, DOWN],
@@ -86,7 +86,7 @@ const HELP_ROWS: &[HelpRow] = &[
         action: "Copy the diff selection, or the navigator row when it has focus",
     },
     HelpRow {
-        keys: &["F6", "Ctrl+1", "Ctrl+2"],
+        keys: &["F6"],
         action: "Switch between the navigator and the content",
     },
     HelpRow {
@@ -119,11 +119,11 @@ impl DiffViewer {
                     modal_content("review-help", t)
                         .w(px(560.0))
                         .max_h(px(560.0))
-                        .overflow_hidden()
                         .p(px(16.0))
                         .gap(px(12.0))
                         .child(
                             v_flex()
+                                .flex_shrink_0()
                                 .gap(px(2.0))
                                 .child(
                                     div()
@@ -139,10 +139,15 @@ impl DiffViewer {
                                         .child("Esc closes this"),
                                 ),
                         )
+                        // The table is taller than the card on a short window.
                         .child(
-                            v_flex()
-                                .gap(px(6.0))
-                                .children(HELP_ROWS.iter().map(|row| render_help_row(row, t, cx))),
+                            div()
+                                .id("review-help-rows")
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .child(v_flex().gap(px(6.0)).children(
+                                    HELP_ROWS.iter().map(|row| render_help_row(row, t, cx)),
+                                )),
                         ),
                 )
                 .into_any_element(),
@@ -173,18 +178,138 @@ fn render_help_row(row: &HelpRow, t: &ThemeColors, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::state::ContentView;
-    use super::super::KeyContext;
-    use super::super::footer::footer_hints;
+    use super::super::super::state::{ContentView, FocusRegion};
+    use super::super::footer::{COPY_KEY, DOWN, ENTER, FIND_KEY, UP, footer_hints};
+    use super::super::{KeyContext, ReviewCommand, dispatch, normalize_key};
     use super::HELP_ROWS;
+    use gpui::Modifiers;
+    use std::collections::BTreeSet;
 
-    /// The footer only advertises keys; the help overlay has to explain them.
+    /// Everything a user can press, so the sweep below misses nothing.
+    const KEY_CORPUS: &[&str] = &[
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
+        "s", "t", "u", "v", "w", "x", "y", "z", "1", "2", "3", "/", "?", "[", "]", "{", "}", "up",
+        "down", "left", "right", "home", "end", "enter", "space", "escape", "tab", "f6",
+    ];
+
+    /// How the help table and the footer spell the keystroke.
+    fn label(key: &str, modifiers: Modifiers) -> String {
+        if key == "f6" {
+            return "F6".to_string();
+        }
+        if modifiers.platform || modifiers.control {
+            return match key {
+                "f" => FIND_KEY,
+                "c" => COPY_KEY,
+                other => other,
+            }
+            .to_string();
+        }
+        let (key, _) = normalize_key(key, modifiers.shift);
+        match key {
+            "up" => UP,
+            "down" => DOWN,
+            "enter" => ENTER,
+            "left" => "\u{2190}",
+            "right" => "\u{2192}",
+            "space" => "Space",
+            "home" => "Home",
+            "end" => "End",
+            "f6" => "F6",
+            other => other,
+        }
+        .to_string()
+    }
+
+    fn documented() -> BTreeSet<String> {
+        HELP_ROWS
+            .iter()
+            .flat_map(|row| row.keys.iter().map(|key| (*key).to_string()))
+            .collect()
+    }
+
+    /// Every keystroke that resolves to a command, over every screen state.
+    fn reachable() -> BTreeSet<String> {
+        let contexts = [
+            KeyContext::default(),
+            KeyContext {
+                focus: FocusRegion::Content,
+                ..KeyContext::default()
+            },
+            KeyContext {
+                screen: ContentView::File,
+                has_symbols: true,
+                split_available: true,
+                search_open: true,
+                ..KeyContext::default()
+            },
+            KeyContext {
+                screen: ContentView::File,
+                focus: FocusRegion::Content,
+                has_symbols: true,
+                split_available: true,
+                search_open: true,
+                ..KeyContext::default()
+            },
+            KeyContext {
+                screen: ContentView::File,
+                has_commits: true,
+                ..KeyContext::default()
+            },
+        ];
+        let modifier_sets = [
+            Modifiers::default(),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                function: true,
+                ..Modifiers::default()
+            },
+        ];
+        // Esc is bound through the Cancel action, not the key table.
+        let mut found = BTreeSet::from(["Esc".to_string()]);
+        for base in contexts {
+            for modifiers in modifier_sets {
+                let ctx = KeyContext { modifiers, ..base };
+                for key in KEY_CORPUS {
+                    match dispatch(ctx, key) {
+                        Some(ReviewCommand::Swallow) | None => {}
+                        Some(_) => {
+                            found.insert(label(key, modifiers));
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_help_table_lists_exactly_what_is_bound() {
+        assert_eq!(
+            documented(),
+            reachable(),
+            "the help overlay must document every binding and nothing else"
+        );
+    }
+
     #[test]
     fn every_footer_key_is_documented_in_the_help_table() {
-        let documented: Vec<&str> = HELP_ROWS
-            .iter()
-            .flat_map(|row| row.keys.iter().copied())
-            .collect();
+        let documented = documented();
         let screens = [
             KeyContext::default(),
             KeyContext {
@@ -199,7 +324,7 @@ mod tests {
             for hint in left.iter().chain(right.iter()) {
                 for key in hint.keys {
                     assert!(
-                        documented.contains(key),
+                        documented.contains(*key),
                         "the footer offers {key} but the help table never explains it"
                     );
                 }
