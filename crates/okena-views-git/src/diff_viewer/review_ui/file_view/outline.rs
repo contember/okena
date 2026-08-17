@@ -3,18 +3,23 @@
 use super::super::super::DiffViewer;
 use super::super::super::review::ReviewFileKey;
 use super::super::labels;
-use super::super::state::SymbolRef;
+use super::super::state::{ContentView, SymbolRef};
+use super::header;
 use super::structure::{OutlineRow, outline_rows};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::v_flex;
 use okena_core::theme::ThemeColors;
+use okena_review::StructuredFile;
+use okena_syntax::SymbolKey;
 use okena_ui::popover::popover_panel;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm};
 use std::collections::HashMap;
 
 const PANEL_WIDTH: Pixels = px(520.0);
+/// Gap between the file header and the panel hanging off the `outline` link.
+const PANEL_GAP: Pixels = px(6.0);
 const PANEL_HEIGHT: Pixels = px(420.0);
 /// One nesting step, in pixels; deeper nesting stops moving right.
 const INDENT: f32 = 12.0;
@@ -28,28 +33,27 @@ pub(super) fn render(
     t: &ThemeColors,
     cx: &mut Context<DiffViewer>,
 ) -> Option<AnyElement> {
-    if !view.review_ui.outline_open {
+    // The link that opens it lives on the file header, so the Overview has none.
+    if !view.review_ui.outline_open || view.review_ui.content != ContentView::File {
         return None;
     }
     let entry = view.review_open_entry()?;
     let (old, new) = view.review_open_outline()?;
-    let changed: HashMap<String, usize> = entry
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.qualified.clone(), symbol.change_index))
-        .collect();
+    let changed = changed_symbols(view.review_open_structured_file()?);
     let base = outline_rows(old, &changed);
     let head = outline_rows(new, &changed);
     let key = entry.key.clone();
 
     let panel = popover_panel("review-outline-popover", t)
         .absolute()
-        .top(px(46.0))
+        .top(header::height(view) + PANEL_GAP)
         .right(px(16.0))
         .w(PANEL_WIDTH)
         .max_h(PANEL_HEIGHT)
         .overflow_hidden()
         .flex()
+        // The panel only dismisses on a click outside it, either button.
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(
             h_flex()
                 .w_full()
@@ -84,6 +88,19 @@ pub(super) fn render(
             .child(panel)
             .into_any_element(),
     )
+}
+
+/// Every changed symbol of the open file, keyed the way the outline names it.
+/// A removed symbol only exists on the base side, an added one only on the head.
+fn changed_symbols(file: &StructuredFile) -> HashMap<SymbolKey, usize> {
+    file.symbol_changes()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, change)| {
+            let fact = change.new_fact().or_else(|| change.old())?;
+            Some((fact.key().clone(), index))
+        })
+        .collect()
 }
 
 /// One snapshot's outline. `file` is set only for the head column, whose changed

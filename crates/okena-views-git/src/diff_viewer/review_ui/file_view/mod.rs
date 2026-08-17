@@ -9,13 +9,13 @@ mod token_diff;
 
 use super::super::DiffViewer;
 use super::super::line_render::{WORD_BG_ALPHA, rgba as tint};
-use super::super::types::DisplayItem;
+use super::super::types::DiffViewMode;
 use super::labels::format_signed;
 use super::model::{FileEntry, Reason, ReasonKind};
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::theme::ThemeColors;
-use okena_review::OutlineFact;
+use okena_review::{OutlineFact, StructuredFile};
 use okena_ui::tokens::{ui_text_ms, ui_text_sm};
 
 /// Under this width the header hides the language line and the symbol bar keeps
@@ -52,36 +52,82 @@ impl DiffViewer {
             .and_then(|index| model.files.get(index))
     }
 
+    /// The open file as structure analysis saw it.
+    pub(super) fn review_open_structured_file(&self) -> Option<&StructuredFile> {
+        let index = self.review_open_entry()?.structure_index?;
+        self.smart_review.structure.ready()?.files().get(index)
+    }
+
     /// Base and head outlines of the open file; `None` when both are empty.
     pub(super) fn review_open_outline(&self) -> Option<(&[OutlineFact], &[OutlineFact])> {
-        let index = self.review_open_entry()?.structure_index?;
-        let file = self.smart_review.structure.ready()?.files().get(index)?;
+        let file = self.review_open_structured_file()?;
         let outlines = (file.old_outline(), file.new_outline());
         (!outlines.0.is_empty() || !outlines.1.is_empty()).then_some(outlines)
     }
 
+    /// The changed symbol the bar names: the selection while it still holds,
+    /// else the one the viewport is looking at — spec §9.
+    pub(super) fn review_current_symbol_index(&self) -> Option<usize> {
+        let entry = self.review_open_entry()?;
+        if entry.symbols.is_empty() {
+            return None;
+        }
+        let selected = self
+            .review_ui
+            .selected_symbol
+            .as_ref()
+            .filter(|symbol| symbol.file == entry.key)
+            .and_then(|symbol| {
+                entry
+                    .symbols
+                    .iter()
+                    .position(|candidate| candidate.change_index == symbol.change_index)
+            });
+        let (old, new) = self.review_viewport_lines();
+        structure::followed_symbol(&entry.symbols, selected, old, new)
+    }
+
     /// Base and head line of the diff row at the top of the viewport.
     pub(super) fn review_viewport_lines(&self) -> (Option<u32>, Option<u32>) {
-        let Some(file) = self.current_file.as_ref() else {
-            return (None, None);
+        let items = self
+            .current_file
+            .as_ref()
+            .map_or(&[][..], |file| file.items.as_slice());
+        structure::top_row_lines(
+            items,
+            &self.side_by_side_lines,
+            self.effective_view_mode(),
+            self.review_viewport_top(),
+        )
+    }
+
+    /// Index of the first row the diff list shows.
+    fn review_viewport_top(&self) -> usize {
+        let item_count = self.review_diff_item_count();
+        let state = self.scroll_handle.0.borrow();
+        // A pending scroll is where the list is about to be, which is what the
+        // bar should already name.
+        if let Some(deferred) = state.deferred_scroll_to_item {
+            return deferred.item_index.min(item_count.saturating_sub(1));
+        }
+        let Some(size) = state.last_item_size else {
+            return 0;
         };
-        let top = self
-            .scroll_handle
-            .0
-            .borrow()
-            .base_handle
-            .logical_scroll_top()
-            .0;
-        match file.items.get(top) {
-            Some(DisplayItem::Line(line)) => (
-                line_number(line.old_line_num),
-                line_number(line.new_line_num),
-            ),
-            Some(DisplayItem::Expander(expander)) => (
-                line_number(Some(expander.old_range.0)),
-                line_number(Some(expander.new_range.0)),
-            ),
-            None => (None, None),
+        structure::top_item_index(
+            -f32::from(state.base_handle.offset().y),
+            f32::from(size.contents.height),
+            item_count,
+        )
+    }
+
+    /// How many rows the diff list renders in the mode currently on screen.
+    fn review_diff_item_count(&self) -> usize {
+        match self.effective_view_mode() {
+            DiffViewMode::Unified => self
+                .current_file
+                .as_ref()
+                .map_or(0, |file| file.items.len()),
+            DiffViewMode::SideBySide => self.side_by_side_lines.len(),
         }
     }
 
@@ -90,10 +136,6 @@ impl DiffViewer {
         let width = self.review_ui.content_width;
         width > 0.0 && width < NARROW_CONTENT
     }
-}
-
-fn line_number(value: Option<usize>) -> Option<u32> {
-    value.and_then(|line| u32::try_from(line).ok())
 }
 
 /// Chip tint per reason kind — spec §6 wording, spec §7 chip style.

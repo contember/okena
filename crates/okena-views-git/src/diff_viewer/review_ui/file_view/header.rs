@@ -18,6 +18,8 @@ use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 
 /// The header states the file's strongest reasons; the navigator has the rest.
 const HEADER_CHIPS: usize = 3;
+const ROW_HEIGHT: Pixels = px(40.0);
+const SUMMARY_HEIGHT: Pixels = px(22.0);
 const OUTLINE_LINK: &str = "outline";
 const PREVIOUS: &str = "\u{2039}";
 const NEXT: &str = "\u{203A}";
@@ -38,13 +40,14 @@ pub(super) fn render(
         .model
         .as_ref()
         .and_then(|model| text::header_summary(model));
-    let queue = view.review_ui.model.as_ref().and_then(|model| {
-        text::queue_position(&visible, model, view.review_ui.queue_target.as_ref())
-    });
+    let queue =
+        view.review_ui.model.as_ref().and_then(|model| {
+            text::queue_label(&visible, model, view.review_ui.queue_target.as_ref())
+        });
     let has_outline = view.review_open_outline().is_some();
 
     let row = h_flex()
-        .h(px(40.0))
+        .h(ROW_HEIGHT)
         .px(px(16.0))
         .gap(px(8.0))
         .flex_none()
@@ -67,9 +70,7 @@ pub(super) fn render(
             d.child(word(text::analysis_label(entry), t.text_muted, cx))
         })
         .when(has_outline, |d| d.child(outline_link(t, cx)))
-        .when_some(queue, |d, (position, total)| {
-            d.child(queue_group(position, total, t, cx))
-        });
+        .when_some(queue, |d, queue| d.child(queue_group(queue, t, cx)));
 
     match summary {
         Some(summary) => v_flex()
@@ -178,17 +179,12 @@ fn outline_link(t: &ThemeColors, cx: &mut Context<DiffViewer>) -> AnyElement {
 }
 
 /// `3 of 236` with the two steps through the Attention order.
-fn queue_group(
-    position: usize,
-    total: usize,
-    t: &ThemeColors,
-    cx: &mut Context<DiffViewer>,
-) -> AnyElement {
+fn queue_group(label: String, t: &ThemeColors, cx: &mut Context<DiffViewer>) -> AnyElement {
     h_flex()
         .flex_none()
         .gap(px(4.0))
         .items_center()
-        .child(word(format!("{position} of {total}"), t.text_muted, cx))
+        .child(word(label, t.text_muted, cx))
         .child(step_button("review-queue-prev", PREVIOUS, -1, t, cx))
         .child(step_button("review-queue-next", NEXT, 1, t, cx))
         .into_any_element()
@@ -222,11 +218,25 @@ fn step_button(
         .into_any_element()
 }
 
+/// How tall the header is, so overlays anchored under it know where it ends.
+pub(super) fn height(view: &DiffViewer) -> Pixels {
+    let summary = view
+        .review_ui
+        .model
+        .as_ref()
+        .is_some_and(|model| text::header_summary(model).is_some());
+    if summary && view.review_open_entry().is_some() {
+        ROW_HEIGHT + SUMMARY_HEIGHT
+    } else {
+        ROW_HEIGHT
+    }
+}
+
 /// The line a small comparison gets instead of the Overview — spec §12.
 fn summary_line(summary: String, t: &ThemeColors, cx: &App) -> AnyElement {
     div()
         .flex_none()
-        .h(px(22.0))
+        .h(SUMMARY_HEIGHT)
         .px(px(16.0))
         .flex()
         .items_center()
@@ -241,7 +251,7 @@ fn summary_line(summary: String, t: &ThemeColors, cx: &App) -> AnyElement {
 fn placeholder(key: Option<&ReviewFileKey>, t: &ThemeColors, cx: &App) -> AnyElement {
     let path = key.map_or_else(|| NO_FILE.to_string(), ReviewFileKey::display);
     div()
-        .h(px(40.0))
+        .h(ROW_HEIGHT)
         .px(px(16.0))
         .flex_none()
         .flex()

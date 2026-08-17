@@ -4,8 +4,7 @@ use super::super::super::DiffViewer;
 use super::super::super::line_render::{WORD_BG_ALPHA, rgba as tint};
 use super::super::labels;
 use super::super::labels::reasons as words;
-use super::super::model::{CallRow, FileEntry, ReasonKind, SymbolEntry};
-use super::structure::viewport_symbol;
+use super::super::model::{CallRow, ReasonKind, SymbolEntry};
 use super::text;
 use super::token_diff::{Segment, SegmentKind, token_diff};
 use super::{chip, churn, word};
@@ -21,8 +20,9 @@ const BAR_CHIPS: usize = 3;
 /// A narrow column keeps the name and the first two chips — spec §12.
 const NARROW_CHIPS: usize = 2;
 const NEXT_HINT: &str = "} next";
-const DETAILS_COLLAPSED: &str = "\u{25B8} details";
-const DETAILS_EXPANDED: &str = "\u{25BE} details";
+const DETAILS_WORD: &str = " details";
+const COLLAPSED_ARROW: &str = "\u{25B8}";
+const EXPANDED_ARROW: &str = "\u{25BE}";
 const SIGNATURE_TITLE: &str = "Signature (normalized)";
 const CALLS_TITLE: &str = "Calls changed in this function";
 const CALLS_CAVEAT: &str = "\u{2014} same file, syntactic; callers are not tracked";
@@ -34,19 +34,20 @@ pub(super) fn render(
     cx: &mut Context<DiffViewer>,
 ) -> Option<AnyElement> {
     let entry = view.review_open_entry()?;
-    if entry.symbols.is_empty() {
-        return None;
-    }
-    let index = current_symbol(view, entry);
+    let index = view.review_current_symbol_index()?;
     let symbol = entry.symbols.get(index)?;
     let narrow = view.review_content_is_narrow();
     let expanded = view.review_ui.details_expanded;
+    // A narrow column keeps the name and two chips; the counter and the churn
+    // repeat what the header and the diff already say — spec §12.
     let chip_limit = if narrow { NARROW_CHIPS } else { BAR_CHIPS };
-    let counter = format!(
-        "{}{}{NEXT_HINT}",
-        text::symbol_counter(index, entry.symbols.len()),
-        text::DOT
-    );
+    let counter = (!narrow).then(|| {
+        format!(
+            "{}{}{NEXT_HINT}",
+            text::symbol_counter(index, entry.symbols.len()),
+            text::DOT
+        )
+    });
 
     let bar = h_flex()
         .h(px(32.0))
@@ -72,15 +73,19 @@ pub(super) fn render(
                 .take(chip_limit)
                 .map(|reason| chip(reason, t, cx)),
         )
-        .children(churn(
-            u64::from(symbol.lines_added),
-            u64::from(symbol.lines_deleted),
-            t,
-            cx,
-        ))
+        .when(!narrow, |d| {
+            d.children(churn(
+                u64::from(symbol.lines_added),
+                u64::from(symbol.lines_deleted),
+                t,
+                cx,
+            ))
+        })
         .child(div().flex_1())
-        .child(word(counter, t.text_muted, cx))
-        .child(details_toggle(expanded, t, cx));
+        .when_some(counter, |d, counter| {
+            d.child(word(counter, t.text_muted, cx))
+        })
+        .child(details_toggle(expanded, narrow, t, cx));
 
     if !expanded {
         return Some(bar.into_any_element());
@@ -94,26 +99,22 @@ pub(super) fn render(
     )
 }
 
-/// The selected symbol wins; otherwise the bar follows the viewport — spec §9.
-fn current_symbol(view: &DiffViewer, entry: &FileEntry) -> usize {
-    if let Some(selected) = view.review_ui.selected_symbol.as_ref()
-        && selected.file == entry.key
-        && let Some(index) = entry
-            .symbols
-            .iter()
-            .position(|symbol| symbol.change_index == selected.change_index)
-    {
-        return index;
-    }
-    let (old, new) = view.review_viewport_lines();
-    viewport_symbol(&entry.symbols, old, new).unwrap_or(0)
-}
-
-fn details_toggle(expanded: bool, t: &ThemeColors, cx: &mut Context<DiffViewer>) -> AnyElement {
-    let label = if expanded {
-        DETAILS_EXPANDED
+/// The arrow alone in a narrow column; the word is the first thing to go — §12.
+fn details_toggle(
+    expanded: bool,
+    narrow: bool,
+    t: &ThemeColors,
+    cx: &mut Context<DiffViewer>,
+) -> AnyElement {
+    let arrow = if expanded {
+        EXPANDED_ARROW
     } else {
-        DETAILS_COLLAPSED
+        COLLAPSED_ARROW
+    };
+    let label = if narrow {
+        arrow.to_string()
+    } else {
+        format!("{arrow}{DETAILS_WORD}")
     };
     div()
         .id("review-symbol-details")
@@ -134,9 +135,11 @@ fn details(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> AnyElement {
         .any(|reason| reason.kind == ReasonKind::Complex);
     v_flex()
         .flex_none()
+        .min_w_0()
         .px(px(16.0))
         .py(px(8.0))
         .gap(px(10.0))
+        .overflow_hidden()
         .bg(rgb(t.bg_secondary))
         .border_b_1()
         .border_color(rgb(t.border))
@@ -153,7 +156,9 @@ fn details(symbol: &SymbolEntry, t: &ThemeColors, cx: &App) -> AnyElement {
 fn signature_block(old: &str, new: &str, t: &ThemeColors, cx: &App) -> AnyElement {
     let segments = token_diff(old, new);
     v_flex()
+        .min_w_0()
         .gap(px(2.0))
+        .overflow_hidden()
         .child(caption(SIGNATURE_TITLE, t, cx))
         .child(signature_line(
             "\u{2212}",
@@ -183,8 +188,10 @@ fn signature_line(
     cx: &App,
 ) -> AnyElement {
     h_flex()
+        .min_w_0()
         .gap(px(8.0))
         .items_start()
+        .overflow_hidden()
         .font_family("monospace")
         .text_size(ui_text_ms(cx))
         .child(
@@ -219,7 +226,9 @@ fn signature_line(
 
 fn calls_block(calls: &[CallRow], t: &ThemeColors, cx: &App) -> AnyElement {
     v_flex()
+        .min_w_0()
         .gap(px(4.0))
+        .overflow_hidden()
         .child(
             h_flex()
                 .gap(px(6.0))

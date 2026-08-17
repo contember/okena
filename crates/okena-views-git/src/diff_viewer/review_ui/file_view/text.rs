@@ -10,6 +10,8 @@ use okena_review::CallChangeKind;
 pub(super) const DOT: &str = " \u{00B7} ";
 pub(super) const ARROW: &str = "\u{2192}";
 pub(super) const AT_LEAST: &str = "\u{2265} ";
+/// Stands in for the position when the queue target is filtered out of view.
+const UNPLACED: &str = "\u{2014}";
 const BINARY: &str = "binary";
 
 /// Directory (with its trailing slash) and basename; the header dims the first.
@@ -128,6 +130,22 @@ pub(super) fn queue_position(
     Some((row + 1, visible.len()))
 }
 
+/// `3 of 236`, or `— of 236` when a filter hides the target. The steps stay
+/// usable either way, so the label is only missing when there is nothing to step.
+pub(super) fn queue_label(
+    visible: &[usize],
+    model: &ReviewModel,
+    target: Option<&AttentionTarget>,
+) -> Option<String> {
+    if visible.is_empty() {
+        return None;
+    }
+    Some(match queue_position(visible, model, target) {
+        Some((position, total)) => format!("{position} of {total}"),
+        None => format!("{UNPLACED} of {}", visible.len()),
+    })
+}
+
 /// `changed symbol 1 of 4`.
 pub(super) fn symbol_counter(index: usize, total: usize) -> String {
     format!("changed symbol {} of {total}", index.saturating_add(1))
@@ -168,7 +186,7 @@ mod tests {
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
     use super::{
         analysis_label, call_context, call_marker, call_text, churn_words, header_summary,
-        queue_position, split_path, symbol_counter,
+        queue_label, queue_position, split_path, symbol_counter,
     };
     use okena_git::DiffMode;
     use okena_review::CallChangeKind;
@@ -281,6 +299,35 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_filtered_out_target_still_counts_the_rows_it_could_step_through() {
+        let model = fixtures::model();
+        let visible: Vec<usize> = (0..model.attention.len()).collect();
+        let first = model
+            .attention
+            .first()
+            .expect("ranked items")
+            .target
+            .clone();
+        assert_eq!(
+            queue_label(&visible, &model, Some(&first)),
+            Some(format!("1 of {}", visible.len()))
+        );
+        assert_eq!(
+            queue_label(&visible, &model, None),
+            Some(format!("\u{2014} of {}", visible.len()))
+        );
+        assert_eq!(
+            queue_label(
+                &visible,
+                &model,
+                Some(&AttentionTarget::Directory("nowhere".into()))
+            ),
+            Some(format!("\u{2014} of {}", visible.len()))
+        );
+        assert_eq!(queue_label(&[], &model, Some(&first)), None);
     }
 
     #[test]

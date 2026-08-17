@@ -231,6 +231,7 @@ impl DiffViewer {
     }
 
     pub(crate) fn review_open_overview(&mut self, cx: &mut Context<Self>) {
+        self.review_ui.outline_open = false;
         self.review_ui.content = ContentView::Overview;
         self.review_ui.selected_symbol = None;
         self.review_ui.marker = None;
@@ -238,6 +239,7 @@ impl DiffViewer {
     }
 
     pub(crate) fn review_open_file(&mut self, key: ReviewFileKey, cx: &mut Context<Self>) {
+        self.review_ui.outline_open = false;
         self.review_ui.content = ContentView::File;
         self.review_ui.selected_symbol = None;
         self.review_ui.marker = None;
@@ -358,17 +360,9 @@ impl DiffViewer {
         else {
             return;
         };
-        let current = self
-            .review_ui
-            .selected_symbol
-            .as_ref()
-            .filter(|symbol| symbol.file == key)
-            .and_then(|symbol| {
-                entry
-                    .symbols
-                    .iter()
-                    .position(|candidate| candidate.change_index == symbol.change_index)
-            });
+        // Start from the symbol the bar shows (selected, or the one in view),
+        // so `}` and the "k of n" counter agree.
+        let current = self.review_current_symbol_index();
         let Some(position) = step_index(entry.symbols.len(), current, delta) else {
             return;
         };
