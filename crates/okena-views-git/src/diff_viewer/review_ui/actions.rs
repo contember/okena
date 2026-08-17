@@ -247,7 +247,20 @@ impl DiffViewer {
         self.review_ui.selected_symbol = None;
         self.review_ui.marker = None;
         self.review_ui.queue_target = self.review_queue_target_for(&key);
+        if self.review_file_is_loaded(&key) {
+            // Already on screen: re-selecting must not reload or lose the scroll.
+            self.review_navigation.invalidate();
+            cx.notify();
+            return;
+        }
         self.select_smart_file(key, cx);
+    }
+
+    /// The open file's source and diff are ready and displayed.
+    fn review_file_is_loaded(&self, key: &ReviewFileKey) -> bool {
+        self.smart_review.selected_file.as_ref() == Some(key)
+            && self.smart_review.file.has_ready_cache(key, true)
+            && self.current_file.is_some()
     }
 
     /// The file's own queue entry when it has one, else its first symbol entry.

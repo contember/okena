@@ -41,6 +41,30 @@ pub(super) fn top_item_index(scroll_y: f32, contents_height: f32, item_count: us
     low
 }
 
+/// How many rows fit in a list of `list_height`; rows are `contents / count`
+/// tall. Zero when nothing is measured yet.
+pub(super) fn visible_rows(list_height: f32, contents_height: f32, item_count: usize) -> usize {
+    if item_count == 0
+        || !contents_height.is_finite()
+        || contents_height <= 0.0
+        || !list_height.is_finite()
+        || list_height <= 0.0
+    {
+        return 0;
+    }
+    let row_height = f64::from(contents_height) / as_f64(item_count);
+    if row_height <= 0.0 {
+        return 0;
+    }
+    let rows = (f64::from(list_height) / row_height).ceil();
+    // Row counts are small; a huge quotient just means "everything".
+    if rows >= as_f64(item_count) {
+        item_count
+    } else {
+        rows as usize
+    }
+}
+
 fn as_f64(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }
@@ -113,14 +137,23 @@ pub(super) fn viewport_symbol(
         .or_else(|| nearest_preceding(entries, top_row_old, top_row_new))
 }
 
-/// What the symbol bar names. An explicit selection holds while the viewport
-/// top is inside it or just above it; past that the bar follows the view again.
+/// The diff rows on screen, as `(base, head)` lines. `bottom` is `None` until
+/// the list has been measured, in which case only the top row is known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Viewport {
+    pub top: (Option<u32>, Option<u32>),
+    pub bottom: Option<(Option<u32>, Option<u32>)>,
+}
+
+/// What the symbol bar names. An explicit selection holds while any of it is
+/// on screen, or the viewport top sits just above it; once the view has moved
+/// past it the bar follows the view again.
 pub(super) fn followed_symbol(
     entries: &[SymbolEntry],
     selected: Option<usize>,
-    top_row_old: Option<u32>,
-    top_row_new: Option<u32>,
+    viewport: &Viewport,
 ) -> Option<usize> {
+    let (top_row_old, top_row_new) = viewport.top;
     let Some(selected) = selected.filter(|index| *index < entries.len()) else {
         return viewport_symbol(entries, top_row_old, top_row_new);
     };
@@ -129,12 +162,31 @@ pub(super) fn followed_symbol(
     }
     let holds = entries
         .get(selected)
-        .is_some_and(|entry| covers(entry, top_row_old, top_row_new))
+        .is_some_and(|entry| covers(entry, top_row_old, top_row_new) || on_screen(entry, viewport))
         || nearest_following(entries, top_row_old, top_row_new) == Some(selected);
     if holds {
         return Some(selected);
     }
     viewport_symbol(entries, top_row_old, top_row_new).or(Some(selected))
+}
+
+/// Any hunk of the symbol intersects the rows between the viewport's top and
+/// bottom, on the side those rows are measured on.
+fn on_screen(entry: &SymbolEntry, viewport: &Viewport) -> bool {
+    let Some((bottom_old, bottom_new)) = viewport.bottom else {
+        return false;
+    };
+    let (top_old, top_new) = viewport.top;
+    let intersects = |top: Option<u32>, bottom: Option<u32>, hunks: &[(u32, u32)]| {
+        let (Some(top), Some(bottom)) = (top, bottom) else {
+            return false;
+        };
+        hunks
+            .iter()
+            .any(|(start, end)| *start <= bottom && *end >= top)
+    };
+    intersects(top_old, bottom_old, &entry.old_hunks)
+        || intersects(top_new, bottom_new, &entry.new_hunks)
 }
 
 /// The viewport row of one snapshot with the symbol's hunks on that same side.
@@ -284,7 +336,10 @@ fn collect(
 mod tests {
     use super::super::super::fixtures;
     use super::super::super::model::{KindGlyph, SymbolEntry};
-    use super::{followed_symbol, outline_rows, top_item_index, top_row_lines, viewport_symbol};
+    use super::{
+        Viewport, followed_symbol, outline_rows, top_item_index, top_row_lines, viewport_symbol,
+        visible_rows,
+    };
     use crate::diff_viewer::types::{
         DiffViewMode, DisplayItem, DisplayLine, ExpanderRow, SideBySideLine, SideContent,
     };
@@ -526,37 +581,66 @@ mod tests {
         let configure = position(&entries, "configure");
         let selected = Some(configure);
 
+        let at = |row: u32| Viewport {
+            top: (Some(row), Some(row)),
+            bottom: None,
+        };
+
         assert_eq!(
-            followed_symbol(&entries, selected, Some(75), Some(75)),
+            followed_symbol(&entries, selected, &at(75)),
             selected,
             "the top row sits inside the selected symbol"
         );
         assert_eq!(
-            followed_symbol(&entries, selected, Some(72), Some(72)),
+            followed_symbol(&entries, selected, &at(72)),
             selected,
             "the top row is just above it, with nothing in between"
         );
         assert_eq!(
-            named(
-                &entries,
-                followed_symbol(&entries, selected, Some(410), Some(410))
-            ),
+            named(&entries, followed_symbol(&entries, selected, &at(410))),
             Some("normalize"),
             "once the view moves on, the bar follows it"
         );
         assert_eq!(
-            followed_symbol(&entries, selected, None, None),
+            followed_symbol(&entries, selected, &Viewport::default()),
             selected,
             "an unmeasured viewport keeps the selection"
         );
         assert_eq!(
-            named(
-                &entries,
-                followed_symbol(&entries, None, Some(22), Some(22))
-            ),
+            named(&entries, followed_symbol(&entries, None, &at(22))),
             Some("run"),
             "without a selection the view alone decides"
         );
+    }
+
+    #[test]
+    fn the_selection_holds_while_any_of_it_is_on_screen() {
+        let entries = symbols();
+        let configure = position(&entries, "configure");
+        let selected = Some(configure);
+        let (start, _) = entries[configure].new_hunks[0];
+        // Centered on the symbol: the top row is inside the symbol above it,
+        // but the symbol itself is on screen, so the bar keeps naming it.
+        let centered = Viewport {
+            top: (Some(start - 30), Some(start - 30)),
+            bottom: Some((Some(start + 10), Some(start + 10))),
+        };
+        assert_eq!(followed_symbol(&entries, selected, &centered), selected);
+        // Scrolled so it left the screen entirely: the view leads again.
+        let past = Viewport {
+            top: (Some(start - 60), Some(start - 60)),
+            bottom: Some((Some(start - 31), Some(start - 31))),
+        };
+        assert_ne!(followed_symbol(&entries, selected, &past), selected);
+    }
+
+    #[test]
+    fn visible_rows_come_from_the_list_height_over_the_row_height() {
+        assert_eq!(visible_rows(200.0, 2000.0, 100), 10);
+        assert_eq!(visible_rows(205.0, 2000.0, 100), 11);
+        assert_eq!(visible_rows(5000.0, 2000.0, 100), 100);
+        assert_eq!(visible_rows(200.0, 0.0, 100), 0);
+        assert_eq!(visible_rows(200.0, 2000.0, 0), 0);
     }
 
     #[test]

@@ -104,8 +104,19 @@ impl DiffViewer {
             cx.notify();
             return;
         }
-        let generation = self.smart_review.file.begin(target.file.clone());
+        // The same file, already loaded and displayed: map straight to the
+        // row. Only another file (or a stale load) starts a fresh source load.
+        let loaded = self.smart_review.file.has_ready_cache(&target.file, true)
+            && self.current_file.is_some();
+        let generation = if loaded {
+            self.smart_review.file.generation()
+        } else {
+            self.smart_review.file.begin(target.file.clone())
+        };
         self.review_navigation.begin(generation, target);
+        if loaded && let Some(pending) = self.review_navigation.pending.as_mut() {
+            pending.source_started = true;
+        }
         self.resume_review_navigation(cx);
         cx.notify();
     }

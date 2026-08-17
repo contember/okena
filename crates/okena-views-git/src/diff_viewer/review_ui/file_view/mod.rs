@@ -83,12 +83,21 @@ impl DiffViewer {
                     .iter()
                     .position(|candidate| candidate.change_index == symbol.change_index)
             });
-        let (old, new) = self.review_viewport_lines();
-        structure::followed_symbol(&entry.symbols, selected, old, new)
+        let viewport = self.review_viewport();
+        structure::followed_symbol(&entry.symbols, selected, &viewport)
     }
 
-    /// Base and head line of the diff row at the top of the viewport.
-    pub(super) fn review_viewport_lines(&self) -> (Option<u32>, Option<u32>) {
+    /// The rows the diff list shows right now, as base/head lines.
+    fn review_viewport(&self) -> structure::Viewport {
+        let top = self.review_viewport_top();
+        let bottom = self.review_viewport_bottom(top);
+        structure::Viewport {
+            top: self.review_row_lines(top),
+            bottom: bottom.map(|row| self.review_row_lines(row)),
+        }
+    }
+
+    fn review_row_lines(&self, row: usize) -> (Option<u32>, Option<u32>) {
         let items = self
             .current_file
             .as_ref()
@@ -97,7 +106,7 @@ impl DiffViewer {
             items,
             &self.side_by_side_lines,
             self.effective_view_mode(),
-            self.review_viewport_top(),
+            row,
         )
     }
 
@@ -117,6 +126,26 @@ impl DiffViewer {
             -f32::from(state.base_handle.offset().y),
             f32::from(size.contents.height),
             item_count,
+        )
+    }
+
+    /// Index of the last row the diff list shows; `None` before the list has
+    /// been laid out (or while a scroll is pending and the top is a guess).
+    fn review_viewport_bottom(&self, top: usize) -> Option<usize> {
+        let item_count = self.review_diff_item_count();
+        let state = self.scroll_handle.0.borrow();
+        if state.deferred_scroll_to_item.is_some() {
+            return None;
+        }
+        let size = state.last_item_size?;
+        let visible = structure::visible_rows(
+            f32::from(state.base_handle.bounds().size.height),
+            f32::from(size.contents.height),
+            item_count,
+        );
+        Some(
+            top.saturating_add(visible.saturating_sub(1))
+                .min(item_count.checked_sub(1)?),
         )
     }
 

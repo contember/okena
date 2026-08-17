@@ -139,6 +139,12 @@ impl FileViewState {
         self.generation == generation && self.key.as_ref() == Some(key)
     }
 
+    /// The generation the loaded file belongs to; a navigation inside the
+    /// same loaded file keeps it instead of starting a reload.
+    pub(crate) fn generation(&self) -> FileGeneration {
+        self.generation
+    }
+
     pub(crate) fn mark_cache_ready(
         &mut self,
         generation: FileGeneration,
