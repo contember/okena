@@ -104,6 +104,9 @@ pub(crate) struct FileRow {
     pub role_badge: Option<&'static str>,
     /// Structure never reached the file — spec §7 dims instead of badging.
     pub dimmed: bool,
+    /// The outline is on and this file has symbols under it, so the row is the
+    /// header of a block and not just another row.
+    pub outlined: bool,
     pub is_rename: bool,
     /// Full path(s), plus why the row is dimmed.
     pub tooltip: String,
@@ -460,8 +463,9 @@ fn emit(args: Emit<'_>) {
     }
     for index in &dir.files {
         if let Some(entry) = model.files.get(*index) {
-            out.push(file_nav_row(entry, depth, false, badged));
-            if outline {
+            let outlined = outline && !entry.symbols.is_empty();
+            out.push(file_nav_row(entry, depth, false, badged, outlined));
+            if outlined {
                 push_outline(entry, depth.saturating_add(1), out);
             }
         }
@@ -482,8 +486,9 @@ fn flat_rows(model: &ReviewModel, visible: &[usize], outline: bool) -> Vec<NavRo
     });
     let mut out = Vec::new();
     for entry in indices.iter().filter_map(|index| model.files.get(*index)) {
-        out.push(file_nav_row(entry, 0, true, false));
-        if outline {
+        let outlined = outline && !entry.symbols.is_empty();
+        out.push(file_nav_row(entry, 0, true, false, outlined));
+        if outlined {
             push_outline(entry, 1, &mut out);
         }
     }
@@ -508,7 +513,9 @@ fn push_outline(entry: &FileEntry, depth: usize, out: &mut Vec<NavRow>) {
         for detail in detail_rows(symbol, &target) {
             out.push(NavRow {
                 id: None,
-                depth,
+                // One level under the symbol, so the guide of the block runs
+                // down the symbol's own glyph column.
+                depth: depth.saturating_add(1),
                 kind: NavRowKind::Detail(detail),
             });
         }
@@ -578,7 +585,13 @@ fn call_line_text(line: &calls::CallLine) -> String {
 
 // -- file rows ---------------------------------------------------------------
 
-fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool, badged: bool) -> NavRow {
+fn file_nav_row(
+    entry: &FileEntry,
+    depth: usize,
+    flatten: bool,
+    badged: bool,
+    outlined: bool,
+) -> NavRow {
     let is_rename = entry.status == ReviewFileStatus::Renamed
         || matches!((&entry.old_path, &entry.new_path), (Some(old), Some(new)) if old != new);
     let name_display = match (&entry.old_path, &entry.new_path) {
@@ -605,6 +618,7 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool, badged: bool) ->
             markers: markers(entry),
             role_badge: role_badge(entry.role).filter(|_| !badged && !markers_name_the_role(entry)),
             dimmed: not_analyzed(entry),
+            outlined,
             is_rename,
             tooltip,
         }),

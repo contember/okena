@@ -165,6 +165,12 @@ impl DiffViewer {
             open,
             t,
         )
+        // The block below belongs to this row, so the row reads as its header.
+        // A fill and not a rule: a border would make this row taller than the
+        // rest, and the virtualized list measures one height for all of them.
+        .when(file.outlined && !open && !cursor, |d| {
+            d.bg(rgb(t.bg_secondary))
+        })
         .child(div().w(ICON_SM).flex_shrink_0())
         .child(file_icon(&file.icon_name, t, cx).flex_shrink_0())
         .child(
@@ -263,7 +269,6 @@ impl DiffViewer {
             false,
             t,
         )
-        .child(div().w(px(GLYPH_WIDTH)).flex_shrink_0())
         .child(detail_marker(detail.kind, t, cx))
         .child(
             div()
@@ -330,7 +335,7 @@ fn role_badge(badge: &'static str, t: &ThemeColors, cx: &App) -> Div {
         .child(badge)
 }
 
-/// One row of the tree: the accent stripe, the indent, then the content.
+/// One row of the tree: the accent stripe, the indent rail, then the content.
 /// The stripe marks the keyboard cursor, the fill the file that is open.
 fn tree_row(
     id: ElementId,
@@ -339,7 +344,6 @@ fn tree_row(
     open: bool,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    let indent = f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * INDENT;
     h_flex()
         .id(id)
         .h(px(TREE_ROW_HEIGHT))
@@ -351,5 +355,21 @@ fn tree_row(
         .when(cursor && !open, |d| d.bg(rgb(t.bg_hover)))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(selection_bar(cursor, t))
-        .child(div().w(px(indent)).flex_shrink_0())
+        .child(indent_rail(depth, t))
+}
+
+/// The indent, drawn rather than left blank: one hairline per level the row
+/// hangs under, so five levels of tree read as five levels and not as text at
+/// five x positions.
+fn indent_rail(depth: usize, t: &ThemeColors) -> Div {
+    h_flex()
+        .flex_shrink_0()
+        .h_full()
+        .children((0..depth).map(|_| {
+            div()
+                .w(px(INDENT))
+                .h_full()
+                .border_l_1()
+                .border_color(rgb(t.border))
+        }))
 }

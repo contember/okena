@@ -139,7 +139,8 @@ filters. When a filter is active the button reads the preset name or role names 
 sidebar footer says “113 of 385 files · Review code · show all”. Overview clicks (legend rows, facts)
 set the same filter.
 
-**Files mode** — real tree (reuse `okena_files::file_tree` helpers): directory rows show file count and
+**Files mode** — real tree (reuse `okena_files::file_tree` helpers): every row draws one indent guide
+per level it hangs under, so depth is visible and not inferred; directory rows show file count and
 summed +/− of the visible subset; single-child chains joined; under ~40 files everything is expanded,
 above that top-level directories collapsed; `flatten` shows a plain list; virtualized. File rows: icon,
 name (rename rows `…/old.ts → …/new.ts` keeping basenames, full paths on hover), at most two reason
@@ -154,7 +155,9 @@ reads by scrolling. Symbol rows: kind glyph, name (qualified on hover), the mark
 one opens the symbol. Detail lines, one line each and truncated with the full text on hover: `sig
 <old> → <new>` first, then the calls (`+` `−` `~`, the call text, then the branch it sits in, so a
 narrow column cuts the branch first), at most six of them and then `… N more`. Identical occurrences
-share one line with `×4`. Detail lines open their symbol on click but `↑` `↓` step over them. The
+share one line with `×4`. A file with a block under it is filled like a header, its symbols sit one
+level in and their detail lines one level further, under the symbol's own glyph column. Detail lines
+open their symbol on click but `↑` `↓` step over them. The
 footer counts what the switch added: `89 files · 4 122 changed symbols · dimmed = not analyzed (8)`.
 
 **Attention mode** — the full ordered list (Start here is its top). Reason chips at the top act as OR
