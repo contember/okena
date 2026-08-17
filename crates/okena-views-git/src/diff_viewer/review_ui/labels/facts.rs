@@ -36,6 +36,8 @@ const HIDE_LEDGER_LINK: &str = "hide ledger";
 /// Marks a commit with more than one parent in the ledger.
 pub(crate) const MERGE_BADGE: &str = "merge";
 pub(crate) const NO_SUPPORTED_LANGUAGE: &str = "no supported language in this comparison";
+/// A minus in front of `added + deleted` would misread as a net, so say it.
+const MOSTLY_DELETIONS: &str = "mostly deletions";
 /// A directory row with no path of its own — the comparison touched the root.
 const REPOSITORY_ROOT: &str = "repository root";
 
@@ -58,12 +60,16 @@ pub(crate) fn lines_phrase(lines: u64) -> String {
     }
 }
 
-/// `Implementation 15 692 lines`; the sign shows when the role lost more lines
-/// than it gained. The number itself stays the changed-line total.
+/// `Implementation 15 692 lines`, or `… · mostly deletions` when the role lost
+/// more lines than it gained. The number stays the changed-line total.
 pub(crate) fn headline_lines(role: &str, lines: u64, deletion_heavy: bool) -> String {
-    let sign = if deletion_heavy { "\u{2212}" } else { "" };
     let unit = if lines == 1 { "line" } else { "lines" };
-    format!("{role} {sign}{} {unit}", format_lines(lines))
+    let headline = format!("{role} {} {unit}", format_lines(lines));
+    if deletion_heavy {
+        format!("{headline}{DOT}{MOSTLY_DELETIONS}")
+    } else {
+        headline
+    }
 }
 
 /// `Implementation 12 files` — the fallback when nothing has a line count.
@@ -95,8 +101,15 @@ fn rounded_percent(percent: f32) -> String {
     format!("{percent:.0} %")
 }
 
-/// `45.3 %` — the legend keeps one decimal so small roles stay visible.
+/// `45.3 %` — one decimal. A share too small to round to a tenth says so, and a
+/// role with no share at all keeps an empty cell — spec §2, no zero cells.
 pub(crate) fn percent_label(percent: f32) -> String {
+    if percent <= 0.0 {
+        return String::new();
+    }
+    if percent < 0.05 {
+        return "< 0.1 %".to_string();
+    }
     format!("{percent:.1} %")
 }
 
@@ -107,7 +120,7 @@ pub(crate) fn legend_files(files: usize) -> String {
 
 /// `≥ 3 removed · ≥ 12 signatures changed · ≥ 34 added — analyzed subset, TS/TSX`.
 /// Empty when the fact carries nothing worth a line.
-pub(crate) fn public_api_sentence(fact: &PublicApiFact, languages: &[String]) -> String {
+pub(crate) fn public_api_sentence(fact: &PublicApiFact) -> String {
     if fact.no_supported_language {
         return NO_SUPPORTED_LANGUAGE.to_string();
     }
@@ -137,7 +150,7 @@ pub(crate) fn public_api_sentence(fact: &PublicApiFact, languages: &[String]) ->
     if !fact.lower_bound {
         return counts;
     }
-    let subset = language_slashes(languages);
+    let subset = language_slashes(&fact.languages);
     if subset.is_empty() {
         format!("{counts}{DASH}analyzed subset")
     } else {
@@ -162,22 +175,37 @@ pub(crate) fn tests_sentence(fact: &TestsFact) -> String {
     } else {
         "directories"
     };
-    let head = format!(
-        "Test files changed next to {} of {} implementation {unit}",
-        fact.with_tests, fact.impl_dirs
-    );
+    // `0 of 3` is a zero cell; when nothing has tests, say that instead.
+    let none_at_all = fact.with_tests == 0;
+    let head = if none_at_all {
+        format!(
+            "no test files changed next to any of the {} implementation {unit}",
+            format_count(fact.impl_dirs)
+        )
+    } else {
+        format!(
+            "Test files changed next to {} of {} implementation {unit}",
+            format_count(fact.with_tests),
+            format_count(fact.impl_dirs)
+        )
+    };
     let Some(first) = fact.without.first() else {
         return head;
     };
-    let mut sentence = format!(
-        "{head}{DOT}none next to {} ({}, {})",
+    let named = format!(
+        "{} ({}, {})",
         directory_name(&first.path),
         count_files(first.files),
         lines_phrase(first.lines)
     );
+    if none_at_all {
+        // "any of the N" already covers the rest, so only the biggest is named.
+        return format!("{head}{DOT}largest {named}");
+    }
+    let mut sentence = format!("{head}{DOT}none next to {named}");
     let rest = fact.without.len().saturating_sub(1);
     if rest > 0 {
-        sentence.push_str(&format!(" and {rest} more"));
+        sentence.push_str(&format!(" and {} more", format_count(rest)));
     }
     sentence
 }
@@ -194,15 +222,21 @@ fn directory_name(path: &str) -> &str {
 /// 4 with edits, ranked below`.
 pub(crate) fn moves_sentence(fact: &MovesFact) -> String {
     let unit = if fact.total == 1 { "move" } else { "moves" };
-    let mut parts = vec![format!("{} high-similarity {unit}", fact.total)];
+    let mut parts = vec![format!(
+        "{} high-similarity {unit}",
+        format_count(fact.total)
+    )];
     if fact.likely_mechanical > 0 {
         parts.push(format!(
             "{} likely mechanical (\u{2264} {MECHANICAL_RESIDUAL_LINES} residual lines)",
-            fact.likely_mechanical
+            format_count(fact.likely_mechanical)
         ));
     }
     if fact.with_edits > 0 {
-        parts.push(format!("{} with edits, ranked below", fact.with_edits));
+        parts.push(format!(
+            "{} with edits, ranked below",
+            format_count(fact.with_edits)
+        ));
     }
     parts.join(DOT)
 }
@@ -212,7 +246,7 @@ pub(crate) fn commits_sentence(fact: &CommitsFact) -> String {
     let mut parts = vec![format_count(fact.count)];
     if fact.merges > 0 {
         let unit = if fact.merges == 1 { "merge" } else { "merges" };
-        parts.push(format!("{} {unit}", fact.merges));
+        parts.push(format!("{} {unit}", format_count(fact.merges)));
     }
     let authors = authors_phrase(&fact.authors);
     if !authors.is_empty() {
@@ -245,7 +279,7 @@ fn authors_phrase(authors: &[String]) -> String {
     if rest == 0 {
         named
     } else {
-        format!("{named} +{rest}")
+        format!("{named} +{}", format_count(rest))
     }
 }
 
@@ -260,7 +294,7 @@ fn span_phrase(seconds: i64) -> String {
     if seconds < MINUTE {
         return "under a minute".to_string();
     }
-    let (value, singular, plural) = if seconds < HOUR {
+    let (value, singular, plural): (i64, &str, &str) = if seconds < HOUR {
         (seconds / MINUTE, "minute", "minutes")
     } else if seconds < DAY {
         (seconds / HOUR, "hour", "hours")
@@ -268,7 +302,8 @@ fn span_phrase(seconds: i64) -> String {
         (seconds / DAY, "day", "days")
     };
     let unit = if value == 1 { singular } else { plural };
-    format!("{value} {unit}")
+    let value = u64::try_from(value).unwrap_or(0);
+    format!("{} {unit}", format_lines(value))
 }
 
 /// `305b0f0 … 9a7be3f`; a single commit shows one sha.
@@ -313,7 +348,7 @@ pub(crate) fn also_sentence(fact: &AlsoFact) -> String {
 
 fn counted(count: usize, singular: &str, plural: &str) -> String {
     let unit = if count == 1 { singular } else { plural };
-    format!("{count} {unit}")
+    format!("{} {unit}", format_count(count))
 }
 
 /// `structure reached 63 of 97 implementation files (first 200 in path order)
@@ -371,8 +406,16 @@ mod tests {
             signatures,
             added,
             lower_bound,
-            languages: Vec::new(),
+            languages: languages(),
             no_supported_language: false,
+        }
+    }
+
+    /// The same counts without a language list, so the subset clause drops out.
+    fn without_languages(fact: &PublicApiFact) -> PublicApiFact {
+        PublicApiFact {
+            languages: Vec::new(),
+            ..fact.clone()
         }
     }
 
@@ -397,10 +440,15 @@ mod tests {
     }
 
     #[test]
-    fn a_deletion_heavy_role_shows_the_sign() {
+    fn a_deletion_heavy_role_says_so_instead_of_signing_a_sum() {
+        let headline = headline_lines("Implementation", 16_000, true);
         assert_eq!(
-            headline_lines("Implementation", 16_000, true),
-            "Implementation \u{2212}16\u{2009}000 lines"
+            headline,
+            "Implementation 16\u{2009}000 lines \u{00B7} mostly deletions"
+        );
+        assert!(
+            !headline.contains('\u{2212}') && !headline.contains('-'),
+            "the number is added + deleted, so it carries no sign: {headline}"
         );
     }
 
@@ -415,20 +463,31 @@ mod tests {
     }
 
     #[test]
-    fn legend_percentages_keep_one_decimal() {
+    fn legend_percentages_keep_one_decimal_and_never_read_zero() {
         assert_eq!(percent_label(45.3), "45.3 %");
         assert_eq!(percent_label(0.7), "0.7 %");
+        assert_eq!(percent_label(0.1), "0.1 %");
+        assert_eq!(
+            percent_label(0.04),
+            "< 0.1 %",
+            "a share too small to round is still a share"
+        );
+        assert_eq!(
+            percent_label(0.0),
+            "",
+            "a role with no share keeps an empty cell"
+        );
     }
 
     #[test]
     fn public_api_counts_are_lower_bounds_only_while_coverage_is_partial() {
         assert_eq!(
-            public_api_sentence(&public_api(3, 12, 34, true), &languages()),
+            public_api_sentence(&public_api(3, 12, 34, true)),
             "\u{2265} 3 removed \u{00B7} \u{2265} 12 signatures changed \u{00B7} \u{2265} 34 \
              added \u{2014} analyzed subset, TS/TSX"
         );
         assert_eq!(
-            public_api_sentence(&public_api(3, 12, 34, false), &languages()),
+            public_api_sentence(&public_api(3, 12, 34, false)),
             "3 removed \u{00B7} 12 signatures changed \u{00B7} 34 added"
         );
     }
@@ -436,10 +495,13 @@ mod tests {
     #[test]
     fn public_api_never_prints_a_zero_or_a_plural_of_one() {
         assert_eq!(
-            public_api_sentence(&public_api(0, 1, 0, false), &[]),
+            public_api_sentence(&without_languages(&public_api(0, 1, 0, false))),
             "1 signature changed"
         );
-        assert_eq!(public_api_sentence(&public_api(0, 0, 0, false), &[]), "");
+        assert_eq!(
+            public_api_sentence(&without_languages(&public_api(0, 0, 0, false))),
+            ""
+        );
     }
 
     #[test]
@@ -447,7 +509,7 @@ mod tests {
         let mut fact = public_api(0, 0, 0, true);
         fact.no_supported_language = true;
         assert_eq!(
-            public_api_sentence(&fact, &languages()),
+            public_api_sentence(&fact),
             "no supported language in this comparison"
         );
     }
@@ -475,6 +537,33 @@ mod tests {
             "Test files changed next to 4 of 6 implementation directories \u{00B7} none next to \
              packages/workers/src (26 files, 6\u{2009}118 lines) and 1 more"
         );
+    }
+
+    #[test]
+    fn no_tests_anywhere_never_reads_as_zero_of_three() {
+        let fact = TestsFact {
+            impl_dirs: 3,
+            with_tests: 0,
+            without: vec![
+                DirRef {
+                    path: "packages/workers/src".to_string(),
+                    files: 26,
+                    lines: 6_118,
+                },
+                DirRef {
+                    path: "packages/core/src".to_string(),
+                    files: 2,
+                    lines: 30,
+                },
+            ],
+        };
+        let sentence = tests_sentence(&fact);
+        assert_eq!(
+            sentence,
+            "no test files changed next to any of the 3 implementation directories \u{00B7} \
+             largest packages/workers/src (26 files, 6\u{2009}118 lines)"
+        );
+        assert!(!sentence.contains("0 of "), "{sentence}");
     }
 
     #[test]

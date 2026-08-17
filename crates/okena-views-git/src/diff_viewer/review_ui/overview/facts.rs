@@ -2,7 +2,7 @@
 //! to — spec §8. Pure; the render pass turns a link into a click.
 
 use super::super::labels::facts as words;
-use super::super::model::{CommitRow, CoverageSummary, Facts, FileEntry, ReasonKind, ReviewModel};
+use super::super::model::{CommitRow, Facts, FileEntry, ReasonKind, ReviewModel};
 use super::super::state::RoleSet;
 
 /// One fact line: label, sentence, and the link that ends it.
@@ -41,11 +41,13 @@ impl FactLink {
 }
 
 /// One line per fact that has something to say; empty facts never reach the screen.
-pub(crate) fn fact_sentences(facts: &Facts, coverage: &CoverageSummary) -> Vec<FactLine> {
+/// Every sentence reads off the fact itself — the coverage caveat lives in §8's
+/// second block, not here.
+pub(crate) fn fact_sentences(facts: &Facts) -> Vec<FactLine> {
     let mut lines: Vec<FactLine> = Vec::with_capacity(5);
 
     if let Some(fact) = facts.public_api.as_ref() {
-        let text = words::public_api_sentence(fact, &coverage.languages);
+        let text = words::public_api_sentence(fact);
         if !text.is_empty() {
             // Nothing to rank when no language was analyzed, so no link either.
             let link = (!fact.no_supported_language).then_some(FactLink::Attention);
@@ -89,10 +91,13 @@ pub(crate) fn fact_sentences(facts: &Facts, coverage: &CoverageSummary) -> Vec<F
     if let Some(fact) = facts.also.as_ref() {
         let text = words::also_sentence(fact);
         if !text.is_empty() {
+            // Deleted implementation files are named but not linked: their role is
+            // Implementation, and filtering to it would show the whole change.
+            let linkable = fact.lockfiles > 0 || fact.submodules > 0 || fact.binaries > 0;
             lines.push(FactLine {
                 label: words::ALSO,
                 text,
-                link: Some(FactLink::Also),
+                link: linkable.then_some(FactLink::Also),
             });
         }
     }
@@ -108,15 +113,15 @@ pub(crate) fn ledger_rows(commits: &[CommitRow]) -> Vec<&CommitRow> {
     rows
 }
 
-/// A file the "Also" fact counts — the same set `also_fact` sums up.
+/// A file the "Also" link can narrow to. Deleted implementation files are left
+/// out on purpose — their role is Implementation, so filtering to it would widen
+/// the view to the whole change instead of narrowing it.
 fn is_also_file(entry: &FileEntry) -> bool {
     entry.binary
-        || entry.reasons.iter().any(|reason| {
-            matches!(
-                reason.kind,
-                ReasonKind::Lockfile | ReasonKind::Submodule | ReasonKind::DeletedImpl
-            )
-        })
+        || entry
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason.kind, ReasonKind::Lockfile | ReasonKind::Submodule))
 }
 
 /// Roles of the files "Also" counts. The role filter is the narrowest filter the
@@ -132,9 +137,9 @@ pub(crate) fn also_roles(model: &ReviewModel) -> RoleSet {
 #[cfg(test)]
 mod tests {
     use super::super::super::fixtures;
-    use super::super::super::model::{CoverageSummary, Facts, ReviewModel};
+    use super::super::super::model::{AlsoFact, Facts, ReasonKind, ReviewModel};
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
-    use super::{FactLine, FactLink, also_roles, fact_sentences, ledger_rows};
+    use super::{FactLine, FactLink, also_roles, fact_sentences, is_also_file, ledger_rows};
     use okena_core::review::{FileRole, ReviewInventory};
     use okena_git::DiffMode;
 
@@ -161,7 +166,7 @@ mod tests {
     #[test]
     fn the_fixture_comparison_says_every_fact_it_has() {
         let model = fixtures::model();
-        let lines = fact_sentences(&model.facts, &model.coverage);
+        let lines = fact_sentences(&model.facts);
         let labels: Vec<&str> = lines.iter().map(|line| line.label).collect();
         assert_eq!(labels, ["Public API", "Tests", "Moves", "Commits", "Also"]);
         assert_eq!(line(&lines, "Public API").link, Some(FactLink::Attention));
@@ -176,7 +181,7 @@ mod tests {
 
     #[test]
     fn an_empty_fact_set_produces_no_lines() {
-        assert!(fact_sentences(&Facts::default(), &CoverageSummary::default()).is_empty());
+        assert!(fact_sentences(&Facts::default()).is_empty());
     }
 
     #[test]
@@ -224,7 +229,7 @@ mod tests {
                 head: "feature".into(),
             },
         });
-        let lines = fact_sentences(&model.facts, &model.coverage);
+        let lines = fact_sentences(&model.facts);
         let public_api = line(&lines, "Public API");
         assert_eq!(public_api.text, "no supported language in this comparison");
         assert_eq!(public_api.link, None);
@@ -234,7 +239,7 @@ mod tests {
     fn a_small_comparison_has_no_moves_and_no_also_line() {
         let inventory = fixtures::inventory_small();
         let model = model_of(&inventory);
-        let labels: Vec<&str> = fact_sentences(&model.facts, &model.coverage)
+        let labels: Vec<&str> = fact_sentences(&model.facts)
             .iter()
             .map(|line| line.label)
             .collect();
@@ -250,17 +255,90 @@ mod tests {
         assert!(roles.contains(FileRole::Lockfile), "pnpm-lock.yaml");
         assert!(roles.contains(FileRole::Unclassified), "assets/logo.png");
         assert!(
-            roles.contains(FileRole::Implementation),
-            "src/legacy.rs was deleted"
+            !roles.contains(FileRole::Implementation),
+            "a deleted implementation file must not widen the link to the whole change"
         );
         assert!(!roles.contains(FileRole::Documentation));
+    }
+
+    /// Drift guard: the link predicate must keep counting the same files the
+    /// ranking's `also_fact` counts, minus the deleted implementation files.
+    #[test]
+    fn the_also_predicate_tracks_the_fact_it_links_from() {
+        let model = fixtures::model();
+        let fact = model
+            .facts
+            .also
+            .as_ref()
+            .expect("the fixture has an Also fact");
+        let counted = model
+            .files
+            .iter()
+            .filter(|entry| is_also_file(entry))
+            .count();
+        assert_eq!(
+            counted,
+            fact.lockfiles + fact.submodules + fact.binaries,
+            "one file per lockfile, submodule and binary the fact counts"
+        );
+        assert!(
+            fact.deleted_impl > 0,
+            "the fixture deletes an implementation file, so the split is exercised"
+        );
+        assert_eq!(
+            counted + fact.deleted_impl,
+            model
+                .files
+                .iter()
+                .filter(|entry| {
+                    is_also_file(entry)
+                        || entry
+                            .reasons
+                            .iter()
+                            .any(|reason| reason.kind == ReasonKind::DeletedImpl)
+                })
+                .count(),
+            "the sentence still names the deleted files the link leaves out"
+        );
+    }
+
+    #[test]
+    fn a_deleted_implementation_file_alone_leaves_the_also_line_unlinked() {
+        let facts = Facts {
+            also: Some(AlsoFact {
+                lockfiles: 0,
+                submodules: 0,
+                binaries: 0,
+                deleted_impl: 2,
+            }),
+            ..Facts::default()
+        };
+        let lines = fact_sentences(&facts);
+        let also = line(&lines, "Also");
+        assert_eq!(also.text, "2 deleted implementation files");
+        assert_eq!(also.link, None, "nothing to narrow to");
+    }
+
+    #[test]
+    fn the_tests_link_opens_the_directory_the_sentence_names() {
+        let model = fixtures::model();
+        let lines = fact_sentences(&model.facts);
+        let tests = line(&lines, "Tests");
+        let Some(FactLink::Directory(path)) = tests.link.as_ref() else {
+            panic!("the tests fact links to a directory: {tests:?}");
+        };
+        assert!(
+            tests.text.contains(path.as_str()),
+            "the link goes where the sentence points: {} vs {path}",
+            tests.text
+        );
     }
 
     #[test]
     fn a_binary_only_comparison_still_has_an_also_line() {
         let inventory = fixtures::inventory_binary_only();
         let model = model_of(&inventory);
-        let lines = fact_sentences(&model.facts, &model.coverage);
+        let lines = fact_sentences(&model.facts);
         assert_eq!(line(&lines, "Also").text, "2 binary files");
         assert!(also_roles(&model).contains(FileRole::Unclassified));
     }

@@ -42,12 +42,13 @@ pub(crate) fn headline(model: &ReviewModel) -> Headline {
     }
 }
 
-/// Implementation when it changed at all, else the role that changed the most.
+/// Implementation when it changed something the headline can name, else the role
+/// that changed the most. A headline never reads `Implementation 0 lines`.
 fn headline_row(model: &ReviewModel) -> Option<&VolumeRow> {
-    let implementation = model
-        .volume
-        .iter()
-        .find(|row| row.role == FileRole::Implementation && row.files > 0);
+    let counts_lines = model.total_changed_lines > 0;
+    let implementation = model.volume.iter().find(|row| {
+        row.role == FileRole::Implementation && row.files > 0 && (!counts_lines || row.lines > 0)
+    });
     if implementation.is_some() {
         return implementation;
     }
@@ -129,10 +130,29 @@ mod tests {
             }
         }
         assert!(
-            headline(&model).main.contains('\u{2212}'),
+            headline(&model).main.ends_with("mostly deletions"),
             "{}",
             headline(&model).main
         );
+    }
+
+    #[test]
+    fn implementation_without_changed_lines_never_leads_the_headline() {
+        let mut model = fixtures::model();
+        for row in &mut model.volume {
+            if row.role == FileRole::Implementation {
+                row.lines = 0;
+                row.percent = 0.0;
+            }
+        }
+        let headline = headline(&model);
+        assert!(
+            !headline.main.starts_with("Implementation"),
+            "the largest role takes over: {}",
+            headline.main
+        );
+        assert!(!headline.main.contains(" 0 lines"), "{}", headline.main);
+        assert!(!headline.sub.starts_with("0 %"), "{}", headline.sub);
     }
 
     #[test]

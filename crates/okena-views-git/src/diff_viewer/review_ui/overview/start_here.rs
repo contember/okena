@@ -19,19 +19,24 @@ pub(crate) fn caveat(coverage: &CoverageSummary) -> Option<String> {
     if !coverage.partial {
         return None;
     }
-    // The reached subset is biased only when analysis took files in path order.
-    let path_order = coverage.path_order_bias.then_some(coverage.analyzed_files);
-    if coverage.impl_total > 0 {
-        let reached = u64::try_from(coverage.impl_analyzed).unwrap_or(u64::MAX);
-        let total = u64::try_from(coverage.impl_total).unwrap_or(u64::MAX);
-        return Some(words::caveat_sentence(reached, total, true, path_order));
+    if coverage.impl_total == 0 {
+        // Without implementation files the sentence already counts every file, so
+        // "(first N in path order)" would only repeat the number next to it.
+        return Some(words::caveat_sentence(
+            coverage.analyzed_files,
+            coverage.total_files,
+            false,
+            None,
+        ));
     }
-    Some(words::caveat_sentence(
-        coverage.analyzed_files,
-        coverage.total_files,
-        false,
-        path_order,
-    ))
+    let reached = u64::try_from(coverage.impl_analyzed).unwrap_or(u64::MAX);
+    let total = u64::try_from(coverage.impl_total).unwrap_or(u64::MAX);
+    // The bias clause earns its place only when it names a different number.
+    let path_order = coverage
+        .path_order_bias
+        .then_some(coverage.analyzed_files)
+        .filter(|first| *first != reached);
+    Some(words::caveat_sentence(reached, total, true, path_order))
 }
 
 /// How loud a reason chip is. Colours come from the theme, not from here.
@@ -85,7 +90,7 @@ mod tests {
     use super::super::super::fixtures;
     use super::super::super::model::{CoverageSummary, ReasonKind, ReviewModel, Tier};
     use super::super::super::ranking::{ModelInputs, StructureLoad, build_review_model};
-    use super::{ChipTone, START_HERE_ROWS, caveat, chip_tone, start_here};
+    use super::{ChipTone, START_HERE_ROWS, caveat, chip_tone, row_tone, start_here};
     use okena_core::review::ReviewInventory;
     use okena_git::DiffMode;
 
@@ -195,6 +200,61 @@ mod tests {
             caveat(&coverage).as_deref(),
             Some("structure reached 0 of 2 files \u{2014} the rest ranked from git facts")
         );
+    }
+
+    #[test]
+    fn the_bias_clause_is_dropped_when_it_would_only_repeat_a_number() {
+        let no_implementation = CoverageSummary {
+            analyzed_files: 1,
+            total_files: 3,
+            impl_analyzed: 0,
+            impl_total: 0,
+            path_order_bias: true,
+            partial: true,
+            ..CoverageSummary::default()
+        };
+        let sentence = caveat(&no_implementation).expect("a partial run has a caveat");
+        assert_eq!(
+            sentence,
+            "structure reached 1 of 3 files \u{2014} the rest ranked from git facts"
+        );
+        assert!(!sentence.contains("path order"), "{sentence}");
+
+        let same_number = CoverageSummary {
+            analyzed_files: 63,
+            total_files: 200,
+            impl_analyzed: 63,
+            impl_total: 97,
+            path_order_bias: true,
+            partial: true,
+            ..CoverageSummary::default()
+        };
+        let sentence = caveat(&same_number).expect("a partial run has a caveat");
+        assert_eq!(
+            sentence,
+            "structure reached 63 of 97 implementation files \u{2014} the rest ranked from \
+             git facts"
+        );
+        assert!(!sentence.contains("path order"), "{sentence}");
+    }
+
+    #[test]
+    fn a_rows_tone_follows_the_tier_that_placed_it() {
+        let model = fixtures::model();
+        for item in &model.attention {
+            let expected = match item.tier {
+                Tier::Contract => ChipTone::Contract,
+                Tier::Behaviour => ChipTone::Behaviour,
+                Tier::Volume | Tier::GitFacts => ChipTone::Caution,
+                Tier::Rest => ChipTone::Muted,
+            };
+            assert_eq!(row_tone(item), expected, "{} | {:?}", item.name, item.tier);
+        }
+        let contract = model
+            .attention
+            .first()
+            .expect("the fixture ranks something first");
+        assert_eq!(row_tone(contract), ChipTone::Contract);
     }
 
     #[test]

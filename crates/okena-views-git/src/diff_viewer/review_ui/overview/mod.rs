@@ -83,15 +83,20 @@ impl DiffViewer {
                         .map(|(index, row)| self.render_legend_row(index, row, t, cx)),
                 ),
             );
-        let facts = self.render_facts(model, t, cx);
-        let body = if narrow {
-            v_flex().gap(px(20.0)).child(volume).child(facts)
-        } else {
-            h_flex()
+        // A comparison with no facts gives the volume the whole width.
+        let body = match self.render_facts(model, t, cx) {
+            None => volume.into_any_element(),
+            Some(facts) if narrow => v_flex()
+                .gap(px(20.0))
+                .child(volume)
+                .child(facts)
+                .into_any_element(),
+            Some(facts) => h_flex()
                 .items_start()
                 .gap(px(40.0))
                 .child(volume)
                 .child(facts.w(FACTS_WIDTH).flex_shrink_0())
+                .into_any_element(),
         };
         v_flex()
             .gap(px(12.0))
@@ -165,16 +170,28 @@ impl DiffViewer {
             .into_any_element()
     }
 
-    fn render_facts(&self, model: &ReviewModel, t: &ThemeColors, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .gap(px(10.0))
-            .children(
-                fact_sentences(&model.facts, &model.coverage)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, line)| self.render_fact_line(index, line, t, cx)),
-            )
-            .children(self.render_ledger(model, t, cx))
+    /// The right column, or nothing at all when this comparison states no facts.
+    fn render_facts(
+        &self,
+        model: &ReviewModel,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let lines = fact_sentences(&model.facts);
+        if lines.is_empty() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .gap(px(10.0))
+                .children(
+                    lines
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, line)| self.render_fact_line(index, line, t, cx)),
+                )
+                .children(self.render_ledger(model, t, cx)),
+        )
     }
 
     /// The commit ledger, inline under the facts while `show ledger` is on.
@@ -269,7 +286,12 @@ impl DiffViewer {
             FactLink::Directory(path) => {
                 self.review_open_item(AttentionTarget::Directory(path.clone()), cx);
             }
-            FactLink::MechanicalMoves => self.review_set_saved_filter(Some(true), None, cx),
+            FactLink::MechanicalMoves => {
+                // Replace the filter rather than layer onto it, as "Also" does.
+                self.review_set_navigator(NavigatorMode::Files, cx);
+                self.review_set_role_filter(RoleFilter::everything(), cx);
+                self.review_set_saved_filter(Some(true), Some(false), cx);
+            }
             FactLink::CommitLedger => self.review_toggle_commit_ledger(cx),
             FactLink::Also => {
                 let roles = self
