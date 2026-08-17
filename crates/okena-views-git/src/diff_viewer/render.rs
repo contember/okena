@@ -609,6 +609,8 @@ impl DiffViewer {
             false
         };
         let max_scroll = self.max_scroll_x();
+        // The review file header already states the path once.
+        let show_path_header = !is_smart_mode(&self.diff_mode);
 
         div()
             .flex_1()
@@ -616,18 +618,20 @@ impl DiffViewer {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .child(
-                div()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .bg(rgb(t.bg_header))
-                    .text_size(ui_text_md(cx))
-                    .font_family("monospace")
-                    .text_color(rgb(t.text_secondary))
-                    .child(file_path),
-            )
+            .when(show_path_header, |d| {
+                d.child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(rgb(t.border))
+                        .bg(rgb(t.bg_header))
+                        .text_size(ui_text_md(cx))
+                        .font_family("monospace")
+                        .text_color(rgb(t.text_secondary))
+                        .child(file_path),
+                )
+            })
             // In-page search bar (Cmd/Ctrl+F)
             .children(search_bar)
             .when(is_binary, |d| {

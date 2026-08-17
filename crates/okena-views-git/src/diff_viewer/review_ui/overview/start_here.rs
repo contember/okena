@@ -31,6 +31,11 @@ pub(crate) fn caveat(coverage: &CoverageSummary) -> Option<String> {
     }
     let reached = u64::try_from(coverage.impl_analyzed).unwrap_or(u64::MAX);
     let total = u64::try_from(coverage.impl_total).unwrap_or(u64::MAX);
+    if reached >= total {
+        // Every implementation file was reached; only supporting files were
+        // left out, and those never carry structural reasons anyway.
+        return None;
+    }
     // The bias clause earns its place only when it names a different number.
     let path_order = coverage
         .path_order_bias

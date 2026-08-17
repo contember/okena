@@ -414,12 +414,23 @@ fn file_nav_row(entry: &FileEntry, depth: usize, flatten: bool) -> NavRow {
             added: entry.lines_added,
             deleted: entry.lines_deleted,
             markers: markers(entry),
-            role_badge: role_badge(entry.role),
+            role_badge: role_badge(entry.role).filter(|_| !markers_name_the_role(entry)),
             dimmed: not_analyzed(entry),
             is_rename,
             tooltip,
         }),
     }
+}
+
+/// A `lockfile` / `CI config` / `submodule` chip already says what the role
+/// badge would say; showing both reads as two facts.
+fn markers_name_the_role(entry: &FileEntry) -> bool {
+    markers(entry).iter().any(|reason| {
+        matches!(
+            reason.kind,
+            ReasonKind::Lockfile | ReasonKind::CiConfig | ReasonKind::Submodule
+        )
+    })
 }
 
 /// Implementation is the default reading; Unclassified has nothing to say.
@@ -677,7 +688,14 @@ mod tests {
         assert_eq!(file(&rows, "lib.rs").role_badge, None);
         assert_eq!(file(&rows, "logo.png").role_badge, None);
         assert_eq!(file(&rows, "README.md").role_badge, Some("Docs"));
-        assert_eq!(file(&rows, "Cargo.toml").role_badge, Some("Config"));
+        // Its `CI config` chip already names the role; no second badge.
+        assert_eq!(file(&rows, "Cargo.toml").role_badge, None);
+        assert!(
+            file(&rows, "Cargo.toml")
+                .markers
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::CiConfig)
+        );
         assert_eq!(file(&rows, "handler_test.rs").role_badge, Some("Tests"));
     }
 
