@@ -25,6 +25,9 @@ use std::num::NonZeroU32;
 
 /// The only file the fixture analyses; everything else stays a git fact.
 const ENGINE: &str = "src/engine.rs";
+const DELETED: &str = "src/legacy.rs";
+const MOVED_OLD: &str = "src/motion_old.rs";
+const MOVED_NEW: &str = "src/motion_new.rs";
 const UNSUPPORTED: &str = "src/app.js";
 const FAILED: &str = "worker/handler.rs";
 
@@ -34,6 +37,8 @@ const CONFIGURE_OLD: &str = "pub fn configure(&self, options: Options)";
 const CONFIGURE_NEW: &str = "pub fn configure(&self, options: Options, strict: bool)";
 const DISPATCH: &str = "fn dispatch(&self, event: Event)";
 const NORMALIZE: &str = "fn normalize(value: &str) -> String";
+const RENDER: &str = "fn render(input: &str) -> String";
+const STEPS: &str = "fn steps(count: u32) -> Vec<Step>";
 const ORCHESTRATE: &str = "pub fn orchestrate(config: Config, hooks: &Hooks, retries: u32, \
      timeout: u64, tags: &[&str], tracing: bool, budget: Budget, sink: &mut Sink) -> Result<()>";
 
@@ -308,14 +313,18 @@ fn hunk(old: Option<(u32, u32)>, new: Option<(u32, u32)>) -> ChangedHunk {
     ChangedHunk::new(old.map(range), new.map(range)).expect("fixture hunk")
 }
 
-fn nav(side: ComparisonSide, line: u32) -> ReviewNavigationTarget {
+fn nav_at(path: &str, side: ComparisonSide, line: u32) -> ReviewNavigationTarget {
     ReviewNavigationTarget {
-        path: ENGINE.to_string(),
+        path: path.to_string(),
         side,
         line: at(line),
         byte_offset: None,
         symbol_context: None,
     }
+}
+
+fn nav(side: ComparisonSide, line: u32) -> ReviewNavigationTarget {
+    nav_at(ENGINE, side, line)
 }
 
 fn key(path: &[&str], kind: SymbolKind, name: &str) -> SymbolKey {
@@ -371,6 +380,35 @@ fn call(
         context,
     )
     .expect("fixture call fact")
+}
+
+/// A `ChangedLines` hotspot on the side the change actually has.
+fn changed_lines(
+    symbol: &SymbolKey,
+    range: (u32, u32),
+    old: u32,
+    new: u32,
+    side: ComparisonSide,
+    line: u32,
+) -> StructuralHotspot {
+    StructuralHotspot::new(
+        SymbolReference::new(side, span(range.0, range.1), symbol.clone()),
+        StructuralMetric::ChangedLines { old, new },
+        rust(),
+        nav(side, line),
+    )
+    .expect("fixture changed-lines hotspot")
+}
+
+/// A removed function is measured on the base side, where it still exists.
+fn base_changed_lines(
+    symbol: &SymbolKey,
+    range: (u32, u32),
+    old: u32,
+    new: u32,
+    line: u32,
+) -> StructuralHotspot {
+    changed_lines(symbol, range, old, new, ComparisonSide::Base, line)
 }
 
 fn hotspot(
@@ -639,9 +677,52 @@ fn engine_file() -> StructuredFile {
             nav(ComparisonSide::Head, 412),
         )
         .expect("fixture added call"),
+        // A brand-new function is full of new calls; that is not behaviour.
+        CallDiffChange::new(
+            CallChangeKind::Added,
+            None,
+            Some(call(
+                "spawn",
+                "(config)",
+                640,
+                &orchestrate,
+                vec![ControlContext::ErrorBranch],
+            )),
+            false,
+            false,
+            None,
+            nav(ComparisonSide::Head, 640),
+        )
+        .expect("fixture new-function call"),
     ];
 
+    // The producer emits `ChangedLines` for *every* changed function and the
+    // head-side metric triple for every head-side function, changed or not.
     let hotspots = vec![
+        changed_lines(&run, (10, 45), 6, 8, ComparisonSide::Head, 10),
+        base_changed_lines(&legacy_run, (50, 70), 21, 0, 50),
+        changed_lines(&configure, (75, 95), 1, 1, ComparisonSide::Head, 75),
+        changed_lines(&dispatch, (200, 244), 3, 5, ComparisonSide::Head, 200),
+        changed_lines(&normalize, (400, 436), 6, 12, ComparisonSide::Head, 400),
+        changed_lines(&orchestrate, (600, 839), 0, 240, ComparisonSide::Head, 600),
+        hotspot(
+            &run,
+            (10, 45),
+            StructuralMetric::FunctionLineCount { lines: 36 },
+            10,
+        ),
+        hotspot(
+            &run,
+            (10, 45),
+            StructuralMetric::ParameterCount { parameters: 3 },
+            10,
+        ),
+        hotspot(
+            &run,
+            (10, 45),
+            StructuralMetric::SyntacticNestingDepth { depth: 3 },
+            10,
+        ),
         hotspot(
             &orchestrate,
             (600, 839),
@@ -660,17 +741,17 @@ fn engine_file() -> StructuredFile {
             StructuralMetric::ParameterCount { parameters: 8 },
             600,
         ),
-        hotspot(
-            &normalize,
-            (400, 436),
-            StructuralMetric::ChangedLines { old: 6, new: 12 },
-            400,
-        ),
-        // A hotspot on a symbol that did not change; the ranking must skip it.
+        // Hotspots on a symbol that did not change; the ranking must skip them.
         hotspot(
             &helper,
             (900, 989),
             StructuralMetric::FunctionLineCount { lines: 90 },
+            900,
+        ),
+        hotspot(
+            &helper,
+            (900, 989),
+            StructuralMetric::SyntacticNestingDepth { depth: 7 },
             900,
         ),
     ];
@@ -756,18 +837,141 @@ fn failed_file() -> StructuredFile {
     .expect("fixture failed file")
 }
 
-fn rust_coverage() -> Vec<LanguageCoverage> {
+fn rust_coverage(files: u64) -> Vec<LanguageCoverage> {
     vec![LanguageCoverage::new(
         SyntaxLanguage::Rust,
-        ReviewCoverage::new(1, 1, 0, 0, 0, 0, None).expect("fixture language coverage"),
+        ReviewCoverage::new(files, files, 0, 0, 0, 0, None).expect("fixture language coverage"),
     )]
 }
 
-/// One parsed file, one unsupported, one failed, and a file-limit omission.
+/// `src/legacy.rs`: analysed even though it is gone, so its removed symbol and
+/// its `deleted implementation file` row both appear.
+fn deleted_file() -> StructuredFile {
+    let render = key(&[], SymbolKind::Function, "render");
+    let change = SymbolChange::new(
+        SymbolChangeKind::Removed,
+        Some(fact(FactSpec {
+            key: &render,
+            visibility: SymbolVisibility::Private,
+            full: (5, 60),
+            signature_line: 5,
+            body: (6, 60),
+            signature: RENDER,
+            params: 1,
+            depth: 2,
+        })),
+        None,
+        None,
+        false,
+        vec![hunk(Some((5, 60)), None)],
+        nav_at(DELETED, ComparisonSide::Base, 5),
+    )
+    .expect("fixture render change");
+    StructuredFile::new(
+        Some(DELETED.to_string()),
+        None,
+        Some(SyntaxLanguage::Rust),
+        Some(rust()),
+        None,
+        FileAnalysisStatus::Parsed,
+        Vec::new(),
+        Vec::new(),
+        vec![change],
+        vec![
+            StructuralHotspot::new(
+                SymbolReference::new(ComparisonSide::Base, span(5, 60), render.clone()),
+                StructuralMetric::ChangedLines { old: 56, new: 0 },
+                rust(),
+                nav_at(DELETED, ComparisonSide::Base, 5),
+            )
+            .expect("fixture deleted hotspot"),
+        ],
+        Vec::new(),
+        vec![hunk(Some((5, 60)), None)],
+        Vec::new(),
+        None,
+    )
+    .expect("fixture deleted file")
+}
+
+/// `src/motion_old.rs` → `src/motion_new.rs`: a rename with 86 residual lines,
+/// analysed, so its `moved` row must survive next to its symbol row.
+fn moved_file() -> StructuredFile {
+    let steps = key(&[], SymbolKind::Function, "steps");
+    let head = |line: u32| nav_at(MOVED_NEW, ComparisonSide::Head, line);
+    let change = SymbolChange::new(
+        SymbolChangeKind::Modified,
+        Some(fact(FactSpec {
+            key: &steps,
+            visibility: SymbolVisibility::Private,
+            full: (10, 60),
+            signature_line: 10,
+            body: (11, 60),
+            signature: STEPS,
+            params: 1,
+            depth: 2,
+        })),
+        Some(fact(FactSpec {
+            key: &steps,
+            visibility: SymbolVisibility::Private,
+            full: (10, 74),
+            signature_line: 10,
+            body: (11, 74),
+            signature: STEPS,
+            params: 1,
+            depth: 2,
+        })),
+        None,
+        true,
+        vec![hunk(Some((20, 55)), Some((20, 69)))],
+        head(10),
+    )
+    .expect("fixture steps change");
+    StructuredFile::new(
+        Some(MOVED_OLD.to_string()),
+        Some(MOVED_NEW.to_string()),
+        Some(SyntaxLanguage::Rust),
+        Some(rust()),
+        Some(rust()),
+        FileAnalysisStatus::Parsed,
+        Vec::new(),
+        Vec::new(),
+        vec![change],
+        vec![
+            StructuralHotspot::new(
+                SymbolReference::new(ComparisonSide::Head, span(10, 74), steps.clone()),
+                StructuralMetric::ChangedLines { old: 36, new: 50 },
+                rust(),
+                head(10),
+            )
+            .expect("fixture moved hotspot"),
+            StructuralHotspot::new(
+                SymbolReference::new(ComparisonSide::Head, span(10, 74), steps.clone()),
+                StructuralMetric::FunctionLineCount { lines: 65 },
+                rust(),
+                head(10),
+            )
+            .expect("fixture moved size hotspot"),
+        ],
+        Vec::new(),
+        vec![hunk(Some((20, 55)), Some((20, 69)))],
+        Vec::new(),
+        None,
+    )
+    .expect("fixture moved file")
+}
+
+/// Three parsed files, one unsupported, one failed, and a file-limit omission.
 pub(crate) fn structure() -> ReviewStructure {
     ReviewStructure::new_with_omissions(
         comparison(),
-        vec![engine_file(), unsupported_file(), failed_file()],
+        vec![
+            engine_file(),
+            deleted_file(),
+            moved_file(),
+            unsupported_file(),
+            failed_file(),
+        ],
         vec![
             OmittedFileGroup::new(
                 2,
@@ -782,8 +986,8 @@ pub(crate) fn structure() -> ReviewStructure {
             )
             .expect("fixture omission group"),
         ],
-        ReviewCoverage::new(5, 1, 2, 0, 1, 1, None).expect("fixture structure coverage"),
-        rust_coverage(),
+        ReviewCoverage::new(7, 3, 2, 0, 1, 1, None).expect("fixture structure coverage"),
+        rust_coverage(3),
         Vec::new(),
     )
     .expect("structure fixture")
@@ -795,7 +999,7 @@ pub(crate) fn structure_with_failure() -> ReviewStructure {
         comparison(),
         vec![engine_file(), failed_file()],
         ReviewCoverage::new(2, 1, 0, 0, 0, 1, None).expect("fixture failure coverage"),
-        rust_coverage(),
+        rust_coverage(1),
         Vec::new(),
     )
     .expect("failure structure fixture")

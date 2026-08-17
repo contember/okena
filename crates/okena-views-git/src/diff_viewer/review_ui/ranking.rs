@@ -10,7 +10,7 @@ use super::model::{
     AlsoFact, AnalysisStatus, AttentionItem, AttentionTarget, CallRow, CommitRow, CommitsFact,
     CoverageSummary, DirNode, DirRef, Facts, FileAnalysis, FileEntry, KindGlyph, MovesFact,
     OmissionRow, PublicApiFact, Reason, ReasonKind, ReviewModel, SymbolEntry, SymbolMetrics,
-    TestsFact, Tier, VolumeRow, is_under,
+    TestsFact, Tier, VolumeRow,
 };
 use super::state::{ALL_ROLES, MECHANICAL_RESIDUAL_LINES, is_likely_mechanical};
 use okena_core::review::{
@@ -24,7 +24,7 @@ use okena_review::{
     SymbolChangeKind,
 };
 use okena_syntax::{ControlContext, SymbolKey, SymbolVisibility};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Comparisons at or below either bound skip the Overview — spec §12.
 const SMALL_CHANGE_FILES: usize = 10;
@@ -71,10 +71,11 @@ pub(crate) fn build_review_model(inputs: ModelInputs<'_>) -> ReviewModel {
     };
 
     let structure = inputs.structure;
+    let index = StructureIndex::new(structure);
     let mut files: Vec<FileEntry> = inventory
         .files
         .iter()
-        .map(|fact| file_entry(fact, structure))
+        .map(|fact| file_entry(fact, &index))
         .collect();
     apply_large_churn(&mut files);
 
@@ -82,8 +83,9 @@ pub(crate) fn build_review_model(inputs: ModelInputs<'_>) -> ReviewModel {
         total.saturating_add(entry.changed_lines())
     });
     let root = directory_tree(&files);
+    let implementation_counts = implementation_counts(&root, &files);
     let volume = volume_rows(&files, total_changed_lines);
-    let attention = attention_items(&files, &root);
+    let attention = attention_items(&files, &root, &implementation_counts);
     // A single commit target has no commit ledger to show — spec §12.
     let commits = match inputs.diff_mode {
         DiffMode::Commit(_) => Vec::new(),
@@ -93,7 +95,7 @@ pub(crate) fn build_review_model(inputs: ModelInputs<'_>) -> ReviewModel {
     let coverage = coverage_summary(inventory, structure, &files);
     let facts = Facts {
         public_api: public_api_fact(&files, structure, &coverage),
-        tests: tests_fact(&root),
+        tests: tests_fact(&root, &implementation_counts),
         moves: moves_fact(&files),
         commits: commits_fact(&commits),
         also: also_fact(&files),
@@ -177,6 +179,16 @@ fn is_implementation_like(role: FileRole) -> bool {
     matches!(role, FileRole::Implementation | FileRole::Unclassified)
 }
 
+/// What makes a directory an implementation directory. A binary blob never
+/// does: nobody writes a test next to a PNG.
+fn counts_as_implementation_dir(entry: &FileEntry) -> bool {
+    match entry.role {
+        FileRole::Implementation => true,
+        FileRole::Unclassified => !entry.binary,
+        _ => false,
+    }
+}
+
 fn is_function(glyph: KindGlyph) -> bool {
     matches!(glyph, KindGlyph::Function | KindGlyph::Method)
 }
@@ -187,18 +199,48 @@ fn is_type(glyph: KindGlyph) -> bool {
 
 // -- files -------------------------------------------------------------------
 
-fn file_entry(fact: &ReviewFileFact, structure: Option<&ReviewStructure>) -> FileEntry {
+/// Structure files by their exact `(old, new)` path pair, resolved once.
+struct StructureIndex<'a> {
+    structure: Option<&'a ReviewStructure>,
+    by_paths: HashMap<(Option<&'a str>, Option<&'a str>), usize>,
+}
+
+impl<'a> StructureIndex<'a> {
+    fn new(structure: Option<&'a ReviewStructure>) -> Self {
+        let by_paths = structure
+            .map(|structure| {
+                structure
+                    .files()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| ((file.old_path(), file.new_path()), index))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            structure,
+            by_paths,
+        }
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.structure.is_some()
+    }
+
+    fn find(&self, fact: &ReviewFileFact) -> Option<(usize, &'a StructuredFile)> {
+        let index = *self
+            .by_paths
+            .get(&(fact.old_path.as_deref(), fact.new_path.as_deref()))?;
+        Some((index, self.structure?.files().get(index)?))
+    }
+}
+
+fn file_entry(fact: &ReviewFileFact, index: &StructureIndex<'_>) -> FileEntry {
     let key = ReviewFileKey::from_inventory(fact);
     let role = fact.classification.role();
-    let structure_index = structure.and_then(|structure| {
-        structure.files().iter().position(|file| {
-            file.old_path() == fact.old_path.as_deref()
-                && file.new_path() == fact.new_path.as_deref()
-        })
-    });
-    let structured = structure
-        .zip(structure_index)
-        .and_then(|(structure, index)| structure.files().get(index));
+    let found = index.find(fact);
+    let structure_index = found.map(|(index, _)| index);
+    let structured = found.map(|(_, file)| file);
     let path = fact
         .new_path
         .as_deref()
@@ -206,7 +248,7 @@ fn file_entry(fact: &ReviewFileFact, structure: Option<&ReviewStructure>) -> Fil
         .unwrap_or_default();
     let analysis = file_analysis(structured, path);
     let symbols = structured.map(symbol_entries).unwrap_or_default();
-    let reasons = file_reasons(fact, role, &analysis, structure.is_some(), path);
+    let reasons = file_reasons(fact, role, &analysis, index.is_loaded(), path);
 
     FileEntry {
         display_path: key.display(),
@@ -335,11 +377,13 @@ fn apply_large_churn(files: &mut [FileEntry]) {
         return;
     };
     for entry in files.iter_mut() {
+        // Symbol reasons explain the file too, so its churn adds nothing.
         let unexplained = entry.tier == Tier::Rest
             && entry
                 .reasons
                 .iter()
-                .all(|reason| reason.kind == ReasonKind::NotAnalyzed);
+                .all(|reason| reason.kind == ReasonKind::NotAnalyzed)
+            && entry.symbols.iter().all(|symbol| symbol.reasons.is_empty());
         if is_implementation_like(entry.role) && unexplained && entry.changed_lines() >= threshold {
             entry.reasons.push(Reason {
                 kind: ReasonKind::LargeChurn,
@@ -367,16 +411,60 @@ fn churn_threshold(files: &[FileEntry]) -> Option<u64> {
 
 // -- symbols -----------------------------------------------------------------
 
+/// Calls and hotspots bucketed by the symbol they belong to, built once per file.
+#[derive(Default)]
+struct SymbolFacetIndex<'a> {
+    calls: HashMap<&'a SymbolKey, Vec<&'a CallDiffChange>>,
+    hotspots: HashMap<&'a SymbolKey, Vec<&'a StructuralHotspot>>,
+}
+
+impl<'a> SymbolFacetIndex<'a> {
+    fn new(file: &'a StructuredFile) -> Self {
+        let mut index = Self::default();
+        for change in file.call_diff() {
+            let mut keys: Vec<&SymbolKey> = [change.old(), change.new_fact()]
+                .into_iter()
+                .flatten()
+                .filter_map(|fact| fact.enclosing_symbol())
+                .collect();
+            keys.dedup();
+            for key in keys {
+                index.calls.entry(key).or_default().push(change);
+            }
+        }
+        for hotspot in file.hotspots() {
+            // Head-side only: base-side metrics describe code that is gone.
+            if hotspot.symbol().side() == ComparisonSide::Head {
+                index
+                    .hotspots
+                    .entry(hotspot.symbol().key())
+                    .or_default()
+                    .push(hotspot);
+            }
+        }
+        index
+    }
+
+    fn calls(&self, key: &SymbolKey) -> &[&'a CallDiffChange] {
+        self.calls.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    fn hotspots(&self, key: &SymbolKey) -> &[&'a StructuralHotspot] {
+        self.hotspots.get(key).map_or(&[], Vec::as_slice)
+    }
+}
+
 fn symbol_entries(file: &StructuredFile) -> Vec<SymbolEntry> {
+    let index = SymbolFacetIndex::new(file);
     file.symbol_changes()
         .iter()
         .enumerate()
-        .filter_map(|(change_index, change)| symbol_entry(file, change_index, change))
+        .filter_map(|(change_index, change)| symbol_entry(&index, change_index, change))
         .collect()
 }
 
 fn symbol_entry(
-    file: &StructuredFile,
+    index: &SymbolFacetIndex<'_>,
     change_index: usize,
     change: &SymbolChange,
 ) -> Option<SymbolEntry> {
@@ -393,17 +481,17 @@ fn symbol_entry(
             )
         });
     let glyph = symbol_glyph(&key.kind());
-    let calls = call_rows(file.call_diff(), key);
-    let metrics = symbol_metrics(file.hotspots(), key);
+    let changes = index.calls(key);
+    let calls = call_rows(changes);
+    let metrics = symbol_metrics(index.hotspots(key));
     let reasons = symbol_reasons(SymbolFacts {
         change,
         glyph,
         public,
         visibility,
         calls: &calls,
-        contexts: &call_contexts(file.call_diff(), key),
+        contexts: &call_contexts(changes),
         metrics,
-        edited_body: has_changed_lines(file.hotspots(), key),
     });
     let (old_hunks, new_hunks) = hunk_ranges(change);
 
@@ -441,8 +529,6 @@ struct SymbolFacts<'a> {
     calls: &'a [CallRow],
     contexts: &'a [&'a ControlContext],
     metrics: SymbolMetrics,
-    /// The analysis measured how much of this symbol's body changed.
-    edited_body: bool,
 }
 
 fn symbol_reasons(facts: SymbolFacts<'_>) -> Vec<Scored> {
@@ -476,8 +562,12 @@ fn symbol_reasons(facts: SymbolFacts<'_>) -> Vec<Scored> {
         }
     }
 
-    // Tier 2 — behaviour, read through the calls the function makes.
-    if is_function(facts.glyph) && !facts.calls.is_empty() {
+    // Tier 2 — behaviour, read through the calls an existing function makes.
+    // A new function's calls are all new, so they say nothing about behaviour.
+    if change.kind() == SymbolChangeKind::Modified
+        && is_function(facts.glyph)
+        && !facts.calls.is_empty()
+    {
         let context = words::most_severe_context(facts.contexts.iter().copied());
         out.push(scored(
             ReasonKind::Calls,
@@ -488,8 +578,11 @@ fn symbol_reasons(facts: SymbolFacts<'_>) -> Vec<Scored> {
 
     // Tier 3 — volume, measured separately for edits and for new code.
     match change.kind() {
+        // The producer measures `ChangedLines` for every changed function, so
+        // only `body_changed` says the body itself moved; the measurement is
+        // magnitude, and the comparator already sorts by it.
         SymbolChangeKind::Modified
-            if is_function(facts.glyph) && facts.edited_body && !body_named =>
+            if is_function(facts.glyph) && change.body_changed() && !body_named =>
         {
             out.push(scored(ReasonKind::Body, words::BODY, Tier::Volume));
         }
@@ -550,17 +643,9 @@ fn hunk_ranges(change: &SymbolChange) -> (LineRanges, LineRanges) {
     (old, new)
 }
 
-fn encloses(change: &CallDiffChange, key: &SymbolKey) -> bool {
-    [change.old(), change.new_fact()]
-        .into_iter()
-        .flatten()
-        .any(|fact| fact.enclosing_symbol() == Some(key))
-}
-
-fn call_rows(call_diff: &[CallDiffChange], key: &SymbolKey) -> Vec<CallRow> {
+fn call_rows(call_diff: &[&CallDiffChange]) -> Vec<CallRow> {
     call_diff
         .iter()
-        .filter(|change| encloses(change, key))
         .map(|change| {
             let fact = change.new_fact().or_else(|| change.old());
             CallRow {
@@ -585,10 +670,9 @@ fn call_rows(call_diff: &[CallDiffChange], key: &SymbolKey) -> Vec<CallRow> {
         .collect()
 }
 
-fn call_contexts<'a>(call_diff: &'a [CallDiffChange], key: &SymbolKey) -> Vec<&'a ControlContext> {
+fn call_contexts<'a>(call_diff: &[&'a CallDiffChange]) -> Vec<&'a ControlContext> {
     call_diff
         .iter()
-        .filter(|change| encloses(change, key))
         .flat_map(|change| {
             [change.old(), change.new_fact()]
                 .into_iter()
@@ -598,19 +682,10 @@ fn call_contexts<'a>(call_diff: &'a [CallDiffChange], key: &SymbolKey) -> Vec<&'
         .collect()
 }
 
-fn head_hotspots<'a>(
-    hotspots: &'a [StructuralHotspot],
-    key: &'a SymbolKey,
-) -> impl Iterator<Item = &'a StructuralHotspot> {
-    hotspots.iter().filter(move |hotspot| {
-        hotspot.symbol().side() == ComparisonSide::Head && hotspot.symbol().key() == key
-    })
-}
-
 /// Hotspots exist for every head-side symbol; only changed ones reach the model.
-fn symbol_metrics(hotspots: &[StructuralHotspot], key: &SymbolKey) -> SymbolMetrics {
+fn symbol_metrics(hotspots: &[&StructuralHotspot]) -> SymbolMetrics {
     let mut metrics = SymbolMetrics::default();
-    for hotspot in head_hotspots(hotspots, key) {
+    for hotspot in hotspots {
         match hotspot.metric() {
             StructuralMetric::FunctionLineCount { lines } => metrics.lines = Some(*lines),
             StructuralMetric::ParameterCount { parameters } => metrics.params = Some(*parameters),
@@ -620,11 +695,6 @@ fn symbol_metrics(hotspots: &[StructuralHotspot], key: &SymbolKey) -> SymbolMetr
         }
     }
     metrics
-}
-
-fn has_changed_lines(hotspots: &[StructuralHotspot], key: &SymbolKey) -> bool {
-    head_hotspots(hotspots, key)
-        .any(|hotspot| matches!(hotspot.metric(), StructuralMetric::ChangedLines { .. }))
 }
 
 // -- directories -------------------------------------------------------------
@@ -676,7 +746,7 @@ fn directory_tree(files: &[FileEntry]) -> DirNode {
         node.files.push(index);
     }
     let mut root = finish_dir(root, files);
-    mark_test_coverage(&mut root, files);
+    mark_test_coverage(&mut root, files, false);
     root
 }
 
@@ -696,7 +766,7 @@ fn finish_dir(builder: DirBuilder, files: &[FileEntry]) -> DirNode {
         };
         lines_added = lines_added.saturating_add(entry.lines_added);
         lines_deleted = lines_deleted.saturating_add(entry.lines_deleted);
-        is_implementation_dir |= entry.role == FileRole::Implementation;
+        is_implementation_dir |= counts_as_implementation_dir(entry);
     }
     for child in &children {
         file_count = file_count.saturating_add(child.file_count);
@@ -729,45 +799,67 @@ fn join_chain(mut node: DirNode) -> DirNode {
     node
 }
 
-/// Returns whether the subtree contains a test file.
-fn mark_test_coverage(node: &mut DirNode, files: &[FileEntry]) -> bool {
+/// Marks the top-most untested implementation directory of each branch and
+/// returns whether the subtree contains a test file — spec §5 / §6 tier 4.
+/// `nested` says an ancestor is already an implementation directory, so this
+/// one is a child of the row the reader will see.
+fn mark_test_coverage(node: &mut DirNode, files: &[FileEntry], nested: bool) -> bool {
     let mut has_test = node
         .files
         .iter()
         .any(|index| files.get(*index).is_some_and(|entry| entry.is_test));
+    let inside = nested || node.is_implementation_dir;
     for child in &mut node.children {
-        has_test |= mark_test_coverage(child, files);
+        has_test |= mark_test_coverage(child, files, inside);
     }
-    node.no_test_changes = node.is_implementation_dir && !has_test;
+    node.no_test_changes = node.is_implementation_dir && !nested && !has_test;
     has_test
 }
 
-/// Implementation directories with no test change, top-most first and never
-/// repeated on a child — spec §6 tier 4.
-fn topmost_untested<'a>(node: &'a DirNode, out: &mut Vec<&'a DirNode>) {
+/// The directories that carry the marker; by construction none is a descendant
+/// of another.
+fn untested_dirs<'a>(node: &'a DirNode, out: &mut Vec<&'a DirNode>) {
     if node.no_test_changes {
         out.push(node);
-        return;
     }
     for child in &node.children {
-        topmost_untested(child, out);
+        untested_dirs(child, out);
     }
 }
 
+/// Top-most implementation directories — the denominator of the Tests fact.
 fn implementation_dirs<'a>(node: &'a DirNode, out: &mut Vec<&'a DirNode>) {
     if node.is_implementation_dir {
         out.push(node);
+        return;
     }
     for child in &node.children {
         implementation_dirs(child, out);
     }
 }
 
-fn implementation_files_under(files: &[FileEntry], dir: &str) -> usize {
-    files
+/// Implementation-like files per directory path, summed bottom-up in one pass.
+fn implementation_counts(root: &DirNode, files: &[FileEntry]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    count_implementation(root, files, &mut counts);
+    counts
+}
+
+fn count_implementation(
+    node: &DirNode,
+    files: &[FileEntry],
+    counts: &mut HashMap<String, usize>,
+) -> usize {
+    let mut total = node
+        .files
         .iter()
-        .filter(|entry| entry.role == FileRole::Implementation && is_under(tree_path(entry), dir))
-        .count()
+        .filter(|index| files.get(**index).is_some_and(counts_as_implementation_dir))
+        .count();
+    for child in &node.children {
+        total = total.saturating_add(count_implementation(child, files, counts));
+    }
+    counts.insert(node.path.clone(), total);
+    total
 }
 
 // -- volume ------------------------------------------------------------------
@@ -855,24 +947,27 @@ struct Ranked {
     source: usize,
 }
 
-fn attention_items(files: &[FileEntry], root: &DirNode) -> Vec<AttentionItem> {
+fn attention_items(
+    files: &[FileEntry],
+    root: &DirNode,
+    counts: &HashMap<String, usize>,
+) -> Vec<AttentionItem> {
     let mut ranked: Vec<Ranked> = Vec::new();
     let mut source = 0usize;
     for entry in files {
-        if entry.symbols.is_empty() {
+        if entry.symbols.is_empty() || keeps_its_own_row(entry) {
             ranked.push(file_row(entry, source));
-        } else {
-            for symbol in &entry.symbols {
-                ranked.push(symbol_row(entry, symbol, source));
-                source += 1;
-            }
+            source += 1;
         }
-        source += 1;
+        for symbol in &entry.symbols {
+            ranked.push(symbol_row(entry, symbol, source));
+            source += 1;
+        }
     }
     let mut untested = Vec::new();
-    topmost_untested(root, &mut untested);
+    untested_dirs(root, &mut untested);
     for node in untested {
-        ranked.push(directory_row(node, files, source));
+        ranked.push(directory_row(node, counts, source));
         source += 1;
     }
 
@@ -888,6 +983,22 @@ fn attention_items(files: &[FileEntry], root: &DirNode) -> Vec<AttentionItem> {
             .then_with(|| left.source.cmp(&right.source))
     });
     ranked.into_iter().map(|ranked| ranked.item).collect()
+}
+
+/// Reasons about the file as a whole. A deleted implementation file or a
+/// residual-heavy rename keeps its own row even when its symbols also rank.
+fn keeps_its_own_row(entry: &FileEntry) -> bool {
+    entry.reasons.iter().any(|reason| {
+        matches!(
+            reason.kind,
+            ReasonKind::DeletedImpl
+                | ReasonKind::Moved
+                | ReasonKind::CiConfig
+                | ReasonKind::Lockfile
+                | ReasonKind::Submodule
+                | ReasonKind::Binary
+        )
+    })
 }
 
 fn churn(item: &AttentionItem) -> u64 {
@@ -920,19 +1031,9 @@ fn symbol_row(entry: &FileEntry, symbol: &SymbolEntry, source: usize) -> Ranked 
 
 fn symbol_sub_rank(symbol: &SymbolEntry) -> u8 {
     match symbol.tier {
-        Tier::Contract => {
-            let signature = symbol.reasons.iter().any(|reason| {
-                matches!(
-                    reason.kind,
-                    ReasonKind::PublicSignature | ReasonKind::ExportedSignature
-                )
-            });
-            let body = symbol
-                .reasons
-                .iter()
-                .any(|reason| reason.kind == ReasonKind::Body);
-            u8::from(signature && !body)
-        }
+        // Signature *and* body outranks signature only — read off the change,
+        // not off the chips.
+        Tier::Contract => u8::from(symbol.signature.is_some() && !symbol.body_changed),
         // Calls that vanished or changed shape come before calls merely added.
         Tier::Behaviour => u8::from(!symbol.calls.iter().any(|call| {
             matches!(
@@ -975,7 +1076,7 @@ fn file_row(entry: &FileEntry, source: usize) -> Ranked {
     }
 }
 
-fn directory_row(node: &DirNode, files: &[FileEntry], source: usize) -> Ranked {
+fn directory_row(node: &DirNode, counts: &HashMap<String, usize>, source: usize) -> Ranked {
     let name = if node.path.is_empty() {
         "repository root".to_string()
     } else {
@@ -990,7 +1091,7 @@ fn directory_row(node: &DirNode, files: &[FileEntry], source: usize) -> Ranked {
                 label: words::NO_TEST_CHANGES.to_string(),
             }],
             name,
-            path: words::implementation_files(implementation_files_under(files, &node.path)),
+            path: words::implementation_files(counts.get(&node.path).copied().unwrap_or_default()),
             glyph: KindGlyph::Directory,
             lines_added: node.lines_added,
             lines_deleted: node.lines_deleted,
@@ -1047,7 +1148,7 @@ fn public_api_fact(
     })
 }
 
-fn tests_fact(root: &DirNode) -> Option<TestsFact> {
+fn tests_fact(root: &DirNode, counts: &HashMap<String, usize>) -> Option<TestsFact> {
     let mut dirs = Vec::new();
     implementation_dirs(root, &mut dirs);
     if dirs.is_empty() {
@@ -1058,7 +1159,8 @@ fn tests_fact(root: &DirNode) -> Option<TestsFact> {
         .filter(|node| node.no_test_changes)
         .map(|node| DirRef {
             path: node.path.clone(),
-            files: node.file_count,
+            // The same number the attention row shows.
+            files: counts.get(&node.path).copied().unwrap_or_default(),
             lines: node.lines_added.saturating_add(node.lines_deleted),
         })
         .collect();
@@ -1115,9 +1217,10 @@ fn moves_fact(files: &[FileEntry]) -> Option<MovesFact> {
 fn commits_fact(commits: &[CommitRow]) -> Option<CommitsFact> {
     let first = commits.first()?;
     let last = commits.last()?;
+    let mut seen: HashSet<&str> = HashSet::with_capacity(commits.len());
     let mut authors: Vec<String> = Vec::new();
     for commit in commits {
-        if !authors.contains(&commit.author) {
+        if seen.insert(commit.author.as_str()) {
             authors.push(commit.author.clone());
         }
     }
@@ -1310,20 +1413,22 @@ fn extension_of(path: &str) -> Option<String> {
     Some(path.rsplit('/').next()?.rsplit_once('.')?.1.to_lowercase())
 }
 
+/// Only files that actually failed get a row; a run-wide error belongs to the
+/// status pill, not to a "0 files" line.
 fn failure_row(structure: &ReviewStructure, files: &[FileEntry]) -> Option<OmissionRow> {
     let failed = files
         .iter()
         .filter(|entry| entry.analysis == FileAnalysis::Failed)
         .count();
+    if failed == 0 {
+        return None;
+    }
     let error = structure
         .files()
         .iter()
         .flat_map(StructuredFile::errors)
         .chain(structure.errors())
         .next();
-    if failed == 0 && error.is_none() {
-        return None;
-    }
     Some(OmissionRow {
         sentence: words::FAILED_TO_PARSE.to_string(),
         count: u64::try_from(failed).unwrap_or(0),
@@ -1387,7 +1492,7 @@ fn snapshot_oid(comparison: &ResolvedComparison, base: bool) -> String {
 mod tests {
     use super::super::fixtures;
     use super::super::model::{
-        AnalysisStatus, AttentionTarget, KindGlyph, ReasonKind, ReviewModel, Tier,
+        AnalysisStatus, AttentionTarget, DirNode, KindGlyph, ReasonKind, ReviewModel, Tier,
     };
     use super::{ModelInputs, StructureLoad, apportion, build_review_model};
     use okena_core::review::ReviewInventory;
@@ -1418,7 +1523,7 @@ mod tests {
     }
 
     /// Every attention row as `name | tier | reason kinds`.
-    fn rows(model: &ReviewModel) -> Vec<String> {
+    fn attention_rows(model: &ReviewModel) -> Vec<String> {
         model
             .attention
             .iter()
@@ -1445,22 +1550,24 @@ mod tests {
     fn the_attention_list_is_the_whole_ranking_in_order() {
         let model = fixtures::model();
         assert_eq!(
-            rows(&model),
+            attention_rows(&model),
             [
                 "Engine::run | Contract | PublicSignature+Body+Calls",
-                "legacy.rs | Contract | DeletedImpl+NotAnalyzed",
+                "legacy.rs | Contract | DeletedImpl",
                 "Engine::legacy_run | Contract | PublicRemoved",
                 "Engine::configure | Contract | PublicSignature",
-                "Engine::dispatch | Behaviour | Calls",
+                "Engine::dispatch | Behaviour | Calls+Body",
                 "normalize | Behaviour | Calls+Body",
                 "orchestrate | Volume | New+NewPublic+Complex+Complex",
-                "motion_new.rs | GitFacts | Moved+Moved+NotAnalyzed",
+                "steps | Volume | Body",
                 "handler.rs | GitFacts | NotAnalyzed+LargeChurn",
+                "motion_new.rs | GitFacts | Moved+Moved",
                 "lib.rs | GitFacts | New+NotAnalyzed",
                 "logo.png | GitFacts | Binary+NotAnalyzed",
                 "src | GitFacts | NoTestChanges",
                 "pnpm-lock.yaml | GitFacts | Lockfile+NotAnalyzed",
                 "Cargo.toml | GitFacts | CiConfig+NotAnalyzed",
+                "render | Rest | Removed",
                 "app.js | Rest | NotAnalyzed",
                 "handler_test.rs | Rest | NotAnalyzed",
                 "README.md | Rest | NotAnalyzed",
@@ -1504,21 +1611,131 @@ mod tests {
         targets.dedup_by_key(|target| format!("{target:?}"));
         assert_eq!(targets.len(), before, "no target is listed twice");
 
-        let with_symbols = model
+        for entry in &model.files {
+            assert!(
+                model
+                    .attention
+                    .iter()
+                    .any(|item| item.target.file() == Some(&entry.key)),
+                "{} is missing from the list",
+                entry.display_path
+            );
+        }
+        let symbols: usize = model.files.iter().map(|entry| entry.symbols.len()).sum();
+        assert_eq!(
+            model
+                .attention
+                .iter()
+                .filter(|item| matches!(item.target, AttentionTarget::Symbol { .. }))
+                .count(),
+            symbols,
+            "one row per changed symbol"
+        );
+    }
+
+    #[test]
+    fn structural_file_reasons_keep_their_row_even_when_the_file_has_symbols() {
+        let model = fixtures::model();
+        for (path, kind, tier) in [
+            ("src/legacy.rs", ReasonKind::DeletedImpl, Tier::Contract),
+            (
+                "src/motion_old.rs \u{2192} src/motion_new.rs",
+                ReasonKind::Moved,
+                Tier::GitFacts,
+            ),
+        ] {
+            let entry = model
+                .files
+                .iter()
+                .find(|entry| entry.display_path == path)
+                .unwrap_or_else(|| panic!("{path} is in the fixture"));
+            assert!(!entry.symbols.is_empty(), "{path} was analysed");
+            let row = model
+                .attention
+                .iter()
+                .find(|item| item.target == AttentionTarget::File(entry.key.clone()))
+                .unwrap_or_else(|| panic!("{path} keeps its own row"));
+            assert_eq!(row.tier, tier);
+            assert!(row.reasons.iter().any(|reason| reason.kind == kind));
+            assert!(
+                model.attention.iter().any(|item| matches!(
+                    &item.target,
+                    AttentionTarget::Symbol { file, .. } if file == &entry.key
+                )),
+                "and its symbols are still listed"
+            );
+        }
+        // A file that only carries annotations still folds into its symbols.
+        let engine = model
             .files
             .iter()
-            .filter(|entry| !entry.symbols.is_empty())
-            .count();
-        assert_eq!(
-            model.attention.len(),
-            model.files.len() - with_symbols
-                + model
-                    .files
-                    .iter()
-                    .map(|entry| entry.symbols.len())
-                    .sum::<usize>()
-                + 1,
-            "every file is represented by its symbols or by itself, plus one directory"
+            .find(|entry| entry.display_path == "src/engine.rs")
+            .expect("the fixture analyses src/engine.rs");
+        assert!(engine.reasons.is_empty());
+        assert!(
+            !model
+                .attention
+                .iter()
+                .any(|item| item.target == AttentionTarget::File(engine.key.clone()))
+        );
+    }
+
+    #[test]
+    fn a_new_function_full_of_new_calls_still_ranks_by_volume() {
+        let model = fixtures::model();
+        let engine = model
+            .files
+            .iter()
+            .find(|entry| entry.display_path == "src/engine.rs")
+            .expect("the fixture analyses src/engine.rs");
+        let orchestrate = engine
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "orchestrate")
+            .expect("the fixture adds a public function");
+        assert_eq!(orchestrate.calls.len(), 1, "the new function does call out");
+        assert_eq!(orchestrate.tier, Tier::Volume);
+        assert!(
+            !orchestrate
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::Calls),
+            "new calls in new code are not a behaviour signal"
+        );
+    }
+
+    #[test]
+    fn a_signature_only_change_never_claims_a_changed_body() {
+        let model = fixtures::model();
+        let engine = model
+            .files
+            .iter()
+            .find(|entry| entry.display_path == "src/engine.rs")
+            .expect("the fixture analyses src/engine.rs");
+        // The producer measures ChangedLines for every changed function, so the
+        // chip must come from `body_changed`, not from the measurement.
+        let configure = engine
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "configure")
+            .expect("the fixture changes a signature only");
+        assert!(!configure.body_changed);
+        assert!(
+            !configure
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::Body)
+        );
+        let run = engine
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("the fixture changes a signature and a body");
+        assert!(run.body_changed);
+        assert!(
+            run.reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::Body)
         );
     }
 
@@ -1583,10 +1800,67 @@ mod tests {
             .filter(|item| item.glyph == KindGlyph::Directory)
             .map(|item| item.name.as_str())
             .collect();
-        assert_eq!(dirs, ["src"], "worker changed tests, so only src is bare");
+        assert_eq!(
+            dirs,
+            ["src"],
+            "worker changed tests next to its code, and a lone binary is not a \
+             directory anyone writes tests for"
+        );
         let row = &model.attention[find(&model, "src")];
         assert_eq!(row.path, "6 implementation files");
         assert_eq!(row.reasons[0].label, "no test files changed next to it");
+        assert!(
+            !model
+                .root
+                .children
+                .iter()
+                .any(|child| child.path == "assets" && child.is_implementation_dir),
+            "a directory holding only a binary is not an implementation directory"
+        );
+    }
+
+    #[test]
+    fn the_untested_marker_never_repeats_on_a_nested_directory() {
+        let bare = wrap(vec![
+            file_json("packages/core/src/a.rs", 10, 0),
+            file_json("packages/core/src/nested/b.rs", 5, 0),
+        ]);
+        let model = model_of(&bare, None, StructureLoad::Loading);
+        let dirs: Vec<&str> = model
+            .attention
+            .iter()
+            .filter(|item| item.glyph == KindGlyph::Directory)
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(dirs, ["packages/core/src"], "only the top-most row");
+        let nested = dir_at(&model.root, "packages/core/src/nested")
+            .expect("the nested directory is in the tree");
+        assert!(nested.is_implementation_dir);
+        assert!(!nested.no_test_changes, "the parent already says it");
+
+        let tests = model.facts.tests.clone().expect("one implementation tree");
+        assert_eq!(tests.impl_dirs, 1, "top-most directories only");
+        assert_eq!(tests.with_tests, 0);
+        assert_eq!(tests.without.len(), 1);
+        assert_eq!(tests.without[0].path, "packages/core/src");
+        assert_eq!(tests.without[0].files, 2, "the same count as the row");
+
+        // A test next to the parent covers the nested directory as well.
+        let covered = wrap(vec![
+            file_json("packages/core/src/a.rs", 10, 0),
+            file_json("packages/core/src/nested/b.rs", 5, 0),
+            test_json("packages/core/src/a_test.rs", 4),
+        ]);
+        let model = model_of(&covered, None, StructureLoad::Loading);
+        assert!(
+            !model
+                .attention
+                .iter()
+                .any(|item| item.glyph == KindGlyph::Directory)
+        );
+        let tests = model.facts.tests.expect("one implementation tree");
+        assert_eq!((tests.impl_dirs, tests.with_tests), (1, 1));
+        assert!(tests.without.is_empty());
     }
 
     #[test]
@@ -1711,8 +1985,8 @@ mod tests {
             )
             .status,
             AnalysisStatus::Limited {
-                analyzed: 1,
-                total: 5
+                analyzed: 3,
+                total: 7
             },
             "a pending group outranks the parse failure next to it"
         );
@@ -1756,7 +2030,22 @@ mod tests {
         );
         assert_eq!(model.omissions[0].count, 2);
         assert!(model.omissions[0].warn);
+        assert_eq!(model.omissions[1].count, 1);
         assert_eq!(model.omissions[1].detail, "parsing: unexpected token");
+        assert!(
+            model.omissions.iter().all(|row| row.count > 0),
+            "no row ever counts nothing"
+        );
+        assert!(
+            model_of(
+                &fixtures::inventory(),
+                Some(&fixtures::structure_empty()),
+                StructureLoad::Ready
+            )
+            .omissions
+            .is_empty(),
+            "a clean run has nothing to report"
+        );
 
         for row in &model.omissions {
             for name in [
@@ -1827,14 +2116,21 @@ mod tests {
     fn small_comparisons_are_bounded_by_files_or_by_lines() {
         assert!(model_of(&fixtures::inventory_small(), None, StructureLoad::Loading).small_change);
         assert!(!fixtures::model().small_change);
-        // Ten files or five hundred lines is still small; both bounds must fail.
-        let ten = model_of(&sized_inventory(10, 60), None, StructureLoad::Loading);
-        assert!(ten.small_change, "ten files stay small however large");
-        let quiet = model_of(&sized_inventory(11, 45), None, StructureLoad::Loading);
-        assert_eq!(quiet.total_changed_lines, 495);
-        assert!(quiet.small_change, "under five hundred lines stays small");
-        let big = model_of(&sized_inventory(11, 46), None, StructureLoad::Loading);
-        assert_eq!(big.total_changed_lines, 506);
+        // Both bounds are inclusive, and both must fail before a comparison is big.
+        let ten = model_of(&sized_inventory(10, 100), None, StructureLoad::Loading);
+        assert_eq!((ten.files.len(), ten.total_changed_lines), (10, 1_000));
+        assert!(ten.small_change, "exactly ten files is still small");
+        let eleven = model_of(&sized_inventory(11, 100), None, StructureLoad::Loading);
+        assert!(!eleven.small_change, "one file more is not");
+
+        let five_hundred = model_of(&sized_inventory(20, 25), None, StructureLoad::Loading);
+        assert_eq!(five_hundred.total_changed_lines, 500);
+        assert!(
+            five_hundred.small_change,
+            "exactly 500 lines is still small"
+        );
+        let big = model_of(&sized_inventory(20, 26), None, StructureLoad::Loading);
+        assert_eq!(big.total_changed_lines, 520);
         assert!(!big.small_change);
     }
 
@@ -1919,13 +2215,58 @@ mod tests {
     #[test]
     fn coverage_reports_the_implementation_subset_and_the_path_order_bias() {
         let model = fixtures::model();
-        assert_eq!(model.coverage.analyzed_files, 1);
-        assert_eq!(model.coverage.total_files, 5);
+        assert_eq!(model.coverage.analyzed_files, 3);
+        assert_eq!(model.coverage.total_files, 7);
         assert_eq!(model.coverage.impl_total, 7);
-        assert_eq!(model.coverage.impl_analyzed, 1);
+        assert_eq!(model.coverage.impl_analyzed, 3);
         assert!(model.coverage.path_order_bias);
         assert_eq!(model.coverage.failed, 1);
         assert_eq!(model.coverage.merge_base_oid, Some("2".repeat(40)));
+    }
+
+    #[test]
+    fn a_file_whose_symbols_already_rank_never_gets_a_churn_reason() {
+        let mut inventory = fixtures::inventory();
+        for file in &mut inventory.files {
+            if file.new_path.as_deref() == Some("src/engine.rs") {
+                file.lines_added = Some(5_000);
+            }
+        }
+        let model = model_of(
+            &inventory,
+            Some(&fixtures::structure()),
+            StructureLoad::Ready,
+        );
+        let engine = model
+            .files
+            .iter()
+            .find(|entry| entry.display_path == "src/engine.rs")
+            .expect("the fixture analyses src/engine.rs");
+        assert!(engine.changed_lines() > 5_000, "it is the top decile now");
+        assert!(engine.reasons.is_empty(), "its symbols already explain it");
+        assert!(
+            !model.attention.iter().any(|item| item
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == ReasonKind::LargeChurn)),
+            "and nothing else reaches the decile"
+        );
+    }
+
+    fn dir_at<'a>(node: &'a DirNode, path: &str) -> Option<&'a DirNode> {
+        if node.path == path {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| dir_at(child, path))
+    }
+
+    fn test_json(path: &str, added: u64) -> Value {
+        json!({
+            "old_path": path, "new_path": path, "status": "modified",
+            "lines_added": added, "lines_deleted": 0, "binary": false,
+            "classification": { "role": "test", "rule_id": "builtin.path.test.v1" },
+            "provenance": { "source": "git" }
+        })
     }
 
     fn file_json(path: &str, added: u64, deleted: u64) -> Value {
