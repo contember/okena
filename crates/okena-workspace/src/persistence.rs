@@ -978,7 +978,7 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
             if project.worktree_info.is_some() {
                 !worktree_checkout_path(project).exists()
             } else {
-                project.is_creating && !Path::new(&project.path).exists()
+                project.is_creating && !interrupted_create_is_usable(project)
             }
         })
         .map(|p| p.id.clone())
@@ -1055,12 +1055,7 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
         if !p.is_creating {
             continue;
         }
-        let checkout_exists = if p.worktree_info.is_some() {
-            worktree_checkout_path(p).exists()
-        } else {
-            Path::new(&p.path).exists()
-        };
-        if !checkout_exists {
+        if !interrupted_create_is_usable(p) {
             continue;
         }
         if p.layout.is_none() {
@@ -1070,6 +1065,26 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
     }
 
     stale_terminal_ids
+}
+
+/// Whether what an interrupted create left on disk is worth keeping.
+///
+/// A worktree checkout only has to exist — `git worktree add` either produces
+/// one or does not. A clone is weaker: killed mid-fetch it leaves the target
+/// directory behind with an unborn HEAD, so existence alone would promote a
+/// repo containing no files to a normal-looking project. Demand a finished
+/// checkout there.
+///
+/// Both callers below must agree: the stale sweep removes the row when this is
+/// false, and the self-heal finishes it when true. Split them and a half-clone
+/// is neither removed nor finished — it stays marked creating forever, which is
+/// the "stuck on cloning" state this recovery exists to prevent.
+fn interrupted_create_is_usable(project: &ProjectData) -> bool {
+    if project.worktree_info.is_some() {
+        return worktree_checkout_path(project).exists();
+    }
+    let path = Path::new(&project.path);
+    path.exists() && okena_git::is_complete_checkout(path)
 }
 
 pub(crate) fn worktree_checkout_path(project: &ProjectData) -> &Path {
