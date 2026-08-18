@@ -392,14 +392,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 _ => None,
             };
 
-            let (is_waiting, idle_label, progress) = terminal_id.as_ref().map_or((false, None, None), |tid| {
+            let (is_waiting, idle_label, progress, has_bell) = terminal_id.as_ref().map_or((false, None, None, false), |tid| {
                 let guard = terminals.lock();
-                guard.get(tid).map_or((false, None, None), |t| {
+                guard.get(tid).map_or((false, None, None, false), |t| {
                     let progress = t.progress();
+                    // An inactive tab hides its pane, so the tab stands in for the
+                    // pane's attention border and reports the same two signals.
+                    let bell = t.has_bell() || t.has_notification();
                     if t.is_waiting_for_input() {
-                        (true, Some(t.idle_duration_display()), progress)
+                        (true, Some(t.idle_duration_display()), progress, bell)
                     } else {
-                        (false, None, progress)
+                        (false, None, progress, bell)
                     }
                 })
             });
@@ -496,12 +499,16 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }))
                             .into_any_element()
                     } else {
-                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        // Bell outranks the rest: it is the one state the user is
+                        // being asked to come back to. Same glyph and color as the
+                        // sidebar's terminal rows.
+                        let icon_color = if has_bell { rgb(t.border_bell) } else if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_path = if has_bell { "icons/bell.svg" } else { "icons/terminal.svg" };
                         h_flex()
                             .gap(px(6.0))
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).flex_shrink_0().text_color(icon_color))
+                            .child(svg().path(icon_path).size(px(12.0)).flex_shrink_0().text_color(icon_color))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())

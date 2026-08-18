@@ -52,6 +52,10 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         if let Some(ref terminal) = self.terminal {
             terminal.toggle_unread();
             cx.notify();
+            // The mark shows in four places, and the sidebar is a `.cached()`
+            // sibling this pane's notify never reaches. One keypress is far
+            // too rare for the cost of bypassing the caches to matter.
+            cx.refresh_windows();
         }
     }
 

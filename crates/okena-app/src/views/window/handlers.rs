@@ -805,11 +805,16 @@ impl WindowView {
                 }
             }
             OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
-                let terminals = self.terminals.lock();
-                if let Some(terminal) = terminals.get(terminal_id) {
-                    terminal.toggle_unread();
+                {
+                    let terminals = self.terminals.lock();
+                    if let Some(terminal) = terminals.get(terminal_id) {
+                        terminal.toggle_unread();
+                    }
                 }
                 cx.notify();
+                // Same reason as the keybinding path: the sidebar row sits
+                // behind a `.cached()` wrapper a plain notify won't reach.
+                cx.refresh_windows();
             }
             OverlayManagerEvent::TerminalSelectAll { terminal_id } => {
                 let terminals = self.terminals.lock();
