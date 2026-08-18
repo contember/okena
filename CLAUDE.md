@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Desktop app — main binary, GPUI views, app coordinator
-crates/                     # Library crates (29 crates, see below)
+crates/                     # Library crates (30 crates, see below)
 mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
 assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
@@ -42,6 +42,7 @@ Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use 
 | `okena-theme` | Theming system (built-in + custom themes) |
 | `okena-ui` | Design tokens, shared UI utilities |
 | `okena-files` | File search, file viewer, syntax highlighting |
+| `okena-highlight` | syntect/tree-sitter syntax highlighting shared by the file viewer, diff viewer and markdown code blocks |
 | `okena-markdown` | Markdown parsing and rendering |
 | `okena-views-terminal` | Terminal pane, layout container, split/tabs views |
 | `okena-views-sidebar` | Sidebar, project list, folder list, drag-and-drop |

@@ -1,14 +1,14 @@
 //! Shared syntax highlighting utilities.
 //!
 //! Provides types and functions for syntax highlighting that can be used
-//! across different viewers (file viewer, diff viewer, etc.).
+//! across different viewers (file viewer, diff viewer, markdown code blocks).
 
 use gpui::Rgba;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Theme;
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 /// Global cached syntax set with extended syntaxes (including TypeScript/TSX).
@@ -135,10 +135,7 @@ pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
 }
 
 /// Get syntax reference for a file path.
-pub fn get_syntax_for_path<'a>(
-    path: &Path,
-    syntax_set: &'a SyntaxSet,
-) -> &'a syntect::parsing::SyntaxReference {
+pub fn get_syntax_for_path<'a>(path: &Path, syntax_set: &'a SyntaxSet) -> &'a SyntaxReference {
     let ext = path.extension().and_then(|e| e.to_str());
 
     ext.and_then(map_extension_to_syntax)
@@ -213,6 +210,48 @@ pub fn highlight_line(
     }
 }
 
+/// Resolve a fenced-code info string (`rust`, `ts`, `sh`) to a syntect syntax.
+/// `None` when the language is unknown, so callers can tell "highlight as plain
+/// text" apart from "leave this block alone". Mirrors [`get_syntax_for_path`]'s
+/// mapping.
+pub fn find_syntax_for_language<'a>(
+    lang: &str,
+    syntax_set: &'a SyntaxSet,
+) -> Option<&'a SyntaxReference> {
+    map_extension_to_syntax(lang)
+        .and_then(|mapped| syntax_set.find_syntax_by_extension(mapped))
+        .or_else(|| syntax_set.find_syntax_by_token(lang))
+}
+
+/// Like [`find_syntax_for_language`], falling back to plain text.
+pub fn syntax_for_language<'a>(lang: &str, syntax_set: &'a SyntaxSet) -> &'a SyntaxReference {
+    find_syntax_for_language(lang, syntax_set)
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
+}
+
+/// Highlight a fenced markdown code block, one entry per line of `code`.
+///
+/// A fence with no language, or one syntect does not know, comes back empty:
+/// plain-text highlighting would repaint the block in the syntax theme's
+/// foreground, and a code block with nothing to colour should keep the
+/// document's own text colour instead.
+///
+/// Unlike [`highlight_content`] this loads the shared `SyntaxSet` itself — the
+/// markdown renderer has no file open and so holds no set of its own.
+pub fn highlight_code_block(
+    code: &str,
+    language: Option<&str>,
+    is_dark: bool,
+) -> Vec<HighlightedLine> {
+    let syntax_set = load_syntax_set();
+    let Some(syntax) = language.and_then(|lang| find_syntax_for_language(lang, &syntax_set)) else {
+        return Vec::new();
+    };
+    // Tabs stay as-is: the markdown renderer maps selection offsets onto the
+    // raw code text, so a span must keep the character count of its line.
+    highlight_lines(code, syntax, &syntax_set, 0, is_dark, false)
+}
+
 /// Highlight file content and return a vector of highlighted lines.
 ///
 /// # Arguments
@@ -236,7 +275,35 @@ pub fn highlight_content(
         );
     }
 
-    let syntax = get_syntax_for_path(path, syntax_set);
+    highlight_lines(
+        content,
+        get_syntax_for_path(path, syntax_set),
+        syntax_set,
+        max_lines,
+        is_dark,
+        true,
+    )
+}
+
+/// Highlight `content` line by line, merging adjacent spans of the same colour.
+/// `expand_tabs` turns each tab into four spaces — right for a viewer that owns
+/// its own layout, wrong where the caller indexes back into the original text.
+fn highlight_lines(
+    content: &str,
+    syntax: &SyntaxReference,
+    syntax_set: &SyntaxSet,
+    max_lines: usize,
+    is_dark: bool,
+    expand_tabs: bool,
+) -> Vec<HighlightedLine> {
+    let expand = |text: &str| {
+        if expand_tabs {
+            text.replace('\t', "    ")
+        } else {
+            text.to_string()
+        }
+    };
+
     let theme = load_syntax_theme(is_dark);
     let mut highlighter = HighlightLines::new(syntax, theme);
     let default_color = default_text_color(is_dark);
@@ -263,9 +330,7 @@ pub fn highlight_content(
                     };
 
                     // Pre-process text: remove newlines, expand tabs
-                    let processed = text
-                        .trim_end_matches(&['\n', '\r'][..])
-                        .replace('\t', "    ");
+                    let processed = expand(text.trim_end_matches(&['\n', '\r'][..]));
 
                     if processed.is_empty() {
                         continue;
@@ -292,9 +357,7 @@ pub fn highlight_content(
                 (merged, plain)
             }
             Err(_) => {
-                let text = line
-                    .trim_end_matches(&['\n', '\r'][..])
-                    .replace('\t', "    ");
+                let text = expand(line.trim_end_matches(&['\n', '\r'][..]));
                 (
                     vec![HighlightedSpan {
                         color: default_color,

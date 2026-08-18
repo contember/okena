@@ -6259,18 +6259,15 @@ dependencies = [
  "log",
  "nucleo-matcher",
  "okena-core",
+ "okena-highlight",
  "okena-markdown",
  "okena-transport",
  "okena-ui",
  "serde",
  "serde_json",
- "streaming-iterator",
  "syntect",
  "tempfile",
- "tree-sitter",
- "tree-sitter-md",
  "ttf-parser",
- "two-face",
  "usvg 0.45.1",
 ]
 
@@ -6288,6 +6285,18 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "okena-highlight"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "streaming-iterator",
+ "syntect",
+ "tree-sitter",
+ "tree-sitter-md",
+ "two-face",
 ]
 
 [[package]]

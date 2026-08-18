@@ -19,7 +19,7 @@
 
 use crate::syntax::{
     HighlightedLine, HighlightedSpan, default_text_color, highlight_line, load_syntax_theme,
-    map_extension_to_syntax,
+    syntax_for_language,
 };
 use gpui::Rgba;
 use std::collections::HashMap;
@@ -229,7 +229,7 @@ fn collect_code_blocks(
         let Some(code) = content.get(start..end.min(content.len())) else {
             continue;
         };
-        let syntax = syntax_for_lang(lang, syntax_set);
+        let syntax = syntax_for_language(lang, syntax_set);
         let mut highlighter = HighlightLines::new(syntax, theme);
         let first_line = line_of(line_starts, start);
         for (i, line) in LinesWithEndings::from(code).enumerate() {
@@ -237,18 +237,6 @@ fn collect_code_blocks(
             out.insert(first_line + i, spans);
         }
     }
-}
-
-/// Resolve a fenced-code info-string language to a syntect syntax, falling back
-/// to plain text. Mirrors [`crate::syntax::get_syntax_for_path`]'s mapping.
-fn syntax_for_lang<'a>(
-    lang: &str,
-    syntax_set: &'a SyntaxSet,
-) -> &'a syntect::parsing::SyntaxReference {
-    map_extension_to_syntax(lang)
-        .and_then(|mapped| syntax_set.find_syntax_by_extension(mapped))
-        .or_else(|| syntax_set.find_syntax_by_token(lang))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
 }
 
 /// Build spans for one (non-code) line from the per-byte colour buffer,
