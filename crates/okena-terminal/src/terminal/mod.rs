@@ -160,6 +160,12 @@ pub struct Terminal {
     /// exactly once instead of on every batch while `has_bell` stays set.
     pub(super) bell_pending: Arc<AtomicBool>,
 
+    /// "The user marked this pane unread by hand" flag. Holds `has_bell`
+    /// against the render path's clear-on-focus, so marking the pane you are
+    /// looking at actually sticks; released when focus leaves, so the next
+    /// visit clears the bell like any other. GPUI thread only.
+    pub(super) manual_unread: AtomicBool,
+
     /// Sticky "this pane raised a desktop notification" flag, mirroring
     /// `has_bell` but for OSC 9/777 alerts. Set by the app when it actually
     /// fires a notification (so it already honors the user's settings and the
@@ -419,6 +425,7 @@ impl Terminal {
             title,
             has_bell,
             bell_pending,
+            manual_unread: AtomicBool::new(false),
             has_notification: AtomicBool::new(false),
             pending_clipboard,
             pending_clipboard_reads,

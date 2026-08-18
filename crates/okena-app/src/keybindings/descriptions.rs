@@ -12,8 +12,8 @@ use super::{
     ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
     ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn,
-    ZoomOut,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -158,6 +158,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Minimize/detach the terminal",
             category: "Terminal",
             factory: || Box::new(MinimizeTerminal),
+        },
+    );
+    map.insert(
+        "ToggleUnread",
+        ActionDescription {
+            name: "Mark as Unread",
+            description: "Raise (or clear) the terminal's unread bell mark",
+            category: "Terminal",
+            factory: || Box::new(ToggleUnread),
         },
     );
     map.insert(

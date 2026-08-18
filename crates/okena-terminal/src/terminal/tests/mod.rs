@@ -6,6 +6,7 @@ mod osc;
 mod prompt_jump;
 mod resize_authority;
 mod snapshot_watermark;
+mod unread;
 mod url_detect;
 mod xterm_color;
 

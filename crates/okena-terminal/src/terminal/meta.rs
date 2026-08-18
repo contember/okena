@@ -88,6 +88,42 @@ impl Terminal {
     /// Clear the bell notification flag (call when terminal receives focus)
     pub fn clear_bell(&self) {
         *self.has_bell.lock() = false;
+        self.manual_unread
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Raise the bell by hand — "mark as unread". Unlike a BEL from the shell
+    /// this survives the render path's clear-on-focus (see `manual_unread`),
+    /// so it sticks on the pane the user is currently looking at.
+    pub fn mark_unread(&self) {
+        *self.has_bell.lock() = true;
+        self.manual_unread
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Toggle the manual unread mark. Returns the new state. Any bell counts as
+    /// read here, so this also dismisses one the shell rang.
+    pub fn toggle_unread(&self) -> bool {
+        if self.has_bell() {
+            self.clear_bell();
+            false
+        } else {
+            self.mark_unread();
+            true
+        }
+    }
+
+    /// Whether the bell is currently held by a manual unread mark.
+    pub fn is_manually_unread(&self) -> bool {
+        self.manual_unread
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Drop the manual hold while keeping the bell lit (call when the pane
+    /// loses focus). The mark has done its job — the next focus clears it.
+    pub fn release_manual_unread(&self) {
+        self.manual_unread
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Consume the one-shot "bell rang since last drain" edge. Returns true if

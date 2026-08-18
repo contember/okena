@@ -804,6 +804,13 @@ impl WindowView {
                     terminal.clear();
                 }
             }
+            OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
+                let terminals = self.terminals.lock();
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    terminal.toggle_unread();
+                }
+                cx.notify();
+            }
             OverlayManagerEvent::TerminalSelectAll { terminal_id } => {
                 let terminals = self.terminals.lock();
                 if let Some(terminal) = terminals.get(terminal_id) {
@@ -1200,6 +1207,11 @@ impl WindowView {
                         has_selection,
                         link_url,
                     } => {
+                        let has_bell = self
+                            .terminals
+                            .lock()
+                            .get(&terminal_id)
+                            .is_some_and(|t| t.has_bell());
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_terminal_context_menu(
                                 terminal_id,
@@ -1207,6 +1219,7 @@ impl WindowView {
                                 layout_path,
                                 position,
                                 has_selection,
+                                has_bell,
                                 link_url,
                                 cx,
                             );
