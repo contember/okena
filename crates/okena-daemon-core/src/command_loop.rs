@@ -3043,10 +3043,18 @@ pub async fn daemon_command_loop(
                                                     ws.notify_data(&mut cx);
                                                 }
                                                 result => {
-                                                    let msg = match result {
-                                                        Ok(Err(e)) => e.to_string(),
+                                                    // Two renderings: the whole
+                                                    // thing for the log, git's own
+                                                    // error line for the toast.
+                                                    let (msg, detail) = match result {
+                                                        Ok(Err(e)) => {
+                                                            (e.to_string(), e.user_detail())
+                                                        }
                                                         Err(join) => {
-                                                            format!("clone task failed: {join}")
+                                                            let m = format!(
+                                                                "clone task failed: {join}"
+                                                            );
+                                                            (m.clone(), m)
                                                         }
                                                         Ok(Ok(())) => {
                                                             unreachable!("success handled above")
@@ -3070,9 +3078,12 @@ pub async fn daemon_command_loop(
                                                         "clone-project: {url} failed: {msg}"
                                                     );
                                                     if let Some(hm) = &hook_monitor {
-                                                        hm.push_toast(okena_state::Toast::error(
-                                                            format!("Clone failed: {msg}"),
-                                                        ));
+                                                        hm.push_toast(
+                                                            okena_state::Toast::error(
+                                                                "Clone failed",
+                                                            )
+                                                            .with_detail(detail),
+                                                        );
                                                     }
                                                 }
                                             }
