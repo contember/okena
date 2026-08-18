@@ -22,9 +22,14 @@ impl GitHeader {
     ///
     /// `current_branch` is the branch name from the git status watcher
     /// (passed in because the watcher lives in the main app).
+    ///
+    /// `inline_controls` is dropped in just left of the right-aligned
+    /// base-compare chip. The header's hover-revealed buttons go there so
+    /// revealing them eats the flex spacer instead of shoving the chip left.
     pub fn render_git_status(
         &self,
         status: Option<GitStatus>,
+        inline_controls: Option<AnyElement>,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -233,6 +238,7 @@ impl GitHeader {
                     // Flexible spacer: pushes the base-compare chip to the right
                     // edge of the header row.
                     .child(div().flex_1().min_w(px(8.0)))
+                    .when_some(inline_controls, |d, controls| d.child(controls))
                     // Branch-vs-base comparison, shown only when a base exists,
                     // as a labeled `⎇ main +N −M` chip. Doubles as the "review
                     // changes" affordance: clicking opens a three-dot diff of

@@ -677,98 +677,119 @@ impl ProjectColumn {
         // crashes GPUI (prepaint and paint can see different hover states).
         let show_reveal = is_focused_view || self.header_hovered;
 
+        let has_git = git_status
+            .as_ref()
+            .and_then(|g| g.branch.as_ref())
+            .is_some();
+
+        let reveal_controls: Option<AnyElement> = show_reveal.then(|| {
+            h_flex()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .id("hide-project-btn")
+                        .cursor_pointer()
+                        // Uniform horizontal padding (not a fixed width)
+                        // so every header button sits 5px from its
+                        // neighbours regardless of glyph size — a small
+                        // dot no longer floats in a wide box.
+                        .px(px(5.0))
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            focus_manager_for_hide.update(cx, |fm, cx| {
+                                workspace_for_hide.update(cx, |ws, cx| {
+                                    ws.toggle_project_overview_visibility(
+                                        fm,
+                                        window_id_for_hide,
+                                        &project_id_for_hide,
+                                        cx,
+                                    );
+                                });
+                            });
+                        })
+                        .child(
+                            svg()
+                                .path(vis_icon)
+                                .size(px(14.0))
+                                .text_color(rgb(t.text_secondary)),
+                        )
+                        .tooltip(move |_window, cx| Tooltip::new(vis_tooltip).build(_window, cx)),
+                )
+                .child(
+                    div()
+                        .id("fullscreen-project-btn")
+                        .cursor_pointer()
+                        .px(px(5.0))
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            let pid = project_id.clone();
+                            focus_manager.update(cx, |fm, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    // Toggle: when already focused, clear
+                                    // focus to return to the overview.
+                                    let target = if is_focused_view { None } else { Some(pid) };
+                                    ws.set_focused_project(fm, target, cx);
+                                });
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            svg()
+                                .path(focus_icon)
+                                .size(px(14.0))
+                                .text_color(rgb(t.text_secondary)),
+                        )
+                        .tooltip(move |_window, cx| Tooltip::new(focus_tooltip).build(_window, cx)),
+                )
+                .into_any_element()
+        });
+
+        // In the compact row the base-compare chip is pinned to the right edge
+        // of the git status area, so growing the button cluster on its right
+        // shoved the chip sideways on every hover. Hand the buttons to the git
+        // status row instead: they land left of the chip and the flex spacer
+        // absorbs their width. The comfortable layout keeps them in the header
+        // row — there the chip lives on a row of its own.
+        let (inline_reveal, header_reveal) = if !is_comfortable && has_git {
+            (reveal_controls, None)
+        } else {
+            (None, reveal_controls)
+        };
+
+        let git_status_el = self.git_header.update(cx, |gh, cx| {
+            gh.render_git_status(git_status.clone(), inline_reveal, &t, cx)
+        });
+
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
-            // All four action buttons share one cluster with a single, uniform
-            // gap. Absent buttons (the hover-revealed hide/fullscreen while the
-            // header isn't hovered, or an empty hook/service indicator) leave
-            // the flex layout entirely, so a gap only ever appears between
-            // buttons that are actually visible.
+            // The header buttons share one cluster with a single, uniform gap.
+            // Absent buttons (an empty hook/service indicator, or the
+            // hover-revealed pair once it has been handed to the git status
+            // row) leave the flex layout entirely, so a gap only ever appears
+            // between buttons that are actually visible.
             .child(
                 h_flex()
                     .gap(px(2.0))
-                    .when(show_reveal, |d| {
-                        d.child(
-                            div()
-                                .id("hide-project-btn")
-                                .cursor_pointer()
-                                // Uniform horizontal padding (not a fixed width)
-                                // so every header button sits 5px from its
-                                // neighbours regardless of glyph size — a small
-                                // dot no longer floats in a wide box.
-                                .px(px(5.0))
-                                .h(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(move |_, _window, cx| {
-                                    cx.stop_propagation();
-                                    focus_manager_for_hide.update(cx, |fm, cx| {
-                                        workspace_for_hide.update(cx, |ws, cx| {
-                                            ws.toggle_project_overview_visibility(
-                                                fm,
-                                                window_id_for_hide,
-                                                &project_id_for_hide,
-                                                cx,
-                                            );
-                                        });
-                                    });
-                                })
-                                .child(
-                                    svg()
-                                        .path(vis_icon)
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.text_secondary)),
-                                )
-                                .tooltip(move |_window, cx| {
-                                    Tooltip::new(vis_tooltip).build(_window, cx)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("fullscreen-project-btn")
-                                .cursor_pointer()
-                                .px(px(5.0))
-                                .h(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(move |_, _window, cx| {
-                                    cx.stop_propagation();
-                                    let pid = project_id.clone();
-                                    focus_manager.update(cx, |fm, cx| {
-                                        workspace.update(cx, |ws, cx| {
-                                            // Toggle: when already focused, clear
-                                            // focus to return to the overview.
-                                            let target =
-                                                if is_focused_view { None } else { Some(pid) };
-                                            ws.set_focused_project(fm, target, cx);
-                                        });
-                                        cx.notify();
-                                    });
-                                })
-                                .child(
-                                    svg()
-                                        .path(focus_icon)
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.text_secondary)),
-                                )
-                                .tooltip(move |_window, cx| {
-                                    Tooltip::new(focus_tooltip).build(_window, cx)
-                                }),
-                        )
-                    })
+                    .when_some(header_reveal, |d, controls| d.child(controls))
                     .child({
                         self.hook_panel
                             .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))
@@ -778,14 +799,6 @@ impl ProjectColumn {
                             .update(cx, |sp, cx| sp.render_service_indicator(&t, cx))
                     }),
             );
-
-        let git_status_el = self.git_header.update(cx, |gh, cx| {
-            gh.render_git_status(git_status.clone(), &t, cx)
-        });
-        let has_git = git_status
-            .as_ref()
-            .and_then(|g| g.branch.as_ref())
-            .is_some();
 
         let context_menu_handler = {
             let request_broker = self.request_broker.clone();
