@@ -24,11 +24,11 @@ pub mod in_page_search;
 #[cfg(feature = "gpui")]
 pub mod list_overlay;
 #[cfg(feature = "gpui")]
-pub mod markdown_highlight;
-#[cfg(feature = "gpui")]
 pub mod selection;
+// Highlighting lives in `okena-highlight` (shared with the markdown renderer);
+// re-exported here so the viewers keep their `okena_files::syntax` paths.
 #[cfg(feature = "gpui")]
-pub mod syntax;
+pub use okena_highlight::{markdown_highlight, syntax};
 // `theme` re-exports gpui theme helpers from `okena-ui` (a gpui crate) and is
 // consumed only by gpui code, so it is gated with the rest of the viewer even
 // though it holds no rendering itself.
