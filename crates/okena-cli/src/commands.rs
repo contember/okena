@@ -1231,9 +1231,7 @@ pub fn cli_project_clone(
     // On a later failure the row is removed from state (visible in `okena ls`)
     // plus a toast.
     if v.get("pending").and_then(|p| p.as_bool()).unwrap_or(false) {
-        eprintln!(
-            "clone started in the background; the path will exist once it completes"
-        );
+        eprintln!("clone started in the background; the path will exist once it completes");
     }
     project_add_followups(&token, &project_id, hidden, folder, window)
 }
