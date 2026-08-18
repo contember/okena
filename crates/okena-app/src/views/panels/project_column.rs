@@ -932,7 +932,12 @@ impl ProjectColumn {
 
     /// Placeholder shown while the daemon is still materializing the project's
     /// directory — a worktree checkout, or a clone of a remote repository.
-    fn render_creating_state(&self, is_worktree: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_creating_state(
+        &self,
+        is_worktree: bool,
+        progress: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let (icon, title, detail) = if is_worktree {
             (
@@ -973,6 +978,16 @@ impl ProjectColumn {
                     .text_center()
                     .child(detail),
             )
+            // Only a clone reports progress; a worktree checkout is local and
+            // usually over before a percentage would be readable.
+            .when_some(progress, |d, progress: &str| {
+                d.child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(progress.to_string()),
+                )
+            })
     }
 
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1172,7 +1187,11 @@ impl Render for ProjectColumn {
                     }
                     ColumnContent::Closing => self.render_closing_state(cx).into_any_element(),
                     ColumnContent::Creating => self
-                        .render_creating_state(project.worktree_info.is_some(), cx)
+                        .render_creating_state(
+                            project.worktree_info.is_some(),
+                            project.creating_progress.as_deref(),
+                            cx,
+                        )
                         .into_any_element(),
                     ColumnContent::Empty => self.render_empty_state(cx).into_any_element(),
                 };
@@ -1280,6 +1299,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

@@ -103,6 +103,31 @@ pub fn current_lane() -> Lane {
     CURRENT_LANE.with(|c| c.get())
 }
 
+/// A live feed of a command's stderr lines, delivered while it still runs.
+///
+/// The bus otherwise hands back all output at once when the process exits,
+/// which is fine for a verdict and useless for progress: a long `git clone`
+/// reports where it has got to only as it goes. Held behind an `Arc` because
+/// the reader thread owns a clone of it.
+#[derive(Clone)]
+pub struct StderrSink(Arc<dyn Fn(&str) + Send + Sync>);
+
+impl StderrSink {
+    pub fn new(sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(sink))
+    }
+
+    fn emit(&self, line: &str) {
+        (self.0)(line);
+    }
+}
+
+impl std::fmt::Debug for StderrSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StderrSink")
+    }
+}
+
 /// A fully-described one-shot command. Built directly, or extracted from a
 /// configured [`std::process::Command`] via [`CommandSpec::from_command`].
 #[derive(Debug, Clone)]
@@ -120,6 +145,8 @@ pub struct CommandSpec {
     /// be killed at once via [`CommandBus::cancel_scope`] (e.g. on project
     /// close or app shutdown).
     pub scope: Option<u64>,
+    /// Optional live feed of stderr lines. See [`StderrSink`].
+    pub stderr_sink: Option<StderrSink>,
 }
 
 impl CommandSpec {
@@ -133,6 +160,7 @@ impl CommandSpec {
             lane: current_lane(),
             label: None,
             scope: None,
+            stderr_sink: None,
         }
     }
 
@@ -180,6 +208,13 @@ impl CommandSpec {
         self
     }
 
+    /// Report stderr lines to `sink` as they arrive, on top of capturing them.
+    /// For progress on commands too long to watch in silence.
+    pub fn on_stderr_line(mut self, sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.stderr_sink = Some(StderrSink::new(sink));
+        self
+    }
+
     /// Extract a spec from an already-configured [`std::process::Command`].
     ///
     /// This is what lets `safe_output(command("git").args(..).current_dir(..))`
@@ -216,6 +251,7 @@ impl CommandSpec {
             lane: current_lane(),
             label: None,
             scope: None,
+            stderr_sink: None,
         }
     }
 
@@ -578,7 +614,10 @@ fn spawn_and_collect(spec: &CommandSpec, ctl: &Arc<JobControl>) -> std::io::Resu
     // blocks on `write` forever while we wait for it to exit and never drain —
     // a classic deadlock, hit by e.g. a large `docker ps -a` or `git diff`.
     let out_reader = spawn_pipe_reader(child.stdout.take());
-    let err_reader = spawn_pipe_reader(child.stderr.take());
+    let err_reader = match spec.stderr_sink.clone() {
+        Some(sink) => spawn_streaming_pipe_reader(child.stderr.take(), sink),
+        None => spawn_pipe_reader(child.stderr.take()),
+    };
 
     // Publish the kill handle so cancel()/cancel_scope() can reach the whole
     // process tree. The registration clears it before the OS identity can be
@@ -682,6 +721,63 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
         }
         buf
     })
+}
+
+/// Longest run of bytes accepted as one line before it is flushed anyway, so a
+/// stream that never breaks cannot grow the buffer without bound.
+const MAX_SINK_LINE: usize = 8 * 1024;
+
+/// Like [`spawn_pipe_reader`], but also hands each line to `sink` as it
+/// arrives rather than only at exit.
+///
+/// Both `\r` and `\n` end a line: progress-reporting tools separate updates
+/// with a carriage return so the line rewrites itself in place, and splitting
+/// on `\n` alone would hold every update back until the very end — exactly the
+/// buffering this exists to avoid. The full byte stream is still accumulated,
+/// so the command's captured stderr is unchanged.
+fn spawn_streaming_pipe_reader<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+    sink: StderrSink,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return all;
+        };
+        let mut chunk = [0u8; 4096];
+        let mut line = Vec::new();
+        loop {
+            let read = match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            all.extend_from_slice(&chunk[..read]);
+            for &byte in &chunk[..read] {
+                if byte == b'\n' || byte == b'\r' {
+                    emit_sink_line(&sink, &mut line);
+                } else {
+                    line.push(byte);
+                    if line.len() >= MAX_SINK_LINE {
+                        emit_sink_line(&sink, &mut line);
+                    }
+                }
+            }
+        }
+        emit_sink_line(&sink, &mut line);
+        all
+    })
+}
+
+/// Emit `line` if it holds anything, and clear it either way.
+fn emit_sink_line(sink: &StderrSink, line: &mut Vec<u8>) {
+    if !line.is_empty() {
+        let text = String::from_utf8_lossy(line);
+        let text = text.trim();
+        if !text.is_empty() {
+            sink.emit(text);
+        }
+        line.clear();
+    }
 }
 
 fn wait_for_readers(

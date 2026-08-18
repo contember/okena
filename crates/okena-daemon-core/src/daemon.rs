@@ -828,6 +828,7 @@ mod shutdown_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         project
             .terminal_names
@@ -918,6 +919,7 @@ mod shutdown_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         project.hook_terminals.insert(
             "persistent-hook".to_string(),
@@ -1001,6 +1003,7 @@ mod shutdown_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         });
         data.project_order.push("p1".to_string());
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));

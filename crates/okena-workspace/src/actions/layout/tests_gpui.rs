@@ -36,6 +36,7 @@ fn make_project(id: &str) -> ProjectData {
         last_activity_at: None,
         is_creating: false,
         is_closing: false,
+        creating_progress: None,
     }
 }
 
@@ -505,6 +506,7 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         last_activity_at: None,
         is_creating: false,
         is_closing: false,
+        creating_progress: None,
     }
 }
 

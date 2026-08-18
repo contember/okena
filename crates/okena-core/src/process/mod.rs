@@ -15,7 +15,8 @@
 mod bus;
 
 pub use bus::{
-    CommandBus, CommandCancellation, CommandHandle, CommandSpec, Lane, current_lane, with_lane,
+    CommandBus, CommandCancellation, CommandHandle, CommandSpec, Lane, StderrSink, current_lane,
+    with_lane,
 };
 
 /// Create a [`std::process::Command`] that does **not** flash a console
@@ -275,6 +276,74 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    /// The point of the sink is arrival time, not content: lines must reach it
+    /// while the command still runs. Buffering them until exit would make
+    /// progress reporting useless, and that is what the plain reader does.
+    #[test]
+    fn stderr_lines_reach_the_sink_before_the_command_exits() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let observed_early = Arc::new(Mutex::new(false));
+
+        let sink_seen = seen.clone();
+        let sink_early = observed_early.clone();
+        let output = super::run(
+            super::CommandSpec::new("sh")
+                .args([
+                    "-c",
+                    // Marker, a pause, then exit. A sink that only fired at
+                    // exit could not have seen the marker during the sleep.
+                    "printf 'first\n' >&2; sleep 1; printf 'second\n' >&2",
+                ])
+                .on_stderr_line(move |line| {
+                    sink_seen.lock().expect("lock").push(line.to_string());
+                    if line == "first" {
+                        *sink_early.lock().expect("lock") = true;
+                    }
+                }),
+        )
+        .expect("run sh");
+
+        assert!(
+            *observed_early.lock().expect("lock"),
+            "the first line must arrive before the command finishes"
+        );
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        // Capture is unaffected.
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "first\nsecond\n");
+    }
+
+    /// Progress tools rewrite one line with `\r`. Splitting on `\n` alone
+    /// would hold every update back until the command ended.
+    #[test]
+    fn carriage_returns_separate_progress_updates() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        super::run(
+            super::CommandSpec::new("sh")
+                .args(["-c", "printf 'a: 10%%\rb: 50%%\rc: 100%%\n' >&2"])
+                .on_stderr_line(move |line| {
+                    sink_seen.lock().expect("lock").push(line.to_string());
+                }),
+        )
+        .expect("run sh");
+
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            vec![
+                "a: 10%".to_string(),
+                "b: 50%".to_string(),
+                "c: 100%".to_string()
+            ]
+        );
+    }
+
     /// Every bus child must lead its own session, so it has no controlling
     /// terminal to be stopped on. Without this a `git clone` that hits a
     /// credential prompt takes SIGTTIN and hangs forever instead of failing.

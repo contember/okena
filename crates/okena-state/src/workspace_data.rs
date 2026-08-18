@@ -290,6 +290,15 @@ pub struct ProjectData {
     /// project stranded "Closing…" forever.
     #[serde(skip)]
     pub is_closing: bool,
+    /// Latest progress line for an in-flight clone, e.g. `Receiving objects:
+    /// 42%`. Only ever set while `is_creating`; mirrored over the wire so thin
+    /// clients show the same thing as the desktop.
+    ///
+    /// Not persisted, for the same reason as `is_closing`: it describes a live
+    /// process, and reloading a stale percentage after a restart would claim
+    /// progress that nothing is making.
+    #[serde(skip)]
+    pub creating_progress: Option<String>,
 }
 
 impl ProjectData {
@@ -372,6 +381,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

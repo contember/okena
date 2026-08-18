@@ -16,19 +16,19 @@ pub use diff::{
 };
 pub use error::{GitError, GitResult};
 pub use repository::{
-    BranchList, HeadSnapshot, OrphanedWorktree, VerifiedWorktree, checkout_local_branch,
-    checkout_remote_branch, clone_dir_name, clone_repository, compute_target_paths,
-    count_ahead_behind, count_unpushed_commits, create_and_checkout_branch, create_worktree,
-    create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
+    BranchList, CloneProgress, HeadSnapshot, OrphanedWorktree, VerifiedWorktree,
+    checkout_local_branch, checkout_remote_branch, clone_dir_name, clone_repository,
+    compute_target_paths, count_ahead_behind, count_unpushed_commits, create_and_checkout_branch,
+    create_worktree, create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
     discard_file_changes, fetch_all, fetch_and_fast_forward, finish_clone_repository,
     get_available_branches_for_worktree, get_current_branch, get_default_branch, get_head_snapshot,
     get_repo_common_dir, get_repo_root, has_uncommitted_changes, is_complete_checkout,
-    list_branches,
-    list_branches_classified, list_linked_worktree_paths, list_pull_requests, merge_branch,
-    move_worktree, project_path_in_worktree, push_branch, rebase_onto, remove_orphaned_worktree,
-    remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir, resolve_review_base,
-    stage_file, start_clone_repository, stash_changes, stash_pop, unstage_file, validate_clone_url,
-    verify_linked_worktree_fresh, verify_orphaned_worktree,
+    list_branches, list_branches_classified, list_linked_worktree_paths, list_pull_requests,
+    merge_branch, move_worktree, parse_clone_progress, project_path_in_worktree, push_branch,
+    rebase_onto, remove_orphaned_worktree, remove_worktree, remove_worktree_fast,
+    resolve_git_root_and_subdir, resolve_review_base, stage_file, start_clone_repository,
+    stash_changes, stash_pop, unstage_file, validate_clone_url, verify_linked_worktree_fresh,
+    verify_orphaned_worktree,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look

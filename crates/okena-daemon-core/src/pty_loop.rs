@@ -980,6 +980,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         let child = ProjectData {
             id: "wt1".into(),
@@ -1019,6 +1020,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
@@ -1066,6 +1068,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

@@ -821,6 +821,7 @@ mod tests {
             hooks: Default::default(),
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

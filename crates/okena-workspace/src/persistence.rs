@@ -1191,6 +1191,7 @@ pub fn default_workspace() -> WorkspaceData {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }],
         project_order: vec![project_id],
         service_panel_heights: HashMap::new(),
@@ -1615,6 +1616,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

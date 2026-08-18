@@ -568,6 +568,7 @@ impl Workspace {
             // optimistic (deferred-hooks) create still awaiting its checkout.
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -749,6 +750,7 @@ impl Workspace {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
 
         // Multi-window new-project visibility rule (PRD user story 14):

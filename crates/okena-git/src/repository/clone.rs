@@ -70,11 +70,61 @@ fn require_absent_clone_target(target_path: &Path) -> GitResult<()> {
     Ok(())
 }
 
+/// How far along a `git clone` is, as reported by git itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneProgress {
+    /// The phase git names, e.g. `Receiving objects`.
+    pub phase: String,
+    /// Percent complete within that phase, 0-100.
+    pub percent: u8,
+}
+
+impl CloneProgress {
+    /// One short line for a UI: `Receiving objects: 42%`.
+    pub fn summary(&self) -> String {
+        format!("{}: {}%", self.phase, self.percent)
+    }
+}
+
+/// Read one line of `git clone --progress` output.
+///
+/// The lines that carry progress look like `Receiving objects:  42% (52/123)`,
+/// sometimes behind a `remote: ` prefix when the phase runs on the server.
+/// Everything else git writes — the opening `Cloning into '...'`, warnings,
+/// the final `done.` summaries — carries no percentage and is skipped, so
+/// callers can feed it every line without filtering first.
+pub fn parse_clone_progress(line: &str) -> Option<CloneProgress> {
+    let line = line.trim().strip_prefix("remote: ").unwrap_or(line.trim());
+    let (phase, rest) = line.split_once(':')?;
+    let phase = phase.trim();
+    // Guard against picking up a URL or a path with a colon in it.
+    if phase.is_empty() || !phase.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('%') {
+        return None;
+    }
+    let percent: u8 = digits.parse().ok().filter(|p| *p <= 100)?;
+    Some(CloneProgress {
+        phase: phase.to_string(),
+        percent,
+    })
+}
+
 /// Submit `git clone <url> <target_path>` to the process bus.
 ///
 /// Runs on [`Lane::Long`]: a clone is network-bound and unbounded in duration,
 /// so it must never occupy an interactive or poller slot.
-pub fn start_clone_repository(url: &str, target_path: &Path) -> GitResult<CommandHandle> {
+///
+/// `on_progress` is called from the bus reader thread for each progress update
+/// git reports, so it must be cheap and must not block.
+pub fn start_clone_repository(
+    url: &str,
+    target_path: &Path,
+    on_progress: impl Fn(CloneProgress) + Send + Sync + 'static,
+) -> GitResult<CommandHandle> {
     let url = validate_clone_url(url)?;
     require_absent_clone_target(target_path)?;
 
@@ -84,11 +134,18 @@ pub fn start_clone_repository(url: &str, target_path: &Path) -> GitResult<Comman
     }
 
     let mut cmd = network_command();
-    cmd.args(["clone", "--", url, target_str]);
+    // `--progress` is required, not cosmetic: git reports progress only when
+    // stderr is a terminal, and the bus always pipes it.
+    cmd.args(["clone", "--progress", "--", url, target_str]);
     Ok(CommandBus::global().submit(
         CommandSpec::from_command(&cmd)
             .lane(Lane::Long)
-            .label("git clone"),
+            .label("git clone")
+            .on_stderr_line(move |line| {
+                if let Some(progress) = parse_clone_progress(line) {
+                    on_progress(progress);
+                }
+            }),
     ))
 }
 
@@ -111,9 +168,10 @@ pub fn is_complete_checkout(path: &Path) -> bool {
     gix::open(path).is_ok_and(|repo| repo.head_id().is_ok())
 }
 
-/// Submit and synchronously wait for `git clone <url> <target_path>`.
+/// Submit and synchronously wait for `git clone <url> <target_path>`,
+/// discarding progress.
 pub fn clone_repository(url: &str, target_path: &Path) -> GitResult<()> {
-    finish_clone_repository(start_clone_repository(url, target_path)?)
+    finish_clone_repository(start_clone_repository(url, target_path, |_| {})?)
 }
 
 #[cfg(test)]
@@ -153,6 +211,103 @@ mod tests {
             validate_clone_url("  https://host/a.git ").ok(),
             Some("https://host/a.git")
         );
+    }
+
+    #[test]
+    fn reads_the_percentage_out_of_gits_progress_lines() {
+        let cases = [
+            ("Receiving objects:  42% (52/123)", "Receiving objects", 42),
+            (
+                "Resolving deltas: 100% (30/30), done.",
+                "Resolving deltas",
+                100,
+            ),
+            (
+                "remote: Enumerating objects:   7% (1/14)",
+                "Enumerating objects",
+                7,
+            ),
+            ("Updating files:   0% (1/900)", "Updating files", 0),
+        ];
+        for (line, phase, percent) in cases {
+            assert_eq!(
+                parse_clone_progress(line),
+                Some(CloneProgress {
+                    phase: phase.to_string(),
+                    percent
+                }),
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn lines_without_a_percentage_are_not_progress() {
+        for line in [
+            "Cloning into '/tmp/repo'...",
+            "fatal: could not read Username for 'https://github.com'",
+            "warning: redirecting to https://example.com/repo.git/",
+            "remote: Total 14 (delta 0), reused 0 (delta 0)",
+            "",
+            "https://example.com: unreachable",
+        ] {
+            assert_eq!(parse_clone_progress(line), None, "line: {line}");
+        }
+    }
+
+    #[test]
+    fn a_progress_update_renders_as_one_short_line() {
+        let progress = CloneProgress {
+            phase: "Receiving objects".to_string(),
+            percent: 42,
+        };
+        assert_eq!(progress.summary(), "Receiving objects: 42%");
+    }
+
+    /// End-to-end over a real `git clone`: the parser above is only useful if
+    /// git actually emits these lines under the bus's piped stderr, which it
+    /// does only because of `--progress`. Uses a `file://` URL so the clone
+    /// goes through the real transport (a plain path would hardlink and skip
+    /// the transfer) without touching the network.
+    #[test]
+    fn a_real_clone_reports_progress() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+        use std::sync::{Arc, Mutex};
+
+        let (_tmp, source) = init_temp_repo();
+        for i in 0..20 {
+            std::fs::write(source.join(format!("file{i}.txt")), format!("{i}\n")).unwrap();
+        }
+        git_in(&source, &["add", "."]);
+        git_in(
+            &source,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+        );
+
+        let target =
+            std::env::temp_dir().join(format!("okena-clone-progress-{}", uuid::Uuid::new_v4()));
+        let seen: Arc<Mutex<Vec<CloneProgress>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+
+        let url = format!("file://{}", source.display());
+        let handle = start_clone_repository(&url, &target, move |progress| {
+            sink.lock().expect("lock").push(progress);
+        })
+        .expect("start clone");
+        finish_clone_repository(handle).expect("clone succeeds");
+
+        let seen = seen.lock().expect("lock");
+        assert!(
+            !seen.is_empty(),
+            "git reported no progress; --progress or the parser regressed"
+        );
+        assert!(
+            seen.iter().all(|p| p.percent <= 100 && !p.phase.is_empty()),
+            "malformed progress: {seen:?}"
+        );
+        assert!(is_complete_checkout(&target), "clone should be complete");
+
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]

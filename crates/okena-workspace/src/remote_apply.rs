@@ -260,6 +260,7 @@ pub fn apply_remote_snapshot(
                         last_activity_at: api_project.last_activity_at,
                         is_creating: api_project.is_creating,
                         is_closing: api_project.is_closing,
+                        creating_progress: api_project.creating_progress.clone(),
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -555,6 +556,7 @@ mod tests {
             hooks: Default::default(),
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

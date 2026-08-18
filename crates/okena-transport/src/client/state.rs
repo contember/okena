@@ -214,6 +214,7 @@ mod tests {
             hooks: Default::default(),
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 
@@ -380,6 +381,7 @@ mod tests {
             hooks: Default::default(),
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

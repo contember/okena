@@ -33,6 +33,7 @@ fn make_project(id: &str) -> ProjectData {
         last_activity_at: None,
         is_creating: false,
         is_closing: false,
+        creating_progress: None,
     }
 }
 
