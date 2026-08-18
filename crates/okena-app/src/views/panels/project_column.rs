@@ -450,13 +450,15 @@ impl ProjectColumn {
                         let workspace = self.workspace.clone();
                         let project_id = self.project_id.clone();
 
-                        let terminal_name = {
-                            let osc_title = self
-                                .terminals
-                                .lock()
-                                .get(&terminal_id)
-                                .and_then(|t| t.title());
-                            project.terminal_display_name(&terminal_id, osc_title)
+                        // A minimized terminal has no pane to carry the attention
+                        // border, so its chip reports the same two signals.
+                        let (terminal_name, has_bell) = {
+                            let terminals = self.terminals.lock();
+                            let terminal = terminals.get(&terminal_id);
+                            let osc_title = terminal.and_then(|t| t.title());
+                            let bell =
+                                terminal.is_some_and(|t| t.has_bell() || t.has_notification());
+                            (project.terminal_display_name(&terminal_id, osc_title), bell)
                         };
 
                         div()
@@ -473,9 +475,17 @@ impl ProjectColumn {
                             .text_size(ui_text_sm(cx))
                             .child(
                                 svg()
-                                    .path("icons/terminal-minimized.svg")
+                                    .path(if has_bell {
+                                        "icons/bell.svg"
+                                    } else {
+                                        "icons/terminal-minimized.svg"
+                                    })
                                     .size(px(10.0))
-                                    .text_color(rgb(t.text_muted)),
+                                    .text_color(if has_bell {
+                                        rgb(t.border_bell)
+                                    } else {
+                                        rgb(t.text_muted)
+                                    }),
                             )
                             .child(div().text_color(rgb(t.text_primary)).child(terminal_name))
                             .on_click(move |_, _window, cx| {
@@ -493,13 +503,13 @@ impl ProjectColumn {
                         let workspace = self.workspace.clone();
                         let terminal_id_for_click = terminal_id.clone();
 
-                        let terminal_name = {
-                            let osc_title = self
-                                .terminals
-                                .lock()
-                                .get(&terminal_id)
-                                .and_then(|t| t.title());
-                            project.terminal_display_name(&terminal_id, osc_title)
+                        let (terminal_name, has_bell) = {
+                            let terminals = self.terminals.lock();
+                            let terminal = terminals.get(&terminal_id);
+                            let osc_title = terminal.and_then(|t| t.title());
+                            let bell =
+                                terminal.is_some_and(|t| t.has_bell() || t.has_notification());
+                            (project.terminal_display_name(&terminal_id, osc_title), bell)
                         };
 
                         div()
@@ -511,8 +521,19 @@ impl ProjectColumn {
                             .border_color(rgb(t.border))
                             .bg(rgb(t.bg_hover))
                             .hover(|s| s.bg(rgb(t.bg_selection)))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
                             .text_size(ui_text_sm(cx))
                             .text_color(rgb(t.text_primary))
+                            .when(has_bell, |d| {
+                                d.child(
+                                    svg()
+                                        .path("icons/bell.svg")
+                                        .size(px(10.0))
+                                        .text_color(rgb(t.border_bell)),
+                                )
+                            })
                             .child(format!("\u{2197} {}", terminal_name))
                             .on_click(move |_, _window, cx| {
                                 workspace.update(cx, |ws, cx| {
