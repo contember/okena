@@ -11,6 +11,7 @@
 //! | [`ci`]       | GitHub PR info + CI check parsing |
 //! | [`paths`]    | repo-root resolution and worktree/project path computation |
 
+use okena_core::process::command;
 use std::path::Path;
 
 use crate::error::{GitError, GitResult};
@@ -52,6 +53,32 @@ pub use worktree::{
     remove_orphaned_worktree, remove_worktree, remove_worktree_fast, verify_linked_worktree_fresh,
     verify_orphaned_worktree,
 };
+
+/// Build a `git` command for an operation that talks to a remote.
+///
+/// Git asks for credentials on `/dev/tty`, not stdin, so redirecting stdin is
+/// no defence: in a background process group that read raises SIGTTIN and the
+/// child stops forever, leaving the caller blocked in `wait()` with nothing in
+/// the log. Refuse every interactive prompt so a missing credential fails fast.
+///
+/// The second half of the defence is in the command bus, which gives every
+/// child its own session and so no controlling terminal to prompt on.
+pub(crate) fn network_command() -> std::process::Command {
+    let mut cmd = command("git");
+    // Empty `GIT_ASKPASS` is deliberate: git reads it as "set but unusable" and
+    // skips both `core.askpass` and `SSH_ASKPASS` instead of falling through.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never");
+    // Only when the user has not chosen their own ssh command, so a custom
+    // `GIT_SSH_COMMAND` keeps working. BatchMode still authenticates via an
+    // agent; it only turns passphrase and host-key prompts into failures.
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    cmd
+}
 
 /// Run a git command and return `Ok(())` if it exits successfully,
 /// or `Err(GitExitError)` with the stderr message.

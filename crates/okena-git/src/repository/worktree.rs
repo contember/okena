@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use okena_core::process::{command, safe_output};
 
 use super::branch::get_default_branch;
-use super::{head_branch_short, path_str, require_success};
+use super::{head_branch_short, network_command, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,7 +401,7 @@ pub fn create_worktree(
         args.push(branch);
         args.push(target_str);
         if let Some(default_branch) = get_default_branch(repo_path) {
-            let _ = safe_output(command("git").args([
+            let _ = safe_output(network_command().args([
                 "-C",
                 repo_str,
                 "fetch",
@@ -464,7 +464,7 @@ pub fn fetch_and_fast_forward(repo_path: &Path, worktree_path: &Path, default_br
     let (Ok(repo_str), Ok(wt_str)) = (path_str(repo_path), path_str(worktree_path)) else {
         return;
     };
-    match safe_output(command("git").args(["-C", repo_str, "fetch", "origin", default_branch])) {
+    match safe_output(network_command().args(["-C", repo_str, "fetch", "origin", default_branch])) {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
             log::warn!(

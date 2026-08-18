@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use okena_core::process::{CommandBus, CommandHandle, CommandSpec, Lane, command};
+use okena_core::process::{CommandBus, CommandHandle, CommandSpec, Lane};
 
-use super::{path_str, require_success};
+use super::{network_command, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
 /// Validate that a clone URL cannot be read by git as an option.
@@ -83,7 +83,7 @@ pub fn start_clone_repository(url: &str, target_path: &Path) -> GitResult<Comman
         std::fs::create_dir_all(parent).map_err(GitError::CommandFailed)?;
     }
 
-    let mut cmd = command("git");
+    let mut cmd = network_command();
     cmd.args(["clone", "--", url, target_str]);
     Ok(CommandBus::global().submit(
         CommandSpec::from_command(&cmd)

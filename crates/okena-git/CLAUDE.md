@@ -8,7 +8,7 @@ Git status, diff parsing, and worktree operations for project directories.
 |------|---------|
 | `lib.rs` | `GitStatus` — cached git status. Tracks branch, dirty state, ahead/behind counts. PR/CI types (`PrInfo`, `PrState`, `CiCheck`, `CiStatus`, `CiCheckSummary`). `validate_git_ref`. Re-exports the `repository` API. |
 | `diff.rs` | Diff parsing — `DiffLine`, `DiffHunk`, `DiffResult`, `DiffMode` (unified/side-by-side). Parses `git diff` output into structured data. |
-| `repository/` | Repository operations, split into submodules. `mod.rs` declares them, re-exports the public API (so `okena_git::repository::*` paths are unchanged), and holds shared private helpers (`require_success`, `path_str`, `head_branch_short`, `get_worktree_branches`) plus `#[cfg(test)] test_support` (shared `init_temp_repo` / `git_in`). |
+| `repository/` | Repository operations, split into submodules. `mod.rs` declares them, re-exports the public API (so `okena_git::repository::*` paths are unchanged), and holds shared private helpers (`require_success`, `path_str`, `head_branch_short`, `get_worktree_branches`, `network_command`) plus `#[cfg(test)] test_support` (shared `init_temp_repo` / `git_in`). |
 | `repository/worktree.rs` | Worktree ops — `create_worktree`, `create_worktree_with_start_point`, `remove_worktree`, `remove_worktree_fast`, `list_git_worktrees`, stale-dir cleanup. Destructive ops take a freshly verified token: `VerifiedWorktree` (`verify_linked_worktree_fresh`) for tracked checkouts, `OrphanedWorktree` (`verify_orphaned_worktree` → `remove_orphaned_worktree`) for one whose metadata entry was pruned. |
 | `repository/clone.rs` | Clone ops — `clone_repository` (runs on `Lane::Long`; a clone is network-bound and unbounded), `clone_dir_name` (the directory `git clone` would create, for prefilling), `validate_clone_url`. |
 | `repository/branch.rs` | Branch ops — list/classify (`BranchList`), checkout/create/delete/push, `get_default_branch`, rebase, merge, stash, per-file stage/unstage/discard. |
@@ -20,5 +20,6 @@ Git status, diff parsing, and worktree operations for project directories.
 ## Key Patterns
 
 - **Cached status**: Git status is cached in-memory and populated by background polling. `get_git_status` is non-blocking (returns cached data or None).
+- **Remote git is non-interactive**: anything touching a remote (clone, fetch, push) is built with `network_command()`, never `command("git")`. Git prompts on `/dev/tty`, so a background child would take SIGTTIN and hang forever instead of failing.
 - **Worktree workflow**: Worktrees are managed as lightweight branch checkouts alongside the main repo.
 - **Diff views**: UI for diffs lives in `crates/okena-views-git/src/diff_viewer/`.
