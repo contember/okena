@@ -199,6 +199,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "ToggleUnread".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-u", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-shift-u", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
             "Copy".to_string(),
             vec![
                 KeybindingEntry::new("cmd-c", Some("TerminalPane")),

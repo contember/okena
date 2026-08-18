@@ -46,6 +46,15 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
     }
 
+    /// Toggle the pane's unread mark — the bell indicator the shell raises on
+    /// BEL, set by hand so a pane can be flagged to come back to.
+    pub(super) fn handle_toggle_unread(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.toggle_unread();
+            cx.notify();
+        }
+    }
+
     pub(super) fn handle_fullscreen(&mut self, cx: &mut Context<Self>) {
         if let Some(ref id) = self.terminal_id {
             let action = ActionRequest::SetFullscreen {

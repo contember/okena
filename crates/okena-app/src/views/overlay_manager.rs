@@ -131,10 +131,14 @@ pub enum OverlayManagerEvent {
     },
 
     /// Context menu: Add terminal to project
-    AddTerminal { project_id: String },
+    AddTerminal {
+        project_id: String,
+    },
 
     /// Context menu: Create worktree from project
-    CreateWorktree { project_id: String },
+    CreateWorktree {
+        project_id: String,
+    },
 
     /// Context menu: Rename project
     RenameProject {
@@ -157,7 +161,9 @@ pub enum OverlayManagerEvent {
     },
 
     /// Context menu: Close worktree project (opens the confirm dialog)
-    CloseWorktree { project_id: String },
+    CloseWorktree {
+        project_id: String,
+    },
 
     /// Context menu: Open the daemon-backed worktree list.
     ManageWorktrees {
@@ -174,19 +180,29 @@ pub enum OverlayManagerEvent {
     },
 
     /// Context menu: Delete project
-    DeleteProject { project_id: String },
+    DeleteProject {
+        project_id: String,
+    },
 
     /// Context menu: Toggle a project's pinned flag
-    ToggleProjectPinned { project_id: String },
+    ToggleProjectPinned {
+        project_id: String,
+    },
 
     /// Folder context menu: Delete folder
-    DeleteFolder { folder_id: String },
+    DeleteFolder {
+        folder_id: String,
+    },
 
     /// Context menu: Configure hooks for a project
-    ConfigureHooks { project_id: String },
+    ConfigureHooks {
+        project_id: String,
+    },
 
     /// Context menu: Quick create worktree (one-click)
-    QuickCreateWorktree { project_id: String },
+    QuickCreateWorktree {
+        project_id: String,
+    },
 
     /// Color picker: project color was changed (for remote sync)
     ProjectColorChanged {
@@ -195,7 +211,9 @@ pub enum OverlayManagerEvent {
     },
 
     /// Color picker: a worktree project's color override was reset to its parent
-    WorktreeColorReset { project_id: String },
+    WorktreeColorReset {
+        project_id: String,
+    },
 
     /// Color picker: folder color was changed
     FolderColorChanged {
@@ -204,10 +222,14 @@ pub enum OverlayManagerEvent {
     },
 
     /// Context menu: Reload services (okena.yaml) for a project
-    ReloadServices { project_id: String },
+    ReloadServices {
+        project_id: String,
+    },
 
     /// Context menu: Focus parent project of a worktree
-    FocusParent { project_id: String },
+    FocusParent {
+        project_id: String,
+    },
 
     /// Project switcher: Focus a specific project
     FocusProject(String),
@@ -220,10 +242,14 @@ pub enum OverlayManagerEvent {
     ToggleProjectVisibility(String),
 
     /// Remote connect dialog: connection paired and ready
-    RemoteConnected { config: RemoteConnectionConfig },
+    RemoteConnected {
+        config: RemoteConnectionConfig,
+    },
 
     /// Remote context menu: reconnect to a connection
-    RemoteReconnect { connection_id: String },
+    RemoteReconnect {
+        connection_id: String,
+    },
 
     /// Remote context menu: open pair dialog
     RemotePair {
@@ -238,13 +264,20 @@ pub enum OverlayManagerEvent {
     },
 
     /// Remote pair dialog: user submitted a code
-    RemotePaired { connection_id: String, code: String },
+    RemotePaired {
+        connection_id: String,
+        code: String,
+    },
 
     /// Remote context menu: remove a connection
-    RemoteRemoveConnection { connection_id: String },
+    RemoteRemoveConnection {
+        connection_id: String,
+    },
 
     /// Terminal context menu: copy
-    TerminalCopy { terminal_id: String },
+    TerminalCopy {
+        terminal_id: String,
+    },
     /// Terminal context menu: annotate the selection and send it back.
     /// The host owns the terminals, so only it can snapshot the selected text.
     TerminalAnnotate {
@@ -252,11 +285,20 @@ pub enum OverlayManagerEvent {
         position: gpui::Point<gpui::Pixels>,
     },
     /// Terminal context menu: paste
-    TerminalPaste { terminal_id: String },
+    TerminalPaste {
+        terminal_id: String,
+    },
     /// Terminal context menu: clear
-    TerminalClear { terminal_id: String },
+    TerminalClear {
+        terminal_id: String,
+    },
+    TerminalToggleUnread {
+        terminal_id: String,
+    },
     /// Terminal context menu: select all
-    TerminalSelectAll { terminal_id: String },
+    TerminalSelectAll {
+        terminal_id: String,
+    },
     /// Terminal context menu: split
     TerminalSplit {
         project_id: String,
@@ -289,7 +331,10 @@ pub enum OverlayManagerEvent {
     },
 
     /// File viewer blame click: open the named commit in the diff viewer.
-    OpenCommitFromBlame { project_id: String, hash: String },
+    OpenCommitFromBlame {
+        project_id: String,
+        hash: String,
+    },
 
     OpenFileExternally {
         path: String,
@@ -1258,6 +1303,7 @@ impl OverlayManager {
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
         has_selection: bool,
+        has_bell: bool,
         link_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -1271,6 +1317,7 @@ impl OverlayManager {
                 layout_path,
                 position,
                 has_selection,
+                has_bell,
                 link_url,
                 cx,
             )
@@ -1313,6 +1360,12 @@ impl OverlayManager {
                 TerminalContextMenuEvent::SelectAll { terminal_id } => {
                     this.hide_terminal_context_menu(cx);
                     cx.emit(OverlayManagerEvent::TerminalSelectAll {
+                        terminal_id: terminal_id.clone(),
+                    });
+                }
+                TerminalContextMenuEvent::ToggleUnread { terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalToggleUnread {
                         terminal_id: terminal_id.clone(),
                     });
                 }

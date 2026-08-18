@@ -29,6 +29,10 @@ pub enum TerminalContextMenuEvent {
     SelectAll {
         terminal_id: String,
     },
+    /// Flip the pane's unread (bell) mark.
+    ToggleUnread {
+        terminal_id: String,
+    },
     Split {
         project_id: String,
         layout_path: Vec<usize>,
@@ -53,18 +57,24 @@ pub struct TerminalContextMenu {
     layout_path: Vec<usize>,
     position: Point<Pixels>,
     has_selection: bool,
+    /// Whether the pane currently carries a bell/unread mark — flips the
+    /// menu's mark-unread entry into a mark-read one.
+    has_bell: bool,
     /// URL at the right-click position (if any).
     link_url: Option<String>,
     focus_handle: FocusHandle,
 }
 
 impl TerminalContextMenu {
+    // Context-menu setup: params are position/state inputs, not a group.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         terminal_id: String,
         project_id: String,
         layout_path: Vec<usize>,
         position: Point<Pixels>,
         has_selection: bool,
+        has_bell: bool,
         link_url: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -75,6 +85,7 @@ impl TerminalContextMenu {
             layout_path,
             position,
             has_selection,
+            has_bell,
             link_url,
             focus_handle,
         }
@@ -216,6 +227,26 @@ impl Render for TerminalContextMenu {
                                         terminal_id: this.terminal_id.clone(),
                                     });
                                 })),
+                        )
+                        // Mark as Unread / Read — the bell indicator, by hand
+                        .child(
+                            menu_item(
+                                "ctx-toggle-unread",
+                                "icons/bell.svg",
+                                if self.has_bell {
+                                    "Mark as Read"
+                                } else {
+                                    "Mark as Unread"
+                                },
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TerminalContextMenuEvent::ToggleUnread {
+                                        terminal_id: this.terminal_id.clone(),
+                                    });
+                                },
+                            )),
                         )
                         .child(menu_separator(&t))
                         // Split Horizontal

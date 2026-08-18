@@ -38,5 +38,6 @@ gpui::actions!(
         JumpToPreviousFailedCommand,
         JumpToNextFailedCommand,
         AnnotateSelection,
+        ToggleUnread,
     ]
 );

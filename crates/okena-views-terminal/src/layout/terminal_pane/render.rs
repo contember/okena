@@ -6,8 +6,8 @@ use crate::actions::{
     FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
     FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
     JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
-    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn,
-    ZoomOut,
+    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 use crate::layout::navigation::NavigationDirection;
 use crate::terminal_view_settings;
@@ -66,9 +66,12 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
         let is_focused = window.is_window_active() && focus_handle.is_focused(window);
 
         let has_bell = self.terminal.as_ref().is_some_and(|t| t.has_bell());
+        // A hand-set "unread" mark holds the bell against this clear, or
+        // marking the focused pane would be undone on the very next frame.
         if is_focused
             && has_bell
             && let Some(ref terminal) = self.terminal
+            && !terminal.is_manually_unread()
         {
             terminal.clear_bell();
         }
@@ -93,6 +96,9 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             && let Some(ref terminal) = self.terminal
         {
             terminal.mark_as_viewed();
+            // Focus has left, so the mark no longer needs holding: the bell
+            // stays lit and the next visit clears it like any other.
+            terminal.release_manual_unread();
         }
         self.was_focused = is_focused;
 
@@ -153,6 +159,9 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             }))
             .on_action(cx.listener(|this, _: &MinimizeTerminal, _window, cx| {
                 this.handle_minimize(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleUnread, _window, cx| {
+                this.handle_toggle_unread(cx);
             }))
             .on_action(cx.listener(|this, _: &Copy, _window, cx| {
                 this.handle_copy(cx);
