@@ -8,6 +8,7 @@ use super::types::{DisplayItem, DisplayLine, ExpanderRow, HighlightedSpan};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use okena_core::review::ComparisonSide;
 use okena_core::theme::ThemeColors;
 use okena_files::code_view::{
     build_styled_text_with_backgrounds, find_word_boundaries, selection_bg_ranges,
@@ -276,7 +277,17 @@ impl DiffViewer {
             .map(|n| format!("{:>width$}", n, width = self.line_num_width))
             .unwrap_or_else(|| " ".repeat(self.line_num_width));
 
-        let (line_bg, _, accent_color) = self.line_colors(line.line_type, t);
+        let (line_bg, _, mut accent_color) = self.line_colors(line.line_type, t);
+        let semantic_highlight = line
+            .old_line_num
+            .is_some_and(|line| self.semantic_highlight_matches(ComparisonSide::Base, line))
+            || line
+                .new_line_num
+                .is_some_and(|line| self.semantic_highlight_matches(ComparisonSide::Head, line));
+        if semantic_highlight {
+            // The selected symbol claims the accent bar for as long as it stays selected.
+            accent_color = Some(rgba(t.border_active, 1.0));
+        }
 
         let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
         // In-page search highlights (cell id = item index in unified view).
@@ -299,6 +310,7 @@ impl DiffViewer {
             .text_size(px(font_size))
             .font_family("monospace")
             .when_some(line_bg, |d, bg| d.bg(bg))
+            .when(semantic_highlight, |d| d.bg(rgba(t.term_yellow, 0.2)))
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
                 let plain_text = plain_text.clone();

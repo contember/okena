@@ -7,6 +7,7 @@ use super::types::{
 };
 use gpui::prelude::*;
 use gpui::*;
+use okena_core::review::ComparisonSide;
 use okena_core::theme::ThemeColors;
 use okena_files::code_view::{find_word_boundaries, selection_bg_ranges};
 use okena_files::selection::{Selection2DExtension, Selection2DNonEmpty};
@@ -307,7 +308,17 @@ impl DiffViewer {
 
         match content {
             Some(c) => {
-                let (line_bg, word_bg, accent_color) = self.line_colors(c.line_type, t);
+                let (line_bg, word_bg, mut accent_color) = self.line_colors(c.line_type, t);
+                let comparison_side = match side {
+                    SideBySideSide::Left => ComparisonSide::Base,
+                    SideBySideSide::Right => ComparisonSide::Head,
+                };
+                let semantic_highlight =
+                    self.semantic_highlight_matches(comparison_side, c.line_num);
+                if semantic_highlight {
+                    // The selected symbol claims the accent bar for as long as it stays selected.
+                    accent_color = Some(rgba(t.border_active, 1.0));
+                }
 
                 // Format line number - show empty for 0
                 let line_num = if c.line_num > 0 {
@@ -413,6 +424,9 @@ impl DiffViewer {
 
                 if let Some(bg) = line_bg {
                     column = column.bg(bg);
+                }
+                if semantic_highlight {
+                    column = column.bg(rgba(t.term_yellow, 0.2));
                 }
 
                 // Left accent bar (fixed width child, always present for alignment)

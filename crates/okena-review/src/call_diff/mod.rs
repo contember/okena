@@ -1,0 +1,1250 @@
+//! Deterministic same-file comparison of direct outgoing calls.
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt;
+
+use okena_core::review::{ComparisonSide, ReviewNavigationTarget};
+use okena_syntax::{CallFact, ControlContext, SourceRange, SymbolKey, SyntaxLanguage};
+
+use crate::model::{ControlledModelError, checked_stable_sort_by};
+use crate::{CallChangeKind, CallDiffChange, CallPairingEvidence, CallPairingStrategy, ModelError};
+
+/// Exact inputs for comparing direct calls in one uniquely matched descriptive symbol.
+///
+/// This input does not claim stable symbol identity. The caller selects a same-file old/new symbol
+/// match and supplies each side's exact source range. Calls outside those ranges, calls owned by a
+/// nested symbol, and calls owned by another same-named symbol are ignored.
+#[derive(Clone, Copy, Debug)]
+pub struct CallDiffInput<'a> {
+    old_path: &'a str,
+    new_path: &'a str,
+    enclosing_symbol: &'a SymbolKey,
+    old_enclosing_range: SourceRange,
+    new_enclosing_range: SourceRange,
+    old_calls: &'a [CallFact],
+    new_calls: &'a [CallFact],
+}
+
+/// Borrowed call candidates already indexed for one enclosing symbol.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexedCallDiffInput<'a> {
+    old_path: &'a str,
+    new_path: &'a str,
+    enclosing_symbol: &'a SymbolKey,
+    old_enclosing_range: SourceRange,
+    new_enclosing_range: SourceRange,
+    old_calls: &'a [&'a CallFact],
+    new_calls: &'a [&'a CallFact],
+}
+
+impl<'a> IndexedCallDiffInput<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        old_path: &'a str,
+        new_path: &'a str,
+        enclosing_symbol: &'a SymbolKey,
+        old_enclosing_range: SourceRange,
+        new_enclosing_range: SourceRange,
+        old_calls: &'a [&'a CallFact],
+        new_calls: &'a [&'a CallFact],
+    ) -> Result<Self, CallDiffError> {
+        validate_paths(old_path, new_path)?;
+        Ok(Self {
+            old_path,
+            new_path,
+            enclosing_symbol,
+            old_enclosing_range,
+            new_enclosing_range,
+            old_calls,
+            new_calls,
+        })
+    }
+}
+
+/// Why a controlled deterministic comparison stopped before producing a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparisonStopReason {
+    Cancelled,
+    Deadline,
+    Disconnected,
+}
+
+impl<'a> CallDiffInput<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        old_path: &'a str,
+        new_path: &'a str,
+        enclosing_symbol: &'a SymbolKey,
+        old_enclosing_range: SourceRange,
+        new_enclosing_range: SourceRange,
+        old_calls: &'a [CallFact],
+        new_calls: &'a [CallFact],
+    ) -> Result<Self, CallDiffError> {
+        validate_paths(old_path, new_path)?;
+        Ok(Self {
+            old_path,
+            new_path,
+            enclosing_symbol,
+            old_enclosing_range,
+            new_enclosing_range,
+            old_calls,
+            new_calls,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum CallDiffError {
+    EmptyPath(ComparisonSide),
+    InvalidChange(ModelError),
+}
+
+impl fmt::Display for CallDiffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPath(ComparisonSide::Base) => {
+                formatter.write_str("old call-diff path must not be empty")
+            }
+            Self::EmptyPath(ComparisonSide::Head) => {
+                formatter.write_str("new call-diff path must not be empty")
+            }
+            Self::InvalidChange(error) => write!(formatter, "invalid call-diff change: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CallDiffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidChange(error) => Some(error),
+            Self::EmptyPath(_) => None,
+        }
+    }
+}
+
+/// Error returned only by cooperative CallDiff entry points.
+#[derive(Debug)]
+pub enum ControlledCallDiffError {
+    Comparison(CallDiffError),
+    Stopped(ComparisonStopReason),
+}
+
+impl fmt::Display for ControlledCallDiffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Comparison(error) => error.fmt(formatter),
+            Self::Stopped(reason) => write!(formatter, "call-diff comparison stopped: {reason:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlledCallDiffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Comparison(error) => Some(error),
+            Self::Stopped(_) => None,
+        }
+    }
+}
+
+impl ControlledCallDiffError {
+    pub fn stop_reason(&self) -> Option<ComparisonStopReason> {
+        match self {
+            Self::Stopped(reason) => Some(*reason),
+            Self::Comparison(_) => None,
+        }
+    }
+}
+
+impl From<CallDiffError> for ControlledCallDiffError {
+    fn from(error: CallDiffError) -> Self {
+        Self::Comparison(error)
+    }
+}
+
+impl From<ModelError> for ControlledCallDiffError {
+    fn from(error: ModelError) -> Self {
+        Self::Comparison(CallDiffError::InvalidChange(error))
+    }
+}
+
+impl From<ControlledModelError<ComparisonStopReason>> for ControlledCallDiffError {
+    fn from(error: ControlledModelError<ComparisonStopReason>) -> Self {
+        match error {
+            ControlledModelError::Invalid(error) => {
+                Self::Comparison(CallDiffError::InvalidChange(error))
+            }
+            ControlledModelError::Stopped(reason) => Self::Stopped(reason),
+        }
+    }
+}
+
+impl From<ModelError> for CallDiffError {
+    fn from(value: ModelError) -> Self {
+        Self::InvalidChange(value)
+    }
+}
+
+#[derive(Default)]
+struct Candidates<'a> {
+    old: Vec<&'a CallFact>,
+    new: Vec<&'a CallFact>,
+}
+
+/// Compare direct outgoing calls for one selected same-file enclosing symbol.
+///
+/// A modified call is emitted only when its exact callee and descriptive enclosing key produce one
+/// candidate on each side with identical syntax provenance. Any repetition or provenance mismatch
+/// deliberately degrades to removed and added occurrences.
+pub fn compare_calls(input: CallDiffInput<'_>) -> Result<Vec<CallDiffChange>, CallDiffError> {
+    match compare_calls_controlled(input, &mut || None) {
+        Ok(changes) => Ok(changes),
+        Err(ControlledCallDiffError::Comparison(error)) => Err(error),
+        Err(ControlledCallDiffError::Stopped(_)) => {
+            unreachable!("the legacy CallDiff entry point never requests a stop")
+        }
+    }
+}
+
+/// Compare direct calls with a cooperative stop checkpoint.
+pub fn compare_calls_controlled(
+    input: CallDiffInput<'_>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<CallDiffChange>, ControlledCallDiffError> {
+    check(checkpoint)?;
+    let mut old_calls = Vec::new();
+    for call in input.old_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.old_enclosing_range.contains(call.call_site_range())
+        {
+            old_calls.push(call);
+        }
+    }
+    let mut new_calls = Vec::new();
+    for call in input.new_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.new_enclosing_range.contains(call.call_site_range())
+        {
+            new_calls.push(call);
+        }
+    }
+    compare_indexed_calls_controlled(
+        IndexedCallDiffInput::new(
+            input.old_path,
+            input.new_path,
+            input.enclosing_symbol,
+            input.old_enclosing_range,
+            input.new_enclosing_range,
+            &old_calls,
+            &new_calls,
+        )?,
+        checkpoint,
+    )
+}
+
+/// Compare pre-indexed borrowed candidates with cooperative stop checkpoints.
+pub fn compare_indexed_calls(
+    input: IndexedCallDiffInput<'_>,
+) -> Result<Vec<CallDiffChange>, CallDiffError> {
+    match compare_indexed_calls_controlled(input, &mut || None) {
+        Ok(changes) => Ok(changes),
+        Err(ControlledCallDiffError::Comparison(error)) => Err(error),
+        Err(ControlledCallDiffError::Stopped(_)) => {
+            unreachable!("the legacy indexed CallDiff entry point never requests a stop")
+        }
+    }
+}
+
+/// Compare pre-indexed borrowed candidates with cooperative stop checkpoints.
+pub fn compare_indexed_calls_controlled(
+    input: IndexedCallDiffInput<'_>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<Vec<CallDiffChange>, ControlledCallDiffError> {
+    check(checkpoint)?;
+    let mut candidates = BTreeMap::<&str, Candidates<'_>>::new();
+    for &call in input.old_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.old_enclosing_range.contains(call.call_site_range())
+        {
+            candidates
+                .entry(call.callee_text())
+                .or_default()
+                .old
+                .push(call);
+        }
+    }
+    for &call in input.new_calls {
+        check(checkpoint)?;
+        if call.enclosing_symbol() == Some(input.enclosing_symbol)
+            && input.new_enclosing_range.contains(call.call_site_range())
+        {
+            candidates
+                .entry(call.callee_text())
+                .or_default()
+                .new
+                .push(call);
+        }
+    }
+
+    let mut changes = Vec::new();
+    for group in candidates.values_mut() {
+        check(checkpoint)?;
+        for call in &group.old {
+            check(checkpoint)?;
+            for _ in call.control_context() {
+                check(checkpoint)?;
+            }
+        }
+        for call in &group.new {
+            check(checkpoint)?;
+            for _ in call.control_context() {
+                check(checkpoint)?;
+            }
+        }
+        checked_stable_sort_by(
+            &mut group.old,
+            |left, right, checkpoint| compare_facts_controlled(left, right, checkpoint),
+            &mut || check(checkpoint),
+        )?;
+        checked_stable_sort_by(
+            &mut group.new,
+            |left, right, checkpoint| compare_facts_controlled(left, right, checkpoint),
+            &mut || check(checkpoint),
+        )?;
+        // Repeated callees: an occurrence that reads the same on both sides
+        // (arguments, control context, provenance) is unchanged whatever its
+        // ordinal, so it drops out before the uniqueness test below. Nothing
+        // here pairs by position; the leftovers still degrade to added/removed.
+        let (old_count, new_count) = (group.old.len(), group.new.len());
+        cancel_identical_controlled(&mut group.old, &mut group.new, checkpoint)?;
+        if let ([old], [new]) = (group.old.as_slice(), group.new.as_slice())
+            && old.provenance() == new.provenance()
+        {
+            let strategy = if old_count == 1 && new_count == 1 {
+                CallPairingStrategy::UniqueOccurrenceWithinEnclosingRange
+            } else {
+                CallPairingStrategy::UniqueChangedOccurrenceWithinEnclosingRange
+            };
+            let arguments_changed = old.argument_text() != new.argument_text();
+            let control_context_changed = !contexts_equal_controlled(
+                old.control_context(),
+                new.control_context(),
+                checkpoint,
+            )?;
+            if !arguments_changed && !control_context_changed {
+                continue;
+            }
+            let pairing = CallPairingEvidence::new(
+                strategy,
+                old.call_site_range(),
+                new.call_site_range(),
+                input.old_enclosing_range,
+                input.new_enclosing_range,
+                1,
+                1,
+            )?;
+            changes.push(CallDiffChange::new_controlled(
+                CallChangeKind::Modified,
+                Some((*old).clone()),
+                Some((*new).clone()),
+                arguments_changed,
+                control_context_changed,
+                Some(pairing),
+                navigation(input.new_path, ComparisonSide::Head, new.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
+            )?);
+            continue;
+        }
+
+        for call in &group.old {
+            check(checkpoint)?;
+            changes.push(CallDiffChange::new_controlled(
+                CallChangeKind::Removed,
+                Some((*call).clone()),
+                None,
+                false,
+                false,
+                None,
+                navigation(input.old_path, ComparisonSide::Base, call.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
+            )?);
+        }
+        for call in &group.new {
+            check(checkpoint)?;
+            changes.push(CallDiffChange::new_controlled(
+                CallChangeKind::Added,
+                None,
+                Some((*call).clone()),
+                false,
+                false,
+                None,
+                navigation(input.new_path, ComparisonSide::Head, call.call_site_range()),
+                &mut || checkpoint().map_or(Ok(()), Err),
+            )?);
+        }
+    }
+    checked_stable_sort_by(&mut changes, compare_changes_controlled, &mut || {
+        check(checkpoint)
+    })?;
+    Ok(changes)
+}
+
+/// Drop every old/new occurrence pair that is identical in argument text,
+/// control context and provenance; each old call cancels at most one new call.
+fn cancel_identical_controlled<'a>(
+    old: &mut Vec<&'a CallFact>,
+    new: &mut Vec<&'a CallFact>,
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<(), ControlledCallDiffError> {
+    let mut kept_old = Vec::with_capacity(old.len());
+    for candidate in old.drain(..) {
+        check(checkpoint)?;
+        let mut matched = None;
+        for (index, other) in new.iter().enumerate() {
+            if candidate.argument_text() == other.argument_text()
+                && candidate.provenance() == other.provenance()
+                && contexts_equal_controlled(
+                    candidate.control_context(),
+                    other.control_context(),
+                    checkpoint,
+                )?
+            {
+                matched = Some(index);
+                break;
+            }
+        }
+        match matched {
+            Some(index) => {
+                new.remove(index);
+            }
+            None => kept_old.push(candidate),
+        }
+    }
+    *old = kept_old;
+    Ok(())
+}
+
+fn validate_paths(old_path: &str, new_path: &str) -> Result<(), CallDiffError> {
+    if old_path.trim().is_empty() {
+        return Err(CallDiffError::EmptyPath(ComparisonSide::Base));
+    }
+    if new_path.trim().is_empty() {
+        return Err(CallDiffError::EmptyPath(ComparisonSide::Head));
+    }
+    Ok(())
+}
+
+fn check(
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<(), ControlledCallDiffError> {
+    match checkpoint() {
+        Some(reason) => Err(ControlledCallDiffError::Stopped(reason)),
+        None => Ok(()),
+    }
+}
+
+fn navigation(path: &str, side: ComparisonSide, call_range: SourceRange) -> ReviewNavigationTarget {
+    ReviewNavigationTarget {
+        path: path.to_string(),
+        side,
+        line: call_range.start_line(),
+        byte_offset: Some(call_range.start_byte()),
+        symbol_context: None,
+    }
+}
+
+fn compare_facts_controlled<E>(
+    left: &CallFact,
+    right: &CallFact,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .call_site_range()
+        .start_byte()
+        .cmp(&right.call_site_range().start_byte())
+        .then_with(|| {
+            left.call_site_range()
+                .end_byte()
+                .cmp(&right.call_site_range().end_byte())
+        })
+        .then_with(|| left.argument_text().cmp(right.argument_text()));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    let ordering =
+        compare_contexts_controlled(left.control_context(), right.control_context(), checkpoint)?;
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    Ok(language_rank(left.provenance().language())
+        .cmp(&language_rank(right.provenance().language()))
+        .then_with(|| left.provenance().parser().cmp(right.provenance().parser())))
+}
+
+fn language_rank(language: SyntaxLanguage) -> u8 {
+    match language {
+        SyntaxLanguage::Rust => 0,
+        SyntaxLanguage::TypeScript => 1,
+        SyntaxLanguage::Tsx => 2,
+    }
+}
+
+fn compare_contexts_controlled<E>(
+    left: &[ControlContext],
+    right: &[ControlContext],
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    for (left, right) in left.iter().zip(right) {
+        checkpoint()?;
+        let ordering =
+            context_rank(left)
+                .cmp(&context_rank(right))
+                .then_with(|| match (left, right) {
+                    (ControlContext::Other(left), ControlContext::Other(right)) => left.cmp(right),
+                    _ => Ordering::Equal,
+                });
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(left.len().cmp(&right.len()))
+}
+
+fn contexts_equal_controlled(
+    left: &[ControlContext],
+    right: &[ControlContext],
+    checkpoint: &mut dyn FnMut() -> Option<ComparisonStopReason>,
+) -> Result<bool, ControlledCallDiffError> {
+    Ok(compare_contexts_controlled(left, right, &mut || check(checkpoint))? == Ordering::Equal)
+}
+
+fn context_rank(context: &ControlContext) -> u8 {
+    match context {
+        ControlContext::Condition => 0,
+        ControlContext::Loop => 1,
+        ControlContext::MatchArm => 2,
+        ControlContext::ErrorBranch => 3,
+        ControlContext::Callback => 4,
+        ControlContext::Closure => 5,
+        ControlContext::Other(_) => 6,
+    }
+}
+
+fn compare_changes_controlled<E>(
+    left: &CallDiffChange,
+    right: &CallDiffChange,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ordering, E> {
+    let ordering = left
+        .navigation()
+        .line
+        .cmp(&right.navigation().line)
+        .then_with(|| {
+            left.navigation()
+                .byte_offset
+                .cmp(&right.navigation().byte_offset)
+        })
+        .then_with(|| change_rank(left.kind()).cmp(&change_rank(right.kind())))
+        .then_with(|| change_callee(left).cmp(change_callee(right)))
+        .then_with(|| left.navigation().path.cmp(&right.navigation().path))
+        .then_with(|| side_rank(left.navigation().side).cmp(&side_rank(right.navigation().side)));
+    if ordering != Ordering::Equal {
+        return Ok(ordering);
+    }
+    match (change_fact(left), change_fact(right)) {
+        (Some(left), Some(right)) => compare_facts_controlled(left, right, checkpoint),
+        (None, Some(_)) => Ok(Ordering::Less),
+        (Some(_), None) => Ok(Ordering::Greater),
+        (None, None) => Ok(Ordering::Equal),
+    }
+}
+
+fn change_rank(kind: CallChangeKind) -> u8 {
+    match kind {
+        CallChangeKind::Removed => 0,
+        CallChangeKind::Modified => 1,
+        CallChangeKind::Added => 2,
+    }
+}
+
+fn side_rank(side: ComparisonSide) -> u8 {
+    match side {
+        ComparisonSide::Base => 0,
+        ComparisonSide::Head => 1,
+    }
+}
+
+fn change_callee(change: &CallDiffChange) -> &str {
+    change_fact(change)
+        .map(CallFact::callee_text)
+        .unwrap_or_default()
+}
+
+fn change_fact(change: &CallDiffChange) -> Option<&CallFact> {
+    change.new_fact().or_else(|| change.old())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use okena_syntax::{SymbolKind, SyntaxLanguage, SyntaxProvenance};
+
+    use super::*;
+
+    fn source_range(start: u64, end: u64, line: u32) -> SourceRange {
+        let line = NonZeroU32::new(line).unwrap();
+        SourceRange::new(start, end, line, line).unwrap()
+    }
+
+    fn enclosing_range() -> SourceRange {
+        SourceRange::new(
+            0,
+            10_000,
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(1_000).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn key(path: &[&str], name: &str) -> SymbolKey {
+        SymbolKey::new(
+            path.iter().map(|segment| (*segment).to_string()).collect(),
+            SymbolKind::Function,
+            name,
+        )
+        .unwrap()
+    }
+
+    fn call(
+        callee: &str,
+        arguments: &str,
+        start: u64,
+        line: u32,
+        enclosing: &SymbolKey,
+        contexts: Vec<ControlContext>,
+    ) -> CallFact {
+        call_with_provenance(
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, "call-diff-test").unwrap(),
+            callee,
+            arguments,
+            start,
+            line,
+            enclosing,
+            contexts,
+        )
+    }
+
+    fn call_with_provenance(
+        provenance: SyntaxProvenance,
+        callee: &str,
+        arguments: &str,
+        start: u64,
+        line: u32,
+        enclosing: &SymbolKey,
+        contexts: Vec<ControlContext>,
+    ) -> CallFact {
+        let call_range = source_range(start, start.saturating_add(12), line);
+        CallFact::new(
+            provenance,
+            callee,
+            arguments,
+            call_range,
+            call_range,
+            Some(enclosing.clone()),
+            contexts,
+        )
+        .unwrap()
+    }
+
+    fn compare(
+        enclosing: &SymbolKey,
+        old_calls: &[CallFact],
+        new_calls: &[CallFact],
+    ) -> Vec<CallDiffChange> {
+        compare_paths("src/old.ts", "src/new.ts", enclosing, old_calls, new_calls)
+    }
+
+    fn compare_paths(
+        old_path: &str,
+        new_path: &str,
+        enclosing: &SymbolKey,
+        old_calls: &[CallFact],
+        new_calls: &[CallFact],
+    ) -> Vec<CallDiffChange> {
+        compare_calls(
+            CallDiffInput::new(
+                old_path,
+                new_path,
+                enclosing,
+                enclosing_range(),
+                enclosing_range(),
+                old_calls,
+                new_calls,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unchanged_unique_call_is_omitted() {
+        let enclosing = key(&[], "review");
+        let old = vec![call("load", "(value)", 10, 2, &enclosing, Vec::new())];
+        let new = vec![call("load", "(value)", 30, 4, &enclosing, Vec::new())];
+
+        assert!(compare(&enclosing, &old, &new).is_empty());
+    }
+
+    #[test]
+    fn additions_and_removals_navigate_to_their_own_side_and_path() {
+        let enclosing = key(&[], "review");
+        let old = vec![call("removed", "()", 20, 3, &enclosing, Vec::new())];
+        let new = vec![call("added", "()", 40, 5, &enclosing, Vec::new())];
+        let changes = compare_paths("old/name.ts", "new/name.ts", &enclosing, &old, &new);
+
+        let removed = changes
+            .iter()
+            .find(|change| change.kind() == CallChangeKind::Removed)
+            .unwrap();
+        assert_eq!(removed.navigation().path, "old/name.ts");
+        assert_eq!(removed.navigation().side, ComparisonSide::Base);
+        assert_eq!(removed.navigation().line.get(), 3);
+        assert_eq!(removed.navigation().byte_offset, Some(20));
+        let added = changes
+            .iter()
+            .find(|change| change.kind() == CallChangeKind::Added)
+            .unwrap();
+        assert_eq!(added.navigation().path, "new/name.ts");
+        assert_eq!(added.navigation().side, ComparisonSide::Head);
+        assert_eq!(added.navigation().line.get(), 5);
+        assert_eq!(added.navigation().byte_offset, Some(40));
+    }
+
+    #[test]
+    fn unique_pair_reports_argument_control_and_combined_modifications() {
+        let enclosing = key(&[], "review");
+        for (old_arguments, new_arguments, old_context, new_context, expected) in [
+            ("(old)", "(new)", vec![], vec![], (true, false)),
+            (
+                "(same)",
+                "(same)",
+                vec![],
+                vec![ControlContext::Condition],
+                (false, true),
+            ),
+            (
+                "(old)",
+                "(new)",
+                vec![ControlContext::Loop],
+                vec![ControlContext::Condition],
+                (true, true),
+            ),
+        ] {
+            let old = vec![call("load", old_arguments, 10, 2, &enclosing, old_context)];
+            let new = vec![call("load", new_arguments, 30, 4, &enclosing, new_context)];
+            let changes = compare(&enclosing, &old, &new);
+
+            assert_eq!(changes.len(), 1);
+            let change = &changes[0];
+            assert_eq!(change.kind(), CallChangeKind::Modified);
+            assert_eq!(change.arguments_changed(), expected.0);
+            assert_eq!(change.control_context_changed(), expected.1);
+            assert_eq!(change.navigation().side, ComparisonSide::Head);
+            assert_eq!(change.navigation().path, "src/new.ts");
+            assert_eq!(change.navigation().line.get(), 4);
+            let evidence = change.pairing().unwrap();
+            assert_eq!(
+                evidence.strategy(),
+                CallPairingStrategy::UniqueOccurrenceWithinEnclosingRange
+            );
+            assert_eq!(evidence.old_candidate_count(), 1);
+            assert_eq!(evidence.new_candidate_count(), 1);
+            assert_eq!(evidence.old_call_range(), old[0].call_site_range());
+            assert_eq!(evidence.new_call_range(), new[0].call_site_range());
+            assert_eq!(evidence.old_enclosing_range(), enclosing_range());
+            assert_eq!(evidence.new_enclosing_range(), enclosing_range());
+        }
+    }
+
+    #[test]
+    fn repeated_candidates_on_one_or_both_sides_never_pair_by_ordinal() {
+        let enclosing = key(&[], "review");
+        let old = vec![
+            call("load", "(first)", 10, 2, &enclosing, Vec::new()),
+            call("load", "(second)", 30, 4, &enclosing, Vec::new()),
+        ];
+        let one_new = vec![call("load", "(new)", 50, 6, &enclosing, Vec::new())];
+        let one_sided = compare(&enclosing, &old, &one_new);
+        assert_eq!(
+            one_sided
+                .iter()
+                .filter(|change| change.kind() == CallChangeKind::Removed)
+                .count(),
+            2
+        );
+        assert_eq!(
+            one_sided
+                .iter()
+                .filter(|change| change.kind() == CallChangeKind::Added)
+                .count(),
+            1
+        );
+        assert!(one_sided.iter().all(|change| change.pairing().is_none()));
+
+        let two_new = vec![
+            call("load", "(third)", 50, 6, &enclosing, Vec::new()),
+            call("load", "(fourth)", 70, 8, &enclosing, Vec::new()),
+        ];
+        let both_sides = compare(&enclosing, &old, &two_new);
+        assert_eq!(both_sides.len(), 4);
+        assert!(
+            both_sides
+                .iter()
+                .all(|change| change.kind() != CallChangeKind::Modified)
+        );
+    }
+
+    #[test]
+    fn identical_repeated_calls_cancel_out_whatever_their_ordinal() {
+        let enclosing = key(&[], "review");
+        let old = vec![
+            call("useState", "(false)", 10, 2, &enclosing, Vec::new()),
+            call("useState", "(true)", 30, 4, &enclosing, Vec::new()),
+            call("useState", "(false)", 50, 6, &enclosing, Vec::new()),
+        ];
+        // Same three occurrences, moved down by an unrelated edit above them.
+        let moved = vec![
+            call("useState", "(false)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(true)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        assert!(compare(&enclosing, &old, &moved).is_empty());
+
+        // One occurrence changed: the identical ones drop out, the rest still
+        // degrade to added/removed — never a positional Modified pair.
+        let edited = vec![
+            call("useState", "(false)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(1)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &edited);
+        assert_eq!(changes.len(), 1);
+        let change = &changes[0];
+        assert_eq!(change.kind(), CallChangeKind::Modified);
+        assert_eq!(change.old().map(CallFact::argument_text), Some("(true)"));
+        assert_eq!(change.new_fact().map(CallFact::argument_text), Some("(1)"));
+        assert_eq!(
+            change.pairing().map(CallPairingEvidence::strategy),
+            Some(CallPairingStrategy::UniqueChangedOccurrenceWithinEnclosingRange)
+        );
+
+        // Two changed occurrences per side stay ambiguous: added and removed.
+        let two_edited = vec![
+            call("useState", "(1)", 90, 8, &enclosing, Vec::new()),
+            call("useState", "(2)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &two_edited);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().all(|change| change.pairing().is_none()));
+
+        // Control context is part of identity: the same call inside a loop is
+        // a different occurrence from the one outside it.
+        let in_loop = vec![
+            call(
+                "useState",
+                "(false)",
+                90,
+                8,
+                &enclosing,
+                vec![ControlContext::Loop],
+            ),
+            call("useState", "(true)", 110, 10, &enclosing, Vec::new()),
+            call("useState", "(false)", 130, 12, &enclosing, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &in_loop);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind(), CallChangeKind::Modified);
+        assert!(changes[0].control_context_changed());
+    }
+
+    #[test]
+    fn exact_callee_change_degrades_to_added_and_removed() {
+        let enclosing = key(&[], "review");
+        let old = vec![call("load", "(value)", 10, 2, &enclosing, Vec::new())];
+        let new = vec![call("loadCached", "(value)", 30, 4, &enclosing, Vec::new())];
+        let changes = compare(&enclosing, &old, &new);
+
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.kind() == CallChangeKind::Removed)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.kind() == CallChangeKind::Added)
+        );
+    }
+
+    #[test]
+    fn cross_language_provenance_never_pairs_as_modified() {
+        let enclosing = key(&[], "review");
+        let old = vec![call_with_provenance(
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, "typescript-parser").unwrap(),
+            "load",
+            "(old)",
+            10,
+            2,
+            &enclosing,
+            Vec::new(),
+        )];
+        let new = vec![call_with_provenance(
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::Rust, "rust-parser").unwrap(),
+            "load",
+            "(new)",
+            30,
+            4,
+            &enclosing,
+            Vec::new(),
+        )];
+        let changes = compare(&enclosing, &old, &new);
+
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.kind() == CallChangeKind::Removed)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.kind() == CallChangeKind::Added)
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.kind() != CallChangeKind::Modified)
+        );
+    }
+
+    #[test]
+    fn parser_version_mismatch_never_pairs_as_modified() {
+        let enclosing = key(&[], "review");
+        let old = vec![call_with_provenance(
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, "typescript-parser@1")
+                .unwrap(),
+            "load",
+            "(old)",
+            10,
+            2,
+            &enclosing,
+            Vec::new(),
+        )];
+        let new = vec![call_with_provenance(
+            SyntaxProvenance::tree_sitter(SyntaxLanguage::TypeScript, "typescript-parser@2")
+                .unwrap(),
+            "load",
+            "(new)",
+            30,
+            4,
+            &enclosing,
+            Vec::new(),
+        )];
+        let changes = compare(&enclosing, &old, &new);
+
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.kind() != CallChangeKind::Modified)
+        );
+    }
+
+    #[test]
+    fn nested_other_and_out_of_range_calls_are_excluded() {
+        let enclosing = key(&[], "outer");
+        let nested = key(&["outer"], "inner");
+        let other = key(&[], "other");
+        let old = vec![
+            call("selected", "(old)", 10, 2, &enclosing, Vec::new()),
+            call("nested", "()", 20, 3, &nested, Vec::new()),
+            call("selected", "(other)", 30, 4, &other, Vec::new()),
+            call("outside", "()", 20_000, 2_000, &enclosing, Vec::new()),
+        ];
+        let new = vec![
+            call("selected", "(new)", 40, 5, &enclosing, Vec::new()),
+            call("nested", "()", 50, 6, &nested, Vec::new()),
+            call("selected", "(other)", 60, 7, &other, Vec::new()),
+        ];
+        let changes = compare(&enclosing, &old, &new);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind(), CallChangeKind::Modified);
+        assert_eq!(changes[0].new_fact().unwrap().callee_text(), "selected");
+    }
+
+    #[test]
+    fn unicode_callee_and_ranges_are_preserved() {
+        let enclosing = key(&["Nástroje"], "zkontroluj");
+        let old = vec![call(
+            "služba.načti",
+            "(žlutý)",
+            21,
+            3,
+            &enclosing,
+            Vec::new(),
+        )];
+        let new = vec![call(
+            "služba.načti",
+            "(červený)",
+            55,
+            6,
+            &enclosing,
+            Vec::new(),
+        )];
+        let changes = compare(&enclosing, &old, &new);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new_fact().unwrap().callee_text(), "služba.načti");
+        assert_eq!(changes[0].navigation().byte_offset, Some(55));
+        assert_eq!(
+            changes[0].pairing().unwrap().old_call_range(),
+            source_range(21, 33, 3)
+        );
+    }
+
+    #[test]
+    fn output_order_is_stable_for_reordered_inputs() {
+        let enclosing = key(&[], "review");
+        let old = vec![
+            call("zeta", "()", 90, 9, &enclosing, Vec::new()),
+            call("alpha", "()", 10, 2, &enclosing, Vec::new()),
+            call("repeat", "(one)", 50, 5, &enclosing, Vec::new()),
+            call("repeat", "(two)", 70, 7, &enclosing, Vec::new()),
+        ];
+        let new = vec![call("beta", "()", 30, 3, &enclosing, Vec::new())];
+        let mut reversed_old = old.clone();
+        reversed_old.reverse();
+        let mut reversed_new = new.clone();
+        reversed_new.reverse();
+
+        assert_eq!(
+            compare(&enclosing, &old, &new),
+            compare(&enclosing, &reversed_old, &reversed_new)
+        );
+    }
+
+    #[test]
+    fn provenance_tie_breaks_have_stable_serialization_for_reversed_inputs() {
+        let enclosing = key(&[], "review");
+        let make = |language, parser| {
+            call_with_provenance(
+                SyntaxProvenance::tree_sitter(language, parser).unwrap(),
+                "same",
+                "(value)",
+                10,
+                2,
+                &enclosing,
+                Vec::new(),
+            )
+        };
+        let old = vec![
+            make(SyntaxLanguage::TypeScript, "parser-z"),
+            make(SyntaxLanguage::Rust, "parser-rust"),
+        ];
+        let new = vec![
+            make(SyntaxLanguage::Tsx, "parser-tsx"),
+            make(SyntaxLanguage::TypeScript, "parser-a"),
+        ];
+        let mut reversed_old = old.clone();
+        reversed_old.reverse();
+        let mut reversed_new = new.clone();
+        reversed_new.reverse();
+
+        let forward = serde_json::to_string(&compare(&enclosing, &old, &new)).unwrap();
+        let reversed =
+            serde_json::to_string(&compare(&enclosing, &reversed_old, &reversed_new)).unwrap();
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn empty_paths_are_rejected_even_when_there_are_no_changes() {
+        let enclosing = key(&[], "review");
+        let error = CallDiffInput::new(
+            "",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CallDiffError::EmptyPath(ComparisonSide::Base)
+        ));
+
+        let legacy_shape = match error {
+            CallDiffError::EmptyPath(_) => "empty_path",
+            CallDiffError::InvalidChange(_) => "invalid_change",
+        };
+        assert_eq!(legacy_shape, "empty_path");
+    }
+
+    #[test]
+    fn legacy_entry_point_matches_never_stopped_controlled_output() {
+        let enclosing = key(&[], "review");
+        let old = vec![call("load", "(old)", 10, 2, &enclosing, Vec::new())];
+        let new = vec![call("load", "(new)", 30, 4, &enclosing, Vec::new())];
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &old,
+            &new,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compare_calls(input).unwrap(),
+            compare_calls_controlled(input, &mut || None).unwrap()
+        );
+    }
+
+    #[test]
+    fn controlled_comparison_stops_during_large_candidate_sort() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..100)
+            .rev()
+            .map(|index| {
+                call(
+                    "repeated",
+                    &format!("({index})"),
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &calls,
+            &[],
+        )
+        .unwrap();
+        let mut checks = 0_u32;
+        let error = compare_calls_controlled(input, &mut || {
+            checks += 1;
+            (checks == 306).then_some(ComparisonStopReason::Deadline)
+        })
+        .unwrap_err();
+
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+    }
+
+    #[test]
+    fn controlled_comparison_distinguishes_deadline_and_disconnect_stops() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..100)
+            .map(|index| {
+                call(
+                    &format!("call_{index}"),
+                    "()",
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let input = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &calls,
+            &calls,
+        )
+        .unwrap();
+        let mut checkpoints = 0_u32;
+        let error = compare_calls_controlled(input, &mut || {
+            checkpoints += 1;
+            (checkpoints == 250).then_some(ComparisonStopReason::Deadline)
+        })
+        .unwrap_err();
+        assert_eq!(error.stop_reason(), Some(ComparisonStopReason::Deadline));
+
+        let empty = CallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let error =
+            compare_calls_controlled(empty, &mut || Some(ComparisonStopReason::Disconnected))
+                .unwrap_err();
+        assert_eq!(
+            error.stop_reason(),
+            Some(ComparisonStopReason::Disconnected)
+        );
+    }
+
+    #[test]
+    fn indexed_candidates_are_checkpointed_near_linearly() {
+        let enclosing = key(&[], "review");
+        let calls: Vec<_> = (0_u64..250)
+            .map(|index| {
+                call(
+                    &format!("call_{index}"),
+                    "()",
+                    index * 20,
+                    u32::try_from(index + 1).unwrap(),
+                    &enclosing,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let references: Vec<_> = calls.iter().collect();
+        let input = IndexedCallDiffInput::new(
+            "src/old.ts",
+            "src/new.ts",
+            &enclosing,
+            enclosing_range(),
+            enclosing_range(),
+            &references,
+            &references,
+        )
+        .unwrap();
+        let mut checkpoints = 0_usize;
+        let changes = compare_indexed_calls_controlled(input, &mut || {
+            checkpoints += 1;
+            None
+        })
+        .unwrap();
+
+        assert!(changes.is_empty());
+        assert!(checkpoints >= references.len() * 2);
+        assert!(checkpoints <= references.len() * 8 + 2);
+    }
+}

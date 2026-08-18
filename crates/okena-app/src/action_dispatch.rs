@@ -760,6 +760,31 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
             ignore_whitespace,
         },
+        ActionRequest::ReviewInventory { project_id, mode } => ActionRequest::ReviewInventory {
+            project_id: s(&project_id),
+            mode,
+        },
+        ActionRequest::ReviewDiff {
+            project_id,
+            request,
+        } => ActionRequest::ReviewDiff {
+            project_id: s(&project_id),
+            request,
+        },
+        ActionRequest::ReviewSource {
+            project_id,
+            request,
+        } => ActionRequest::ReviewSource {
+            project_id: s(&project_id),
+            request,
+        },
+        ActionRequest::ReviewStructure {
+            project_id,
+            request,
+        } => ActionRequest::ReviewStructure {
+            project_id: s(&project_id),
+            request,
+        },
         ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
             project_id: s(&project_id),
         },
@@ -1260,6 +1285,42 @@ mod tests {
     use super::*;
     use crate::workspace::state::SplitDirection;
 
+    fn review_diff_request() -> okena_core::review::ReviewDiffRequest {
+        let requested_base = "1".repeat(40);
+        let merge_base = "2".repeat(40);
+        let head = "3".repeat(40);
+        let identity = format!("branch:merge-base:{requested_base}:{head}:{merge_base}");
+        serde_json::from_value(serde_json::json!({
+            "comparison": {
+                "requested": {
+                    "branch_compare": {
+                        "base": "origin/main",
+                        "head": "feature/review"
+                    }
+                },
+                "requested_base_oid": requested_base,
+                "requested_head_oid": head,
+                "strategy": "merge_base_to_head",
+                "base": { "kind": "commit", "oid": merge_base },
+                "head": { "kind": "commit", "oid": head },
+                "merge_base_oid": merge_base,
+                "identity": identity
+            },
+            "ignore_whitespace": false
+        }))
+        .unwrap()
+    }
+
+    fn review_source_request() -> okena_core::review::ReviewSourceRequest {
+        let comparison = review_diff_request().comparison;
+        okena_core::review::ReviewSourceRequest::new(
+            comparison.into_resolved(),
+            Some("src/old.rs".to_string()),
+            Some("src/new.rs".to_string()),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn rows_map_visual_split_axis_back_to_canonical_axis() {
         let action = canonicalize_layout_action(
@@ -1309,5 +1370,42 @@ mod tests {
             discovered_worktree_project_name("/", "feature/fallback"),
             "worktree (feature/fallback)"
         );
+    }
+
+    #[test]
+    fn review_actions_strip_only_the_remote_project_prefix() {
+        let project_id = "remote:connection-1:project-1".to_string();
+        let request = review_diff_request();
+        let source_request = review_source_request();
+        let actions = [
+            ActionRequest::ReviewInventory {
+                project_id: project_id.clone(),
+                mode: okena_core::types::DiffMode::BranchCompare {
+                    base: "origin/main".to_string(),
+                    head: "feature/review".to_string(),
+                },
+            },
+            ActionRequest::ReviewDiff {
+                project_id: project_id.clone(),
+                request: request.clone(),
+            },
+            ActionRequest::ReviewSource {
+                project_id: project_id.clone(),
+                request: Box::new(source_request),
+            },
+            ActionRequest::ReviewStructure {
+                project_id,
+                request,
+            },
+        ];
+
+        for action in actions {
+            let original = serde_json::to_value(&action).unwrap();
+            let value = serde_json::to_value(strip_remote_ids(action, "connection-1")).unwrap();
+            assert_eq!(value["project_id"], "project-1");
+            if original.get("request").is_some() {
+                assert_eq!(value["request"], original["request"]);
+            }
+        }
     }
 }

@@ -18,6 +18,8 @@ pub enum SideBySideSide {
 /// Lightweight file stats for sidebar display (no syntax highlighting).
 pub struct FileStats {
     pub path: String,
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
     pub added: usize,
     pub removed: usize,
     pub is_binary: bool,
@@ -29,6 +31,8 @@ impl From<&FileDiff> for FileStats {
     fn from(file: &FileDiff) -> Self {
         Self {
             path: file.display_name().to_string(),
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
             added: file.lines_added,
             removed: file.lines_removed,
             is_binary: file.is_binary,

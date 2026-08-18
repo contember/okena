@@ -7,6 +7,7 @@ pub mod diff;
 pub mod error;
 pub(crate) mod gix_helpers;
 pub mod repository;
+pub mod review;
 
 pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;
@@ -14,7 +15,7 @@ pub use diff::{
     DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options,
     get_file_contents_for_diff, is_git_repo,
 };
-pub use error::{GitError, GitResult};
+pub use error::{GitError, GitResult, ReviewSourceBudgetKind};
 pub use repository::{
     BranchList, HeadSnapshot, OrphanedWorktree, VerifiedWorktree, checkout_local_branch,
     checkout_remote_branch, compute_target_paths, count_ahead_behind, count_unpushed_commits,
@@ -27,6 +28,15 @@ pub use repository::{
     rebase_onto, remove_orphaned_worktree, remove_worktree, remove_worktree_fast,
     resolve_git_root_and_subdir, resolve_review_base, stage_file, stash_changes, stash_pop,
     unstage_file, verify_linked_worktree_fresh, verify_orphaned_worktree,
+};
+pub use review::{
+    ExactReviewDiffResponse, ReviewGitBudget, ReviewGitControl, ReviewSourceBudget,
+    ReviewSourceContents, get_exact_review_diff, get_exact_review_diff_response,
+    get_exact_review_diff_response_with_control, get_exact_review_diff_with_control,
+    get_exact_review_source, get_exact_review_source_response,
+    get_exact_review_source_response_with_control, get_exact_review_source_with_control,
+    get_review_inventory, get_review_inventory_with_control, resolve_review_comparison,
+    resolve_review_comparison_with_control,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look

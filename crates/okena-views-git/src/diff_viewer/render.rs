@@ -1,5 +1,8 @@
 //! Render trait impl and helper methods for the diff viewer.
 
+use super::review::is_smart_mode;
+use super::review_ui::DiffPaneArgs;
+use super::review_ui::labels::short_sha;
 use super::types::DiffViewMode;
 use super::{Cancel, DiffViewer};
 use gpui::prelude::*;
@@ -35,14 +38,18 @@ impl DiffViewer {
         needs_controls: bool,
         is_maximized: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let is_working = *diff_mode == DiffMode::WorkingTree;
         let hide_mode_toggle = matches!(
             diff_mode,
             DiffMode::Commit(_) | DiffMode::BranchCompare { .. }
         );
         let is_unified = self.view_mode == DiffViewMode::Unified;
+        let smart = is_smart_mode(diff_mode);
+        let show_view_toggle = !smart || self.review_show_split_toggle();
         let detached = self.is_detached;
+        let merge_base = smart.then(|| self.render_merge_base(t, cx)).flatten();
+        let status_pill = smart.then(|| self.render_status_pill(t, cx));
 
         div()
             .px(px(20.0))
@@ -161,13 +168,16 @@ impl DiffViewer {
                                         .child(format!("-{}", total_removed)),
                                 ),
                         )
-                    }),
+                    })
+                    .children(merge_base),
             )
             // Drag-to-move spacer (only when detached)
             .child(window_drag_spacer(detached))
             .child(
                 h_flex()
                     .gap(px(8.0))
+                    // Analysis status pill sits with the controls so its popover anchors right
+                    .children(status_pill)
                     // Whitespace toggle
                     .child(
                         div()
@@ -198,19 +208,23 @@ impl DiffViewer {
                                     .child("Whitespace"),
                             ),
                     )
-                    // Separator
-                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
-                    // View mode toggle
-                    .child(
-                        div()
-                            .id("view-mode-toggle")
-                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_view_mode(cx)))
-                            .child(segmented_toggle(
-                                &[("Unified", is_unified), ("Split", !is_unified)],
-                                t,
-                                cx,
-                            )),
-                    )
+                    .when(show_view_toggle, |d| {
+                        d.child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
+                            .child(
+                                div()
+                                    .id("view-mode-toggle")
+                                    .on_click(
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.toggle_view_mode(cx)
+                                        }),
+                                    )
+                                    .child(segmented_toggle(
+                                        &[("Unified", is_unified), ("Split", !is_unified)],
+                                        t,
+                                        cx,
+                                    )),
+                            )
+                    })
                     // Diff mode toggle (hidden for commit/branch compare diffs)
                     .when(!hide_mode_toggle, |d| {
                         d.child(
@@ -279,6 +293,31 @@ impl DiffViewer {
                             ),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// `merge-base <sha>`, with the resolved OIDs on hover.
+    fn render_merge_base(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let comparison = self.smart_review.comparison()?;
+        let merge_base = comparison.merge_base_oid()?.as_str().to_string();
+        let dot = "\u{00B7}";
+        let detail = format!(
+            "base {} {dot} head {} {dot} merge-base {merge_base}",
+            snapshot_oid(comparison.base()),
+            snapshot_oid(comparison.head()),
+        );
+        Some(
+            div()
+                .id("review-merge-base")
+                .text_size(ui_text_md(cx))
+                .font_family("monospace")
+                .text_color(rgb(t.text_muted))
+                .child(format!("merge-base {}", short_sha(&merge_base)))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
+                })
+                .into_any_element(),
+        )
     }
 
     /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
@@ -570,6 +609,8 @@ impl DiffViewer {
             false
         };
         let max_scroll = self.max_scroll_x();
+        // The review file header already states the path once.
+        let show_path_header = !is_smart_mode(&self.diff_mode);
 
         div()
             .flex_1()
@@ -577,18 +618,20 @@ impl DiffViewer {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .child(
-                div()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .bg(rgb(t.bg_header))
-                    .text_size(ui_text_md(cx))
-                    .font_family("monospace")
-                    .text_color(rgb(t.text_secondary))
-                    .child(file_path),
-            )
+            .when(show_path_header, |d| {
+                d.child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(rgb(t.border))
+                        .bg(rgb(t.bg_header))
+                        .text_size(ui_text_md(cx))
+                        .font_family("monospace")
+                        .text_color(rgb(t.text_secondary))
+                        .child(file_path),
+                )
+            })
             // In-page search bar (Cmd/Ctrl+F)
             .children(search_bar)
             .when(is_binary, |d| {
@@ -794,6 +837,8 @@ impl DiffViewer {
 
     pub(super) fn render_footer(&self, t: &ThemeColors, cx: &App) -> impl IntoElement {
         let has_commits = self.has_commits();
+        let smart = is_smart_mode(&self.diff_mode);
+        let show_split = !smart || self.review_show_split_toggle();
         div()
             .px(px(16.0))
             .py(px(8.0))
@@ -806,10 +851,12 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t, cx))
-                    .when(!has_commits, |d| {
+                    .when(!smart && !has_commits, |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
-                    .child(self.render_hint("S", "split", t, cx))
+                    .when(show_split, |d| {
+                        d.child(self.render_hint("S", "split", t, cx))
+                    })
                     .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
                     .when(has_commits, |d| {
                         d.child(self.render_hint("[ ]", "commits", t, cx))
@@ -987,6 +1034,7 @@ impl Render for DiffViewer {
         let has_error = self.error_message.is_some();
         let error_message = self.error_message.clone();
         let diff_mode = self.diff_mode.clone();
+        let is_smart = is_smart_mode(&diff_mode);
         let has_files = !self.file_stats.is_empty();
         // Gutter: two number columns + separator, matching render_line layout
         let char_width = self.char_width();
@@ -1032,6 +1080,9 @@ impl Render for DiffViewer {
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                if is_smart_mode(&this.diff_mode) && this.handle_review_cancel(window, cx) {
+                    return;
+                }
                 if this.search.is_some() {
                     this.close_search(window, cx);
                     return;
@@ -1048,6 +1099,10 @@ impl Render for DiffViewer {
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if is_smart_mode(&this.diff_mode) && this.handle_review_key(event, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
 
@@ -1055,9 +1110,17 @@ impl Render for DiffViewer {
                     "f" if modifiers.platform || modifiers.control => {
                         this.open_search(window, cx);
                     }
-                    "tab" => this.toggle_mode(cx),
-                    "s" => this.toggle_view_mode(cx),
+                    "tab" if !is_smart_mode(&this.diff_mode) => this.toggle_mode(cx),
+                    "s" if !is_smart_mode(&this.diff_mode) || this.review_show_split_toggle() => {
+                        this.toggle_view_mode(cx)
+                    }
                     "w" => this.toggle_ignore_whitespace(cx),
+                    "up" if is_smart_mode(&this.diff_mode) => {
+                        this.select_adjacent_smart_file(false, cx)
+                    }
+                    "down" if is_smart_mode(&this.diff_mode) => {
+                        this.select_adjacent_smart_file(true, cx)
+                    }
                     "up" => this.prev_file(cx),
                     "down" => this.next_file(cx),
                     "left" => {
@@ -1129,22 +1192,46 @@ impl Render for DiffViewer {
             .when(self.has_commits(), |d| {
                 d.child(self.render_commit_info_bar(&t, cx))
             })
-            .child(self.render_content(
-                &t,
-                self.loading,
-                has_error,
-                error_message,
-                has_files,
-                is_binary,
-                file_path,
-                line_count,
-                gutter_width,
-                tree_elements,
-                theme_colors,
-                cx,
-            ))
-            .child(self.render_footer(&t, cx))
+            .child(if is_smart {
+                // The Overview reflows below 1000 px, so the shell needs its own width.
+                self.review_ui.content_width = (f32::from(window.viewport_size().width)
+                    - self.sidebar_resize.width())
+                .max(0.0);
+                self.render_review_shell(
+                    &t,
+                    DiffPaneArgs {
+                        is_binary,
+                        file_path,
+                        line_count,
+                        gutter_width,
+                        theme_colors,
+                    },
+                    cx,
+                )
+            } else {
+                self.render_content(
+                    &t,
+                    self.loading,
+                    has_error,
+                    error_message,
+                    has_files,
+                    is_binary,
+                    file_path,
+                    line_count,
+                    gutter_width,
+                    tree_elements,
+                    theme_colors,
+                    cx,
+                )
+                .into_any_element()
+            })
+            .child(if is_smart {
+                self.render_review_footer(&t, cx)
+            } else {
+                self.render_footer(&t, cx).into_any_element()
+            })
             .children(self.render_context_overlays(&t, cx))
+            .into_any_element()
     }
 }
 
@@ -1152,4 +1239,12 @@ impl Focusable for DiffViewer {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// The resolved OID of one side, or a dash when the side has none.
+fn snapshot_oid(snapshot: &okena_core::review::ReviewSnapshot) -> String {
+    snapshot
+        .oid()
+        .map(|oid| oid.as_str().to_string())
+        .unwrap_or_else(|| "\u{2014}".to_string())
 }

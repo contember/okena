@@ -1,4 +1,24 @@
+use std::fmt;
 use std::path::PathBuf;
+
+/// Byte budget that an exact review source request exceeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReviewSourceBudgetKind {
+    /// One source side exceeded the maximum blob size.
+    PerFileSourceBytes,
+    /// The combined source sides exceeded the request's remaining byte budget.
+    AggregateSourceBytes,
+}
+
+impl fmt::Display for ReviewSourceBudgetKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PerFileSourceBytes => formatter.write_str("per-file byte"),
+            Self::AggregateSourceBytes => formatter.write_str("aggregate byte"),
+        }
+    }
+}
 
 /// Structured error type for git operations.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +58,16 @@ pub enum GitError {
     /// Failed to parse structured output (JSON, etc.).
     #[error("parse error: {0}")]
     ParseError(String),
+
+    /// An exact review source request exceeded a caller-owned byte budget.
+    #[error(
+        "exact review source {kind} budget exceeded: observed {observed} bytes, limit {limit} bytes"
+    )]
+    ReviewSourceBudgetExceeded {
+        kind: ReviewSourceBudgetKind,
+        observed: u64,
+        limit: u64,
+    },
 }
 
 /// Convenience alias for `Result<T, GitError>`.

@@ -2520,6 +2520,7 @@ pub async fn daemon_command_loop(
         service_tick.clone(),
     );
     let content_search_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONTENT_SEARCHES));
+    let review_permits = Arc::new(Semaphore::new(crate::review::MAX_CONCURRENT_REVIEWS));
 
     loop {
         let BridgeMessage { command, reply } = match bridge_rx.recv().await {
@@ -2577,6 +2578,30 @@ pub async fn daemon_command_loop(
                         reply,
                         &runtime,
                         content_search_permits.clone(),
+                    ),
+                    Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(CommandResult::Err(error));
+                        }
+                    }
+                }
+                continue;
+            }
+            command => command,
+        };
+
+        let command = match command {
+            RemoteCommand::Action(action) if crate::review::is_review_action(&action) => {
+                let prepared = {
+                    let workspace = workspace.lock();
+                    crate::review::prepare_review_action(&workspace, action)
+                };
+                match prepared {
+                    Ok(action) => crate::review::spawn_review_action(
+                        action,
+                        reply,
+                        &runtime,
+                        review_permits.clone(),
                     ),
                     Err(error) => {
                         if let Some(reply) = reply {
