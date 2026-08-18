@@ -439,3 +439,27 @@ fn detect_url_not_extended_across_a_trailing_dash() {
         "https://github.com/contember/webmaster/pull/564"
     );
 }
+
+#[test]
+fn detect_url_not_extended_by_a_barely_longer_next_line() {
+    // The URL ends its row at column 58 and the next row is 61 wide, so the
+    // URL never reached the layout edge — no wrap.  The old +3 slack put this
+    // exactly on the boundary and absorbed the branch name.  Reproduces
+    // Claude Code's PR line: "● Hotovo — https://…/pull/567" /
+    // "(feat/browser-and-edge-worker-sentry) → main, samostatně od".
+    let links = detect_urls_in(
+        "\u{25cf} Hotovo \u{2014} https://github.com/contember/webmaster/pull/567\r\n  (feat/browser-and-edge-worker-sentry) \u{2192} main, samostatn\u{11b} od\r\n",
+        80,
+    );
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.is_url).collect();
+    assert_eq!(
+        url_links.len(),
+        1,
+        "Branch name on the next line must not be absorbed: {:?}",
+        links
+    );
+    assert_eq!(
+        url_links[0].text,
+        "https://github.com/contember/webmaster/pull/567"
+    );
+}

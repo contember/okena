@@ -328,8 +328,10 @@ impl Terminal {
                     // A mid-token wrap fills the row to the layout edge, so a
                     // continuation can never be wider than the row it
                     // continues.  A wider next row means the break was a word
-                    // break — the URL ended on its own line.
-                    if next_rtrimmed.chars().count() > url_end_col + 3 {
+                    // break — the URL ended on its own line.  No slack: the
+                    // edge is exact, and slack is what let a 3-column-longer
+                    // continuation through.
+                    if next_rtrimmed.chars().count() > url_end_col {
                         break;
                     }
 
