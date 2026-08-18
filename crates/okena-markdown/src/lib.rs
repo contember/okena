@@ -51,3 +51,83 @@ pub struct MarkdownDocument {
     /// Flat text representation of all visible content
     pub plain_text: String,
 }
+
+impl MarkdownDocument {
+    /// Syntax-highlight every fenced code block for the given theme.
+    ///
+    /// Kept out of `parse` because the colours come from the syntax theme, which
+    /// the parser has no business knowing: the viewer calls this after parsing
+    /// and again whenever the theme flips between dark and light. A document
+    /// that never gets the call renders its code blocks in the document text
+    /// colour, exactly as before.
+    pub fn highlight_code_blocks(&mut self, is_dark: bool) {
+        for node in &mut self.nodes {
+            if let Node::CodeBlock {
+                language,
+                code,
+                highlighted,
+            } = node
+            {
+                *highlighted = okena_highlight::syntax::highlight_code_block(
+                    code,
+                    language.as_deref(),
+                    is_dark,
+                )
+                .into_iter()
+                .map(|line| line.spans)
+                .collect();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports, not a glob: `use super::*` would pull in gpui's own `test`
+    // macro and shadow the one these tests need.
+    use super::{MarkdownDocument, Node};
+
+    /// The spans of a line must hold exactly that line's characters — tabs and
+    /// all. Rendering maps a character-offset selection onto them, so a span set
+    /// that drops or rewrites characters silently shifts the selection.
+    #[test]
+    fn spans_reproduce_each_line_verbatim() {
+        let mut doc = MarkdownDocument::parse("```rust\nfn main() {\n\tlet x = 1;\n}\n```\n");
+        doc.highlight_code_blocks(true);
+
+        let Some(Node::CodeBlock {
+            code, highlighted, ..
+        }) = doc.nodes.first()
+        else {
+            panic!("expected a code block");
+        };
+
+        let lines: Vec<&str> = code.lines().collect();
+        assert_eq!(highlighted.len(), lines.len());
+        for (spans, line) in highlighted.iter().zip(&lines) {
+            let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(&joined, line);
+        }
+        // More than one colour, or nothing was actually highlighted.
+        let colors: Vec<_> = highlighted[0].iter().map(|s| s.color.r).collect();
+        assert!(colors.len() > 1, "expected `fn main() {{` to be coloured");
+    }
+
+    /// A fence with no language, or one syntect cannot place, is left alone so
+    /// it keeps the document's text colour instead of the syntax theme's.
+    #[test]
+    fn unknown_and_missing_languages_stay_unhighlighted() {
+        for md in [
+            "```\nplain text\n```\n",
+            "```notalanguage\nplain text\n```\n",
+        ] {
+            let mut doc = MarkdownDocument::parse(md);
+            doc.highlight_code_blocks(true);
+
+            let Some(Node::CodeBlock { highlighted, .. }) = doc.nodes.first() else {
+                panic!("expected a code block");
+            };
+            assert!(highlighted.is_empty(), "{md:?} should not be highlighted");
+        }
+    }
+}

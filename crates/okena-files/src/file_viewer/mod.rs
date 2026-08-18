@@ -980,6 +980,11 @@ impl FileViewer {
             // source-view XML), so they need the rehighlight too.
             if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
                 tab.do_highlight_content(&tab.file_path.clone(), &self.syntax_set, self.is_dark);
+                // The rendered markdown view carries its own highlighted code
+                // blocks, separate from the source view's lines.
+                if let Some(doc) = tab.markdown_doc.as_mut() {
+                    doc.highlight_code_blocks(self.is_dark);
+                }
             }
         }
     }

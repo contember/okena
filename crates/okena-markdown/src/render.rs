@@ -4,6 +4,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
+use okena_highlight::styled::build_styled_text_with_backgrounds;
+use okena_highlight::syntax::HighlightedSpan;
 use okena_ui::code_block::code_block_container;
 use okena_ui::tokens::ui_text_md;
 
@@ -17,6 +19,33 @@ use super::{MarkdownDocument, RenderedNode};
 /// Height of one code line. Code blocks are laid out line by line (each line is
 /// its own selectable element), so this stands in for `line_height`.
 const CODE_LINE_HEIGHT: Pixels = px(20.0);
+
+/// One syntax-highlighted code line, drawn as a single text run so indentation
+/// and wide glyphs measure the same as the source.
+///
+/// `selection` is a character range within the line; the spans hold the line's
+/// characters unchanged (tabs included), so the range converts straight to the
+/// byte offsets `build_styled_text_with_backgrounds` expects.
+fn highlighted_code_line(
+    line: &str,
+    spans: &[HighlightedSpan],
+    selection: Option<(usize, usize)>,
+    selection_bg: Rgba,
+) -> StyledText {
+    let byte_at = |char_idx: usize| {
+        line.char_indices()
+            .nth(char_idx)
+            .map(|(byte, _)| byte)
+            .unwrap_or(line.len())
+    };
+    let bg_ranges = match selection {
+        Some((start, end)) if start < end => {
+            vec![(byte_at(start)..byte_at(end), selection_bg.into())]
+        }
+        _ => Vec::new(),
+    };
+    build_styled_text_with_backgrounds(spans, &bg_ranges)
+}
 
 impl MarkdownDocument {
     /// Number of top-level blocks in the document. Each maps to one list item.
@@ -55,13 +84,17 @@ impl MarkdownDocument {
         });
 
         let rendered = match node {
-            Node::CodeBlock { language, code } => {
+            Node::CodeBlock {
+                language,
+                code,
+                highlighted,
+            } => {
                 // Return code blocks with individual lines for per-line selection
                 let selection_bg = rgba(0x3390ff40);
                 let mut lines = Vec::new();
                 let mut line_offset = offset;
 
-                for line in code.lines() {
+                for (line_idx, line) in code.lines().enumerate() {
                     let line_len = char_len(line);
                     let line_end = line_offset + line_len + 1; // +1 for newline
 
@@ -75,7 +108,15 @@ impl MarkdownDocument {
                         }
                     });
 
-                    let line_div = if let Some((sel_start, sel_end)) = line_sel {
+                    let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
+                    let line_div = if !spans.is_empty() {
+                        div().h(CODE_LINE_HEIGHT).child(highlighted_code_line(
+                            line,
+                            spans,
+                            line_sel,
+                            selection_bg,
+                        ))
+                    } else if let Some((sel_start, sel_end)) = line_sel {
                         let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
                         div()
                             .h(CODE_LINE_HEIGHT)
@@ -341,14 +382,18 @@ impl MarkdownDocument {
             Node::Paragraph { children } => {
                 Self::render_inlines_with_selection(children, t, cx, selection).w_full()
             }
-            Node::CodeBlock { language, code } => {
+            Node::CodeBlock {
+                language,
+                code,
+                highlighted,
+            } => {
                 let selection_bg = rgba(0x3390ff40);
 
                 // Render code lines with selection
                 let mut code_lines: Vec<Div> = Vec::new();
                 let mut offset = 0usize;
 
-                for line in code.lines() {
+                for (line_idx, line) in code.lines().enumerate() {
                     let line_len = char_len(line);
                     let line_end = offset + line_len + 1; // +1 for newline
 
@@ -360,7 +405,15 @@ impl MarkdownDocument {
                         }
                     });
 
-                    let line_div = if let Some((sel_start, sel_end)) = line_sel {
+                    let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
+                    let line_div = if !spans.is_empty() {
+                        div().h(CODE_LINE_HEIGHT).child(highlighted_code_line(
+                            line,
+                            spans,
+                            line_sel,
+                            selection_bg,
+                        ))
+                    } else if let Some((sel_start, sel_end)) = line_sel {
                         let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
                         div()
                             .h(CODE_LINE_HEIGHT)
