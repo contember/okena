@@ -463,3 +463,66 @@ fn detect_url_not_extended_by_a_barely_longer_next_line() {
         "https://github.com/contember/webmaster/pull/567"
     );
 }
+
+#[test]
+fn detect_url_not_extended_into_a_parenthetical() {
+    // Same PR line, narrower terminal: the URL row (58) is now the widest row
+    // in the block, so no width guard can tell it from a mid-token wrap.  The
+    // continuation opens a paren, which starts a new token — and the URL ends
+    // in a wholly numeric segment, which only digits can continue.
+    let links = detect_urls_in(
+        "  Pushed to feat/browser-and-edge-worker-sentry, created\r\n  PR #567, ran 3 shell commands\r\n\u{25cf} Hotovo \u{2014} https://github.com/contember/webmaster/pull/567\r\n(feat/browser-and-edge-worker-sentry) \u{2192} main, samostatn\u{11b}\r\nod #566, nep\u{159}ekr\u{fd}vaj\u{ed} se).\r\n",
+        60,
+    );
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.is_url).collect();
+    assert_eq!(
+        url_links.len(),
+        1,
+        "Branch name on the next line must not be absorbed: {:?}",
+        links
+    );
+    assert_eq!(
+        url_links[0].text,
+        "https://github.com/contember/webmaster/pull/567"
+    );
+}
+
+#[test]
+fn detect_url_extended_across_a_split_number() {
+    // The counterpart of the rule above: a genuine wrap can fall inside the
+    // PR number, and a digit does continue a numeric segment.
+    let links = detect_urls_in(
+        "  https://github.com/contember/webmaster/pull/56\r\n  7\r\n",
+        48,
+    );
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
+        .filter(|l| l.text == "https://github.com/contember/webmaster/pull/567")
+        .collect();
+    assert_eq!(
+        url_links.len(),
+        2,
+        "A digit must still continue a wrapped PR number: {:?}",
+        links
+    );
+}
+
+#[test]
+fn detect_url_extended_across_a_split_path_segment() {
+    // A non-numeric last segment stays extendable — the numeric rule must not
+    // leak into ordinary path wraps.
+    let links = detect_urls_in(
+        "  https://github.com/contember/webmaster/tree/feat/brow\r\n  ser-sentry\r\n",
+        56,
+    );
+    let url_links: Vec<&DetectedLink> = links
+        .iter()
+        .filter(|l| l.text == "https://github.com/contember/webmaster/tree/feat/browser-sentry")
+        .collect();
+    assert_eq!(
+        url_links.len(),
+        2,
+        "Ordinary path wrap must still join: {:?}",
+        links
+    );
+}

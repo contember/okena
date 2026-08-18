@@ -354,6 +354,30 @@ impl Terminal {
                         break;
                     }
 
+                    // ── The continuation must read as a continuation of the
+                    // URL's last token.  A hard wrap breaks a token mid-way;
+                    // it never starts a new one. ──
+                    let first = content.chars().next();
+
+                    // An opening paren starts a bracketed token, so this is a
+                    // parenthetical following the URL, not the URL's tail.
+                    if first == Some('(') {
+                        break;
+                    }
+
+                    // A wholly numeric last segment (`/pull/567`, `/issues/42`)
+                    // can only continue with more digits, or with a delimiter
+                    // that starts the next segment.
+                    let last_segment = extended_url.rsplit('/').next().unwrap_or("");
+                    let continues_a_number =
+                        first.is_some_and(|c| c.is_ascii_digit() || matches!(c, '/' | '?' | '#'));
+                    if !last_segment.is_empty()
+                        && last_segment.bytes().all(|b| b.is_ascii_digit())
+                        && !continues_a_number
+                    {
+                        break;
+                    }
+
                     // Take URL-compatible chars as extension.
                     let ext_char_len = content.chars().take_while(|c| url_char(*c)).count();
                     if ext_char_len == 0 {
