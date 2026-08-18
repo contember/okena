@@ -718,7 +718,27 @@ impl ProcessTree {
     fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
         use std::os::unix::process::CommandExt;
 
-        cmd.process_group(0);
+        // SAFETY: the closure runs in the forked child before exec and calls
+        // only async-signal-safe syscalls.
+        unsafe {
+            cmd.pre_exec(|| {
+                // `setsid` buys two things at once. A new session has no
+                // controlling terminal, so a child that tries to prompt on
+                // `/dev/tty` — git asking for credentials, ssh for a
+                // passphrase — fails instead of taking SIGTTIN and stopping
+                // forever where nothing can observe it. And a new session
+                // starts a new process group whose id is this pid, which is
+                // the identity `terminate` kills.
+                //
+                // It only fails if we are already a group leader, which a
+                // fresh fork is not; keep `setpgid` as the fallback anyway,
+                // because the group invariant below must hold either way.
+                if libc::setsid() == -1 && libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let mut child = cmd.spawn()?;
         let process_group = match libc::pid_t::try_from(child.id()) {
             Ok(process_group) if process_group > 0 => process_group,

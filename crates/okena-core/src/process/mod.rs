@@ -275,6 +275,25 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    /// Every bus child must lead its own session, so it has no controlling
+    /// terminal to be stopped on. Without this a `git clone` that hits a
+    /// credential prompt takes SIGTTIN and hangs forever instead of failing.
+    ///
+    /// Session id equal to the pid is exactly what `setsid` produces, and it
+    /// is also the process-group identity the bus kills on cancel.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bus_child_leads_its_own_session() {
+        let output =
+            super::run(super::CommandSpec::new("sh").args(["-c", "ps -o sid= -o pid= -p $$"]))
+                .expect("run ps");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut fields = text.split_whitespace();
+        let sid: i64 = fields.next().and_then(|f| f.parse().ok()).expect("sid");
+        let pid: i64 = fields.next().and_then(|f| f.parse().ok()).expect("pid");
+        assert_eq!(sid, pid, "child should be a session leader, got {text:?}");
+    }
+
     use super::*;
     use std::sync::Mutex;
     use std::time::Duration;
