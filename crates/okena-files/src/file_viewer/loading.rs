@@ -256,7 +256,9 @@ impl FileViewerTab {
                 self.content = content;
                 self.do_highlight_content(&self.file_path.clone(), syntax_set, is_dark);
                 if self.is_markdown {
-                    self.markdown_doc = Some(MarkdownDocument::parse(&self.content));
+                    let mut doc = MarkdownDocument::parse(&self.content);
+                    doc.highlight_code_blocks(is_dark);
+                    self.markdown_doc = Some(doc);
                 }
             }
             Ok(LoadedContent::Image { decoded, source }) => {

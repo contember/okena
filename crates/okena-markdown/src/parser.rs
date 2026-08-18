@@ -122,6 +122,7 @@ impl MarkdownDocument {
                     nodes.push(Node::CodeBlock {
                         language: code_block_lang.take(),
                         code: std::mem::take(&mut code_block_content),
+                        highlighted: Vec::new(),
                     });
                     in_code_block = false;
                 }

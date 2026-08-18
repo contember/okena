@@ -6331,6 +6331,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+ "okena-highlight",
  "okena-ui",
  "pulldown-cmark",
  "serde_yaml_ng",

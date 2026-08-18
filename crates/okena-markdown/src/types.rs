@@ -1,5 +1,7 @@
 //! AST types and utility functions for the markdown renderer.
 
+use okena_highlight::syntax::HighlightedSpan;
+
 /// A node in the markdown AST.
 #[derive(Clone)]
 pub(crate) enum Node {
@@ -13,6 +15,12 @@ pub(crate) enum Node {
     CodeBlock {
         language: Option<String>,
         code: String,
+        /// Syntax-highlighted spans, one entry per line of `code`. Empty until
+        /// `MarkdownDocument::highlight_code_blocks` runs — it needs the theme,
+        /// which parsing does not have — and for languages syntect can't place.
+        /// Each line's spans hold exactly the characters of that line, so
+        /// selection offsets map onto them unchanged.
+        highlighted: Vec<Vec<HighlightedSpan>>,
     },
     List {
         ordered: bool,
