@@ -809,6 +809,7 @@ mod hook_action_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         Workspace::new(WorkspaceData {
             version: 1,
@@ -1276,6 +1277,7 @@ mod set_show_in_overview_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

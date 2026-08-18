@@ -34,8 +34,8 @@ pub use ci::{
     CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info, has_github_remote, list_pull_requests,
 };
 pub use clone::{
-    clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
-    start_clone_repository, validate_clone_url,
+    CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
+    parse_clone_progress, start_clone_repository, validate_clone_url,
 };
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
@@ -162,5 +162,49 @@ pub(crate) mod test_support {
             args,
             String::from_utf8_lossy(&status.stderr)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote git command must refuse every interactive prompt. Without this
+    /// a clone of a private repo blocks on a credential prompt it can never
+    /// show, and the caller waits forever.
+    #[test]
+    fn network_commands_refuse_interactive_prompts() {
+        let cmd = network_command();
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(
+            env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        // Set-but-empty, so git skips askpass instead of falling back to
+        // `core.askpass` / `SSH_ASKPASS`.
+        assert_eq!(env.get("GIT_ASKPASS").map(String::as_str), Some(""));
+        assert_eq!(env.get("SSH_ASKPASS").map(String::as_str), Some(""));
+    }
+
+    /// A user who configured their own ssh command keeps it; we only fill in a
+    /// non-interactive default when the slot is free.
+    #[test]
+    fn a_user_ssh_command_is_left_alone() {
+        let ours = network_command()
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_SSH_COMMAND")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+
+        match std::env::var_os("GIT_SSH_COMMAND") {
+            // Nothing configured: we supply a batch-mode default.
+            None => assert_eq!(ours.as_deref(), Some("ssh -o BatchMode=yes")),
+            // Configured: we must not override it.
+            Some(_) => assert_eq!(ours, None),
+        }
     }
 }

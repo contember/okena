@@ -39,7 +39,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Shortest gap between two clone-progress publishes. Each one takes the
+/// workspace lock and pushes a snapshot to every connected client, so the
+/// limit is about their cost, not about how often git has something to say.
+const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
@@ -2956,7 +2961,51 @@ pub async fn daemon_command_loop(
                                     Err(e) => CommandResult::Err(e),
                                     Ok((new_id, operation_epoch)) => 'start_clone: {
                                         let clone_command = match okena_git::start_clone_repository(
-                                            &url, &target,
+                                            &url,
+                                            &target,
+                                            {
+                                                let workspace = workspace.clone();
+                                                let workspace_tick = workspace_tick.clone();
+                                                let hook_runner = hook_runner.clone();
+                                                let hook_monitor = hook_monitor.clone();
+                                                let project_id = new_id.clone();
+                                                // git reports several updates a
+                                                // second and each publish takes the
+                                                // workspace lock and broadcasts a
+                                                // snapshot to every client, so rate
+                                                // limit. 100% always goes through so
+                                                // a phase never appears to stall
+                                                // short of finishing.
+                                                let last: parking_lot::Mutex<Option<Instant>> =
+                                                    parking_lot::Mutex::new(None);
+                                                move |progress: okena_git::CloneProgress| {
+                                                    {
+                                                        let mut last = last.lock();
+                                                        let now = Instant::now();
+                                                        let due = progress.percent == 100
+                                                            || last.is_none_or(|at| {
+                                                                now.duration_since(at)
+                                                                    >= CLONE_PROGRESS_INTERVAL
+                                                            });
+                                                        if !due {
+                                                            return;
+                                                        }
+                                                        *last = Some(now);
+                                                    }
+                                                    let mut cx = DaemonWorkspaceCx::new(
+                                                        &workspace_tick,
+                                                        &hook_runner,
+                                                        &hook_monitor,
+                                                    );
+                                                    let mut ws = workspace.lock();
+                                                    if ws.set_creating_progress(
+                                                        &project_id,
+                                                        progress.summary(),
+                                                    ) {
+                                                        ws.notify_data(&mut cx);
+                                                    }
+                                                }
+                                            },
                                         ) {
                                             Ok(command) => command,
                                             Err(error) => {
@@ -6014,6 +6063,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         WorkspaceData {
             version: 1,
@@ -6371,6 +6421,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         WorkspaceData {
             version: 1,
@@ -7111,6 +7162,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         WorkspaceData {
             version: 1,
@@ -7353,6 +7405,7 @@ mod tests {
                 last_activity_at: None,
                 is_creating: false,
                 is_closing: false,
+                creating_progress: None,
             }
         };
         let parent = mk("p1", None, vec!["wt1".to_string()]);
@@ -8830,6 +8883,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         };
         let data = WorkspaceData {
             version: 1,

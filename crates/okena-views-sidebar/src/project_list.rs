@@ -33,7 +33,7 @@ pub enum ProjectRowStyle {
     Worktree {
         is_orphan: bool,
         is_busy: bool,
-        busy_label: &'static str,
+        busy_label: String,
     },
     /// Child under a group header: plain solid dot, no rename.
     GroupChild,
@@ -230,8 +230,8 @@ impl Sidebar {
             // 6. Busy label (Worktree busy only)
             .when(is_busy, |d| {
                 let label = match style {
-                    ProjectRowStyle::Worktree { busy_label, .. } => *busy_label,
-                    _ => "",
+                    ProjectRowStyle::Worktree { busy_label, .. } => busy_label.clone(),
+                    _ => String::new(),
                 };
                 d.child(
                     div()
@@ -491,9 +491,14 @@ impl Sidebar {
             }));
 
         let busy_label = if is_creating {
-            "Creating\u{2026}"
+            // Prefer git's own percentage: a clone can run for minutes, and a
+            // bare "Creating…" gives no way to tell it apart from a hang.
+            project
+                .creating_progress
+                .clone()
+                .unwrap_or_else(|| "Creating\u{2026}".to_string())
         } else {
-            "Closing\u{2026}"
+            "Closing\u{2026}".to_string()
         };
         self.append_project_row_content(
             row,

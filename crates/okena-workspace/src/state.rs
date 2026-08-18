@@ -1548,7 +1548,29 @@ impl Workspace {
         self.lifecycle.finish_creating(project_id);
         if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
             p.is_creating = false;
+            // Progress describes the operation, not the project: leaving the
+            // last percentage behind would keep claiming a clone is running.
+            p.creating_progress = None;
         }
+    }
+
+    /// Record how far the in-flight create for `project_id` has got, e.g.
+    /// `Receiving objects: 42%`.
+    ///
+    /// Returns whether anything actually changed, so a caller driven by a
+    /// chatty progress stream can skip broadcasting an identical snapshot.
+    /// Ignores a project that is no longer being created: progress lines are
+    /// delivered from a reader thread and can land after the operation ended,
+    /// and one arriving late must not resurrect the placeholder.
+    pub fn set_creating_progress(&mut self, project_id: &str, summary: String) -> bool {
+        let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) else {
+            return false;
+        };
+        if !p.is_creating || p.creating_progress.as_deref() == Some(summary.as_str()) {
+            return false;
+        }
+        p.creating_progress = Some(summary);
+        true
     }
 
     pub fn mark_worktree_removing(&mut self, path: &str) {
@@ -2610,6 +2632,7 @@ mod workspace_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 
@@ -3652,6 +3675,7 @@ mod gpui_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 

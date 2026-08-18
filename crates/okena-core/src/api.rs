@@ -370,6 +370,12 @@ pub struct ApiProject {
     /// closing".
     #[serde(default)]
     pub is_closing: bool,
+    /// How far the in-flight clone behind this project has got, e.g.
+    /// `Receiving objects: 42%`. Clients show it inside the creating
+    /// placeholder. serde-defaulted so older peers that omit it decode as
+    /// "creating, but no detail" rather than failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creating_progress: Option<String>,
 }
 
 /// Wire mirror of `okena_state::HookTerminalStatus` (which can't be referenced
@@ -1370,6 +1376,7 @@ mod tests {
                 },
                 is_creating: false,
                 is_closing: false,
+                creating_progress: None,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,

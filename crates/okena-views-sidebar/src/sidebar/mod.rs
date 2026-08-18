@@ -743,6 +743,10 @@ pub struct SidebarProjectInfo {
     pub is_closing: bool,
     /// True if this worktree is being created (git fetch + worktree add in progress)
     pub is_creating: bool,
+    /// How far the in-flight create has got, when it reports progress at all
+    /// (clones do, worktree checkouts do not). Replaces the generic
+    /// "Creating…" label so a long clone does not look stuck.
+    pub creating_progress: Option<String>,
     /// Whether this project is itself a worktree
     pub is_worktree: bool,
     /// Whether this project is pinned (shows a pin marker; drives the pinned
@@ -823,6 +827,7 @@ impl SidebarProjectInfo {
             // the user closed is a legitimate bookmark with layout None, and must
             // not render the "Setting up worktree…" placeholder.
             is_creating: project.is_creating,
+            creating_progress: project.creating_progress.clone(),
             is_worktree: project.worktree_info.is_some(),
             pinned: project.pinned,
         }

@@ -1121,6 +1121,7 @@ mod tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         });
         data.project_order.push(id.to_string());
         data.main_window.hidden_project_ids.insert(id.to_string());
