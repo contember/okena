@@ -34,8 +34,8 @@ pub use ci::{
     CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info, has_github_remote, list_pull_requests,
 };
 pub use clone::{
-    clone_dir_name, clone_repository, finish_clone_repository, start_clone_repository,
-    validate_clone_url,
+    clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
+    start_clone_repository, validate_clone_url,
 };
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,

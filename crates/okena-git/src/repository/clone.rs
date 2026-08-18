@@ -97,6 +97,20 @@ pub fn finish_clone_repository(handle: CommandHandle) -> GitResult<()> {
     require_success(handle.wait()?)
 }
 
+/// Whether a clone into `path` ran all the way to a checked-out commit.
+///
+/// `git clone` is not atomic: killed mid-fetch it leaves the target directory
+/// behind holding a `.git` whose HEAD points at a branch that does not exist
+/// yet. That wreckage is indistinguishable from a finished clone by existence
+/// alone, so startup recovery asks this instead — otherwise it promotes a
+/// repo with no files in it to a normal-looking project.
+///
+/// Resolving HEAD is the line between the two: git writes it only once the
+/// fetch has landed the branch it is about to check out.
+pub fn is_complete_checkout(path: &Path) -> bool {
+    gix::open(path).is_ok_and(|repo| repo.head_id().is_ok())
+}
+
 /// Submit and synchronously wait for `git clone <url> <target_path>`.
 pub fn clone_repository(url: &str, target_path: &Path) -> GitResult<()> {
     finish_clone_repository(start_clone_repository(url, target_path)?)
@@ -139,6 +153,37 @@ mod tests {
             validate_clone_url("  https://host/a.git ").ok(),
             Some("https://host/a.git")
         );
+    }
+
+    #[test]
+    fn an_interrupted_clone_is_not_mistaken_for_a_finished_one() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // A finished checkout: HEAD resolves.
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "a\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+        );
+        assert!(is_complete_checkout(&repo));
+
+        // What a clone killed mid-fetch leaves: a `.git` with an unborn HEAD.
+        let dir = std::env::temp_dir().join(format!("okena-partial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init"]);
+        assert!(
+            !is_complete_checkout(&dir),
+            "a repo with no commit is not a finished clone"
+        );
+
+        // Not a repo at all.
+        let plain = dir.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_complete_checkout(&plain));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
