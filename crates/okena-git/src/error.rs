@@ -80,6 +80,9 @@ fn git_failure_line(stderr: &str) -> Option<String> {
     })
 }
 
+/// Convenience alias for `Result<T, GitError>`.
+pub type GitResult<T> = Result<T, GitError>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +124,3 @@ mod tests {
         assert_eq!(err.user_detail(), "invalid repository URL: -x");
     }
 }
-
-/// Convenience alias for `Result<T, GitError>`.
-pub type GitResult<T> = Result<T, GitError>;
