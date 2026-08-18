@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use okena_core::process::{command, safe_output};
 
-use super::{head_branch_short, path_str, require_success};
+use super::{head_branch_short, network_command, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
 /// List all branches in a repository (local + remotes), deduplicating
@@ -192,7 +192,7 @@ pub fn discard_file_changes(repo_path: &Path, file_path: &str) -> GitResult<()> 
 /// Fetch from all remotes.
 pub fn fetch_all(path: &Path) -> GitResult<()> {
     let p = path_str(path)?;
-    let output = safe_output(command("git").args(["-C", p, "fetch", "--all"]))?;
+    let output = safe_output(network_command().args(["-C", p, "fetch", "--all"]))?;
     require_success(output)
 }
 
@@ -225,7 +225,7 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     let p = path_str(repo_path)?;
     let output =
-        safe_output(command("git").args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
+        safe_output(network_command().args(["-C", p, "push", "origin", "--delete", "--", branch]))?;
     require_success(output)
 }
 
@@ -233,7 +233,7 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "push", "origin", "--", branch]))?;
+    let output = safe_output(network_command().args(["-C", p, "push", "origin", "--", branch]))?;
     require_success(output)
 }
 
