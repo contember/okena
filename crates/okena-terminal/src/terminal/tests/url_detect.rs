@@ -417,3 +417,25 @@ fn detect_url_uuid_continuation_with_trailing_prose() {
         links
     );
 }
+
+#[test]
+fn detect_url_not_extended_across_a_trailing_dash() {
+    // The URL is followed by " —" on its own row, so it never reached the
+    // layout edge and the row break is a word break.  Reproduces Claude
+    // Code's PR line: "PR: https://…/pull/564 —" / "fix/agent-ops-digest".
+    let links = detect_urls_in(
+        "  - PR: https://github.com/contember/webmaster/pull/564 \u{2014}\r\n    fix/agent-ops-digest-active-sessions\r\n",
+        80,
+    );
+    let url_links: Vec<&DetectedLink> = links.iter().filter(|l| l.is_url).collect();
+    assert_eq!(
+        url_links.len(),
+        1,
+        "Branch name on the next line must not be absorbed: {:?}",
+        links
+    );
+    assert_eq!(
+        url_links[0].text,
+        "https://github.com/contember/webmaster/pull/564"
+    );
+}

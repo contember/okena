@@ -302,24 +302,11 @@ impl Terminal {
                 let match_row_text = read_row(m_line);
                 let match_rtrimmed = match_row_text.trim_end();
 
-                // URL must reach near the end of visible content.
-                // TUIs may use a narrower layout than the terminal width.
-                let trimmed_char_len = match_rtrimmed.chars().count();
-                if m_col + m_len + 3 < trimmed_char_len {
-                    idx = next_idx;
-                    continue;
-                }
-
-                // No alphabetic text after the URL (prose context).
-                let url_end_pos = m_col + m_len;
-                let suffix_byte = match_rtrimmed
-                    .char_indices()
-                    .nth(url_end_pos)
-                    .map_or(match_rtrimmed.len(), |(b, _)| b);
-                if match_rtrimmed[suffix_byte..]
-                    .chars()
-                    .any(|c| c.is_alphabetic())
-                {
+                // A mid-token wrap runs the URL into the layout edge, so the
+                // URL is the last thing on its row.  Anything after it — a
+                // dash, a bracket, prose — means the row had room left and the
+                // break was a word break, not a wrap.
+                if match_rtrimmed.chars().count() != m_col + m_len {
                     idx = next_idx;
                     continue;
                 }
@@ -439,13 +426,9 @@ impl Terminal {
                         break;
                     }
 
-                    // Continue only if extension fills to near end of
-                    // visible content on this row.
-                    let next_trimmed_len = next_rtrimmed.chars().count();
-                    if indent + ext_char_len + 3 < next_trimmed_len {
-                        break;
-                    }
-                    if !remaining.is_empty() && remaining.chars().any(|c| c.is_alphanumeric()) {
+                    // Same rule one row down: the URL keeps going only if it
+                    // reached this row's edge too.
+                    if !remaining.is_empty() {
                         break;
                     }
 
