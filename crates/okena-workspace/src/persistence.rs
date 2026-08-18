@@ -2490,13 +2490,35 @@ mod tests {
         );
     }
 
+    /// Lay down what a finished `git clone` leaves: a repo whose HEAD resolves.
+    fn init_checked_out_repo(path: &std::path::Path) {
+        std::fs::create_dir_all(path).expect("create repo dir");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                status.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(path.join("file.txt"), "a\n").expect("write file");
+        git(&["add", "."]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"]);
+    }
+
     #[test]
     fn sync_worktrees_finishes_mid_create_clone_when_target_exists() {
-        let checkout = std::env::temp_dir().join(format!(
-            "okena-clone-recovery-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&checkout).expect("create clone target");
+        let checkout =
+            std::env::temp_dir().join(format!("okena-clone-recovery-{}", uuid::Uuid::new_v4()));
+        init_checked_out_repo(&checkout);
         let mut clone = make_project("clone1");
         clone.path = checkout.to_string_lossy().into_owned();
         clone.layout = None;
@@ -2518,15 +2540,46 @@ mod tests {
             !clone.is_creating,
             "completed clone clears its stale marker"
         );
-        std::fs::remove_dir(checkout).expect("remove clone target");
+        std::fs::remove_dir_all(checkout).expect("remove clone target");
+    }
+
+    /// A clone killed mid-fetch leaves the directory behind with an unborn
+    /// HEAD. Existence alone would promote that empty repo to a normal
+    /// project, hiding a broken checkout behind a working-looking row.
+    #[test]
+    fn sync_worktrees_discards_a_clone_interrupted_mid_fetch() {
+        let wreckage =
+            std::env::temp_dir().join(format!("okena-partial-clone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&wreckage).expect("create clone target");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&wreckage)
+            .args(["init", "-q"])
+            .output()
+            .expect("run git init");
+        assert!(status.status.success());
+
+        let mut clone = make_project("clone1");
+        clone.path = wreckage.to_string_lossy().into_owned();
+        clone.layout = None;
+        clone.is_creating = true;
+
+        let mut data = make_workspace(vec![clone], vec!["clone1"], vec![]);
+        sync_worktrees(&mut data);
+
+        assert!(
+            data.projects.is_empty(),
+            "a half-cloned repo is discarded, not finished"
+        );
+        assert!(data.project_order.is_empty());
+
+        std::fs::remove_dir_all(wreckage).expect("remove clone target");
     }
 
     #[test]
     fn sync_worktrees_removes_mid_create_clone_when_target_is_missing() {
-        let missing = std::env::temp_dir().join(format!(
-            "okena-missing-clone-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("okena-missing-clone-{}", uuid::Uuid::new_v4()));
         let mut clone = make_project("clone1");
         clone.path = missing.to_string_lossy().into_owned();
         clone.layout = None;
@@ -2545,10 +2598,8 @@ mod tests {
 
     #[test]
     fn sync_worktrees_preserves_missing_plain_project_not_being_created() {
-        let missing = std::env::temp_dir().join(format!(
-            "okena-missing-bookmark-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("okena-missing-bookmark-{}", uuid::Uuid::new_v4()));
         let mut project = make_project("bookmark");
         project.path = missing.to_string_lossy().into_owned();
         project.layout = None;

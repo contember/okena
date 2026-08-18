@@ -100,13 +100,11 @@ pub(super) fn clone_project(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let target = match okena_workspace::actions::project::resolve_clone_target(
-        &parent_dir,
-        &directory,
-    ) {
-        Ok(target) => target,
-        Err(error) => return ActionResult::Err(error),
-    };
+    let target =
+        match okena_workspace::actions::project::resolve_clone_target(&parent_dir, &directory) {
+            Ok(target) => target,
+            Err(error) => return ActionResult::Err(error),
+        };
     let name = okena_workspace::actions::project::clone_project_name(&name, &directory);
     if let Err(error) = okena_git::clone_repository(&url, &target) {
         return ActionResult::Err(error.to_string());

@@ -358,9 +358,13 @@ impl Workspace {
 
         let id = uuid::Uuid::new_v4().to_string();
         let layout = with_terminal.then(LayoutNode::new_terminal);
-        self.data
-            .projects
-            .push(new_project_row(id.clone(), name, path, layout, default_shell));
+        self.data.projects.push(new_project_row(
+            id.clone(),
+            name,
+            path,
+            layout,
+            default_shell,
+        ));
         self.data.project_order.push(id.clone());
         self.data.add_project_hide_in_other_windows(&id, window_id);
         self.notify_data(cx);
@@ -422,12 +426,12 @@ impl Workspace {
         #[cfg(windows)]
         {
             if project.default_shell.is_none() {
-                project.default_shell =
-                    okena_terminal::shell_config::parse_wsl_unc_path(&project.path).map(
-                        |(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
-                            distro: Some(distro),
-                        },
-                    );
+                project.default_shell = okena_terminal::shell_config::parse_wsl_unc_path(
+                    &project.path,
+                )
+                .map(|(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
+                    distro: Some(distro),
+                });
             }
         }
         self.notify_data(cx);
@@ -461,7 +465,6 @@ impl Workspace {
         }
         self.data.delete_project_scrub_all_windows(project_id);
     }
-
 
     /// Remove hook terminal state restored without a matching live PTY.
     ///
@@ -3830,7 +3833,10 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let project = ws.project(&id).expect("project exists");
-            assert!(project.layout.is_some(), "layout seeded once the dir exists");
+            assert!(
+                project.layout.is_some(),
+                "layout seeded once the dir exists"
+            );
             assert!(!project.is_creating);
         });
     }

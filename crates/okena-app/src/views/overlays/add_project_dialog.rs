@@ -82,11 +82,9 @@ impl AddProjectDialog {
         let name_input =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
         let path_input = cx.new(PathAutoCompleteState::new);
-        let url_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("https://github.com/user/repo.git")
-        });
-        let directory_input =
-            cx.new(|cx| SimpleInputState::new(cx).placeholder("Folder name..."));
+        let url_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("https://github.com/user/repo.git"));
+        let directory_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Folder name..."));
 
         // Typing a URL fills in the directory and the name; editing the
         // directory keeps the name in step. Subscribed to the change event, not
@@ -576,8 +574,7 @@ impl Render for AddProjectDialog {
                             .when(is_git, |d| {
                                 d.child(labeled_input("Repository URL:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.url_input)
-                                            .text_size(ui_text_md(cx)),
+                                        SimpleInput::new(&self.url_input).text_size(ui_text_md(cx)),
                                     ),
                                 ))
                             })
@@ -605,12 +602,14 @@ impl Render for AddProjectDialog {
                             )
                             // Target directory name (git source only)
                             .when(is_git, |d| {
-                                d.child(labeled_input("Folder name:", &t).child(
-                                    input_container(&t, None).child(
-                                        SimpleInput::new(&self.directory_input)
-                                            .text_size(ui_text_md(cx)),
+                                d.child(
+                                    labeled_input("Folder name:", &t).child(
+                                        input_container(&t, None).child(
+                                            SimpleInput::new(&self.directory_input)
+                                                .text_size(ui_text_md(cx)),
+                                        ),
                                     ),
-                                ))
+                                )
                             })
                             // Name input
                             .child(labeled_input("Name:", &t).child(
