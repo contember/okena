@@ -3,14 +3,17 @@
 
 use super::{BranchKind, BranchNavItem, BranchPickerStatus, GitHeader};
 
+use std::cmp::Reverse;
+
 use okena_core::theme::ThemeColors;
-use okena_git::BranchList;
+use okena_git::{BranchDetail, BranchList, UpstreamState};
 use okena_ui::simple_input::SimpleInput;
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 
 impl GitHeader {
@@ -317,17 +320,21 @@ impl GitHeader {
             _ => None,
         };
 
-        let row = |name: String,
-                   is_current: bool,
+        let row = |item: &BranchNavItem,
                    is_selected: bool,
-                   kind: BranchKind,
                    key: String,
                    cx: &mut Context<Self>|
          -> AnyElement {
+            let BranchNavItem {
+                name,
+                kind,
+                is_current,
+                detail,
+            } = item.clone();
             let name_for_click = name.clone();
             let is_remote = kind == BranchKind::Remote;
             h_flex()
-                .id(ElementId::Name(key.into()))
+                .id(ElementId::Name(key.clone().into()))
                 .px(px(10.0))
                 .py(px(4.0))
                 .gap(px(6.0))
@@ -358,16 +365,21 @@ impl GitHeader {
                         .min_w_0()
                         .text_ellipsis()
                         .overflow_hidden()
+                        // Without this a name with a `/` wraps to a second line
+                        // instead of truncating, and the meta column jumps.
+                        .whitespace_nowrap()
                         .child(name),
                 )
                 .when(is_current, |d| {
                     d.child(
                         div()
+                            .flex_shrink_0()
                             .text_size(ui_text_sm(cx))
                             .text_color(rgb(t.term_cyan))
                             .child("HEAD"),
                     )
                 })
+                .children(branch_meta(&detail, kind, &key, t, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
@@ -391,7 +403,7 @@ impl GitHeader {
                 v_flex()
                     .id("branch-picker-popover")
                     .occlude()
-                    .w(px(320.0))
+                    .w(px(420.0))
                     .max_h(px(420.0))
                     .bg(rgb(t.bg_primary))
                     .border_1()
@@ -496,10 +508,8 @@ impl GitHeader {
                             .iter()
                             .map(|(flat, b)| {
                                 row(
-                                    b.name.clone(),
-                                    b.is_current,
+                                    b,
                                     *flat == selected,
-                                    BranchKind::Local,
                                     format!("branch-picker-row-{}", flat),
                                     cx,
                                 )
@@ -509,10 +519,8 @@ impl GitHeader {
                             .iter()
                             .map(|(flat, b)| {
                                 row(
-                                    b.name.clone(),
-                                    false,
+                                    b,
                                     *flat == selected,
-                                    BranchKind::Remote,
                                     format!("branch-picker-row-{}", flat),
                                     cx,
                                 )
@@ -624,15 +632,27 @@ impl GitHeader {
 /// Build the flat, display-ordered nav list from a loaded branch list and a
 /// lowercased filter string: locals first, then remotes.
 ///
-/// The current branch leads the LOCAL section — it is what users scan for, and
-/// putting it on top also makes it the default keyboard selection. The rest
-/// keep git's ordering.
+/// Within each section the most recently committed branch comes first, which
+/// is the order people actually work in; branches with no reported tip time
+/// (older hosts, metadata unavailable) sink to the bottom of their section.
+/// The current branch overrides that and leads the LOCAL section — it is what
+/// users scan for, and putting it on top also makes it the default keyboard
+/// selection.
 fn branch_nav_items(list: &BranchList, filter: &str) -> Vec<BranchNavItem> {
     let is_current = |b: &str| list.current.as_deref() == Some(b);
     let matches = |b: &str| filter.is_empty() || b.to_lowercase().contains(filter);
+    let detail = |b: &str| list.details.get(b).cloned().unwrap_or_default();
+    let tip_time = |b: &str| {
+        list.details
+            .get(b)
+            .and_then(|d| d.committed_at)
+            .unwrap_or(i64::MIN)
+    };
 
     let mut local: Vec<&String> = list.local.iter().collect();
-    local.sort_by_key(|b| !is_current(b));
+    local.sort_by_key(|b| (!is_current(b), Reverse(tip_time(b))));
+    let mut remote: Vec<&String> = list.remote.iter().collect();
+    remote.sort_by_key(|b| Reverse(tip_time(b)));
 
     local
         .into_iter()
@@ -641,18 +661,160 @@ fn branch_nav_items(list: &BranchList, filter: &str) -> Vec<BranchNavItem> {
             name: b.clone(),
             kind: BranchKind::Local,
             is_current: is_current(b),
+            detail: detail(b),
         })
         .chain(
-            list.remote
-                .iter()
+            remote
+                .into_iter()
                 .filter(|b| matches(b))
                 .map(|b| BranchNavItem {
                     name: b.clone(),
                     kind: BranchKind::Remote,
                     is_current: false,
+                    detail: detail(b),
                 }),
         )
         .collect()
+}
+
+/// Right-hand metadata cluster for a branch row: the worktree holding the
+/// branch, how it sits against its upstream, and how recently it moved.
+///
+/// Each part is omitted when it has nothing to say, so an ordinary in-sync
+/// branch shows only its age. Upstream state is local-only — a remote ref does
+/// not track anything.
+fn branch_meta(
+    detail: &BranchDetail,
+    kind: BranchKind,
+    key: &str,
+    t: &ThemeColors,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let mut parts: Vec<AnyElement> = Vec::new();
+
+    // A branch checked out elsewhere cannot be checked out here — git refuses
+    // it — so name the worktree before the user tries.
+    if let Some(path) = detail.worktree.as_deref() {
+        let tooltip = format!("Checked out in {path}");
+        let label = path
+            .rsplit(['/', '\\'])
+            .find(|part| !part.is_empty())
+            .unwrap_or(path)
+            .to_string();
+        parts.push(
+            h_flex()
+                .id(ElementId::Name(format!("{key}-worktree").into()))
+                .flex_shrink_0()
+                .gap(px(3.0))
+                .items_center()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.term_yellow))
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(9.0))
+                        .text_color(rgb(t.term_yellow)),
+                )
+                .child(
+                    div()
+                        .max_w(px(70.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                )
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .into_any_element(),
+        );
+    }
+
+    if kind == BranchKind::Local {
+        match &detail.upstream {
+            UpstreamState::Untracked => parts.push(
+                div()
+                    .id(ElementId::Name(format!("{key}-untracked").into()))
+                    .flex_shrink_0()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("local")
+                    .tooltip(|window, cx| {
+                        Tooltip::new("No upstream — never pushed").build(window, cx)
+                    })
+                    .into_any_element(),
+            ),
+            UpstreamState::Gone => parts.push(
+                div()
+                    .id(ElementId::Name(format!("{key}-gone").into()))
+                    .flex_shrink_0()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.term_red))
+                    .child("gone")
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Upstream branch no longer exists on the remote")
+                            .build(window, cx)
+                    })
+                    .into_any_element(),
+            ),
+            UpstreamState::Tracked {
+                name,
+                ahead,
+                behind,
+            } => {
+                let (ahead, behind) = (*ahead, *behind);
+                if ahead > 0 || behind > 0 {
+                    let tooltip = {
+                        let mut lines = Vec::new();
+                        if ahead > 0 {
+                            lines.push(format!("{ahead} ahead of {name}"));
+                        }
+                        if behind > 0 {
+                            lines.push(format!("{behind} behind {name}"));
+                        }
+                        lines.join("\n")
+                    };
+                    parts.push(
+                        h_flex()
+                            .id(ElementId::Name(format!("{key}-track").into()))
+                            .flex_shrink_0()
+                            .gap(px(4.0))
+                            .items_center()
+                            .text_size(ui_text_sm(cx))
+                            .when(ahead > 0, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(rgb(t.term_green))
+                                        .child(format!("\u{2191}{ahead}")),
+                                )
+                            })
+                            .when(behind > 0, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(rgb(t.term_yellow))
+                                        .child(format!("\u{2193}{behind}")),
+                                )
+                            })
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(timestamp) = detail.committed_at {
+        parts.push(
+            div()
+                .flex_shrink_0()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(okena_git::format_relative_time(timestamp))
+                .into_any_element(),
+        );
+    }
+
+    parts
 }
 
 /// Map a flat selection index (local-first) to its child position within the
@@ -676,14 +838,44 @@ fn branch_row_child_index(local_count: usize, selected: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchKind, BranchList, branch_nav_items, branch_row_child_index};
+    use super::{BranchDetail, BranchKind, BranchList, branch_nav_items, branch_row_child_index};
 
+    /// Build a list whose branches carry no metadata — the pre-metadata host
+    /// case, where display order falls back to git's ref order.
     fn list(current: Option<&str>, local: &[&str], remote: &[&str]) -> BranchList {
         BranchList {
             local: local.iter().map(|s| s.to_string()).collect(),
             remote: remote.iter().map(|s| s.to_string()).collect(),
             current: current.map(|s| s.to_string()),
+            details: Default::default(),
         }
+    }
+
+    /// Same, with a tip timestamp per branch name.
+    fn list_with_times(
+        current: Option<&str>,
+        local: &[(&str, i64)],
+        remote: &[(&str, i64)],
+    ) -> BranchList {
+        let mut list = list(
+            current,
+            &local.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            &remote.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        );
+        list.details = local
+            .iter()
+            .chain(remote)
+            .map(|(name, at)| {
+                (
+                    name.to_string(),
+                    BranchDetail {
+                        committed_at: Some(*at),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        list
     }
 
     fn rows(items: &[super::BranchNavItem]) -> Vec<(&str, BranchKind, bool)> {
@@ -730,6 +922,47 @@ mod tests {
             vec![
                 ("main", BranchKind::Local, false),
                 ("origin/Main-2", BranchKind::Remote, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn sections_are_ordered_by_recency_behind_the_current_branch() {
+        let items = branch_nav_items(
+            &list_with_times(
+                Some("feature"),
+                &[("main", 300), ("feature", 100), ("wip", 200)],
+                &[("origin/old", 50), ("origin/new", 400)],
+            ),
+            "",
+        );
+        assert_eq!(
+            rows(&items),
+            vec![
+                // Current branch wins over its older tip time.
+                ("feature", BranchKind::Local, true),
+                ("main", BranchKind::Local, false),
+                ("wip", BranchKind::Local, false),
+                ("origin/new", BranchKind::Remote, false),
+                ("origin/old", BranchKind::Remote, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn branches_without_a_tip_time_sink_below_dated_ones() {
+        let mut list = list_with_times(None, &[("dated", 100)], &[]);
+        list.local.push("undated".to_string());
+        // Git's ref order puts `undated` last anyway, so check the reverse too.
+        list.local.reverse();
+
+        let items = branch_nav_items(&list, "");
+
+        assert_eq!(
+            rows(&items),
+            vec![
+                ("dated", BranchKind::Local, false),
+                ("undated", BranchKind::Local, false),
             ]
         );
     }

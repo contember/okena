@@ -2,6 +2,7 @@
 //! plus default-branch resolution, rebase, merge, stash, and per-file
 //! stage/unstage/discard.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -249,6 +250,164 @@ pub struct BranchList {
     pub remote: Vec<String>,
     /// Current HEAD branch name (`None` if detached).
     pub current: Option<String>,
+    /// Per-branch metadata, keyed by the same names used in `local`/`remote`.
+    /// Empty when the metadata pass failed, or when it comes from a remote host
+    /// that predates this field — consumers must treat a missing entry as
+    /// "unknown" and still show the branch.
+    #[serde(default)]
+    pub details: HashMap<String, BranchDetail>,
+}
+
+/// What a branch picker can show beside the name: how recently the branch
+/// moved, how it sits against its upstream, and whether another worktree holds
+/// it. Collected for every branch in one [`collect_branch_details`] pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchDetail {
+    /// Committer time of the branch tip, as a Unix timestamp.
+    #[serde(default)]
+    pub committed_at: Option<i64>,
+    /// How the branch sits against its configured upstream.
+    #[serde(default)]
+    pub upstream: UpstreamState,
+    /// Worktree holding this branch, when it is not the one we are asking
+    /// from. Checking such a branch out fails, so the UI can say why up front.
+    #[serde(default)]
+    pub worktree: Option<String>,
+}
+
+/// A branch's relation to its configured upstream ref.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamState {
+    /// No upstream configured — the branch exists only locally.
+    #[default]
+    Untracked,
+    /// The upstream ref is configured but no longer exists on the remote.
+    Gone,
+    /// Tracking `name`, `ahead`/`behind` commits apart from it. Both zero
+    /// means in sync.
+    Tracked {
+        name: String,
+        ahead: usize,
+        behind: usize,
+    },
+}
+
+/// One line per branch: `<short name> <tip time> <upstream> <track> <worktree> <HEAD marker>`,
+/// tab-separated. Tabs cannot appear in a ref name, and git emits none inside
+/// these fields.
+const DETAIL_FORMAT: &str = concat!(
+    "%(refname:short)\t",
+    "%(committerdate:unix)\t",
+    "%(upstream:short)\t",
+    "%(upstream:track)\t",
+    "%(worktreepath)\t",
+    "%(HEAD)"
+);
+
+/// Collect [`BranchDetail`] for every branch in a single `git for-each-ref`.
+///
+/// One subprocess beats a per-branch `gix` rev-walk by a wide margin here: git
+/// answers ahead/behind for every ref off its own commit-graph in a single
+/// pass (~10ms for ~70 refs). Soft-fails to an empty map — the branch list is
+/// still usable without metadata, e.g. against a git too old for
+/// `%(worktreepath)` (< 2.23).
+fn collect_branch_details(path: &Path) -> HashMap<String, BranchDetail> {
+    let Ok(p) = path_str(path) else {
+        return HashMap::new();
+    };
+    // `LC_ALL=C` keeps `%(upstream:track)` in English; git translates it, and
+    // the counts are parsed back out of that text below.
+    let output = safe_output(command("git").env("LC_ALL", "C").args([
+        "-C",
+        p,
+        "for-each-ref",
+        "--format",
+        DETAIL_FORMAT,
+        "refs/heads",
+        "refs/remotes",
+    ]));
+    match output {
+        Ok(output) if output.status.success() => {
+            parse_branch_details(&String::from_utf8_lossy(&output.stdout))
+        }
+        Ok(output) => {
+            log::warn!(
+                "git for-each-ref failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            HashMap::new()
+        }
+        Err(error) => {
+            log::warn!("git for-each-ref failed for {}: {error}", path.display());
+            HashMap::new()
+        }
+    }
+}
+
+/// Parse the [`DETAIL_FORMAT`] output. Short lines are skipped rather than
+/// failing the whole map — a branch without metadata still lists fine.
+fn parse_branch_details(stdout: &str) -> HashMap<String, BranchDetail> {
+    let mut map = HashMap::new();
+    for line in stdout.lines() {
+        let mut fields = line.split('\t');
+        let (Some(name), Some(time), Some(upstream), Some(track), Some(worktree), Some(head)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        map.insert(
+            name.to_string(),
+            BranchDetail {
+                committed_at: time.parse().ok(),
+                upstream: parse_upstream_track(upstream, track),
+                // The worktree we are asking from is where a checkout lands
+                // anyway; only another one blocks it.
+                worktree: (head.trim() != "*" && !worktree.is_empty())
+                    .then(|| worktree.to_string()),
+            },
+        );
+    }
+    map
+}
+
+/// Turn `%(upstream:short)` + `%(upstream:track)` into an [`UpstreamState`].
+///
+/// `track` is empty both for a branch without an upstream and for one in sync
+/// with it, which is why the upstream name is read alongside it. Otherwise it
+/// reads `[gone]`, `[ahead N]`, `[behind N]` or `[ahead N, behind M]`.
+fn parse_upstream_track(upstream: &str, track: &str) -> UpstreamState {
+    if upstream.is_empty() {
+        return UpstreamState::Untracked;
+    }
+    let inner = track.trim().trim_start_matches('[').trim_end_matches(']');
+    if inner == "gone" {
+        return UpstreamState::Gone;
+    }
+    let mut ahead = 0;
+    let mut behind = 0;
+    for part in inner.split(',') {
+        let mut words = part.split_whitespace();
+        match (words.next(), words.next().and_then(|n| n.parse().ok())) {
+            (Some("ahead"), Some(n)) => ahead = n,
+            (Some("behind"), Some(n)) => behind = n,
+            _ => {}
+        }
+    }
+    UpstreamState::Tracked {
+        name: upstream.to_string(),
+        ahead,
+        behind,
+    }
 }
 
 /// List branches classified into local vs. remote.
@@ -299,6 +458,7 @@ pub fn list_branches_classified(path: &Path) -> BranchList {
         current: head_branch_short(&repo),
         local,
         remote,
+        details: collect_branch_details(path),
     }
 }
 
@@ -364,6 +524,110 @@ pub fn create_and_checkout_branch(
 mod tests {
     use super::*;
     use crate::repository::status::get_current_branch;
+
+    /// Sample `for-each-ref` output in [`DETAIL_FORMAT`]: current branch,
+    /// a branch held by another worktree, one whose upstream is gone, and a
+    /// remote-only ref.
+    const SAMPLE: &str = concat!(
+        "main\t1700000000\torigin/main\t[behind 3]\t/repo\t*\n",
+        "feature\t1699000000\torigin/feature\t[ahead 2, behind 1]\t/repo/../wt-feature\t \n",
+        "stale\t1698000000\torigin/stale\t[gone]\t\t \n",
+        "local-only\t1697000000\t\t\t\t \n",
+        "origin/release\t1696000000\t\t\t\t \n",
+    );
+
+    #[test]
+    fn parses_tracking_counts_and_recency() {
+        let details = parse_branch_details(SAMPLE);
+
+        assert_eq!(
+            details["main"],
+            BranchDetail {
+                committed_at: Some(1700000000),
+                upstream: UpstreamState::Tracked {
+                    name: "origin/main".to_string(),
+                    ahead: 0,
+                    behind: 3,
+                },
+                // HEAD marker set: this is our own worktree, not a blocker.
+                worktree: None,
+            }
+        );
+        assert_eq!(
+            details["feature"].upstream,
+            UpstreamState::Tracked {
+                name: "origin/feature".to_string(),
+                ahead: 2,
+                behind: 1,
+            }
+        );
+        assert_eq!(
+            details["feature"].worktree.as_deref(),
+            Some("/repo/../wt-feature")
+        );
+    }
+
+    #[test]
+    fn parses_missing_and_gone_upstreams() {
+        let details = parse_branch_details(SAMPLE);
+
+        assert_eq!(details["stale"].upstream, UpstreamState::Gone);
+        assert_eq!(details["local-only"].upstream, UpstreamState::Untracked);
+        assert_eq!(details["origin/release"].upstream, UpstreamState::Untracked);
+        assert_eq!(details["origin/release"].committed_at, Some(1696000000));
+    }
+
+    #[test]
+    fn in_sync_branch_is_tracked_not_untracked() {
+        // Empty `%(upstream:track)` means either "no upstream" or "in sync";
+        // the upstream name is what tells them apart.
+        let details = parse_branch_details("main\t1700000000\torigin/main\t\t\t*\n");
+        assert_eq!(
+            details["main"].upstream,
+            UpstreamState::Tracked {
+                name: "origin/main".to_string(),
+                ahead: 0,
+                behind: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn short_and_empty_lines_are_skipped() {
+        let details = parse_branch_details("broken-line\t1700000000\n\nmain\t1\t\t\t\t*\n");
+        assert!(!details.contains_key("broken-line"));
+        assert!(details.contains_key("main"));
+    }
+
+    #[test]
+    fn classified_list_carries_details_from_real_git() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().expect("utf-8 path"),
+                "-b",
+                "feat",
+            ],
+        );
+
+        let list = list_branches_classified(&repo);
+
+        let main = &list.details["main"];
+        assert!(main.committed_at.is_some_and(|t| t > 0));
+        // No remote in a temp repo, so nothing tracks anything.
+        assert_eq!(main.upstream, UpstreamState::Untracked);
+        assert_eq!(main.worktree, None, "our own worktree must not be flagged");
+        assert!(
+            list.details["feat"].worktree.is_some(),
+            "a branch held by another worktree must report its path"
+        );
+    }
+
     use crate::repository::test_support::{git_in, init_temp_repo};
     use std::path::PathBuf;
 

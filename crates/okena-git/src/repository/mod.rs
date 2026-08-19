@@ -24,9 +24,9 @@ pub mod status;
 pub mod worktree;
 
 pub use branch::{
-    BranchList, checkout_local_branch, checkout_remote_branch, create_and_checkout_branch,
-    delete_local_branch, delete_remote_branch, discard_file_changes, fetch_all,
-    get_available_branches_for_worktree, get_default_branch, list_branches,
+    BranchDetail, BranchList, UpstreamState, checkout_local_branch, checkout_remote_branch,
+    create_and_checkout_branch, delete_local_branch, delete_remote_branch, discard_file_changes,
+    fetch_all, get_available_branches_for_worktree, get_default_branch, list_branches,
     list_branches_classified, merge_branch, push_branch, rebase_onto, resolve_base_ref,
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
