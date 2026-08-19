@@ -47,6 +47,65 @@ fn highlighted_code_line(
     build_styled_text_with_backgrounds(spans, &bg_ranges)
 }
 
+/// Emphasis a word token inherits from the inline elements enclosing it.
+///
+/// Inline elements are flattened into one wrapping row rather than nested into
+/// containers: a container holding a run that wraps measures as a full-width
+/// box, so whatever follows it starts on a new line instead of continuing the
+/// current one. Emphasis rides down to the tokens instead.
+#[derive(Clone, Copy, Default)]
+struct InlineStyle {
+    bold: bool,
+    italic: bool,
+    link: bool,
+}
+
+impl InlineStyle {
+    fn apply(self, el: Div, c: &MdColors) -> Div {
+        el.when(self.bold, |el| el.font_weight(FontWeight::BOLD))
+            .when(self.italic, |el| el.italic())
+            .when(self.link, |el| el.text_color(rgb(c.link)).underline())
+    }
+}
+
+/// Split a text run into word tokens, each keeping its trailing whitespace.
+///
+/// One element per word is what lets the row wrap between words. Leading
+/// whitespace becomes its own token, so a break there leaves the space behind
+/// on the previous line.
+fn word_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = 0usize;
+    let mut prev_ws = false;
+    for (i, ch) in text.char_indices() {
+        let ws = ch.is_whitespace();
+        if prev_ws && !ws && i > start {
+            tokens.push(&text[start..i]);
+            start = i;
+        }
+        prev_ws = ws;
+    }
+    if start < text.len() {
+        tokens.push(&text[start..]);
+    }
+    tokens
+}
+
+/// Narrow a character selection range to the `len` characters at `offset`.
+fn sub_selection(
+    selection: Option<(usize, usize)>,
+    offset: usize,
+    len: usize,
+) -> Option<(usize, usize)> {
+    selection.and_then(|(s, e)| {
+        if e <= offset || s >= offset + len {
+            None
+        } else {
+            Some((s.saturating_sub(offset), (e - offset).min(len)))
+        }
+    })
+}
+
 impl MarkdownDocument {
     /// Number of top-level blocks in the document. Each maps to one list item.
     pub fn node_count(&self) -> usize {
@@ -657,31 +716,14 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
     ) -> Div {
         let mut elements: Vec<Div> = Vec::new();
-        let mut offset = 0usize;
-
-        for inline in inlines {
-            let inline_len = match inline {
-                Inline::Text(text) => char_len(text),
-                Inline::Code(code) => char_len(code),
-                Inline::Bold(children) | Inline::Italic(children) => {
-                    Self::inlines_text_length(children)
-                }
-                Inline::Link { children, .. } => Self::inlines_text_length(children),
-            };
-
-            let inline_sel = selection.and_then(|(s, e)| {
-                if e <= offset || s >= offset + inline_len {
-                    None
-                } else {
-                    Some((s.saturating_sub(offset), (e - offset).min(inline_len)))
-                }
-            });
-
-            elements.push(Self::render_inline_with_selection(
-                inline, t, cx, inline_sel,
-            ));
-            offset += inline_len;
-        }
+        Self::push_inlines(
+            inlines,
+            InlineStyle::default(),
+            t,
+            cx,
+            selection,
+            &mut elements,
+        );
 
         div()
             .flex()
@@ -699,31 +741,72 @@ impl MarkdownDocument {
             .children(elements)
     }
 
-    /// Render a single inline element with selection.
-    fn render_inline_with_selection(
-        inline: &Inline,
+    /// Text length of one inline element, in characters.
+    fn inline_text_length(inline: &Inline) -> usize {
+        match inline {
+            Inline::Text(text) => char_len(text),
+            Inline::Code(code) => char_len(code),
+            Inline::Bold(children) | Inline::Italic(children) => {
+                Self::inlines_text_length(children)
+            }
+            Inline::Link { children, .. } => Self::inlines_text_length(children),
+        }
+    }
+
+    /// Flatten inline elements into `out`, handing each one the slice of the
+    /// selection range that falls inside it.
+    fn push_inlines(
+        inlines: &[Inline],
+        style: InlineStyle,
         t: &ThemeColors,
         cx: &App,
         selection: Option<(usize, usize)>,
-    ) -> Div {
+        out: &mut Vec<Div>,
+    ) {
+        let mut offset = 0usize;
+        for inline in inlines {
+            let len = Self::inline_text_length(inline);
+            let inline_sel = sub_selection(selection, offset, len);
+            Self::push_inline(inline, style, t, cx, inline_sel, out);
+            offset += len;
+        }
+    }
+
+    /// Append one inline element to `out`: text as word tokens, code as a chip,
+    /// emphasis as style handed down to the tokens inside it.
+    fn push_inline(
+        inline: &Inline,
+        style: InlineStyle,
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        out: &mut Vec<Div>,
+    ) {
         let selection_bg = rgba(0x3390ff40);
         let c = MdColors::new(t);
 
         match inline {
             Inline::Text(text) => {
-                if let Some((start, end)) = selection {
-                    let (before, selected, after) = slice_by_chars(text, start, end);
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .child(div().min_w_0().child(before))
-                        .child(div().min_w_0().bg(selection_bg).child(selected))
-                        .child(div().min_w_0().child(after))
-                } else {
-                    // `min-width: 0` lets a long run shrink to the column width
-                    // and wrap inside it. On `min-width: auto` the run keeps its
-                    // unwrapped width and paints past the edge of the column.
-                    div().min_w_0().child(text.clone())
+                let mut offset = 0usize;
+                for token in word_tokens(text) {
+                    let token_len = char_len(token);
+                    let el = match sub_selection(selection, offset, token_len) {
+                        Some((start, end)) => {
+                            let (before, selected, after) = slice_by_chars(token, start, end);
+                            div()
+                                .flex()
+                                .min_w_0()
+                                .child(div().min_w_0().child(before))
+                                .child(div().min_w_0().bg(selection_bg).child(selected))
+                                .child(div().min_w_0().child(after))
+                        }
+                        // `min-width: 0` lets one very long word (a bare URL,
+                        // say) shrink to the column width and wrap inside it
+                        // instead of painting past the edge.
+                        None => div().min_w_0().child(token.to_string()),
+                    };
+                    out.push(style.apply(el, &c));
+                    offset += token_len;
                 }
             }
             Inline::Code(code) => {
@@ -737,86 +820,52 @@ impl MarkdownDocument {
                         .bg(rgb(c.inline_code_bg))
                         .text_color(rgb(c.body))
                 };
-                if let Some((start, end)) = selection {
-                    let (before, selected, after) = slice_by_chars(code, start, end);
-                    chip(div())
-                        .flex()
-                        .child(div().child(before))
-                        .child(div().bg(selection_bg).child(selected))
-                        .child(div().child(after))
-                } else {
-                    chip(div()).child(code.clone())
-                }
+                let el = match selection {
+                    Some((start, end)) => {
+                        let (before, selected, after) = slice_by_chars(code, start, end);
+                        chip(div())
+                            .flex()
+                            .child(div().child(before))
+                            .child(div().bg(selection_bg).child(selected))
+                            .child(div().child(after))
+                    }
+                    None => chip(div()).child(code.clone()),
+                };
+                out.push(style.apply(el, &c));
             }
-            Inline::Bold(children) => {
-                let mut container = div().font_weight(FontWeight::BOLD).flex().flex_wrap();
-                let mut offset = 0usize;
-                for child in children {
-                    let child_len = match child {
-                        Inline::Text(t) => char_len(t),
-                        Inline::Code(c) => char_len(c),
-                        Inline::Bold(ch) | Inline::Italic(ch) => Self::inlines_text_length(ch),
-                        Inline::Link { children: ch, .. } => Self::inlines_text_length(ch),
-                    };
-                    let child_sel = selection.and_then(|(s, e)| {
-                        if e <= offset || s >= offset + child_len {
-                            None
-                        } else {
-                            Some((s.saturating_sub(offset), (e - offset).min(child_len)))
-                        }
-                    });
-                    container = container
-                        .child(Self::render_inline_with_selection(child, t, cx, child_sel));
-                    offset += child_len;
-                }
-                container
-            }
-            Inline::Italic(children) => {
-                let mut container = div().italic().flex().flex_wrap();
-                let mut offset = 0usize;
-                for child in children {
-                    let child_len = match child {
-                        Inline::Text(t) => char_len(t),
-                        Inline::Code(c) => char_len(c),
-                        Inline::Bold(ch) | Inline::Italic(ch) => Self::inlines_text_length(ch),
-                        Inline::Link { children: ch, .. } => Self::inlines_text_length(ch),
-                    };
-                    let child_sel = selection.and_then(|(s, e)| {
-                        if e <= offset || s >= offset + child_len {
-                            None
-                        } else {
-                            Some((s.saturating_sub(offset), (e - offset).min(child_len)))
-                        }
-                    });
-                    container = container
-                        .child(Self::render_inline_with_selection(child, t, cx, child_sel));
-                    offset += child_len;
-                }
-                container
-            }
-            Inline::Link { children, .. } => {
-                let mut container = div().text_color(rgb(c.link)).underline().flex().flex_wrap();
-                let mut offset = 0usize;
-                for child in children {
-                    let child_len = match child {
-                        Inline::Text(t) => char_len(t),
-                        Inline::Code(c) => char_len(c),
-                        Inline::Bold(ch) | Inline::Italic(ch) => Self::inlines_text_length(ch),
-                        Inline::Link { children: ch, .. } => Self::inlines_text_length(ch),
-                    };
-                    let child_sel = selection.and_then(|(s, e)| {
-                        if e <= offset || s >= offset + child_len {
-                            None
-                        } else {
-                            Some((s.saturating_sub(offset), (e - offset).min(child_len)))
-                        }
-                    });
-                    container = container
-                        .child(Self::render_inline_with_selection(child, t, cx, child_sel));
-                    offset += child_len;
-                }
-                container
-            }
+            Inline::Bold(children) => Self::push_inlines(
+                children,
+                InlineStyle {
+                    bold: true,
+                    ..style
+                },
+                t,
+                cx,
+                selection,
+                out,
+            ),
+            Inline::Italic(children) => Self::push_inlines(
+                children,
+                InlineStyle {
+                    italic: true,
+                    ..style
+                },
+                t,
+                cx,
+                selection,
+                out,
+            ),
+            Inline::Link { children, .. } => Self::push_inlines(
+                children,
+                InlineStyle {
+                    link: true,
+                    ..style
+                },
+                t,
+                cx,
+                selection,
+                out,
+            ),
         }
     }
 
