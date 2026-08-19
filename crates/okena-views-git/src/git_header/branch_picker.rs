@@ -83,29 +83,7 @@ impl GitHeader {
     /// and on every filter-input change.
     pub(super) fn recompute_branch_filtered(&mut self, cx: &mut Context<Self>) {
         let filter = self.branch_picker_filter.read(cx).value().to_lowercase();
-        let current = self.branch_picker_list.current.clone();
-        let matches = |b: &String| filter.is_empty() || b.to_lowercase().contains(&filter);
-
-        let mut items = Vec::new();
-        for b in &self.branch_picker_list.local {
-            if matches(b) {
-                items.push(BranchNavItem {
-                    name: b.clone(),
-                    kind: BranchKind::Local,
-                    is_current: current.as_deref() == Some(b.as_str()),
-                });
-            }
-        }
-        for b in &self.branch_picker_list.remote {
-            if matches(b) {
-                items.push(BranchNavItem {
-                    name: b.clone(),
-                    kind: BranchKind::Remote,
-                    is_current: false,
-                });
-            }
-        }
-        self.branch_picker_filtered = items;
+        self.branch_picker_filtered = branch_nav_items(&self.branch_picker_list, &filter);
         self.branch_picker_selected = 0;
         self.branch_picker_scroll.scroll_to_item(0);
     }
@@ -643,6 +621,40 @@ impl GitHeader {
     }
 }
 
+/// Build the flat, display-ordered nav list from a loaded branch list and a
+/// lowercased filter string: locals first, then remotes.
+///
+/// The current branch leads the LOCAL section — it is what users scan for, and
+/// putting it on top also makes it the default keyboard selection. The rest
+/// keep git's ordering.
+fn branch_nav_items(list: &BranchList, filter: &str) -> Vec<BranchNavItem> {
+    let is_current = |b: &str| list.current.as_deref() == Some(b);
+    let matches = |b: &str| filter.is_empty() || b.to_lowercase().contains(filter);
+
+    let mut local: Vec<&String> = list.local.iter().collect();
+    local.sort_by_key(|b| !is_current(b));
+
+    local
+        .into_iter()
+        .filter(|b| matches(b))
+        .map(|b| BranchNavItem {
+            name: b.clone(),
+            kind: BranchKind::Local,
+            is_current: is_current(b),
+        })
+        .chain(
+            list.remote
+                .iter()
+                .filter(|b| matches(b))
+                .map(|b| BranchNavItem {
+                    name: b.clone(),
+                    kind: BranchKind::Remote,
+                    is_current: false,
+                }),
+        )
+        .collect()
+}
+
 /// Map a flat selection index (local-first) to its child position within the
 /// scroll container, so `ScrollHandle::scroll_to_item` lands on the right row.
 ///
@@ -664,7 +676,63 @@ fn branch_row_child_index(local_count: usize, selected: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::branch_row_child_index;
+    use super::{BranchKind, BranchList, branch_nav_items, branch_row_child_index};
+
+    fn list(current: Option<&str>, local: &[&str], remote: &[&str]) -> BranchList {
+        BranchList {
+            local: local.iter().map(|s| s.to_string()).collect(),
+            remote: remote.iter().map(|s| s.to_string()).collect(),
+            current: current.map(|s| s.to_string()),
+        }
+    }
+
+    fn rows(items: &[super::BranchNavItem]) -> Vec<(&str, BranchKind, bool)> {
+        items
+            .iter()
+            .map(|b| (b.name.as_str(), b.kind, b.is_current))
+            .collect()
+    }
+
+    #[test]
+    fn current_branch_leads_the_local_section() {
+        let items = branch_nav_items(&list(Some("feature"), &["main", "feature", "wip"], &[]), "");
+        assert_eq!(
+            rows(&items),
+            vec![
+                ("feature", BranchKind::Local, true),
+                ("main", BranchKind::Local, false),
+                ("wip", BranchKind::Local, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn remotes_follow_locals_and_detached_head_keeps_order() {
+        let items = branch_nav_items(&list(None, &["main", "wip"], &["origin/release"]), "");
+        assert_eq!(
+            rows(&items),
+            vec![
+                ("main", BranchKind::Local, false),
+                ("wip", BranchKind::Local, false),
+                ("origin/release", BranchKind::Remote, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_matches_case_insensitively_and_drops_the_current_branch() {
+        let items = branch_nav_items(
+            &list(Some("feature"), &["main", "feature"], &["origin/Main-2"]),
+            "main",
+        );
+        assert_eq!(
+            rows(&items),
+            vec![
+                ("main", BranchKind::Local, false),
+                ("origin/Main-2", BranchKind::Remote, false),
+            ]
+        );
+    }
 
     #[test]
     fn child_index_within_local_section() {
