@@ -75,6 +75,30 @@ impl GitHeader {
         .detach();
     }
 
+    /// Open the commit log popover pointed at `branch`, without checking it
+    /// out — the "look before you switch" path out of the branch picker.
+    ///
+    /// Seeds the popover's own branch dropdown from the picker's list, which
+    /// is already loaded, so this costs one commit-graph fetch and no more.
+    pub(super) fn show_branch_history(&mut self, branch: String, cx: &mut Context<Self>) {
+        let branches = self
+            .branch_picker_list
+            .local
+            .iter()
+            .chain(&self.branch_picker_list.remote)
+            .cloned()
+            .collect();
+        self.hide_branch_picker(cx);
+        self.commit_log_branches = branches;
+        self.commit_log_compare_mode = false;
+        self.commit_log_compare_base = None;
+        self.commit_log_compare_head = None;
+        self.commit_log_picker_target = BranchPickerTarget::Graph;
+        self.commit_log_visible = true;
+        self.diff_popover_visible = false;
+        self.switch_commit_log_branch(Some(branch), cx);
+    }
+
     fn switch_commit_log_branch(&mut self, branch: Option<String>, cx: &mut Context<Self>) {
         self.commit_log_branch = branch.clone();
         self.commit_log_branch_picker = false;

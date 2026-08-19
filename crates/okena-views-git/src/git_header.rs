@@ -67,6 +67,18 @@ struct BranchNavItem {
     detail: BranchDetail,
 }
 
+/// State for the context menu on a branch row in the picker. Captured when
+/// the menu opens so it survives the list being refiltered underneath it.
+pub(super) struct BranchRowContextMenu {
+    pub(super) position: Point<Pixels>,
+    pub(super) name: String,
+    /// Comparing the current branch with itself has nothing to show, so the
+    /// compare item is disabled for it.
+    pub(super) is_current: bool,
+    /// Keyboard-highlighted item, as an index into `BRANCH_ROW_ACTIONS`.
+    pub(super) selected: usize,
+}
+
 /// State for the right-click context menu on a commit row in the graph.
 /// Captured once at open time so the menu doesn't need a live reference
 /// back to the underlying `CommitLogEntry`.
@@ -131,6 +143,11 @@ pub struct GitHeader {
     /// selected row in view.
     branch_picker_scroll: ScrollHandle,
     branch_picker_create_mode: bool,
+    /// Open context menu for one branch row, if any.
+    pub(super) branch_row_menu: Option<BranchRowContextMenu>,
+    /// On-screen bounds of the keyboard-selected row, so the menu key can
+    /// anchor the menu under it the same way a right-click does.
+    branch_row_bounds: Bounds<Pixels>,
     branch_picker_create_name: Entity<SimpleInputState>,
     branch_picker_status: BranchPickerStatus,
 
@@ -207,6 +224,8 @@ impl GitHeader {
             branch_picker_selected: 0,
             branch_picker_scroll: ScrollHandle::new(),
             branch_picker_create_mode: false,
+            branch_row_menu: None,
+            branch_row_bounds: Bounds::default(),
             branch_picker_create_name,
             branch_picker_status: BranchPickerStatus::Idle,
             ci_checks_visible: false,

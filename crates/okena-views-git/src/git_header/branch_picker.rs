@@ -1,15 +1,17 @@
 //! Branch switcher popover — filter/select a local or remote branch, or
 //! create a new one from the current HEAD.
 
-use super::{BranchKind, BranchNavItem, BranchPickerStatus, GitHeader};
+use super::{BranchKind, BranchNavItem, BranchPickerStatus, BranchRowContextMenu, GitHeader};
 
 use std::cmp::Reverse;
 
 use okena_core::theme::ThemeColors;
+use okena_core::types::DiffMode;
 use okena_git::{BranchDetail, BranchList, UpstreamState};
 use okena_ui::simple_input::SimpleInput;
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
+use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -140,6 +142,7 @@ impl GitHeader {
         self.branch_picker_visible = false;
         self.branch_picker_create_mode = false;
         self.branch_picker_status = BranchPickerStatus::Idle;
+        self.branch_row_menu = None;
         // Restore the previously-focused terminal so typing resumes there.
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
@@ -257,6 +260,148 @@ impl GitHeader {
         .detach();
     }
 
+    /// Open the row context menu for `item`, anchored at `position`.
+    fn open_branch_row_menu(
+        &mut self,
+        item: &BranchNavItem,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.branch_row_menu = Some(BranchRowContextMenu {
+            position,
+            name: item.name.clone(),
+            is_current: item.is_current,
+            selected: 0,
+        });
+        cx.notify();
+    }
+
+    /// Open the row menu for the keyboard-selected branch, anchored under it
+    /// so it lands where a right-click on that row would have put it.
+    fn open_selected_branch_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .branch_picker_filtered
+            .get(self.branch_picker_selected)
+            .cloned()
+        else {
+            return;
+        };
+        let bounds = self.branch_row_bounds;
+        let position = point(
+            bounds.origin.x + px(24.0),
+            bounds.origin.y + bounds.size.height,
+        );
+        self.open_branch_row_menu(&item, position, cx);
+    }
+
+    /// Open a three-dot diff of `branch` against the current one, without
+    /// checking anything out. Base is the current branch, so the diff reads as
+    /// "what `branch` adds" — the same orientation as the commit log's compare.
+    fn compare_branch_with_current(&mut self, branch: String, cx: &mut Context<Self>) {
+        let base = self
+            .current_branch
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string());
+        let project_id = self.project_id.clone();
+        self.hide_branch_picker(cx);
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                OverlayRequest::Project(ProjectOverlay {
+                    project_id,
+                    kind: ProjectOverlayKind::DiffViewer {
+                        file: None,
+                        mode: Some(DiffMode::BranchCompare { base, head: branch }),
+                        commit_message: None,
+                        commits: None,
+                        commit_index: None,
+                    },
+                }),
+                cx,
+            );
+        });
+    }
+
+    /// Move the menu selection by `delta`, stepping past items this row
+    /// disables so Enter always lands on something that runs.
+    fn move_branch_menu_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(menu) = self.branch_row_menu.as_mut() else {
+            return;
+        };
+        menu.selected = next_menu_index(menu.selected, delta, menu.is_current);
+        cx.notify();
+    }
+
+    /// Run one row action against the branch the menu was opened on, and close
+    /// the menu. A no-op for an action this row disables.
+    fn run_branch_row_action(&mut self, action: BranchRowAction, cx: &mut Context<Self>) {
+        let Some(menu) = self.branch_row_menu.as_ref() else {
+            return;
+        };
+        if !action.is_enabled(menu.is_current) {
+            return;
+        }
+        let branch = menu.name.clone();
+        self.branch_row_menu = None;
+        match action {
+            BranchRowAction::History => self.show_branch_history(branch, cx),
+            BranchRowAction::Compare => self.compare_branch_with_current(branch, cx),
+            BranchRowAction::CopyName => {
+                cx.write_to_clipboard(ClipboardItem::new_string(branch));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Render the context menu for a branch row. Returns `None` when no menu
+    /// is open.
+    fn render_branch_row_menu(
+        &self,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use okena_ui::menu::{context_menu_panel, menu_item_conditional};
+
+        let menu = self.branch_row_menu.as_ref()?;
+        let position = menu.position;
+        let is_current = menu.is_current;
+        let selected = menu.selected;
+
+        let mut panel = context_menu_panel("branch-row-context-menu", t).on_mouse_down_out(
+            cx.listener(|this, _, _, cx| {
+                this.branch_row_menu = None;
+                cx.notify();
+            }),
+        );
+        for (index, action) in BRANCH_ROW_ACTIONS.iter().enumerate() {
+            let action = *action;
+            let enabled = action.is_enabled(is_current);
+            panel = panel.child(
+                menu_item_conditional(
+                    ElementId::Name(format!("branch-row-ctx-{}", action.id()).into()),
+                    action.icon(),
+                    action.label(),
+                    enabled,
+                    t,
+                )
+                // Same highlight as the picker's own selected row, so keyboard
+                // focus reads the same in both.
+                .when(index == selected, |d| {
+                    d.bg(with_alpha(t.border_active, 0.15))
+                })
+                .when(enabled, |d| {
+                    d.on_click(
+                        cx.listener(move |this, _, _, cx| this.run_branch_row_action(action, cx)),
+                    )
+                }),
+            );
+        }
+
+        Some(
+            deferred(anchored().position(position).snap_to_window().child(panel))
+                .into_any_element(),
+        )
+    }
+
     /// Render the branch switcher popover anchored under the branch chip.
     /// Returns a zero-size element when the popover is hidden.
     pub fn render_branch_picker(
@@ -332,6 +477,7 @@ impl GitHeader {
                 detail,
             } = item.clone();
             let name_for_click = name.clone();
+            let item_for_menu = item.clone();
             let is_remote = kind == BranchKind::Remote;
             h_flex()
                 .id(ElementId::Name(key.clone().into()))
@@ -380,9 +526,32 @@ impl GitHeader {
                     )
                 })
                 .children(branch_meta(&detail, kind, &key, t, cx))
+                .when(is_selected, |d| {
+                    // Feed the keyboard-selected row's bounds back so the menu
+                    // key can anchor under it. Assigned without notifying —
+                    // this runs every layout pass.
+                    let entity = cx.entity().clone();
+                    d.relative().child(
+                        canvas(
+                            move |bounds, _window, app| {
+                                entity.update(app, |this, _| this.branch_row_bounds = bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.open_branch_row_menu(&item_for_menu, event.position, cx);
+                        cx.stop_propagation();
+                    }),
+                )
                 .on_click(cx.listener(move |this, _, _window, cx| {
                     this.checkout_branch(name_for_click.clone(), kind, cx);
                 }))
@@ -398,7 +567,7 @@ impl GitHeader {
                 .child(label)
         };
 
-        deferred(
+        let popover = deferred(
             anchored().position(position).snap_to_window().child(
                 v_flex()
                     .id("branch-picker-popover")
@@ -439,7 +608,38 @@ impl GitHeader {
                             }
                             return;
                         }
+                        // An open row menu takes the keys until it closes.
+                        if this.branch_row_menu.is_some() {
+                            match key {
+                                "escape" => {
+                                    this.branch_row_menu = None;
+                                    cx.notify();
+                                }
+                                "up" => this.move_branch_menu_selection(-1, cx),
+                                "down" => this.move_branch_menu_selection(1, cx),
+                                "enter" => {
+                                    if let Some(action) = this
+                                        .branch_row_menu
+                                        .as_ref()
+                                        .map(|menu| BRANCH_ROW_ACTIONS[menu.selected])
+                                    {
+                                        this.run_branch_row_action(action, cx);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
                         match key {
+                            "menu" => {
+                                this.open_selected_branch_menu(cx);
+                                cx.stop_propagation();
+                            }
+                            "f10" if event.keystroke.modifiers.shift => {
+                                this.open_selected_branch_menu(cx);
+                                cx.stop_propagation();
+                            }
                             "up" => {
                                 this.select_prev_branch(cx);
                                 cx.stop_propagation();
@@ -624,8 +824,75 @@ impl GitHeader {
                             }),
                     ),
             ),
-        )
-        .into_any_element()
+        );
+
+        // Mount the row menu as a sibling so it overlays the popover —
+        // `Deferred` takes a single child, so the pair needs a parent div.
+        div()
+            .child(popover)
+            .when_some(self.render_branch_row_menu(t, cx), |d, menu| d.child(menu))
+            .into_any_element()
+    }
+}
+
+/// What the row context menu offers, in menu order. All three work without
+/// checking the branch out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchRowAction {
+    History,
+    Compare,
+    CopyName,
+}
+
+const BRANCH_ROW_ACTIONS: [BranchRowAction; 3] = [
+    BranchRowAction::History,
+    BranchRowAction::Compare,
+    BranchRowAction::CopyName,
+];
+
+/// Step the menu selection by `delta`, skipping items disabled for this row
+/// and stopping at the ends. Returns `current` when nothing selectable lies
+/// that way.
+fn next_menu_index(current: usize, delta: isize, is_current: bool) -> usize {
+    let count = BRANCH_ROW_ACTIONS.len() as isize;
+    let mut index = current as isize;
+    for _ in 0..count {
+        index = (index + delta).clamp(0, count - 1);
+        if BRANCH_ROW_ACTIONS[index as usize].is_enabled(is_current) {
+            return index as usize;
+        }
+    }
+    current
+}
+
+impl BranchRowAction {
+    fn id(self) -> &'static str {
+        match self {
+            Self::History => "history",
+            Self::Compare => "compare",
+            Self::CopyName => "copy",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::History => "icons/git-commit.svg",
+            Self::Compare => "icons/git-pull-request.svg",
+            Self::CopyName => "icons/copy.svg",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::History => "Show History",
+            Self::Compare => "Compare with Current",
+            Self::CopyName => "Copy Branch Name",
+        }
+    }
+
+    /// Comparing the current branch against itself would diff nothing.
+    fn is_enabled(self, is_current: bool) -> bool {
+        !(self == Self::Compare && is_current)
     }
 }
 
@@ -838,7 +1105,10 @@ fn branch_row_child_index(local_count: usize, selected: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchDetail, BranchKind, BranchList, branch_nav_items, branch_row_child_index};
+    use super::{
+        BranchDetail, BranchKind, BranchList, BranchRowAction, branch_nav_items,
+        branch_row_child_index, next_menu_index,
+    };
 
     /// Build a list whose branches carry no metadata — the pre-metadata host
     /// case, where display order falls back to git's ref order.
@@ -965,6 +1235,22 @@ mod tests {
                 ("undated", BranchKind::Local, false),
             ]
         );
+    }
+
+    #[test]
+    fn menu_navigation_stops_at_the_ends() {
+        // [History, Compare, Copy] — all selectable on a non-current branch.
+        assert_eq!(next_menu_index(0, 1, false), 1);
+        assert_eq!(next_menu_index(2, 1, false), 2);
+        assert_eq!(next_menu_index(0, -1, false), 0);
+    }
+
+    #[test]
+    fn menu_navigation_skips_compare_on_the_current_branch() {
+        assert!(!BranchRowAction::Compare.is_enabled(true));
+        // Down from History lands on Copy, not the disabled Compare.
+        assert_eq!(next_menu_index(0, 1, true), 2);
+        assert_eq!(next_menu_index(2, -1, true), 0);
     }
 
     #[test]
