@@ -139,7 +139,7 @@ impl WorkspaceData {
 
     /// Apply the multi-window new-project visibility rule.
     ///
-    /// PRD `plans/multi-window.md` user story 14: "I want to add a project
+    /// ADR `docs/decisions/0002-window-as-viewport.md`: "I want to add a project
     /// from any window so that the project lands in that window only
     /// (visible there, hidden everywhere else by default)." Walks
     /// `main_window` plus every entry in `extra_windows` and inserts

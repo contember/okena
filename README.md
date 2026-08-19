@@ -118,8 +118,8 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 - Both integrations are opt-in via settings toggles
 
 ### Remote Control & Companion Apps
-- **Remote API** - Local HTTP/WebSocket server for remote terminal control (see `docs/remote.md`)
-- **Mobile app** - React Native companion app for Android/iOS over the Rust core via uniffi (see `docs/mobile-status.md`, code in `mobile/rn`)
+- **Remote API** - Local HTTP/WebSocket server for remote terminal control (see `docs/reference/remote.md`)
+- **Mobile app** - React Native companion app for Android/iOS over the Rust core via uniffi (see `docs/reference/mobile.md`, code in `mobile/rn`)
 - **Web client** - Browser-based terminal access via built-in web UI
 - **Secure pairing** - HMAC-SHA256 token auth with rate-limited pairing codes
 
@@ -191,12 +191,12 @@ Settings are stored in the platform's config directory (macOS: `~/Library/Applic
 
 | Guide | Description |
 |-------|-------------|
-| [Configuration](docs/configuration.md) | Settings, keybindings, custom themes, per-project overrides |
-| [Lifecycle Hooks](docs/hooks.md) | Hook terminals, git hooks, environment variables |
-| [Project Services](docs/services.md) | okena.yaml, Docker Compose integration, auto-restart |
-| [Git Worktrees](docs/worktrees.md) | Worktree management, sync watcher, path templates |
-| [Remote Control API](docs/remote.md) | HTTP/WebSocket API, pairing, authentication |
-| [Mobile Client](docs/mobile-status.md) | React Native (uniffi) mobile companion app |
+| [Configuration](docs/reference/configuration.md) | Settings, keybindings, custom themes, per-project overrides |
+| [Lifecycle Hooks](docs/reference/hooks.md) | Hook terminals, git hooks, environment variables |
+| [Project Services](docs/reference/services.md) | okena.yaml, Docker Compose integration, auto-restart |
+| [Git Worktrees](docs/reference/worktrees.md) | Worktree management, sync watcher, path templates |
+| [Remote Control API](docs/reference/remote.md) | HTTP/WebSocket API, pairing, authentication |
+| [Mobile Client](docs/reference/mobile.md) | React Native (uniffi) mobile companion app |
 
 ## Dependencies
 

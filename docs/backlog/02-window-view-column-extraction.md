@@ -1,9 +1,15 @@
-# RootView god object — remaining column/scroll extraction
+---
+id: 02
+title: WindowView column/scroll extraction
+blocked-by: []
+---
+
+# 02 — WindowView god object: column/scroll extraction
 
 - **Severity:** Medium (architecture)
 - **Type:** refactor
-- **Area:** `src/` (desktop app)
-- **Location:** `src/views/root/mod.rs` (`sync_project_columns` ~669-809, `project_columns` map), `render.rs:100` (`render_projects_grid`)
+- **Area:** `okena-app` (desktop app)
+- **Location:** `crates/okena-app/src/views/window/mod.rs` (`sync_project_columns`, `project_columns` map), `crates/okena-app/src/views/window/render.rs` (`render_projects_grid`)
 
 ## Done
 
@@ -16,7 +22,7 @@ snapshots the connection entity and delegates).
 
 ## Remaining (deferred — behavior-sensitive)
 
-`RootView` is still a large struct, and two coupled concerns remain in the view:
+`WindowView` (renamed from `RootView`) is still a large struct, and two coupled concerns remain in the view:
 
 - **`ProjectColumnManager` extraction**: the `project_columns` map plus
   `sync_project_columns` (and `create_remote_column` / `create_local_column`).
@@ -24,7 +30,7 @@ snapshots the connection entity and delegates).
   `remote_manager` / `git_watcher` / `service_manager` / `backend` and call
   `build_git_provider`, so a clean extraction must thread those dependencies.
 - **Drive column sync from the workspace observer, not `render`**:
-  `render_projects_grid` (render.rs:100) mutates state during render
+  `render_projects_grid` mutates state during render
   (`pending_center_scroll.take()`, entity creation, `prune_pane_map`, re-queued
   `cx.notify()`). The center-scroll logic deliberately runs *during* a render pass
   after layout has reported overflow (`max_offset > 0`), deferring across frames —

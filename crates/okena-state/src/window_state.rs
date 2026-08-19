@@ -3,7 +3,7 @@
 //! A `WindowState` is the filter/UI state for one window onto the shared
 //! workspace: which projects are hidden in this window, the active folder
 //! filter, per-project column widths, sidebar folder-collapse map, and OS
-//! window bounds. Pure data — see PRD `plans/multi-window.md`.
+//! window bounds. Pure data — see ADR `docs/decisions/0002-window-as-viewport.md`.
 
 use okena_core::types::SplitDirection;
 use serde::{Deserialize, Serialize};

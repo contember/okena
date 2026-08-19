@@ -4,7 +4,8 @@
 //! (`WorkspaceData.main_window`); `WindowId::Extra(_)` addresses an entry in
 //! `WorkspaceData.extra_windows`. The `Main` variant carries no payload because
 //! the main slot is a compile-time invariant — there is exactly one main window
-//! and closing it quits the app. See PRD `plans/multi-window.md`.
+//! and closing it quits the app. See ADR
+//! `docs/decisions/0002-window-as-viewport.md`.
 
 use uuid::Uuid;
 

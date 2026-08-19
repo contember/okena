@@ -1,28 +1,21 @@
-# Maintenance backlog
+# backlog
 
-Findings from the 2026-05-20 maintenance review (large files, Rust bad practices,
-god classes, concurrency, render-path perf, clippy). One markdown per issue.
+Decided work items ("issues") not yet scheduled into a sprint. One self-contained
+file per item: `NN-<slug>.md` (zero-padded, **folder-local** sequence — don't
+renumber, gaps are fine). Copy [`_template.md`](_template.md).
 
-The first maintenance sprint resolved 10 of the original items (diff scrollbar
-char-width, file-viewer render-thread I/O, updater orchestration, the workspace
-clippy gate, PtyHandle Drop, dtach kill SAFETY/TOCTOU docs, shared SyntaxSet,
-cached-file-viewer eviction, swallowed save error, and worktree stash_pop
-recovery toasts). The items below remain.
+**No `status:` field** — an item is alive because it lives here. It leaves by being
+**deleted** on ship (default; git holds the record) or moved to `../archive/` if it
+documents something a future reader needs. Dependencies go in frontmatter:
+`blocked-by: [./NN-other.md]`.
 
-## High
+Add scope sub-folders (`security/`, `perf/`, …) only once the flat list gets
+unwieldy; numbers stay folder-local.
 
-- [Markdown preview: virtualization (remaining)](markdown-preview-rerender-and-virtualization.md) — perf, per-frame/per-pixel waste fixed
+## Items
 
-## Medium
+<!-- one line each: NN — short summary (link). Keep it short. -->
 
-- [RootView god object — remaining column/scroll extraction](rootview-god-object-and-remote-sync.md) — refactor, remote-sync extracted
-
-## Low
-
-
-## Context
-
-Overall the codebase is in good shape: god-objects were previously decomposed by
-composition, error handling in git/auth is disciplined, async work runs off the main
-thread, and there is essentially no TODO/FIXME debt. The remaining items are
-structural debt concentrated in four oversized files plus a couple of concrete bugs.
+- 01 — [Markdown preview virtualization](01-markdown-preview-virtualization.md) — perf; blocked on a selection model that survives virtualization.
+- 02 — [WindowView column/scroll extraction](02-window-view-column-extraction.md) — refactor; needs dependency threading + a new scroll anchor.
+- 03 — [Daemon/client parity follow-ups](03-daemon-parity-follow-ups.md) — 2 verified open, 2 flagged; all need a live session.

@@ -5,7 +5,8 @@
 //! is the consumer side that detects new entries and opens an OS window per
 //! entry, instantiating a fresh `WindowView` keyed by the new
 //! `WindowId::Extra(uuid)` so each window gets its own per-window UI state
-//! (sidebar, focus, overlays). PRD ref: `plans/multi-window.md`'s "Okena
+//! (sidebar, focus, overlays). ADR ref:
+//! `docs/decisions/0002-window-as-viewport.md`'s "Okena
 //! coordinator" + "Lifecycle and runtime -> Spawn flow" sections.
 //!
 //! Cascade-offset bounds are seeded by `Workspace::spawn_extra_window` at

@@ -1,5 +1,20 @@
 # Full Headless Mode — Migration Roadmap
 
+> **OUTCOME — shipped 2026-06-29.** The migration is complete: the desktop is
+> always a thin client of a daemon it spawns, the in-process local path is
+> deleted, and the standalone `okena-daemon` binary links no GPUI
+> (`cargo tree -i gpui -p okena-daemon` is empty). Phases 0/1a-c/A/B/D1-3/E/F all
+> landed — the commit map is in §3.
+>
+> **This document is history and is not maintained.** §4-§10 are the *original
+> forward plan* and were never rewritten after the work shipped — in particular
+> §10 still recommends starting at Phase A, which is long done. Ignore them as
+> guidance.
+>
+> - The durable *why* → [ADR-0001](../decisions/0001-headless-two-process-daemon.md)
+> - Live follow-ups → [backlog 03](../backlog/03-daemon-parity-follow-ups.md)
+> - Rollback point → tag `pre-daemon-flip-2026-06-25` (commit `a45aacbb`)
+
 Status doc for the migration from Okena's single-process "local + mirrored-remote"
 architecture to a **two-process** model: a headless **daemon** that owns all state,
 PTYs, logic and persistence, and **thin UI clients** (desktop, web, mobile, remote)

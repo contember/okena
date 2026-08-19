@@ -4,7 +4,7 @@ The **React Native** mobile client: the UI layer over the shared Rust core
 (`crates/okena-mobile-ffi`, exposed to TypeScript via uniffi/ubrn), with a native
 `react-native-skia` terminal renderer (**no `xterm.js`**). This replaces the retired Flutter
 app; the migration plan is [`../RN_MIGRATION.md`](../RN_MIGRATION.md) and the architecture
-overview is [`../../docs/mobile-status.md`](../../docs/mobile-status.md).
+overview is [`../../docs/reference/mobile.md`](../../docs/reference/mobile.md).
 
 ## What's here
 

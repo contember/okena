@@ -4,7 +4,7 @@ Remote terminal client for Android/iOS. RN UI over the shared Rust core
 (`crates/okena-mobile-ffi`, exposed via uniffi/ubrn as a JSI TurboModule). Native terminal
 rendering with `react-native-skia` — **no `xterm.js`**. Replaced the retired Flutter app.
 
-Architecture overview: `../../docs/mobile-status.md`. Migration plan: `../RN_MIGRATION.md`.
+Architecture overview: `../../docs/reference/mobile.md`. Migration plan: `../RN_MIGRATION.md`.
 
 ## Commands
 

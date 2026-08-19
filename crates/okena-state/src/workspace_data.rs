@@ -1600,7 +1600,7 @@ mod tests {
 
     #[test]
     fn spawn_extra_window_starts_with_every_current_project_hidden() {
-        // PRD `plans/multi-window.md` line 26: "I want a new window to start
+        // ADR `docs/decisions/0002-window-as-viewport.md`: "I want a new window to start
         // empty (no project columns visible) so that I can deliberately
         // curate what goes in it without inheriting noise from elsewhere."
         // Implementation: snapshot every current project ID into the new

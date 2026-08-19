@@ -12,7 +12,7 @@ over REST + WebSocket.
 > Migration note: this app replaced an earlier Flutter + `flutter_rust_bridge` client. The binding
 > generator and UI were swapped (`flutter_rust_bridge` → uniffi, Dart widgets → RN components); the
 > protocol, TLS, reconnect and ANSI emulation in `okena-core` were reused unchanged. See
-> [`mobile/RN_MIGRATION.md`](../mobile/RN_MIGRATION.md) for the full plan and rationale.
+> [`mobile/RN_MIGRATION.md`](../../mobile/RN_MIGRATION.md) for the full plan and rationale.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ over REST + WebSocket.
          │           HTTP + WebSocket
          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Okena Desktop — remote server (src/remote/)                 │
+│  Okena Desktop — remote server (okena-remote-server)         │
 │  ├── POST /v1/pair       → code → bearer token               │
 │  ├── GET  /v1/state      → workspace snapshot (JSON)         │
 │  ├── POST /v1/actions    → send_text, split, close, resize…  │
@@ -148,7 +148,7 @@ Desktop uses the same `RemoteClient<H>` with `DesktopConnectionHandler`; mobile 
 ~60 `#[uniffi::export]` functions. Cheap getters on the render hot path are **sync** JSI host
 functions; anything that crosses the wire / awaits a server response is **async** (JS Promise, via
 `#[uniffi::export(async_runtime = "tokio")]`). The full contract — and the TypeScript shape ubrn
-emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../mobile/rn/src/native/okena.ts). Highlights:
+emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../../mobile/rn/src/native/okena.ts). Highlights:
 
 | Function | Sync/async | Description |
 |----------|------------|-------------|

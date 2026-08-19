@@ -1,4 +1,10 @@
-# Markdown preview: virtualization (remaining)
+---
+id: 01
+title: Markdown preview virtualization
+blocked-by: []
+---
+
+# 01 — Markdown preview: virtualization
 
 - **Severity:** Medium (perf) — downgraded from High after the per-frame/per-pixel waste was removed
 - **Type:** perf

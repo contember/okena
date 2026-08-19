@@ -11,7 +11,7 @@ use okena_workspace::state::{WindowId, Workspace};
 /// Pick the hide/show menu label given (a) whether any extra windows exist and
 /// (b) whether the project is currently hidden in the window hosting the menu.
 ///
-/// PRD `plans/multi-window.md` user stories 17 + 18 + slice 08 acceptance
+/// ADR `docs/decisions/0002-window-as-viewport.md` (no cross-window ops)
 /// criteria 1 + 2: single-window users keep the legacy "Hide Project" /
 /// "Show Project" labels (no learning tax — user story 30); when at least one
 /// extra window exists the per-window scope becomes explicit via
