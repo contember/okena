@@ -568,22 +568,35 @@ impl MarkdownDocument {
         };
 
         match value {
+            // `min-width: 0` lets the value column shrink below its unwrapped
+            // width so a long scalar wraps inside the card instead of painting
+            // past its edge.
             FmValue::Scalar(s) => h_flex()
+                .w_full()
                 .gap(px(8.0))
                 .items_baseline()
                 .child(key_label().min_w(px(120.0)).flex_shrink_0())
-                .child(div().flex_1().text_color(rgb(c.body)).child(s.clone())),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(rgb(c.body))
+                        .child(s.clone()),
+                ),
             FmValue::Empty => h_flex()
+                .w_full()
                 .gap(px(8.0))
                 .items_baseline()
                 .child(key_label().min_w(px(120.0)).flex_shrink_0())
                 .child(div().italic().text_color(rgb(c.muted)).child("\u{2014}")),
             FmValue::List(items) => v_flex()
+                .w_full()
                 .gap(px(2.0))
                 .child(key_label())
                 .child(Self::render_fm_list(items, t, cx)),
-            FmValue::Map(sub) => v_flex().gap(px(2.0)).child(key_label()).child(
+            FmValue::Map(sub) => v_flex().w_full().gap(px(2.0)).child(key_label()).child(
                 v_flex()
+                    .w_full()
                     .gap(px(4.0))
                     .pl(px(16.0))
                     .children(sub.iter().map(|(k, v)| Self::render_fm_entry(k, v, t, cx))),
@@ -594,35 +607,49 @@ impl MarkdownDocument {
     /// Render a frontmatter sequence as a bulleted, indented list.
     fn render_fm_list(items: &[FmValue], t: &ThemeColors, cx: &App) -> Div {
         let c = MdColors::new(t);
-        let mut list = v_flex().gap(px(2.0)).pl(px(16.0));
+        let mut list = v_flex().w_full().gap(px(2.0)).pl(px(16.0));
         for item in items {
-            list = list.child(match item {
-                FmValue::Scalar(s) => h_flex()
-                    .gap(px(8.0))
-                    .items_baseline()
-                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
-                    .child(div().text_color(rgb(c.body)).child(s.clone())),
-                FmValue::Empty => h_flex()
-                    .gap(px(8.0))
-                    .child(div().text_color(rgb(c.muted)).child("\u{2022}")),
-                FmValue::List(inner) => v_flex()
-                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
-                    .child(Self::render_fm_list(inner, t, cx)),
-                FmValue::Map(sub) => v_flex()
-                    .gap(px(4.0))
-                    .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
-                    .child(
+            list =
+                list.child(match item {
+                    FmValue::Scalar(s) => h_flex()
+                        .w_full()
+                        .gap(px(8.0))
+                        .items_baseline()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(rgb(c.muted))
+                                .child("\u{2022}"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(rgb(c.body))
+                                .child(s.clone()),
+                        ),
+                    FmValue::Empty => h_flex()
+                        .gap(px(8.0))
+                        .child(div().text_color(rgb(c.muted)).child("\u{2022}")),
+                    FmValue::List(inner) => v_flex()
+                        .w_full()
+                        .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
+                        .child(Self::render_fm_list(inner, t, cx)),
+                    FmValue::Map(sub) => {
                         v_flex()
+                            .w_full()
                             .gap(px(4.0))
-                            .pl(px(16.0))
-                            .children(sub.iter().map(|(k, v)| Self::render_fm_entry(k, v, t, cx))),
-                    ),
-            });
+                            .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
+                            .child(v_flex().w_full().gap(px(4.0)).pl(px(16.0)).children(
+                                sub.iter().map(|(k, v)| Self::render_fm_entry(k, v, t, cx)),
+                            ))
+                    }
+                });
         }
         list
     }
 
-    /// Render inline elements with selection highlighting.
+    /// Render inline elements as one wrapping row of word tokens.
     pub(crate) fn render_inlines_with_selection(
         inlines: &[Inline],
         t: &ThemeColors,
