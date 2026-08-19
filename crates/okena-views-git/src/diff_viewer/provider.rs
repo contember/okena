@@ -36,6 +36,9 @@ pub trait GitProvider: Send + Sync + 'static {
             local,
             remote,
             current: None,
+            // The name-only fallback carries no per-branch metadata; the
+            // picker degrades to plain names.
+            details: Default::default(),
         })
     }
 

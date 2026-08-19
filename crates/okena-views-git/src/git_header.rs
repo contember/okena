@@ -4,7 +4,7 @@
 //! Extracted from `ProjectColumn` to keep that view thin. Implementation
 //! is split across the `git_header/` submodules — one per concern.
 
-use okena_git::{BranchList, CommitLogEntry, FileDiffSummary};
+use okena_git::{BranchDetail, BranchList, CommitLogEntry, FileDiffSummary};
 use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
@@ -61,6 +61,10 @@ struct BranchNavItem {
     name: String,
     kind: BranchKind,
     is_current: bool,
+    /// Tip time, upstream state and holding worktree, as reported by
+    /// `list_branches_classified`. Defaults (all unknown) when the host did
+    /// not report metadata for this branch.
+    detail: BranchDetail,
 }
 
 /// State for the right-click context menu on a commit row in the graph.
