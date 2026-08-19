@@ -1,6 +1,6 @@
 # Okena Web Client
 
-Remote web client for Okena terminal multiplexer. Connects to the desktop app's remote server via REST + WebSocket.
+Remote web client for Okena terminal multiplexer. Connects to an Okena **daemon** via REST + WebSocket — the same protocol the desktop and mobile clients use.
 
 ## Stack
 
@@ -22,7 +22,7 @@ bun run build      # TypeScript check + production build
 
 ## Development
 
-Vite dev server proxies `/v1/*` and `/health` to `http://localhost:19100`. Start the desktop app with `cargo run` before running the web client.
+Vite dev server proxies `/v1/*` and `/health` to `http://localhost:19100`. Before running the web client, start a daemon — either `cargo run` (the desktop spawns one) or `cargo run -p okena-daemon` standalone.
 
 ## Architecture
 

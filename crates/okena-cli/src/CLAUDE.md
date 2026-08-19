@@ -1,7 +1,7 @@
 # cli/ — Command-line interface
 
-`okena <subcommand>` controls a running instance over the remote HTTP API
-(`src/remote/`). Entry point is `try_handle_cli()`, called early in `main.rs`
+`okena <subcommand>` controls a running daemon over the remote HTTP API
+(`crates/okena-remote-server/`). Entry point is `try_handle_cli()`, called early in `main.rs`
 *before* GUI startup. The gate only engages clap when the first arg is a known
 subcommand (or `--help`/`--version`), so a bare launch and the `--profile` /
 `--list-profiles` / `--new-profile` flags pass straight through to GUI/profile

@@ -17,6 +17,7 @@ behaviour.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
 - [`remote.md`](remote.md) — remote control server: pairing, HTTP/WS API, TLS.
 - [`mobile.md`](mobile.md) — React Native mobile client architecture (uniffi over `okena-mobile-ffi`).
+- [`testing.md`](testing.md) — repo-wide test-selection rules + the GPUI test harness setup.
 
 For crate-level and module-level detail, read the `CLAUDE.md` next to the code
 (`crates/*/CLAUDE.md`, `crates/okena-app/src/**/CLAUDE.md`, `web/`, `mobile/rn/`).

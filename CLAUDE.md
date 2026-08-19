@@ -82,16 +82,18 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 
 Read these when working in the corresponding areas:
 
-- `crates/okena-app/src/CLAUDE.md` — Desktop app architecture, event flow, GPUI entity model, testing rules
-- `crates/okena-app/src/app/CLAUDE.md` — Main app entity, PTY event loop, remote bridge
+- `crates/okena-app/src/CLAUDE.md` — Desktop app architecture, event flow, GPUI entity model
+- `crates/okena-app/src/app/CLAUDE.md` — Main app entity, daemon connection, detached windows
 - `crates/okena-app/src/keybindings/CLAUDE.md` — Keyboard actions, bindings config
+- `crates/okena-daemon-core/CLAUDE.md` — The daemon: reactor traits, LocalSet, gpui-free invariants
 - `crates/okena-remote-server/src/CLAUDE.md` — Remote control server (HTTP/WS API)
 - `crates/okena-cli/src/CLAUDE.md` — CLI subcommands over the remote API
-- `crates/okena-workspace/CLAUDE.md` — State management, LayoutNode tree, persistence
+- `crates/okena-workspace/CLAUDE.md` — State management, `WorkspaceCx`, LayoutNode tree, persistence
 - `crates/okena-terminal/CLAUDE.md` — PTY threading model, shell detection
 - `crates/okena-git/CLAUDE.md` — Diff parsing, worktree operations
 - `mobile/rn/CLAUDE.md` — React Native mobile app (uniffi over `okena-mobile-ffi`)
 - `web/CLAUDE.md` — React web client
+- `docs/reference/testing.md` — Test-selection rules + GPUI test harness setup
 
 <!-- AGENT-DOCS:POINTER (managed by the agent-docs skill — edit the body freely,
      keep the markers) -->
