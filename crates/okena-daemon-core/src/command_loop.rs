@@ -183,6 +183,18 @@ fn publish_committed_settings_change(
     }
 }
 
+fn refresh_claude_pty_env_after_committed_settings_change(
+    outcome: &SettingsUpdateOutcome,
+    settings: &Arc<Mutex<AppSettings>>,
+    backend: &dyn TerminalBackend,
+) {
+    if outcome.committed {
+        backend.set_extra_env(okena_workspace::claude_env::claude_pty_env_for_settings(
+            &settings.lock(),
+        ));
+    }
+}
+
 const MAX_CONCURRENT_CONTENT_SEARCHES: usize = 2;
 
 fn spawn_content_search_with<Run>(
@@ -2682,6 +2694,11 @@ pub async fn daemon_command_loop(
                             &deadlines,
                         )
                         .await;
+                        refresh_claude_pty_env_after_committed_settings_change(
+                            &outcome,
+                            &settings,
+                            backend.as_ref(),
+                        );
                         publish_committed_settings_change(&outcome, &state_version);
                         outcome.result
                     }
@@ -4489,6 +4506,10 @@ mod tests {
             self.events.lock().push("flush".to_string());
         }
 
+        fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {
+            self.events.lock().push("env".to_string());
+        }
+
         fn supports_session_backend_reconfiguration(&self) -> bool {
             true
         }
@@ -4771,6 +4792,30 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(project_dir).expect("remove migration fixture");
+    }
+
+    #[test]
+    fn claude_pty_env_refreshes_only_after_committed_settings_changes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend =
+            RecordingMigrationBackend::new(events.clone(), SessionBackend::None, false, false);
+        let settings = Arc::new(Mutex::new(default_settings()));
+
+        refresh_claude_pty_env_after_committed_settings_change(
+            &SettingsUpdateOutcome {
+                result: CommandResult::Ok(None),
+                committed: true,
+            },
+            &settings,
+            &backend,
+        );
+        refresh_claude_pty_env_after_committed_settings_change(
+            &SettingsUpdateOutcome::uncommitted(CommandResult::Err("rejected".to_string())),
+            &settings,
+            &backend,
+        );
+
+        assert_eq!(&*events.lock(), &["env".to_string()]);
     }
 
     #[test]
@@ -7533,6 +7578,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn direct_worktree_removal_keeps_localset_and_workspace_live() {
         let (fixture, workspace) = direct_removal_fixture("reactor");
+        let hook_monitor_service = okena_hooks::HookMonitor::new();
+        let hook_monitor = Some(hook_monitor_service.clone());
+        let global_hooks = okena_workspace::persistence::HooksConfig {
+            worktree: okena_workspace::persistence::WorktreeHooks {
+                after_remove: Some("true".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -7563,16 +7617,18 @@ mod tests {
                 let task_service_manager = service_manager.clone();
                 let task_service_tick = service_tick.clone();
                 let task_deadlines = deadlines.clone();
+                let task_hook_monitor = hook_monitor.clone();
+                let task_global_hooks = global_hooks.clone();
                 let removal = tokio::task::spawn_local(async move {
                     let mut focus_manager = FocusManager::new();
                     remove_worktree_project_off_reactor_with(
                         "wt1".to_string(),
                         true,
-                        Default::default(),
+                        task_global_hooks,
                         &task_workspace,
                         &task_tick,
                         &None,
-                        &None,
+                        &task_hook_monitor,
                         &mut focus_manager,
                         &task_backend,
                         &task_terminals,
@@ -7616,6 +7672,23 @@ mod tests {
                     CommandResult::Ok(None)
                 ));
                 assert!(workspace.lock().project("wt1").is_none());
+                let history = hook_monitor_service.history();
+                assert_eq!(history.len(), 1);
+                assert_eq!(history[0].hook_type, "worktree_removed");
+                assert!(history[0].terminal_id.is_none());
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if matches!(
+                            hook_monitor_service.history()[0].status,
+                            okena_hooks::HookStatus::Succeeded { .. }
+                        ) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("worktree_removed hook completes");
             })
             .await;
         std::fs::remove_dir_all(fixture).expect("remove fixture");
@@ -8659,6 +8732,10 @@ mod tests {
             "printf 'close\\n' >> '{}'",
             marker.to_string_lossy()
         ));
+        settings_value.hooks.worktree.after_remove = Some(format!(
+            "printf 'removed\\n' >> '{}'",
+            marker.to_string_lossy()
+        ));
         let global_hooks = settings_value.hooks.clone();
         let settings = Arc::new(Mutex::new(settings_value));
         let hook_runner = None;
@@ -8757,12 +8834,25 @@ mod tests {
                 })
                 .await
                 .expect("background removal completes");
+
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        if std::fs::read_to_string(&marker).ok().as_deref()
+                            == Some("dirty\nclose\nremoved\n")
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("worktree_removed hook completes");
             })
             .await;
 
         assert_eq!(
             std::fs::read_to_string(&marker).expect("read hook order"),
-            "dirty\nclose\n"
+            "dirty\nclose\nremoved\n"
         );
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_file(&marker).ok();

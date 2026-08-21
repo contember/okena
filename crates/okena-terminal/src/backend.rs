@@ -121,6 +121,8 @@ pub trait TerminalBackend: Send + Sync {
         self.flush_teardown();
         true
     }
+    /// Replace environment overrides applied to terminals created from now on.
+    fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {}
     /// Whether this backend can switch persistence routes without replacement.
     fn supports_session_backend_reconfiguration(&self) -> bool {
         false
@@ -222,6 +224,10 @@ impl TerminalBackend for LocalBackend {
     fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
         self.pty_manager
             .flush_teardown_with_timeout(timeout, terminal_ids)
+    }
+
+    fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
+        self.pty_manager.set_extra_env(env);
     }
 
     fn supports_session_backend_reconfiguration(&self) -> bool {
