@@ -195,7 +195,10 @@ impl RemoteActionClient {
         action: ActionRequest,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<serde_json::Value>, String> {
-        if !matches!(action, ActionRequest::SearchContent { .. }) {
+        if !matches!(
+            action,
+            ActionRequest::SearchContent { .. } | ActionRequest::SearchPathContent { .. }
+        ) {
             return Err("cancellable remote actions only support content search".to_string());
         }
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -447,6 +450,19 @@ mod tests {
         }
     }
 
+    fn path_search_action() -> ActionRequest {
+        ActionRequest::SearchPathContent {
+            root: "/project".to_string(),
+            query: "needle".to_string(),
+            case_sensitive: false,
+            mode: "literal".to_string(),
+            max_results: 1000,
+            file_glob: None,
+            context_lines: 0,
+            show_ignored: false,
+        }
+    }
+
     fn remove_worktree_action() -> ActionRequest {
         ActionRequest::RemoveWorktreeProject {
             project_id: "project".to_string(),
@@ -486,7 +502,21 @@ mod tests {
     #[test]
     fn content_search_uses_long_timeout() {
         assert_eq!(timeout_for(&search_action()), SEARCH_TIMEOUT_SECS);
+        assert_eq!(timeout_for(&path_search_action()), SEARCH_TIMEOUT_SECS);
         assert_eq!(SEARCH_TIMEOUT_SECS, 90);
+    }
+
+    #[cfg(feature = "cancellable-http")]
+    #[test]
+    fn cancellable_client_accepts_path_content_search() {
+        let client = RemoteActionClient::new(remote_config(1), "token".to_string());
+        let cancelled = AtomicBool::new(true);
+
+        let error = client
+            .post_action_cancellable(path_search_action(), &cancelled)
+            .unwrap_err();
+
+        assert_eq!(error, "content search cancelled");
     }
 
     #[test]
