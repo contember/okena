@@ -1208,13 +1208,14 @@ fn test_mirror_transport_does_not_answer_queries() {
         "/tmp".into(),
     );
 
-    // DSR cursor position, CSI 14/18 t size queries, DA1 — all answered by the
-    // PTY owner (daemon), never by a mirror: duplicated replies corrupt the
-    // app's input and count as user input for resize ownership on the server.
+    // DSR cursor position, CSI 14/18 t size queries, DA1, XTVERSION — all
+    // answered by the PTY owner (daemon), never by a mirror: duplicated replies
+    // corrupt the app's input and count as user input for resize ownership.
     terminal.process_output(b"\x1b[6n");
     terminal.process_output(b"\x1b[14t");
     terminal.process_output(b"\x1b[18t");
     terminal.process_output(b"\x1b[c");
+    terminal.process_output(b"\x1b[>q");
 
     assert!(
         transport.inner.writes().is_empty(),

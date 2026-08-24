@@ -390,9 +390,12 @@ impl Perform for SidecarPerform {
         if ps != 0 {
             return;
         }
+        if !self.transport.answers_terminal_queries() {
+            return;
+        }
         let response = format!("\x1bP>|okena({})\x1b\\", app_version());
         self.transport
-            .send_input(&self.terminal_id, response.as_bytes());
+            .send_response(&self.terminal_id, response.as_bytes());
     }
 }
 
