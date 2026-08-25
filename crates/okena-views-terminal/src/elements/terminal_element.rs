@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::terminal_input::TerminalInputHandler;
-use super::terminal_rendering::{BatchedTextRun, LayoutRect, is_default_bg};
+use super::terminal_rendering::{BatchedTextLine, LayoutRect, is_default_bg};
 
 type ResizeViewerSizes = HashMap<String, HashMap<u64, TerminalSize>>;
 
@@ -114,7 +114,7 @@ mod tests {
 
     fn empty_layout() -> TerminalGridLayout {
         TerminalGridLayout {
-            batched_runs: Vec::new(),
+            text_lines: Vec::new(),
             rects: Vec::new(),
             screen_lines: 0,
             display_offset: 0,
@@ -421,7 +421,7 @@ struct TerminalRenderCacheKey {
 
 #[derive(Debug)]
 struct TerminalGridLayout {
-    batched_runs: Vec<BatchedTextRun>,
+    text_lines: Vec<BatchedTextLine>,
     rects: Vec<LayoutRect>,
     screen_lines: usize,
     display_offset: i32,
@@ -472,7 +472,7 @@ fn build_terminal_grid_layout(
     t: &ThemeColors,
     state: &TerminalElementState,
 ) -> (u64, TerminalGridLayout) {
-    let (content_generation, batched_runs, rects, screen_lines, display_offset, cursor_point, cols) =
+    let (content_generation, text_lines, rects, screen_lines, display_offset, cursor_point, cols) =
         terminal.with_content(|term| {
             let content_generation = terminal.content_generation();
             let grid = term.grid();
@@ -481,18 +481,15 @@ fn build_terminal_grid_layout(
             let display_offset = grid.display_offset() as i32;
             let cursor_point = grid.cursor.point;
 
-            let mut batched_runs: Vec<BatchedTextRun> = Vec::new();
+            let mut text_lines: Vec<BatchedTextLine> = Vec::new();
             let mut rects: Vec<LayoutRect> = Vec::new();
-            let mut current_batch: Option<BatchedTextRun> = None;
             let mut current_rect: Option<LayoutRect> = None;
 
             for row in 0..screen_lines {
                 let visual_line = row as i32;
                 let buffer_line = visual_line - display_offset;
+                let mut current_line: Option<BatchedTextLine> = None;
 
-                if let Some(batch) = current_batch.take() {
-                    batched_runs.push(batch);
-                }
                 if let Some(rect) = current_rect.take() {
                     rects.push(rect);
                 }
@@ -646,18 +643,10 @@ fn build_terminal_grid_layout(
                         },
                     };
 
-                    let can_append = current_batch
-                        .as_ref()
-                        .is_some_and(|batch| batch.can_append(&text_style, visual_line, col_i32));
-                    if can_append {
-                        if let Some(batch) = current_batch.as_mut() {
-                            batch.append_char(cell.c);
-                        }
+                    if let Some(line) = current_line.as_mut() {
+                        line.append(col_i32, cell.c, text_style);
                     } else {
-                        if let Some(previous) = current_batch.take() {
-                            batched_runs.push(previous);
-                        }
-                        current_batch = Some(BatchedTextRun::new(
+                        current_line = Some(BatchedTextLine::new(
                             visual_line,
                             col_i32,
                             cell.c,
@@ -665,18 +654,18 @@ fn build_terminal_grid_layout(
                         ));
                     }
                 }
+                if let Some(line) = current_line {
+                    text_lines.push(line);
+                }
             }
 
-            if let Some(batch) = current_batch {
-                batched_runs.push(batch);
-            }
             if let Some(rect) = current_rect {
                 rects.push(rect);
             }
 
             (
                 content_generation,
-                batched_runs,
+                text_lines,
                 rects,
                 screen_lines,
                 display_offset,
@@ -685,7 +674,7 @@ fn build_terminal_grid_layout(
             )
         });
     let layout = TerminalGridLayout {
-        batched_runs,
+        text_lines,
         rects,
         screen_lines,
         display_offset,
@@ -1056,8 +1045,8 @@ impl Element for TerminalElement {
         }
 
         // Phase 3: Paint text runs
-        for batch in &layout.batched_runs {
-            batch.paint(
+        for line in &layout.text_lines {
+            line.paint(
                 bounds.origin,
                 cell_width,
                 line_height,
@@ -1108,7 +1097,7 @@ impl Element for TerminalElement {
         } else {
             layout.cells_scanned
         };
-        let text_runs = layout.batched_runs.len();
+        let text_runs = layout.text_lines.len();
         let background_rects = layout.rects.len();
 
         // Phase 5: Paint fog overlay for unfocused terminals
