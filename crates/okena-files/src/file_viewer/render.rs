@@ -11,7 +11,7 @@ use crate::syntax::HighlightedLine;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarShow};
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_markdown::{MarkdownTextRun, RenderedNode, RenderedTextUnit};
@@ -31,12 +31,22 @@ use std::sync::Arc;
 use super::context_menu::TreeNodeTarget;
 use super::{DisplayMode, FileViewer, FontData, PreviewBackground};
 
+const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
+
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
     let r = ((color >> 16) & 0xFF) as f32 / 255.0;
     let g = ((color >> 8) & 0xFF) as f32 / 255.0;
     let b = (color & 0xFF) as f32 / 255.0;
     Rgba { r, g, b, a: alpha }
+}
+
+fn markdown_table_scrollbar(id: impl Into<ElementId>, scroll_handle: &ScrollHandle) -> Div {
+    div().absolute().inset_0().child(
+        Scrollbar::horizontal(scroll_handle)
+            .id(id)
+            .scrollbar_show(ScrollbarShow::Always),
+    )
 }
 
 fn distance_squared_to_bounds(position: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
@@ -125,6 +135,7 @@ impl FileViewer {
         &self,
         id: ElementId,
         unit: RenderedTextUnit,
+        fill_width: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let RenderedTextUnit {
@@ -138,7 +149,7 @@ impl FileViewer {
 
         div()
             .id(id)
-            .w_full()
+            .when(fill_width, |d| d.w_full())
             .on_mouse_down(MouseButton::Left, {
                 let text_runs = text_runs.clone();
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -2140,6 +2151,7 @@ impl Render for FileViewer {
                                                         end_offset,
                                                         text_runs,
                                                     },
+                                                    true,
                                                     cx,
                                                 )
                                                 .into_any_element(),
@@ -2156,6 +2168,7 @@ impl Render for FileViewer {
                                                                 .into(),
                                                             ),
                                                             line,
+                                                            true,
                                                             cx,
                                                         )
                                                         .into_any_element()
@@ -2188,6 +2201,12 @@ impl Render for FileViewer {
                                                 .into_any_element()
                                             }
                                             RenderedNode::Table { header, rows } => {
+                                                let scroll_handle = this
+                                                    .active_tab_mut()
+                                                    .markdown_table_scroll_handles
+                                                    .entry(node_idx)
+                                                    .or_default()
+                                                    .clone();
                                                 let mut table_rows = Vec::new();
                                                 if let Some(header) = header {
                                                     table_rows.push(
@@ -2199,6 +2218,7 @@ impl Render for FileViewer {
                                                                 .into(),
                                                             ),
                                                             header,
+                                                            false,
                                                             cx,
                                                         )
                                                         .into_any_element(),
@@ -2214,6 +2234,7 @@ impl Render for FileViewer {
                                                                 .into(),
                                                             ),
                                                             row,
+                                                            false,
                                                             cx,
                                                         )
                                                         .into_any_element()
@@ -2221,19 +2242,40 @@ impl Render for FileViewer {
                                                 ));
 
                                                 div()
-                                                    .id(ElementId::Name(
-                                                        format!("md-table-{node_idx}").into(),
+                                                    .relative()
+                                                    .child(
+                                                        div()
+                                                            .id(ElementId::Name(
+                                                                format!("md-table-{node_idx}")
+                                                                    .into(),
+                                                            ))
+                                                            .flex()
+                                                            .flex_col()
+                                                            .items_start()
+                                                            .pb(
+                                                                MARKDOWN_TABLE_SCROLLBAR_GUTTER,
+                                                            )
+                                                            .rounded(px(6.0))
+                                                            .border_1()
+                                                            .border_color(rgb(
+                                                                raised_surface_border(
+                                                                    t.bg_secondary,
+                                                                    t.border,
+                                                                ),
+                                                            ))
+                                                            .overflow_x_scroll()
+                                                            .track_scroll(&scroll_handle)
+                                                            .children(table_rows),
+                                                    )
+                                                    .child(markdown_table_scrollbar(
+                                                        ElementId::Name(
+                                                            format!(
+                                                                "md-table-{node_idx}-scrollbar"
+                                                            )
+                                                            .into(),
+                                                        ),
+                                                        &scroll_handle,
                                                     ))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .rounded(px(6.0))
-                                                    .border_1()
-                                                    .border_color(rgb(raised_surface_border(
-                                                        t.bg_secondary,
-                                                        t.border,
-                                                    )))
-                                                    .overflow_x_scroll()
-                                                    .children(table_rows)
                                                     .into_any_element()
                                             }
                                         };
@@ -2563,7 +2605,72 @@ fn render_font_preview(
 
 #[cfg(test)]
 mod markdown_selection_tests {
-    use super::{byte_offset_for_char, char_offset_for_byte, markdown_word_boundaries};
+    use super::{
+        MARKDOWN_TABLE_SCROLLBAR_GUTTER, byte_offset_for_char, char_offset_for_byte,
+        markdown_table_scrollbar, markdown_word_boundaries,
+    };
+    use gpui::prelude::*;
+    use gpui::{
+        Context, Render, ScrollHandle, StatefulInteractiveElement, TestAppContext,
+        VisualTestContext, Window, div, px,
+    };
+    use okena_core::theme::DARK_THEME;
+    use okena_markdown::{MarkdownDocument, RenderedNode};
+
+    struct MarkdownTableScrollTest {
+        scroll_handle: ScrollHandle,
+    }
+
+    impl Render for MarkdownTableScrollTest {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let doc = MarkdownDocument::parse(
+                "| Git | kompjutr | notes |\n| --- | --- | --- |\n| --initial-branch=name | defaultBranch | a long explanation that must overflow |\n",
+            );
+            let Some(RenderedNode::Table { header, rows }) =
+                doc.render_node(0, &DARK_THEME, cx, None)
+            else {
+                return div();
+            };
+            let table_rows = header
+                .into_iter()
+                .chain(rows)
+                .enumerate()
+                .map(|(index, unit)| {
+                    div()
+                        .id(("test-markdown-table-row", index))
+                        .when(index == 1, |d| {
+                            d.debug_selector(|| "test-markdown-table-last-row".to_string())
+                        })
+                        .child(unit.div)
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+
+            div().w(px(360.0)).child(
+                div()
+                    .relative()
+                    .debug_selector(|| "test-markdown-table-container".to_string())
+                    .child(
+                        div()
+                            .id("test-markdown-table-scroll-area")
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .pb(MARKDOWN_TABLE_SCROLLBAR_GUTTER)
+                            .overflow_x_scroll()
+                            .track_scroll(&self.scroll_handle)
+                            .children(table_rows),
+                    )
+                    .child(
+                        markdown_table_scrollbar(
+                            "test-markdown-table-scrollbar",
+                            &self.scroll_handle,
+                        )
+                        .debug_selector(|| "test-markdown-table-scrollbar-layer".to_string()),
+                    ),
+            )
+        }
+    }
 
     #[test]
     fn converts_between_utf8_bytes_and_markdown_character_offsets() {
@@ -2580,5 +2687,41 @@ mod markdown_selection_tests {
     fn double_click_word_range_stays_character_based_with_unicode() {
         let text = "first žluťoučký last";
         assert_eq!(markdown_word_boundaries(text, 8), (6, 15));
+    }
+
+    #[gpui::test]
+    fn markdown_table_scroll_container_measures_wide_rows(cx: &mut TestAppContext) {
+        let scroll_handle = ScrollHandle::new();
+        let handle_for_view = scroll_handle.clone();
+        cx.update(gpui_component::init);
+        let (_, vcx) = cx.add_window_view(move |_, _| MarkdownTableScrollTest {
+            scroll_handle: handle_for_view,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.run_until_parked();
+        vcx.update(|window, cx| _ = window.draw(cx));
+
+        let table_bounds = vcx
+            .debug_bounds("test-markdown-table-container")
+            .expect("table container should be rendered");
+        let scrollbar_bounds = vcx
+            .debug_bounds("test-markdown-table-scrollbar-layer")
+            .expect("scrollbar layer should be rendered");
+        let last_row_bounds = vcx
+            .debug_bounds("test-markdown-table-last-row")
+            .expect("last table row should be rendered");
+
+        assert!(
+            scroll_handle.max_offset().x > px(0.0),
+            "wide markdown rows must produce horizontal overflow"
+        );
+        assert_eq!(
+            scrollbar_bounds, table_bounds,
+            "scrollbar layer must stay anchored to its table"
+        );
+        assert!(
+            table_bounds.bottom() - last_row_bounds.bottom() >= MARKDOWN_TABLE_SCROLLBAR_GUTTER,
+            "scrollbar gutter must not overlap the last table row"
+        );
     }
 }

@@ -251,6 +251,7 @@ impl FileViewerTab {
     ) {
         self.loading = false;
         self.modified_at = modified_at;
+        self.markdown_table_scroll_handles.clear();
         match result {
             Ok(LoadedContent::Text(content)) => {
                 self.content = content;

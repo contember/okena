@@ -199,6 +199,8 @@ pub(super) struct FileViewerTab {
     pub markdown_list_nodes: usize,
     /// Font size the list heights were measured at (to trigger a remeasure).
     pub markdown_list_font: f32,
+    /// Independent horizontal scroll state for each rendered markdown table.
+    pub markdown_table_scroll_handles: HashMap<usize, ScrollHandle>,
     pub source_scroll_handle: UniformListScrollHandle,
     pub scrollbar_drag: Option<ScrollbarDrag>,
     /// Last daemon-reported modification time in Unix milliseconds.
@@ -387,6 +389,7 @@ impl FileViewerTab {
             markdown_list_state: None,
             markdown_list_nodes: 0,
             markdown_list_font: 0.0,
+            markdown_table_scroll_handles: HashMap::new(),
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
             modified_at: None,
@@ -431,6 +434,7 @@ impl FileViewerTab {
             markdown_list_state: None,
             markdown_list_nodes: 0,
             markdown_list_font: 0.0,
+            markdown_table_scroll_handles: HashMap::new(),
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
             modified_at: None,
