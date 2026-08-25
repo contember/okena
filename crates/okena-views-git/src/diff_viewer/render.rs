@@ -709,17 +709,24 @@ impl DiffViewer {
                     if this.get_scrollbar_geometry().is_some() {
                         this.start_scrollbar_drag(y, cx);
                     }
+                    cx.stop_propagation();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| this.end_scrollbar_drag(cx)),
+                cx.listener(|this, _, _window, cx| {
+                    if this.scrollbar_drag.is_some() {
+                        this.end_scrollbar_drag(cx);
+                        cx.stop_propagation();
+                    }
+                }),
             )
             .child(
                 div()
