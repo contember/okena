@@ -24,6 +24,10 @@ fn short_hash(id: &ObjectId) -> String {
     s
 }
 
+fn commit_subject(message: gix::objs::commit::MessageRef<'_>) -> String {
+    message.summary().to_string()
+}
+
 /// Build `commit-id -> [ref label]` map covering local branches, remote
 /// branches, tags and HEAD. Labels follow `git log --decorate=short`
 /// conventions so the same UI styling continues to work.
@@ -149,10 +153,7 @@ pub fn fetch_commit_log(path: &Path, limit: usize, branch: Option<&str>) -> Vec<
 
         let (message, author, timestamp) = match info.object() {
             Ok(commit) => {
-                let msg = commit
-                    .message()
-                    .map(|m| m.title.to_string())
-                    .unwrap_or_default();
+                let msg = commit.message().map(commit_subject).unwrap_or_default();
                 let author_name = commit
                     .author()
                     .map(|a| a.name.to_string())
@@ -179,4 +180,22 @@ pub fn fetch_commit_log(path: &Path, limit: usize, branch: Option<&str>) -> Vec<
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commit_subject;
+    use gix::objs::commit::MessageRef;
+
+    #[test]
+    fn commit_subject_is_always_one_line() {
+        assert_eq!(
+            commit_subject(MessageRef::from_bytes(b"subject only\n")),
+            "subject only"
+        );
+        assert_eq!(
+            commit_subject(MessageRef::from_bytes(b"subject with body\n\nbody\n")),
+            "subject with body"
+        );
+    }
 }
