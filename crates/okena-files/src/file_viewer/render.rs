@@ -14,7 +14,7 @@ use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
-use okena_markdown::RenderedNode;
+use okena_markdown::{MarkdownTextRun, RenderedNode, RenderedTextUnit};
 use okena_ui::code_block::code_block_container;
 use okena_ui::color_utils::raised_surface_border;
 use okena_ui::file_icon::file_icon;
@@ -39,6 +39,73 @@ fn rgba(color: u32, alpha: f32) -> Rgba {
     Rgba { r, g, b, a: alpha }
 }
 
+fn distance_squared_to_bounds(position: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
+    let x = f32::from(position.x);
+    let y = f32::from(position.y);
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let right = left + f32::from(bounds.size.width);
+    let bottom = top + f32::from(bounds.size.height);
+    let dx = if x < left {
+        left - x
+    } else if x > right {
+        x - right
+    } else {
+        0.0
+    };
+    let dy = if y < top {
+        top - y
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
+/// Resolve a pointer to the closest visible text run in a rendered markdown unit.
+fn markdown_offset_for_position(
+    text_runs: &[MarkdownTextRun],
+    position: Point<Pixels>,
+    fallback: usize,
+) -> usize {
+    let mut closest = None;
+    for text_run in text_runs {
+        match text_run.index_for_position(position) {
+            Ok(offset) => return offset,
+            Err(offset) => {
+                let distance = distance_squared_to_bounds(position, text_run.bounds());
+                if closest
+                    .as_ref()
+                    .is_none_or(|(closest_distance, _)| distance < *closest_distance)
+                {
+                    closest = Some((distance, offset));
+                }
+            }
+        }
+    }
+    closest.map_or(fallback, |(_, offset)| offset)
+}
+
+fn byte_offset_for_char(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map_or(text.len(), |(byte_offset, _)| byte_offset)
+}
+
+fn char_offset_for_byte(text: &str, byte_offset: usize) -> usize {
+    text[..byte_offset.min(text.len())].chars().count()
+}
+
+fn markdown_word_boundaries(text: &str, char_offset: usize) -> (usize, usize) {
+    let byte_offset = byte_offset_for_char(text, char_offset);
+    let (start, end) = find_word_boundaries(text, byte_offset);
+    (
+        char_offset_for_byte(text, start),
+        char_offset_for_byte(text, end),
+    )
+}
+
 /// Placeholder row shown while a directory's children are being fetched.
 fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
     let indent = depth as f32 * 14.0;
@@ -54,6 +121,79 @@ fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
 }
 
 impl FileViewer {
+    fn render_selectable_markdown_unit(
+        &self,
+        id: ElementId,
+        unit: RenderedTextUnit,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let RenderedTextUnit {
+            div: content,
+            start_offset,
+            end_offset,
+            text_runs,
+        } = unit;
+        let selectable_end = end_offset.saturating_sub(1).max(start_offset);
+        let text_runs: Arc<[MarkdownTextRun]> = text_runs.into();
+
+        div()
+            .id(id)
+            .w_full()
+            .on_mouse_down(MouseButton::Left, {
+                let text_runs = text_runs.clone();
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let offset =
+                        markdown_offset_for_position(&text_runs, event.position, start_offset)
+                            .clamp(start_offset, selectable_end);
+
+                    if event.click_count >= 3 {
+                        let selection = &mut this.active_tab_mut().markdown_selection;
+                        selection.start = Some(start_offset);
+                        selection.end = Some(selectable_end);
+                        selection.finish();
+                    } else if event.click_count == 2 {
+                        let (word_start, word_end) = this
+                            .active_tab()
+                            .markdown_doc
+                            .as_ref()
+                            .map_or((offset, offset), |doc| {
+                                markdown_word_boundaries(&doc.plain_text, offset)
+                            });
+                        let selection = &mut this.active_tab_mut().markdown_selection;
+                        selection.start = Some(word_start);
+                        selection.end = Some(word_end);
+                        selection.finish();
+                    } else if event.modifiers.shift
+                        && this.active_tab().markdown_selection.start.is_some()
+                    {
+                        let selection = &mut this.active_tab_mut().markdown_selection;
+                        selection.end = Some(offset);
+                        selection.is_selecting = true;
+                    } else {
+                        this.active_tab_mut().markdown_selection.start_at(offset);
+                    }
+                    cx.notify();
+                })
+            })
+            .on_mouse_move({
+                let text_runs = text_runs.clone();
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    if !this.active_tab().markdown_selection.is_selecting {
+                        return;
+                    }
+                    let offset =
+                        markdown_offset_for_position(&text_runs, event.position, start_offset)
+                            .clamp(start_offset, selectable_end);
+                    let selection = &mut this.active_tab_mut().markdown_selection;
+                    if selection.end != Some(offset) {
+                        selection.update_end(offset);
+                        cx.notify();
+                    }
+                })
+            })
+            .child(content)
+    }
+
     /// Render a single highlighted line with selection support.
     pub(super) fn render_line(
         &self,
@@ -1984,272 +2124,118 @@ impl Render for FileViewer {
                                             return div().into_any_element();
                                         };
                                         let element = match rendered_node {
-                                        RenderedNode::Simple {
-                                            div: node_div,
-                                            start_offset,
-                                            end_offset,
-                                        } => {
-                                            let node_end = end_offset.saturating_sub(1);
-                                            let idx = node_idx;
-                                            div()
-                                                    .id(ElementId::Name(
-                                                        format!("md-node-{}", idx).into(),
-                                                    ))
-                                                    .w_full()
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(
-                                                            move |this,
-                                                                  event: &MouseDownEvent,
-                                                                  _window,
-                                                                  cx| {
-                                                                let tab = this.active_tab_mut();
-                                                                if event.click_count == 2 {
-                                                                    tab.markdown_selection.start =
-                                                                        Some(start_offset);
-                                                                    tab.markdown_selection.end =
-                                                                        Some(node_end);
-                                                                    tab.markdown_selection
-                                                                        .finish();
-                                                                } else {
-                                                                    tab.markdown_selection.start =
-                                                                        Some(start_offset);
-                                                                    tab.markdown_selection.end =
-                                                                        Some(start_offset);
-                                                                    tab.markdown_selection
-                                                                        .is_selecting = true;
-                                                                }
-                                                                cx.notify();
-                                                            },
-                                                        ),
-                                                    )
-                                                    .on_mouse_move(cx.listener(
-                                                        move |this,
-                                                              _event: &MouseMoveEvent,
-                                                              _window,
-                                                              cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if tab.markdown_selection.is_selecting
-                                                                && let Some(sel_start) =
-                                                                    tab.markdown_selection.start
-                                                                {
-                                                                    let new_end = if start_offset
-                                                                        >= sel_start
-                                                                    {
-                                                                        Some(node_end)
-                                                                    } else {
-                                                                        Some(start_offset)
-                                                                    };
-                                                                    if tab.markdown_selection.end
-                                                                        != new_end
-                                                                    {
-                                                                        tab.markdown_selection
-                                                                            .end = new_end;
-                                                                        cx.notify();
-                                                                    }
-                                                                }
-                                                        },
-                                                    ))
-                                                    .on_mouse_up(
-                                                        MouseButton::Left,
-                                                        cx.listener(
-                                                            |this,
-                                                             _event: &MouseUpEvent,
-                                                             _window,
-                                                             cx| {
-                                                                this.active_tab_mut()
-                                                                    .markdown_selection
-                                                                    .finish();
-                                                                cx.notify();
-                                                            },
-                                                        ),
-                                                    )
-                                                    .child(node_div)
-                                                    .into_any_element()
-                                        }
-                                        RenderedNode::CodeBlock {
-                                            language, lines, ..
-                                        } => {
-                                            let idx = node_idx;
-                                            let line_children: Vec<AnyElement> = lines
-                                                .into_iter()
-                                                .enumerate()
-                                                .map(
-                                                    |(line_idx, (line_div, start_offset, end_offset))| {
-                                                        let line_end =
-                                                            end_offset.saturating_sub(1);
-                                                        div()
-                                                        .id(ElementId::Name(format!("md-code-{}-line-{}", idx, line_idx).into()))
-                                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if event.click_count == 2 {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(line_end);
-                                                                tab.markdown_selection.finish();
-                                                            } else {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(start_offset);
-                                                                tab.markdown_selection.is_selecting = true;
-                                                            }
-                                                            cx.notify();
-                                                        }))
-                                                        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if tab.markdown_selection.is_selecting
-                                                                && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    let new_end = if start_offset >= sel_start {
-                                                                        Some(line_end)
-                                                                    } else {
-                                                                        Some(start_offset)
-                                                                    };
-                                                                    if tab.markdown_selection.end != new_end {
-                                                                        tab.markdown_selection.end = new_end;
-                                                                        cx.notify();
-                                                                    }
-                                                                }
-                                                        }))
-                                                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                            this.active_tab_mut().markdown_selection.finish();
-                                                            cx.notify();
-                                                        }))
-                                                        .child(line_div)
+                                            RenderedNode::Simple {
+                                                div,
+                                                start_offset,
+                                                end_offset,
+                                                text_runs,
+                                            } => this
+                                                .render_selectable_markdown_unit(
+                                                    ElementId::Name(
+                                                        format!("md-node-{node_idx}").into(),
+                                                    ),
+                                                    RenderedTextUnit {
+                                                        div,
+                                                        start_offset,
+                                                        end_offset,
+                                                        text_runs,
+                                                    },
+                                                    cx,
+                                                )
+                                                .into_any_element(),
+                                            RenderedNode::CodeBlock { language, lines } => {
+                                                let line_children = lines
+                                                    .into_iter()
+                                                    .enumerate()
+                                                    .map(|(line_idx, line)| {
+                                                        this.render_selectable_markdown_unit(
+                                                            ElementId::Name(
+                                                                format!(
+                                                                    "md-code-{node_idx}-line-{line_idx}"
+                                                                )
+                                                                .into(),
+                                                            ),
+                                                            line,
+                                                            cx,
+                                                        )
+                                                        .into_any_element()
+                                                    })
+                                                    .collect::<Vec<_>>();
+
+                                                code_block_container(
+                                                    language.as_deref(),
+                                                    &t,
+                                                    cx,
+                                                )
+                                                .id(ElementId::Name(
+                                                    format!("md-codeblock-{node_idx}").into(),
+                                                ))
+                                                .overflow_x_scroll()
+                                                .child(
+                                                    div()
+                                                        .px(px(14.0))
+                                                        .py(px(10.0))
+                                                        .font_family("monospace")
+                                                        .text_size(ui_text(
+                                                            this.file_font_size,
+                                                            cx,
+                                                        ))
+                                                        .text_color(rgb(t.text_primary))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .children(line_children),
+                                                )
+                                                .into_any_element()
+                                            }
+                                            RenderedNode::Table { header, rows } => {
+                                                let mut table_rows = Vec::new();
+                                                if let Some(header) = header {
+                                                    table_rows.push(
+                                                        this.render_selectable_markdown_unit(
+                                                            ElementId::Name(
+                                                                format!(
+                                                                    "md-table-{node_idx}-header"
+                                                                )
+                                                                .into(),
+                                                            ),
+                                                            header,
+                                                            cx,
+                                                        )
+                                                        .into_any_element(),
+                                                    );
+                                                }
+                                                table_rows.extend(rows.into_iter().enumerate().map(
+                                                    |(row_idx, row)| {
+                                                        this.render_selectable_markdown_unit(
+                                                            ElementId::Name(
+                                                                format!(
+                                                                    "md-table-{node_idx}-row-{row_idx}"
+                                                                )
+                                                                .into(),
+                                                            ),
+                                                            row,
+                                                            cx,
+                                                        )
                                                         .into_any_element()
                                                     },
-                                                )
-                                                .collect();
+                                                ));
 
-                                            let code_block =
-                                                code_block_container(language.as_deref(), &t, cx)
+                                                div()
                                                     .id(ElementId::Name(
-                                                        format!("md-codeblock-{}", idx).into(),
+                                                        format!("md-table-{node_idx}").into(),
                                                     ))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .rounded(px(6.0))
+                                                    .border_1()
+                                                    .border_color(rgb(raised_surface_border(
+                                                        t.bg_secondary,
+                                                        t.border,
+                                                    )))
                                                     .overflow_x_scroll()
-                                                    .child(
-                                                        div()
-                                                            .px(px(14.0))
-                                                            .py(px(10.0))
-                                                            .font_family("monospace")
-                                                            .text_size(ui_text(
-                                                                this.file_font_size,
-                                                                cx,
-                                                            ))
-                                                            .text_color(rgb(t.text_primary))
-                                                            .flex()
-                                                            .flex_col()
-                                                            .children(line_children),
-                                                    );
-
-                                            code_block.into_any_element()
-                                        }
-                                        RenderedNode::Table { header, rows } => {
-                                            let idx = node_idx;
-                                            let mut table_rows: Vec<AnyElement> = Vec::new();
-
-                                            if let Some((header_div, start_offset, end_offset)) =
-                                                header
-                                            {
-                                                let row_end = end_offset.saturating_sub(1);
-                                                table_rows.push(
-                                                    div()
-                                                        .id(ElementId::Name(format!("md-table-{}-header", idx).into()))
-                                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if event.click_count == 2 {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(row_end);
-                                                                tab.markdown_selection.finish();
-                                                            } else {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(start_offset);
-                                                                tab.markdown_selection.is_selecting = true;
-                                                            }
-                                                            cx.notify();
-                                                        }))
-                                                        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if tab.markdown_selection.is_selecting
-                                                                && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    let new_end = if start_offset >= sel_start {
-                                                                        Some(row_end)
-                                                                    } else {
-                                                                        Some(start_offset)
-                                                                    };
-                                                                    if tab.markdown_selection.end != new_end {
-                                                                        tab.markdown_selection.end = new_end;
-                                                                        cx.notify();
-                                                                    }
-                                                                }
-                                                        }))
-                                                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                            this.active_tab_mut().markdown_selection.finish();
-                                                            cx.notify();
-                                                        }))
-                                                        .child(header_div)
-                                                        .into_any_element()
-                                                );
+                                                    .children(table_rows)
+                                                    .into_any_element()
                                             }
-
-                                            for (row_idx, (row_div, start_offset, end_offset)) in
-                                                rows.into_iter().enumerate()
-                                            {
-                                                let row_end = end_offset.saturating_sub(1);
-                                                table_rows.push(
-                                                    div()
-                                                        .id(ElementId::Name(format!("md-table-{}-row-{}", idx, row_idx).into()))
-                                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if event.click_count == 2 {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(row_end);
-                                                                tab.markdown_selection.finish();
-                                                            } else {
-                                                                tab.markdown_selection.start = Some(start_offset);
-                                                                tab.markdown_selection.end = Some(start_offset);
-                                                                tab.markdown_selection.is_selecting = true;
-                                                            }
-                                                            cx.notify();
-                                                        }))
-                                                        .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                                                            let tab = this.active_tab_mut();
-                                                            if tab.markdown_selection.is_selecting
-                                                                && let Some(sel_start) = tab.markdown_selection.start {
-                                                                    let new_end = if start_offset >= sel_start {
-                                                                        Some(row_end)
-                                                                    } else {
-                                                                        Some(start_offset)
-                                                                    };
-                                                                    if tab.markdown_selection.end != new_end {
-                                                                        tab.markdown_selection.end = new_end;
-                                                                        cx.notify();
-                                                                    }
-                                                                }
-                                                        }))
-                                                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                            this.active_tab_mut().markdown_selection.finish();
-                                                            cx.notify();
-                                                        }))
-                                                        .child(row_div)
-                                                        .into_any_element()
-                                                );
-                                            }
-
-                                            let table = div()
-                                                .id(ElementId::Name(
-                                                    format!("md-table-{}", idx).into(),
-                                                ))
-                                                .flex()
-                                                .flex_col()
-                                                .rounded(px(6.0))
-                                                .border_1()
-                                                .border_color(rgb(raised_surface_border(
-                                                    t.bg_secondary,
-                                                    t.border,
-                                                )))
-                                                .overflow_x_scroll()
-                                                .children(table_rows);
-
-                                            table.into_any_element()
-                                        }
                                         };
                                         // Per-block wrapper centers the reading
                                         // column and carries the block's own
@@ -2573,4 +2559,26 @@ fn render_font_preview(
                 .child(metadata_block),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod markdown_selection_tests {
+    use super::{byte_offset_for_char, char_offset_for_byte, markdown_word_boundaries};
+
+    #[test]
+    fn converts_between_utf8_bytes_and_markdown_character_offsets() {
+        let text = "aé🙂 z";
+        assert_eq!(byte_offset_for_char(text, 0), 0);
+        assert_eq!(byte_offset_for_char(text, 1), 1);
+        assert_eq!(byte_offset_for_char(text, 2), 3);
+        assert_eq!(byte_offset_for_char(text, 3), 7);
+        assert_eq!(char_offset_for_byte(text, 7), 3);
+        assert_eq!(byte_offset_for_char(text, 100), text.len());
+    }
+
+    #[test]
+    fn double_click_word_range_stays_character_based_with_unicode() {
+        let text = "first žluťoučký last";
+        assert_eq!(markdown_word_boundaries(text, 8), (6, 15));
+    }
 }

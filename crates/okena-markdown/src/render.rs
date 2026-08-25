@@ -6,15 +6,14 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_highlight::styled::build_styled_text_with_backgrounds;
 use okena_highlight::syntax::HighlightedSpan;
-use okena_ui::code_block::code_block_container;
 use okena_ui::tokens::ui_text_md;
 
 use super::style::{
     MdColors, body_line_height, body_size, heading_style, inline_code_size, node_spacing,
     table_line_height,
 };
-use super::types::{FmValue, Frontmatter, Inline, Node, char_len, slice_by_chars};
-use super::{MarkdownDocument, RenderedNode};
+use super::types::{FmValue, Frontmatter, Inline, Node, char_len};
+use super::{MarkdownDocument, MarkdownTextRun, RenderedNode, RenderedTextUnit};
 
 /// Height of one code line. Code blocks are laid out line by line (each line is
 /// its own selectable element), so this stands in for `line_height`.
@@ -45,6 +44,46 @@ fn highlighted_code_line(
         _ => Vec::new(),
     };
     build_styled_text_with_backgrounds(spans, &bg_ranges)
+}
+
+/// Render one stable text element and apply selection as a text highlight.
+/// Keeping the element whole makes its `TextLayout` usable throughout a drag.
+fn plain_text_run(text: &str, selection: Option<(usize, usize)>, selection_bg: Rgba) -> StyledText {
+    let byte_at = |char_idx: usize| {
+        text.char_indices()
+            .nth(char_idx)
+            .map(|(byte, _)| byte)
+            .unwrap_or(text.len())
+    };
+    let highlights = selection
+        .filter(|(start, end)| start < end)
+        .map(|(start, end)| {
+            vec![(
+                byte_at(start)..byte_at(end),
+                HighlightStyle {
+                    background_color: Some(selection_bg.into()),
+                    ..Default::default()
+                },
+            )]
+        })
+        .unwrap_or_default();
+    StyledText::new(text.to_string()).with_highlights(highlights)
+}
+
+fn push_text_run(
+    text: &str,
+    selection: Option<(usize, usize)>,
+    start_offset: usize,
+    selection_bg: Rgba,
+    targets: &mut Vec<MarkdownTextRun>,
+) -> StyledText {
+    let styled = plain_text_run(text, selection, selection_bg);
+    targets.push(MarkdownTextRun::new(
+        styled.layout().clone(),
+        text.to_string(),
+        start_offset,
+    ));
+    styled
 }
 
 /// Emphasis a word token inherits from the inline elements enclosing it.
@@ -168,30 +207,25 @@ impl MarkdownDocument {
                     });
 
                     let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
-                    let line_div = if !spans.is_empty() {
-                        div().h(CODE_LINE_HEIGHT).child(highlighted_code_line(
-                            line,
-                            spans,
-                            line_sel,
-                            selection_bg,
-                        ))
-                    } else if let Some((sel_start, sel_end)) = line_sel {
-                        let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
-                        div()
-                            .h(CODE_LINE_HEIGHT)
-                            .flex()
-                            .child(div().child(before))
-                            .child(div().bg(selection_bg).child(selected))
-                            .child(div().child(after))
+                    let display_line = if line.is_empty() { " " } else { line };
+                    let styled = if !spans.is_empty() {
+                        highlighted_code_line(line, spans, line_sel, selection_bg)
                     } else {
-                        div().h(CODE_LINE_HEIGHT).child(if line.is_empty() {
-                            " ".to_string()
-                        } else {
-                            line.to_string()
-                        })
+                        plain_text_run(display_line, line_sel, selection_bg)
                     };
+                    let text_runs = vec![MarkdownTextRun::new(
+                        styled.layout().clone(),
+                        line.to_string(),
+                        line_offset,
+                    )];
+                    let line_div = div().h(CODE_LINE_HEIGHT).child(styled);
 
-                    lines.push((line_div, line_offset, line_end));
+                    lines.push(RenderedTextUnit {
+                        div: line_div,
+                        start_offset: line_offset,
+                        end_offset: line_end,
+                        text_runs,
+                    });
                     line_offset = line_end;
                 }
 
@@ -233,6 +267,7 @@ impl MarkdownDocument {
                     });
 
                     let mut header_row = h_flex();
+                    let mut header_runs = Vec::new();
                     let mut cell_offset = 0usize;
                     for (i, header) in headers.iter().enumerate() {
                         let cell_len =
@@ -254,11 +289,18 @@ impl MarkdownDocument {
                         let min_w = ((width * 8) + 24).max(80) as f32;
                         header_row = header_row.child(
                             div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
-                                Self::render_inlines_with_selection(header, t, cx, cell_sel)
-                                    .text_size(ui_text_md(cx))
-                                    .line_height(table_line_height(cx))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(c.heading)),
+                                Self::render_inlines_with_selection_and_targets(
+                                    header,
+                                    t,
+                                    cx,
+                                    cell_sel,
+                                    row_offset + cell_offset + if i > 0 { 1 } else { 0 },
+                                    &mut header_runs,
+                                )
+                                .text_size(ui_text_md(cx))
+                                .line_height(table_line_height(cx))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c.heading)),
                             ),
                         );
                         cell_offset += cell_len;
@@ -268,7 +310,12 @@ impl MarkdownDocument {
                         .bg(rgb(c.surface))
                         .border_b_1()
                         .border_color(rgb(c.surface_border));
-                    rendered_header = Some((header_div, row_offset, header_end));
+                    rendered_header = Some(RenderedTextUnit {
+                        div: header_div,
+                        start_offset: row_offset,
+                        end_offset: header_end,
+                        text_runs: header_runs,
+                    });
                     row_offset = header_end;
                 }
 
@@ -293,6 +340,7 @@ impl MarkdownDocument {
                     });
 
                     let mut row_div = h_flex();
+                    let mut row_runs = Vec::new();
                     if row_idx % 2 == 1 {
                         row_div = row_div.bg(rgb(c.surface));
                     }
@@ -320,16 +368,28 @@ impl MarkdownDocument {
                         let min_w = ((width * 8) + 24).max(80) as f32;
                         row_div = row_div.child(
                             div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
-                                Self::render_inlines_with_selection(cell, t, cx, cell_sel)
-                                    .text_size(ui_text_md(cx))
-                                    .line_height(table_line_height(cx))
-                                    .text_color(rgb(c.body)),
+                                Self::render_inlines_with_selection_and_targets(
+                                    cell,
+                                    t,
+                                    cx,
+                                    cell_sel,
+                                    row_offset + cell_offset + if i > 0 { 1 } else { 0 },
+                                    &mut row_runs,
+                                )
+                                .text_size(ui_text_md(cx))
+                                .line_height(table_line_height(cx))
+                                .text_color(rgb(c.body)),
                             ),
                         );
                         cell_offset += cell_len;
                     }
 
-                    rendered_rows.push((row_div, row_offset, row_end));
+                    rendered_rows.push(RenderedTextUnit {
+                        div: row_div,
+                        start_offset: row_offset,
+                        end_offset: row_end,
+                        text_runs: row_runs,
+                    });
                     row_offset = row_end;
                 }
 
@@ -340,11 +400,20 @@ impl MarkdownDocument {
             }
             _ => {
                 // Other nodes are simple blocks
-                let node_div = Self::render_node_with_selection(node, t, cx, node_selection);
+                let mut text_runs = Vec::new();
+                let node_div = Self::render_node_with_selection(
+                    node,
+                    t,
+                    cx,
+                    node_selection,
+                    offset,
+                    &mut text_runs,
+                );
                 RenderedNode::Simple {
                     div: node_div,
                     start_offset: offset,
                     end_offset: offset + node_len,
+                    text_runs,
                 }
             }
         };
@@ -411,21 +480,16 @@ impl MarkdownDocument {
         t: &ThemeColors,
         cx: &App,
         selection: Option<(usize, usize)>,
+        base_offset: usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
     ) -> Div {
         let c = MdColors::new(t);
         match node {
             Node::Heading { level, children } => {
                 let (size, line_height) = heading_style(*level, cx);
-
-                // For headings, render inline content with selection support
-                // but apply heading styles to the container
-                let content = if let Some((start, end)) = selection {
-                    // Render with selection highlighting
-                    Self::render_heading_text_with_selection(children, start, end)
-                } else {
-                    // No selection - render as plain text for proper styling
-                    div().child(Self::render_inlines_as_text(children))
-                };
+                let text = Self::render_inlines_as_text(children);
+                let content =
+                    push_text_run(&text, selection, base_offset, rgba(0x3390ff40), text_runs);
 
                 div()
                     .w_full()
@@ -438,72 +502,15 @@ impl MarkdownDocument {
             // `w_full` gives the inline flow a definite width to wrap against.
             // Without it the run is sized from its own content and spills past
             // the reading column instead of breaking at its edge.
-            Node::Paragraph { children } => {
-                Self::render_inlines_with_selection(children, t, cx, selection).w_full()
-            }
-            Node::CodeBlock {
-                language,
-                code,
-                highlighted,
-            } => {
-                let selection_bg = rgba(0x3390ff40);
-
-                // Render code lines with selection
-                let mut code_lines: Vec<Div> = Vec::new();
-                let mut offset = 0usize;
-
-                for (line_idx, line) in code.lines().enumerate() {
-                    let line_len = char_len(line);
-                    let line_end = offset + line_len + 1; // +1 for newline
-
-                    let line_sel = selection.and_then(|(s, e)| {
-                        if e <= offset || s >= line_end {
-                            None
-                        } else {
-                            Some((s.saturating_sub(offset), (e - offset).min(line_len)))
-                        }
-                    });
-
-                    let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
-                    let line_div = if !spans.is_empty() {
-                        div().h(CODE_LINE_HEIGHT).child(highlighted_code_line(
-                            line,
-                            spans,
-                            line_sel,
-                            selection_bg,
-                        ))
-                    } else if let Some((sel_start, sel_end)) = line_sel {
-                        let (before, selected, after) = slice_by_chars(line, sel_start, sel_end);
-                        div()
-                            .h(CODE_LINE_HEIGHT)
-                            .flex()
-                            .child(div().child(before))
-                            .child(div().bg(selection_bg).child(selected))
-                            .child(div().child(after))
-                    } else {
-                        div().h(CODE_LINE_HEIGHT).child(if line.is_empty() {
-                            " ".to_string()
-                        } else {
-                            line.to_string()
-                        })
-                    };
-
-                    code_lines.push(line_div);
-                    offset = line_end;
-                }
-
-                code_block_container(language.as_deref(), t, cx).child(
-                    div()
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .font_family("monospace")
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(c.body))
-                        .flex()
-                        .flex_col()
-                        .children(code_lines),
-                )
-            }
+            Node::Paragraph { children } => Self::render_inlines_with_selection_and_targets(
+                children,
+                t,
+                cx,
+                selection,
+                base_offset,
+                text_runs,
+            )
+            .w_full(),
             Node::List { ordered, items } => {
                 // One marker column for both list kinds, right-aligned in it, so
                 // the text hangs at the same indent whatever the marker is —
@@ -548,41 +555,58 @@ impl MarkdownDocument {
                                     .child(marker),
                             )
                             .child(
-                                Self::render_inlines_with_selection(item_inlines, t, cx, item_sel)
-                                    .flex_1(),
+                                Self::render_inlines_with_selection_and_targets(
+                                    item_inlines,
+                                    t,
+                                    cx,
+                                    item_sel,
+                                    base_offset + offset,
+                                    text_runs,
+                                )
+                                .flex_1(),
                             ),
                     );
                     offset += item_len;
                 }
                 list
             }
-            Node::Table {
-                headers,
-                rows,
-                col_widths,
-            } => Self::render_table_with_selection(headers, rows, col_widths, t, cx, selection),
             Node::Blockquote { children } => div()
                 .pl(px(14.0))
                 .border_l_2()
                 .border_color(rgb(c.surface_border))
                 .child(
-                    Self::render_inlines_with_selection(children, t, cx, selection)
-                        .w_full()
-                        .text_color(rgb(c.muted))
-                        .italic(),
+                    Self::render_inlines_with_selection_and_targets(
+                        children,
+                        t,
+                        cx,
+                        selection,
+                        base_offset,
+                        text_runs,
+                    )
+                    .w_full()
+                    .text_color(rgb(c.muted))
+                    .italic(),
                 ),
             // Whitespace is what separates sections here, so an explicit rule
             // stays as a hairline that barely registers.
             Node::HorizontalRule => div().w_full().h(px(1.0)).bg(rgb(c.rule)),
-            // Frontmatter renders as a self-contained metadata card. Partial
-            // (inline) selection highlighting is intentionally omitted; block
-            // selection and copy still work through the flat-text offsets.
-            Node::Frontmatter { block, .. } => Self::render_frontmatter(block, t, cx),
+            Node::Frontmatter { block, .. } => {
+                Self::render_frontmatter(block, t, cx, selection, base_offset, text_runs)
+            }
+            // These are rendered by the specialized branches in `render_node`.
+            Node::CodeBlock { .. } | Node::Table { .. } => div(),
         }
     }
 
     /// Render a frontmatter block as a bordered metadata card.
-    fn render_frontmatter(fm: &Frontmatter, t: &ThemeColors, cx: &App) -> Div {
+    fn render_frontmatter(
+        fm: &Frontmatter,
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
+    ) -> Div {
         let c = MdColors::new(t);
         let card = v_flex()
             .gap(px(4.0))
@@ -598,79 +622,214 @@ impl MarkdownDocument {
 
         match fm {
             Frontmatter::Raw(raw) => {
-                card.font_family("monospace")
-                    .children(raw.lines().map(|line| {
-                        div().text_color(rgb(c.body)).child(if line.is_empty() {
-                            " ".to_string()
-                        } else {
-                            line.to_string()
-                        })
-                    }))
+                let mut cursor = 0usize;
+                let mut lines = Vec::new();
+                for line in raw.lines() {
+                    let line_len = char_len(line);
+                    let line_selection = sub_selection(selection, cursor, line_len);
+                    let display_line = if line.is_empty() { " " } else { line };
+                    let styled = plain_text_run(display_line, line_selection, rgba(0x3390ff40));
+                    text_runs.push(MarkdownTextRun::new(
+                        styled.layout().clone(),
+                        line.to_string(),
+                        base_offset + cursor,
+                    ));
+                    lines.push(div().text_color(rgb(c.body)).child(styled));
+                    cursor += line_len + 1;
+                }
+                card.font_family("monospace").children(lines)
             }
-            Frontmatter::Parsed(entries) => card.children(
-                entries
-                    .iter()
-                    .map(|(key, value)| Self::render_fm_entry(key, value, t, cx)),
-            ),
+            Frontmatter::Parsed(entries) => {
+                let mut cursor = 0usize;
+                card.children(Self::render_fm_entries(
+                    entries,
+                    0,
+                    t,
+                    cx,
+                    selection,
+                    base_offset,
+                    &mut cursor,
+                    text_runs,
+                ))
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_fm_entries(
+        entries: &[(String, FmValue)],
+        depth: usize,
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+        cursor: &mut usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
+    ) -> Vec<Div> {
+        entries
+            .iter()
+            .map(|(key, value)| {
+                Self::render_fm_entry(
+                    key,
+                    value,
+                    depth,
+                    t,
+                    cx,
+                    selection,
+                    base_offset,
+                    cursor,
+                    text_runs,
+                )
+            })
+            .collect()
     }
 
     /// Render a single `key: value` frontmatter entry. Scalars sit inline next
     /// to the key; lists and nested maps stack below it, indented.
-    fn render_fm_entry(key: &str, value: &FmValue, t: &ThemeColors, cx: &App) -> Div {
+    #[allow(clippy::too_many_arguments)]
+    fn render_fm_entry(
+        key: &str,
+        value: &FmValue,
+        depth: usize,
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+        cursor: &mut usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
+    ) -> Div {
         let c = MdColors::new(t);
-        let key_label = || {
-            div()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(c.muted))
-                .child(key.to_string())
-        };
+        *cursor += depth * 2;
+        let key_len = char_len(key);
+        let key_start = *cursor;
+        let key_text = push_text_run(
+            key,
+            sub_selection(selection, key_start, key_len),
+            base_offset + key_start,
+            rgba(0x3390ff40),
+            text_runs,
+        );
+        *cursor += key_len;
+        let key_label = div()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(c.muted))
+            .child(key_text);
 
         match value {
             // `min-width: 0` lets the value column shrink below its unwrapped
             // width so a long scalar wraps inside the card instead of painting
             // past its edge.
-            FmValue::Scalar(s) => h_flex()
-                .w_full()
-                .gap(px(8.0))
-                .items_baseline()
-                .child(key_label().min_w(px(120.0)).flex_shrink_0())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(rgb(c.body))
-                        .child(s.clone()),
-                ),
-            FmValue::Empty => h_flex()
-                .w_full()
-                .gap(px(8.0))
-                .items_baseline()
-                .child(key_label().min_w(px(120.0)).flex_shrink_0())
-                .child(div().italic().text_color(rgb(c.muted)).child("\u{2014}")),
-            FmValue::List(items) => v_flex()
-                .w_full()
-                .gap(px(2.0))
-                .child(key_label())
-                .child(Self::render_fm_list(items, t, cx)),
-            FmValue::Map(sub) => v_flex().w_full().gap(px(2.0)).child(key_label()).child(
+            FmValue::Scalar(s) => {
+                *cursor += 2; // `: `
+                let value_len = char_len(s);
+                let value_start = *cursor;
+                let value_text = push_text_run(
+                    s,
+                    sub_selection(selection, value_start, value_len),
+                    base_offset + value_start,
+                    rgba(0x3390ff40),
+                    text_runs,
+                );
+                *cursor += value_len + 1; // newline
+                h_flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .items_baseline()
+                    .child(key_label.min_w(px(120.0)).flex_shrink_0())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(rgb(c.body))
+                            .child(value_text),
+                    )
+            }
+            FmValue::Empty => {
+                *cursor += 2; // `:` and newline
+                h_flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .items_baseline()
+                    .child(key_label.min_w(px(120.0)).flex_shrink_0())
+                    .child(div().italic().text_color(rgb(c.muted)).child("\u{2014}"))
+            }
+            FmValue::List(items) => {
+                *cursor += 2; // `:` and newline
                 v_flex()
                     .w_full()
-                    .gap(px(4.0))
-                    .pl(px(16.0))
-                    .children(sub.iter().map(|(k, v)| Self::render_fm_entry(k, v, t, cx))),
-            ),
+                    .gap(px(2.0))
+                    .child(key_label)
+                    .child(Self::render_fm_list(
+                        items,
+                        depth + 1,
+                        t,
+                        cx,
+                        selection,
+                        base_offset,
+                        cursor,
+                        text_runs,
+                    ))
+            }
+            FmValue::Map(sub) => {
+                *cursor += 2; // `:` and newline
+                v_flex().w_full().gap(px(2.0)).child(key_label).child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(4.0))
+                        .pl(px(16.0))
+                        .children(Self::render_fm_entries(
+                            sub,
+                            depth + 1,
+                            t,
+                            cx,
+                            selection,
+                            base_offset,
+                            cursor,
+                            text_runs,
+                        )),
+                )
+            }
         }
     }
 
     /// Render a frontmatter sequence as a bulleted, indented list.
-    fn render_fm_list(items: &[FmValue], t: &ThemeColors, cx: &App) -> Div {
+    #[allow(clippy::too_many_arguments)]
+    fn render_fm_list(
+        items: &[FmValue],
+        depth: usize,
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+        cursor: &mut usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
+    ) -> Div {
         let c = MdColors::new(t);
         let mut list = v_flex().w_full().gap(px(2.0)).pl(px(16.0));
         for item in items {
-            list =
-                list.child(match item {
-                    FmValue::Scalar(s) => h_flex()
+            *cursor += depth * 2;
+            let marker_start = *cursor;
+            let marker_text = push_text_run(
+                "\u{2022} ",
+                sub_selection(selection, marker_start, 2),
+                base_offset + marker_start,
+                rgba(0x3390ff40),
+                text_runs,
+            );
+            *cursor += 2;
+            list = list.child(match item {
+                FmValue::Scalar(s) => {
+                    let value_len = char_len(s);
+                    let value_start = *cursor;
+                    let value_text = push_text_run(
+                        s,
+                        sub_selection(selection, value_start, value_len),
+                        base_offset + value_start,
+                        rgba(0x3390ff40),
+                        text_runs,
+                    );
+                    *cursor += value_len + 1;
+                    h_flex()
                         .w_full()
                         .gap(px(8.0))
                         .items_baseline()
@@ -678,42 +837,69 @@ impl MarkdownDocument {
                             div()
                                 .flex_shrink_0()
                                 .text_color(rgb(c.muted))
-                                .child("\u{2022}"),
+                                .child(marker_text),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .text_color(rgb(c.body))
-                                .child(s.clone()),
-                        ),
-                    FmValue::Empty => h_flex()
+                                .child(value_text),
+                        )
+                }
+                FmValue::Empty => {
+                    *cursor += 1;
+                    h_flex()
                         .gap(px(8.0))
-                        .child(div().text_color(rgb(c.muted)).child("\u{2022}")),
-                    FmValue::List(inner) => v_flex()
+                        .child(div().text_color(rgb(c.muted)).child(marker_text))
+                }
+                FmValue::List(inner) => {
+                    *cursor += 1;
+                    v_flex()
                         .w_full()
-                        .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
-                        .child(Self::render_fm_list(inner, t, cx)),
-                    FmValue::Map(sub) => {
-                        v_flex()
-                            .w_full()
-                            .gap(px(4.0))
-                            .child(div().text_color(rgb(c.muted)).child("\u{2022}"))
-                            .child(v_flex().w_full().gap(px(4.0)).pl(px(16.0)).children(
-                                sub.iter().map(|(k, v)| Self::render_fm_entry(k, v, t, cx)),
-                            ))
-                    }
-                });
+                        .child(div().text_color(rgb(c.muted)).child(marker_text))
+                        .child(Self::render_fm_list(
+                            inner,
+                            depth + 1,
+                            t,
+                            cx,
+                            selection,
+                            base_offset,
+                            cursor,
+                            text_runs,
+                        ))
+                }
+                FmValue::Map(sub) => {
+                    *cursor += 1;
+                    v_flex()
+                        .w_full()
+                        .gap(px(4.0))
+                        .child(div().text_color(rgb(c.muted)).child(marker_text))
+                        .child(v_flex().w_full().gap(px(4.0)).pl(px(16.0)).children(
+                            Self::render_fm_entries(
+                                sub,
+                                depth + 1,
+                                t,
+                                cx,
+                                selection,
+                                base_offset,
+                                cursor,
+                                text_runs,
+                            ),
+                        ))
+                }
+            });
         }
         list
     }
 
-    /// Render inline elements as one wrapping row of word tokens.
-    pub(crate) fn render_inlines_with_selection(
+    fn render_inlines_with_selection_and_targets(
         inlines: &[Inline],
         t: &ThemeColors,
         cx: &App,
         selection: Option<(usize, usize)>,
+        base_offset: usize,
+        text_runs: &mut Vec<MarkdownTextRun>,
     ) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         Self::push_inlines(
@@ -722,7 +908,9 @@ impl MarkdownDocument {
             t,
             cx,
             selection,
+            base_offset,
             &mut elements,
+            text_runs,
         );
 
         div()
@@ -755,32 +943,47 @@ impl MarkdownDocument {
 
     /// Flatten inline elements into `out`, handing each one the slice of the
     /// selection range that falls inside it.
+    #[allow(clippy::too_many_arguments)]
     fn push_inlines(
         inlines: &[Inline],
         style: InlineStyle,
         t: &ThemeColors,
         cx: &App,
         selection: Option<(usize, usize)>,
+        base_offset: usize,
         out: &mut Vec<Div>,
+        text_runs: &mut Vec<MarkdownTextRun>,
     ) {
         let mut offset = 0usize;
         for inline in inlines {
             let len = Self::inline_text_length(inline);
             let inline_sel = sub_selection(selection, offset, len);
-            Self::push_inline(inline, style, t, cx, inline_sel, out);
+            Self::push_inline(
+                inline,
+                style,
+                t,
+                cx,
+                inline_sel,
+                base_offset + offset,
+                out,
+                text_runs,
+            );
             offset += len;
         }
     }
 
     /// Append one inline element to `out`: text as word tokens, code as a chip,
     /// emphasis as style handed down to the tokens inside it.
+    #[allow(clippy::too_many_arguments)]
     fn push_inline(
         inline: &Inline,
         style: InlineStyle,
         t: &ThemeColors,
         cx: &App,
         selection: Option<(usize, usize)>,
+        base_offset: usize,
         out: &mut Vec<Div>,
+        text_runs: &mut Vec<MarkdownTextRun>,
     ) {
         let selection_bg = rgba(0x3390ff40);
         let c = MdColors::new(t);
@@ -790,21 +993,16 @@ impl MarkdownDocument {
                 let mut offset = 0usize;
                 for token in word_tokens(text) {
                     let token_len = char_len(token);
-                    let el = match sub_selection(selection, offset, token_len) {
-                        Some((start, end)) => {
-                            let (before, selected, after) = slice_by_chars(token, start, end);
-                            div()
-                                .flex()
-                                .min_w_0()
-                                .child(div().min_w_0().child(before))
-                                .child(div().min_w_0().bg(selection_bg).child(selected))
-                                .child(div().min_w_0().child(after))
-                        }
-                        // `min-width: 0` lets one very long word (a bare URL,
-                        // say) shrink to the column width and wrap inside it
-                        // instead of painting past the edge.
-                        None => div().min_w_0().child(token.to_string()),
-                    };
+                    let styled = push_text_run(
+                        token,
+                        sub_selection(selection, offset, token_len),
+                        base_offset + offset,
+                        selection_bg,
+                        text_runs,
+                    );
+                    // `min-width: 0` lets one very long word (a bare URL,
+                    // say) shrink to the column width and wrap inside it.
+                    let el = div().min_w_0().child(styled);
                     out.push(style.apply(el, &c));
                     offset += token_len;
                 }
@@ -820,17 +1018,8 @@ impl MarkdownDocument {
                         .bg(rgb(c.inline_code_bg))
                         .text_color(rgb(c.body))
                 };
-                let el = match selection {
-                    Some((start, end)) => {
-                        let (before, selected, after) = slice_by_chars(code, start, end);
-                        chip(div())
-                            .flex()
-                            .child(div().child(before))
-                            .child(div().bg(selection_bg).child(selected))
-                            .child(div().child(after))
-                    }
-                    None => chip(div()).child(code.clone()),
-                };
+                let styled = push_text_run(code, selection, base_offset, selection_bg, text_runs);
+                let el = chip(div()).child(styled);
                 out.push(style.apply(el, &c));
             }
             Inline::Bold(children) => Self::push_inlines(
@@ -842,7 +1031,9 @@ impl MarkdownDocument {
                 t,
                 cx,
                 selection,
+                base_offset,
                 out,
+                text_runs,
             ),
             Inline::Italic(children) => Self::push_inlines(
                 children,
@@ -853,7 +1044,9 @@ impl MarkdownDocument {
                 t,
                 cx,
                 selection,
+                base_offset,
                 out,
+                text_runs,
             ),
             Inline::Link { children, .. } => Self::push_inlines(
                 children,
@@ -864,112 +1057,11 @@ impl MarkdownDocument {
                 t,
                 cx,
                 selection,
+                base_offset,
                 out,
+                text_runs,
             ),
         }
-    }
-
-    /// Render a table with selection highlighting.
-    fn render_table_with_selection(
-        headers: &[Vec<Inline>],
-        rows: &[Vec<Vec<Inline>>],
-        col_widths: &[usize],
-        t: &ThemeColors,
-        cx: &App,
-        selection: Option<(usize, usize)>,
-    ) -> Div {
-        // Column widths are precomputed at parse time.
-        let c = MdColors::new(t);
-        let mut table = v_flex()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(c.surface_border))
-            .overflow_hidden();
-
-        let mut offset = 0usize;
-
-        // Header row
-        if !headers.is_empty() {
-            let mut header_row = div()
-                .flex()
-                .bg(rgb(c.surface))
-                .border_b_1()
-                .border_color(rgb(c.surface_border));
-
-            for (i, header) in headers.iter().enumerate() {
-                let cell_len = Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 }; // +1 for tab
-                let cell_sel = selection.and_then(|(s, e)| {
-                    let cell_start = offset + if i > 0 { 1 } else { 0 }; // skip tab
-                    let cell_end = offset + cell_len;
-                    if e <= cell_start || s >= cell_end {
-                        None
-                    } else {
-                        Some((
-                            s.saturating_sub(cell_start),
-                            (e - cell_start).min(Self::inlines_text_length(header)),
-                        ))
-                    }
-                });
-
-                let width = col_widths.get(i).copied().unwrap_or(10);
-                let min_w = ((width * 8) + 24).max(80) as f32;
-                header_row = header_row.child(
-                    div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
-                        Self::render_inlines_with_selection(header, t, cx, cell_sel)
-                            .text_size(ui_text_md(cx))
-                            .line_height(table_line_height(cx))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c.heading)),
-                    ),
-                );
-                offset += cell_len;
-            }
-            offset += 1; // newline
-            table = table.child(header_row);
-        }
-
-        // Data rows
-        for (row_idx, row) in rows.iter().enumerate() {
-            let mut row_div = div()
-                .flex()
-                .when(row_idx % 2 == 1, |d| d.bg(rgb(c.surface)));
-
-            if row_idx < rows.len() - 1 {
-                row_div = row_div.border_b_1().border_color(rgb(c.surface_border));
-            }
-
-            for (i, cell) in row.iter().enumerate() {
-                let cell_len = Self::inlines_text_length(cell) + if i > 0 { 1 } else { 0 };
-                let cell_sel = selection.and_then(|(s, e)| {
-                    let cell_start = offset + if i > 0 { 1 } else { 0 };
-                    let cell_end = offset + cell_len;
-                    if e <= cell_start || s >= cell_end {
-                        None
-                    } else {
-                        Some((
-                            s.saturating_sub(cell_start),
-                            (e - cell_start).min(Self::inlines_text_length(cell)),
-                        ))
-                    }
-                });
-
-                let width = col_widths.get(i).copied().unwrap_or(10);
-                let min_w = ((width * 8) + 24).max(80) as f32;
-                row_div = row_div.child(
-                    div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
-                        Self::render_inlines_with_selection(cell, t, cx, cell_sel)
-                            .text_size(ui_text_md(cx))
-                            .line_height(table_line_height(cx))
-                            .text_color(rgb(c.body)),
-                    ),
-                );
-                offset += cell_len;
-            }
-            offset += 1; // newline
-            table = table.child(row_div);
-        }
-
-        table
     }
 
     /// Render inlines as plain text (for measuring, headings, etc.).
@@ -996,23 +1088,5 @@ impl MarkdownDocument {
                 }
             }
         }
-    }
-
-    /// Render heading text with selection highlighting.
-    /// Returns a Div with flex layout containing the text split by selection.
-    fn render_heading_text_with_selection(
-        inlines: &[Inline],
-        sel_start: usize,
-        sel_end: usize,
-    ) -> Div {
-        let selection_bg = rgba(0x3390ff40);
-        let text = Self::render_inlines_as_text(inlines);
-        let (before, selected, after) = slice_by_chars(&text, sel_start, sel_end);
-
-        div()
-            .flex()
-            .child(div().child(before))
-            .child(div().bg(selection_bg).child(selected))
-            .child(div().child(after))
     }
 }

@@ -19,6 +19,65 @@ pub use style::DOC_MAX_WIDTH;
 /// Type alias for markdown selection (1D character offset).
 pub type MarkdownSelection = SelectionState<usize>;
 
+/// A laid-out text run and its character offset in [`MarkdownDocument::plain_text`].
+///
+/// GPUI reports hit-test positions as UTF-8 byte offsets. Markdown selection is
+/// character-based, so this type owns the conversion at the rendering boundary.
+#[derive(Clone)]
+pub struct MarkdownTextRun {
+    layout: TextLayout,
+    text: SharedString,
+    start_offset: usize,
+}
+
+impl MarkdownTextRun {
+    pub(crate) fn new(
+        layout: TextLayout,
+        text: impl Into<SharedString>,
+        start_offset: usize,
+    ) -> Self {
+        Self {
+            layout,
+            text: text.into(),
+            start_offset,
+        }
+    }
+
+    /// Map a window position to a document character offset.
+    ///
+    /// `Err` carries the closest offset when the position is outside this run,
+    /// mirroring [`TextLayout::index_for_position`].
+    pub fn index_for_position(&self, position: Point<Pixels>) -> Result<usize, usize> {
+        match self.layout.index_for_position(position) {
+            Ok(byte_offset) => Ok(self.document_offset(byte_offset)),
+            Err(byte_offset) => Err(self.document_offset(byte_offset)),
+        }
+    }
+
+    /// Bounds populated by GPUI after the run has been laid out.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.layout.bounds()
+    }
+
+    fn document_offset(&self, byte_offset: usize) -> usize {
+        let byte_offset = byte_offset.min(self.text.len());
+        let char_offset = self
+            .text
+            .char_indices()
+            .take_while(|(index, _)| *index < byte_offset)
+            .count();
+        self.start_offset + char_offset
+    }
+}
+
+/// One independently laid-out markdown unit: a block, code line, or table row.
+pub struct RenderedTextUnit {
+    pub div: Div,
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub text_runs: Vec<MarkdownTextRun>,
+}
+
 /// A rendered node that can be either a simple block or a code block with selectable lines.
 pub enum RenderedNode {
     /// A simple block (heading, paragraph, list, etc.) - single selectable unit
@@ -26,19 +85,17 @@ pub enum RenderedNode {
         div: Div,
         start_offset: usize,
         end_offset: usize,
+        text_runs: Vec<MarkdownTextRun>,
     },
     /// A code block with individually selectable lines
     CodeBlock {
         language: Option<String>,
-        /// Each line as (div, start_offset, end_offset)
-        lines: Vec<(Div, usize, usize)>,
+        lines: Vec<RenderedTextUnit>,
     },
     /// A table with individually selectable rows
     Table {
-        /// Header row (div, start_offset, end_offset)
-        header: Option<(Div, usize, usize)>,
-        /// Data rows as (div, start_offset, end_offset)
-        rows: Vec<(Div, usize, usize)>,
+        header: Option<RenderedTextUnit>,
+        rows: Vec<RenderedTextUnit>,
     },
 }
 

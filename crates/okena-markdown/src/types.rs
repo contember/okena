@@ -189,21 +189,6 @@ pub(crate) enum Inline {
     Link { _url: String, children: Vec<Inline> },
 }
 
-/// Slice a string by character indices (not byte indices).
-/// Returns (before, selected, after) parts.
-pub(crate) fn slice_by_chars(s: &str, start: usize, end: usize) -> (String, String, String) {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    let start = start.min(len);
-    let end = end.min(len);
-
-    let before: String = chars[..start].iter().collect();
-    let selected: String = chars[start..end].iter().collect();
-    let after: String = chars[end..].iter().collect();
-
-    (before, selected, after)
-}
-
 /// Get character count of a string (not byte count).
 pub(crate) fn char_len(s: &str) -> usize {
     s.chars().count()
