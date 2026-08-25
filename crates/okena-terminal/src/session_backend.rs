@@ -551,6 +551,13 @@ struct TrackedProcess {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OwnedPtyProcessSession {
+    session_id: i32,
+    leader: TrackedProcess,
+}
+
+#[cfg(unix)]
 fn raw_process_is_alive(pid: i32) -> bool {
     // SAFETY: signal 0 performs existence/permission checking only and takes no
     // pointers. All callers pass a positive PID discovered from process state.
@@ -564,26 +571,27 @@ fn process_start_marker(pid: i32) -> Option<u128> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_linux_process_stat(stat: &str) -> Option<(i32, u8, u64)> {
+fn parse_linux_process_stat(stat: &str) -> Option<(i32, i32, u8, u64)> {
     // `comm` is parenthesized and may itself contain spaces or `)`; the final
     // ") " delimiter is the only safe place to begin fixed-field parsing.
     let suffix = stat.rsplit_once(") ")?.1;
     let fields: Vec<&str> = suffix.split_whitespace().collect();
     let state = *fields.first()?.as_bytes().first()?; // field 3
     let parent_pid = fields.get(1)?.parse().ok()?; // field 4
+    let session_id = fields.get(3)?.parse().ok()?; // field 6
     let start_ticks = fields.get(19)?.parse().ok()?; // field 22
-    Some((parent_pid, state, start_ticks))
+    Some((parent_pid, session_id, state, start_ticks))
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_stat(pid: i32) -> Option<(i32, u8, u64)> {
+fn linux_process_stat(pid: i32) -> Option<(i32, i32, u8, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_linux_process_stat(&stat)
 }
 
 #[cfg(target_os = "linux")]
 fn process_start_marker(pid: i32) -> Option<u128> {
-    linux_process_stat(pid).map(|(_, _, start_ticks)| start_ticks as u128)
+    linux_process_stat(pid).map(|(_, _, _, start_ticks)| start_ticks as u128)
 }
 
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
@@ -600,7 +608,7 @@ fn tracked_process(pid: i32) -> Option<TrackedProcess> {
 
 #[cfg(target_os = "linux")]
 fn same_process_is_alive(process: TrackedProcess) -> bool {
-    let Some((_, state, start_ticks)) = linux_process_stat(process.pid) else {
+    let Some((_, _, state, start_ticks)) = linux_process_stat(process.pid) else {
         return false;
     };
     // A killed child remains in /proc as a zombie until its stopped dtach
@@ -609,7 +617,15 @@ fn same_process_is_alive(process: TrackedProcess) -> bool {
     state != b'Z' && process.start_marker == Some(start_ticks as u128)
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn same_process_is_alive(process: TrackedProcess) -> bool {
+    !crate::macos_proc::process_is_zombie(process.pid as u32)
+        && process
+            .start_marker
+            .is_some_and(|marker| process_start_marker(process.pid) == Some(marker))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn same_process_is_alive(process: TrackedProcess) -> bool {
     match process.start_marker {
         Some(marker) => process_start_marker(process.pid) == Some(marker),
@@ -644,7 +660,7 @@ fn process_tree_snapshot() -> std::collections::HashMap<i32, Vec<i32>> {
         else {
             continue;
         };
-        if let Some((parent_pid, _, _)) = linux_process_stat(pid) {
+        if let Some((parent_pid, _, _, _)) = linux_process_stat(pid) {
             tree.entry(parent_pid).or_insert_with(Vec::new).push(pid);
         }
     }
@@ -707,7 +723,7 @@ fn tracked_descendants(roots: &[TrackedProcess]) -> Vec<TrackedProcess> {
 }
 
 #[cfg(unix)]
-fn signal_tracked_processes(processes: &[TrackedProcess], signal: i32, session_name: &str) {
+fn signal_tracked_processes(processes: &[TrackedProcess], signal: i32, context: &str) {
     for &process in processes {
         if !same_process_is_alive(process) {
             continue;
@@ -718,10 +734,162 @@ fn signal_tracked_processes(processes: &[TrackedProcess], signal: i32, session_n
             libc::kill(process.pid, signal);
         }
         log::debug!(
-            "Sent signal {signal} to process {} for dtach session {session_name}",
+            "Sent signal {signal} to process {} for {context}",
             process.pid
         );
     }
+}
+
+/// Record the private process session created by `forkpty` for a direct PTY.
+/// Requiring the child to be its leader prevents a bad probe from ever naming
+/// Okena's own session as a teardown target.
+#[cfg(unix)]
+pub(crate) fn owned_pty_process_session(child_pid: u32) -> Option<OwnedPtyProcessSession> {
+    let child_pid = i32::try_from(child_pid).ok()?;
+    // SAFETY: `getsid` takes a numeric PID and does not dereference pointers.
+    let session_id = unsafe { libc::getsid(child_pid) };
+    // SAFETY: PID 0 asks for the calling process's session.
+    let own_session_id = unsafe { libc::getsid(0) };
+    if session_id <= 1 || session_id != child_pid || session_id == own_session_id {
+        return None;
+    }
+    let leader = tracked_process(child_pid)?;
+    leader.start_marker?;
+    Some(OwnedPtyProcessSession { session_id, leader })
+}
+
+#[cfg(target_os = "linux")]
+fn tracked_process_session_members(session_id: i32) -> Option<Vec<TrackedProcess>> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return None;
+    };
+    Some(
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|pid| {
+                linux_process_stat(*pid)
+                    .is_some_and(|(_, sid, state, _)| sid == session_id && state != b'Z')
+            })
+            .filter_map(tracked_process)
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn tracked_process_session_members(session_id: i32) -> Option<Vec<TrackedProcess>> {
+    Some(
+        crate::macos_proc::all_pids()?
+            .into_iter()
+            .filter_map(|pid| i32::try_from(pid).ok())
+            .filter(|pid| {
+                // SAFETY: `getsid` takes a numeric PID and does not dereference pointers.
+                unsafe { libc::getsid(*pid) == session_id }
+            })
+            .filter_map(tracked_process)
+            .filter(|process| same_process_is_alive(*process))
+            .collect(),
+    )
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn tracked_process_session_members(session_id: i32) -> Option<Vec<TrackedProcess>> {
+    let Ok(output) =
+        crate::process::safe_output(crate::process::command("ps").args(["-axo", "pid=,sid="]))
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse::<i32>().ok()?;
+                let sid = fields.next()?.parse::<i32>().ok()?;
+                (sid == session_id).then_some(pid)
+            })
+            .filter_map(tracked_process)
+            .filter(|process| same_process_is_alive(*process))
+            .collect(),
+    )
+}
+
+/// Stop and kill every process still attached to a direct PTY session.
+/// `portable_pty::Child` reaps the leader after this verified kill.
+#[cfg(unix)]
+pub(crate) fn terminate_pty_process_session(
+    session: OwnedPtyProcessSession,
+    terminal_id: &str,
+) -> bool {
+    let session_id = session.session_id;
+    // SAFETY: PID 0 asks for the calling process's session.
+    let own_session_id = unsafe { libc::getsid(0) };
+    if session_id <= 1 || session_id == own_session_id {
+        log::error!(
+            "Refusing to terminate invalid PTY session {session_id} for terminal {terminal_id}"
+        );
+        return false;
+    }
+    if tracked_process(session_id).is_some_and(|leader| leader != session.leader) {
+        log::info!(
+            "PTY session {session_id} for terminal {terminal_id} already ended; recycled leader preserved"
+        );
+        return true;
+    }
+
+    let context = format!("terminal {terminal_id}");
+    let mut members = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stable_snapshots = 0;
+    for _ in 0..8 {
+        let Some(snapshot) = tracked_process_session_members(session_id) else {
+            signal_tracked_processes(&members, libc::SIGCONT, &context);
+            log::error!("Could not inspect PTY session {session_id} for terminal {terminal_id}");
+            return false;
+        };
+        let newly_seen = snapshot
+            .into_iter()
+            .filter(|process| seen.insert(*process))
+            .collect::<Vec<_>>();
+        if newly_seen.is_empty() {
+            stable_snapshots += 1;
+            if stable_snapshots == 2 {
+                break;
+            }
+        } else {
+            stable_snapshots = 0;
+            signal_tracked_processes(&newly_seen, libc::SIGSTOP, &context);
+            members.extend(newly_seen);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    if stable_snapshots < 2 {
+        signal_tracked_processes(&members, libc::SIGCONT, &context);
+        log::error!("PTY session {session_id} for terminal {terminal_id} did not quiesce");
+        return false;
+    }
+
+    signal_tracked_processes(&members, libc::SIGKILL, &context);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let Some(snapshot) = tracked_process_session_members(session_id) else {
+        signal_tracked_processes(&members, libc::SIGCONT, &context);
+        log::error!("Could not verify PTY session {session_id} for terminal {terminal_id}");
+        return false;
+    };
+    let survivors = snapshot.len();
+    if survivors > 0 {
+        signal_tracked_processes(&snapshot, libc::SIGCONT, &context);
+        log::error!(
+            "PTY session {session_id} for terminal {terminal_id} retained {survivors} process(es)"
+        );
+        return false;
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -1740,7 +1908,7 @@ mod tests {
         fields.push("987");
         let stat = format!("123 (worker ) name) {}", fields.join(" "));
 
-        assert_eq!(parse_linux_process_stat(&stat), Some((42, b'Z', 987)));
+        assert_eq!(parse_linux_process_stat(&stat), Some((42, 0, b'Z', 987)));
     }
 
     #[test]

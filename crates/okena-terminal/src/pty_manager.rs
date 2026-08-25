@@ -93,6 +93,8 @@ struct PtyInstances {
 
 struct ExitedPty {
     generation: PtyGeneration,
+    #[cfg(unix)]
+    process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
     #[cfg(windows)]
     wsl_distro: Option<String>,
     #[cfg(windows)]
@@ -103,6 +105,8 @@ impl ExitedPty {
     fn new(generation: PtyGeneration) -> Self {
         Self {
             generation,
+            #[cfg(unix)]
+            process_session: None,
             #[cfg(windows)]
             wsl_distro: None,
             #[cfg(windows)]
@@ -139,6 +143,20 @@ impl PtyInstances {
         self.exited
             .insert(terminal_id.to_string(), ExitedPty::new(generation));
         true
+    }
+
+    #[cfg(unix)]
+    fn record_exited_process_session(
+        &mut self,
+        terminal_id: &str,
+        generation: PtyGeneration,
+        process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
+    ) {
+        if let Some(exited) = self.exited.get_mut(terminal_id)
+            && exited.generation == generation
+        {
+            exited.process_session = process_session;
+        }
     }
 
     #[cfg(windows)]
@@ -261,6 +279,7 @@ fn format_panic(payload: &dyn std::any::Any) -> String {
 
 /// Kill a persistent session and record the outcome against its terminal. A
 /// later successful teardown of the same terminal clears an earlier failure.
+#[cfg(windows)]
 fn record_session_kill(
     tracker: &TeardownTracker,
     terminal_id: &str,
@@ -321,6 +340,8 @@ enum TeardownKind {
         terminal_id: String,
         session_backend: ResolvedBackend,
         session_name: String,
+        #[cfg(unix)]
+        process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
         /// WSL distro for the session (Windows only).
         #[cfg(windows)]
         wsl_distro: Option<String>,
@@ -432,6 +453,9 @@ struct PtyHandle {
     /// `take()` it idempotently to close the PTY and unblock the reader thread.
     master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
+    /// Private `forkpty` session used to find descendants after the shell exits.
+    #[cfg(unix)]
+    process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
     /// Channel to send input to the writer thread.
     /// `Option` so teardown and the `Drop` backstop can both `take()` it
     /// idempotently to close the channel and unblock the writer thread.
@@ -635,6 +659,8 @@ impl PtyManager {
                 terminal_id,
                 session_backend,
                 session_name,
+                #[cfg(unix)]
+                process_session,
                 #[cfg(windows)]
                 wsl_distro,
                 #[cfg(windows)]
@@ -652,8 +678,25 @@ impl PtyManager {
                 } else {
                     record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
                 }
-                #[cfg(not(windows))]
-                record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
+                #[cfg(unix)]
+                {
+                    let session_stopped = session_backend.kill_session(&session_name);
+                    let descendants_stopped = if session_backend == ResolvedBackend::None {
+                        process_session.is_some_and(|session| {
+                            crate::session_backend::terminate_pty_process_session(
+                                session,
+                                &terminal_id,
+                            )
+                        })
+                    } else {
+                        true
+                    };
+                    if session_stopped && descendants_stopped {
+                        tracker.mark_verified(&terminal_id);
+                    } else {
+                        tracker.mark_unverified(&terminal_id);
+                    }
+                }
             }
         }
         if let Some(handle) = job.handle.take() {
@@ -884,6 +927,10 @@ impl PtyManager {
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(unix)]
+        let process_session = child
+            .process_id()
+            .and_then(crate::session_backend::owned_pty_process_session);
 
         // Get reader and writer. The writer is shared (`Arc<Mutex>`) so query
         // replies can be written synchronously via `write_response`, ahead of the
@@ -988,6 +1035,8 @@ impl PtyManager {
                 generation,
                 master: Some(pair.master),
                 child,
+                #[cfg(unix)]
+                process_session,
                 input_tx: Some(input_tx),
                 writer: Some(writer),
                 reader_handle: Some(reader_handle),
@@ -1477,15 +1526,20 @@ impl PtyManager {
         &self,
         terminal_id: &str,
         handle: Option<PtyHandle>,
-        _exited: Option<ExitedPty>,
+        exited: Option<ExitedPty>,
     ) {
         let session_backend = self.session_backend();
         let session_name = session_backend.session_name(terminal_id);
 
+        #[cfg(unix)]
+        let process_session = handle
+            .as_ref()
+            .and_then(|handle| handle.process_session)
+            .or_else(|| exited.as_ref().and_then(|exited| exited.process_session));
+
         // Read WSL info before moving the handle
         #[cfg(windows)]
-        let (wsl_distro, wsl_backend) =
-            Self::wsl_teardown_target(handle.as_ref(), _exited.as_ref());
+        let (wsl_distro, wsl_backend) = Self::wsl_teardown_target(handle.as_ref(), exited.as_ref());
 
         let job = TeardownJob {
             handle,
@@ -1493,6 +1547,8 @@ impl PtyManager {
                 terminal_id: terminal_id.to_string(),
                 session_backend,
                 session_name,
+                #[cfg(unix)]
+                process_session,
                 #[cfg(windows)]
                 wsl_distro,
                 #[cfg(windows)]
@@ -2055,6 +2111,14 @@ impl PtyManager {
                 handle.wsl_backend,
             );
         }
+        #[cfg(unix)]
+        if let Some(handle) = handle.as_ref() {
+            instances.record_exited_process_session(
+                terminal_id,
+                generation,
+                handle.process_session,
+            );
+        }
         drop(instances);
         if let Some(handle) = handle {
             // Process already EOF'd — only reap the reader/writer threads. The later
@@ -2464,6 +2528,64 @@ mod tests {
         manager.flush_teardown();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_pty_kill_terminates_descendants_before_teardown_finishes() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-pty-descendants-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&fixture).expect("create descendant fixture");
+        let child_pid_file = fixture.join("child.pid");
+        let plan = TerminalLaunchPlan {
+            route: ShellType::Default,
+            initial_command: Some(crate::backend::TerminalLaunchCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "sleep 30 & echo $! > \"$1\"; wait".to_string(),
+                    "okena-test".to_string(),
+                    child_pid_file.to_string_lossy().into_owned(),
+                ],
+            }),
+            environment: Vec::new(),
+        };
+        let terminal_id = manager
+            .create_terminal_with_plan(&fixture.to_string_lossy(), &plan)
+            .expect("create direct PTY");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !child_pid_file.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_pid = std::fs::read_to_string(&child_pid_file)
+            .expect("child pid was written")
+            .trim()
+            .parse::<i32>()
+            .expect("child pid is numeric");
+
+        manager.kill(&terminal_id);
+        assert!(manager.flush_teardown_with_timeout(
+            Duration::from_secs(2),
+            std::slice::from_ref(&terminal_id)
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while unsafe { libc::kill(child_pid, 0) == 0 } && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: the PID came from this test's child; signal 0 only checks liveness.
+        let child_alive = unsafe { libc::kill(child_pid, 0) == 0 };
+        if child_alive {
+            // SAFETY: cleanup for the same test-owned child after a failed assertion.
+            unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_dir_all(&fixture);
+        assert!(!child_alive, "direct PTY descendant survived teardown");
+    }
+
     #[cfg(unix)]
     #[derive(Clone, Debug)]
     struct DelayedTerminationChild {
@@ -2531,6 +2653,7 @@ mod tests {
                 release: child_release.clone(),
                 try_wait_error: true,
             }),
+            process_session: None,
             input_tx: None,
             writer: None,
             reader_handle: Some(reader_handle),
@@ -2604,6 +2727,7 @@ mod tests {
                 release: child_release,
                 try_wait_error: false,
             }),
+            process_session: None,
             input_tx: None,
             writer: Some(Arc::new(Mutex::new(Box::new(DropNotifyingWriter(Some(
                 writer_dropped_tx,
@@ -2656,6 +2780,7 @@ mod tests {
                     release: Arc::clone(&child_release),
                     try_wait_error: false,
                 }),
+                process_session: None,
                 input_tx: None,
                 writer: None,
                 reader_handle: Some(reader_handle),

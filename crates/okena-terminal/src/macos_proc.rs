@@ -21,6 +21,11 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+/// Every process currently visible to libproc.
+pub fn all_pids() -> Option<Vec<u32>> {
+    pids_by_type(ProcFilter::All).ok()
+}
+
 /// Direct child pids of `ppid` — equivalent to `pgrep -P <ppid>`.
 pub fn child_pids(ppid: u32) -> Vec<u32> {
     pids_by_type(ProcFilter::ByParentProcess { ppid }).unwrap_or_default()
@@ -46,7 +51,7 @@ pub fn process_name(pid: u32) -> Option<String> {
 /// single `ps -eo pid,ppid` building a process tree.
 pub fn process_tree() -> HashMap<u32, Vec<u32>> {
     let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
-    for pid in pids_by_type(ProcFilter::All).unwrap_or_default() {
+    for pid in all_pids().unwrap_or_default() {
         if let Ok(info) = pidinfo::<BSDInfo>(pid as i32, 0) {
             tree.entry(info.pbi_ppid).or_default().push(pid);
         }
@@ -58,6 +63,11 @@ pub fn process_tree() -> HashMap<u32, Vec<u32>> {
 pub fn process_start_time(pid: u32) -> Option<(u64, u64)> {
     let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
     Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+/// Whether the process is dead and waiting for its parent to reap it.
+pub fn process_is_zombie(pid: u32) -> bool {
+    pidinfo::<BSDInfo>(pid as i32, 0).is_ok_and(|info| info.pbi_status == libc::SZOMB)
 }
 
 /// Map each given unix-socket path to the pids that have it open — equivalent to
