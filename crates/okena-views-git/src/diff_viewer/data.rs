@@ -18,6 +18,10 @@ impl DiffViewer {
         select_file: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if matches!(mode, DiffMode::WorkingTree | DiffMode::Staged) {
+            self.uncommitted_mode = mode.clone();
+            self.commit_message = None;
+        }
         self.diff_mode = mode.clone();
         self.loading = true;
         self.error_message = None;

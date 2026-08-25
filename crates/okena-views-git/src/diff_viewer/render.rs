@@ -26,6 +26,7 @@ impl DiffViewer {
         &self,
         t: &ThemeColors,
         has_files: bool,
+        loading: bool,
         file_count: usize,
         total_added: usize,
         total_removed: usize,
@@ -36,137 +37,99 @@ impl DiffViewer {
         is_maximized: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_working = *diff_mode == DiffMode::WorkingTree;
-        let hide_mode_toggle = matches!(
-            diff_mode,
-            DiffMode::Commit(_) | DiffMode::BranchCompare { .. }
-        );
         let is_unified = self.view_mode == DiffViewMode::Unified;
         let detached = self.is_detached;
+        let title = match diff_mode {
+            DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
+            DiffMode::BranchCompare { base, head } => format!("{base} \u{2192} {head}"),
+            _ => "Uncommitted changes".to_string(),
+        };
 
         div()
-            .px(px(20.0))
-            .py(if detached { px(8.0) } else { px(14.0) })
+            .w_full()
+            .min_w_0()
+            .px(px(16.0))
+            .py(if detached { px(8.0) } else { px(10.0) })
             .border_b_1()
             .border_color(rgb(t.border))
             .flex()
+            .flex_nowrap()
             .items_center()
+            .overflow_hidden()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(ui_text(15.0, cx))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_primary))
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(title),
+            )
             .child(
                 h_flex()
-                    .gap(px(10.0))
-                    .min_w_0()
-                    // Title
-                    .child({
-                        let title = match diff_mode {
-                            DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
-                            DiffMode::BranchCompare { base, head } => {
-                                format!("{base} \u{2192} {head}")
-                            }
-                            _ => "Changes".to_string(),
-                        };
-                        div()
-                            .text_size(ui_text(15.0, cx))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_primary))
-                            .text_ellipsis()
-                            .overflow_hidden()
-                            .min_w_0()
-                            .max_w(px(400.0))
-                            .child(title)
-                    })
-                    // Clickable short hash (copy on click) — for commit mode
-                    .when_some(
-                        if let DiffMode::Commit(hash) = diff_mode {
-                            Some(hash.clone())
-                        } else {
-                            None
-                        },
-                        |d, hash| {
-                            let short = if hash.len() > 7 {
-                                hash[..7].to_string()
-                            } else {
-                                hash.clone()
-                            };
-                            let hash_for_click = hash.clone();
-                            let hash_for_rclick = hash.clone();
-                            d.child(
-                                div()
-                                    .id("commit-hash-copy")
-                                    .text_size(ui_text_ms(cx))
-                                    .font_family("monospace")
-                                    .text_color(rgb(t.term_yellow))
-                                    .cursor_pointer()
-                                    .px(px(5.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            hash_for_click.clone(),
-                                        ));
-                                    })
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            this.open_commit_hash_menu(
-                                                event.position,
-                                                hash_for_rclick.clone(),
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .tooltip(|_window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(
-                                            "Click: copy hash \u{00B7} Right-click: more",
-                                        )
-                                        .build(_window, cx)
-                                    })
-                                    .child(short),
-                            )
-                        },
-                    )
-                    .when(has_files, |d| {
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .pl(px(12.0))
+                    .w(px(124.0))
+                    .border_l_1()
+                    .border_color(rgb(t.border))
+                    .when(loading, |d| {
                         d.child(
-                            h_flex()
-                                .gap(px(6.0))
-                                .pl(px(8.0))
-                                .border_l_1()
-                                .border_color(rgb(t.border))
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format!(
-                                            "{} {}",
-                                            file_count,
-                                            if file_count == 1 { "file" } else { "files" }
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("\u{00B7}"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.diff_added_fg))
-                                        .child(format!("+{}", total_added)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.diff_removed_fg))
-                                        .child(format!("-{}", total_removed)),
-                                ),
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("Loading diff\u{2026}"),
+                        )
+                    })
+                    .when(!loading && has_files, |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(format!(
+                                    "{} {}",
+                                    file_count,
+                                    if file_count == 1 { "file" } else { "files" }
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("\u{00B7}"),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.diff_added_fg))
+                                .child(format!("+{}", total_added)),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.diff_removed_fg))
+                                .child(format!("-{}", total_removed)),
+                        )
+                    })
+                    .when(!loading && !has_files, |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("No changes"),
                         )
                     }),
             )
-            // Drag-to-move spacer (only when detached)
-            .child(window_drag_spacer(detached))
+            .when(detached, |d| d.child(window_drag_spacer(true)))
             .child(
                 h_flex()
+                    .flex_shrink_0()
                     .gap(px(8.0))
                     // Whitespace toggle
                     .child(
@@ -211,19 +174,6 @@ impl DiffViewer {
                                 cx,
                             )),
                     )
-                    // Diff mode toggle (hidden for commit/branch compare diffs)
-                    .when(!hide_mode_toggle, |d| {
-                        d.child(
-                            div()
-                                .id("diff-mode-toggle")
-                                .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
-                                .child(segmented_toggle(
-                                    &[("Unstaged", is_working), ("Staged", !is_working)],
-                                    t,
-                                    cx,
-                                )),
-                        )
-                    })
                     // Separator
                     .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                     // Window min/max controls (only when detached + client decorations)
@@ -272,121 +222,191 @@ impl DiffViewer {
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                             .child(
-                                div()
-                                    .text_size(ui_text(16.0, cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("\u{00D7}"),
+                                svg()
+                                    .path("icons/close.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_muted)),
                             ),
                     ),
             )
     }
 
-    /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
-    pub(super) fn render_commit_info_bar(
+    /// Unified revision rail for uncommitted changes and commit history.
+    pub(super) fn render_revision_bar(
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use gpui_component::tooltip::Tooltip;
 
-        let commit = self.commits.get(self.commit_index);
-        let can_prev = self.can_prev_commit();
-        let can_next = self.can_next_commit();
-        let position = format!("{}/{}", self.commit_index + 1, self.commits.len());
+        let is_uncommitted = self.is_uncommitted();
+        let is_working = self.diff_mode == DiffMode::WorkingTree;
+        let commit = (!is_uncommitted)
+            .then(|| self.commits.get(self.commit_index))
+            .flatten();
+        let revision_hash = match &self.diff_mode {
+            DiffMode::Commit(hash) => Some(hash.clone()),
+            _ => None,
+        };
+        let can_newer = self.can_navigate_newer();
+        let can_older = self.can_navigate_older();
+        let history_loading = self.commit_history_loading;
+        let position = if is_uncommitted {
+            "Uncommitted".to_string()
+        } else if self.commits.is_empty() {
+            "Commit".to_string()
+        } else {
+            format!("{} / {}", self.commit_index + 1, self.commits.len())
+        };
 
         h_flex()
-            .px(px(20.0))
+            .px(px(16.0))
             .py(px(6.0))
-            .gap(px(8.0))
+            .gap(px(10.0))
             .items_center()
+            .min_w_0()
             .border_b_1()
             .border_color(rgb(t.border))
             .bg(rgb(t.bg_secondary))
-            // Prev button
             .child(
-                div()
-                    .id("commit-nav-prev")
-                    .cursor(if can_prev {
-                        CursorStyle::PointingHand
-                    } else {
-                        CursorStyle::default()
-                    })
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .when(can_prev, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_prev {
-                        t.text_secondary
-                    } else {
-                        t.text_muted
-                    }))
-                    .when(can_prev, |d| {
-                        d.on_click(cx.listener(|this, _, _window, cx| this.prev_commit(cx)))
-                    })
-                    .child("\u{25C0}")
-                    .tooltip(move |_window, cx| {
-                        Tooltip::new("Previous commit  [").build(_window, cx)
-                    }),
-            )
-            // Position
-            .child(
-                div()
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_muted))
-                    .min_w(px(36.0))
-                    .text_align(TextAlign::Center)
-                    .child(position),
-            )
-            // Next button
-            .child(
-                div()
-                    .id("commit-nav-next")
-                    .cursor(if can_next {
-                        CursorStyle::PointingHand
-                    } else {
-                        CursorStyle::default()
-                    })
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .when(can_next, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(if can_next {
-                        t.text_secondary
-                    } else {
-                        t.text_muted
-                    }))
-                    .when(can_next, |d| {
-                        d.on_click(cx.listener(|this, _, _window, cx| this.next_commit(cx)))
-                    })
-                    .child("\u{25B6}")
-                    .tooltip(move |_window, cx| Tooltip::new("Next commit  ]").build(_window, cx)),
-            )
-            // Separator
-            .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(t.border)))
-            // Commit metadata
-            .when_some(commit.cloned(), |d, commit| {
-                let hash = commit.hash.clone();
-                let short = if hash.len() > 7 {
-                    hash[..7].to_string()
-                } else {
-                    hash.clone()
-                };
-                let hash_for_click = hash.clone();
-                let hash_for_rclick = hash.clone();
-                let time_str = okena_git::format_relative_time(commit.timestamp);
-                d
-                    // Hash (clickable, copies to clipboard; right-click for menu)
+                h_flex()
+                    .flex_shrink_0()
+                    .h(px(26.0))
+                    .rounded(px(5.0))
+                    .border_1()
+                    .border_color(rgb(t.border))
                     .child(
                         div()
-                            .id("commit-info-hash")
+                            .id("revision-nav-newer")
+                            .cursor(if can_newer {
+                                CursorStyle::PointingHand
+                            } else {
+                                CursorStyle::default()
+                            })
+                            .w(px(28.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(can_newer, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                            .when(can_newer, |d| {
+                                d.on_click(
+                                    cx.listener(|this, _, _window, cx| this.navigate_newer(cx)),
+                                )
+                            })
+                            .tooltip(move |_window, cx| {
+                                Tooltip::new(if can_newer {
+                                    "Newer revision  ["
+                                } else {
+                                    "No newer revision"
+                                })
+                                .build(_window, cx)
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/chevron-left.svg")
+                                    .size(px(13.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .opacity(if can_newer { 1.0 } else { 0.35 }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(88.0))
+                            .px(px(8.0))
+                            .border_l_1()
+                            .border_r_1()
+                            .border_color(rgb(t.border))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(if is_uncommitted {
+                                t.text_primary
+                            } else {
+                                t.text_secondary
+                            }))
+                            .whitespace_nowrap()
+                            .child(position),
+                    )
+                    .child(
+                        div()
+                            .id("revision-nav-older")
+                            .cursor(if can_older {
+                                CursorStyle::PointingHand
+                            } else {
+                                CursorStyle::default()
+                            })
+                            .w(px(28.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(can_older, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                            .when(can_older, |d| {
+                                d.on_click(
+                                    cx.listener(|this, _, _window, cx| this.navigate_older(cx)),
+                                )
+                            })
+                            .tooltip(move |_window, cx| {
+                                Tooltip::new(if can_older {
+                                    "Older revision  ]"
+                                } else if history_loading {
+                                    "Loading commit history"
+                                } else {
+                                    "No older revision"
+                                })
+                                .build(_window, cx)
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/chevron-right.svg")
+                                    .size(px(13.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .opacity(if can_older { 1.0 } else { 0.35 }),
+                            ),
+                    ),
+            )
+            .when(is_uncommitted, |d| {
+                d.child(div().w(px(1.0)).h(px(16.0)).bg(rgb(t.border)))
+                    .child(
+                        div()
+                            .id("diff-mode-toggle")
+                            .flex_shrink_0()
+                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
+                            .child(segmented_toggle(
+                                &[("Unstaged", is_working), ("Staged", !is_working)],
+                                t,
+                                cx,
+                            )),
+                    )
+                    .when(history_loading, |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_muted))
+                                .whitespace_nowrap()
+                                .child("Loading history\u{2026}"),
+                        )
+                    })
+            })
+            .when_some(revision_hash, |d, hash| {
+                let hash_for_click = hash.clone();
+                let hash_for_rclick = hash.clone();
+                d.child(div().w(px(1.0)).h(px(16.0)).bg(rgb(t.border)))
+                    .child(
+                        svg()
+                            .path("icons/git-commit.svg")
+                            .size(px(13.0))
+                            .flex_shrink_0()
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .id("revision-hash")
+                            .flex_shrink_0()
                             .text_size(ui_text_ms(cx))
                             .font_family("monospace")
                             .text_color(rgb(t.term_yellow))
@@ -414,22 +434,30 @@ impl DiffViewer {
                                 Tooltip::new("Click: copy hash \u{00B7} Right-click: more")
                                     .build(_window, cx)
                             })
-                            .child(short),
+                            .whitespace_nowrap()
+                            .child(hash),
                     )
-                    // Author
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_secondary))
-                            .child(commit.author.clone()),
-                    )
-                    // Date
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(time_str),
-                    )
+                    .when_some(commit.cloned(), |d, commit| {
+                        let time_str = okena_git::format_relative_time(commit.timestamp);
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child(commit.author),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(time_str),
+                        )
+                    })
             })
     }
 
@@ -793,7 +821,8 @@ impl DiffViewer {
     }
 
     pub(super) fn render_footer(&self, t: &ThemeColors, cx: &App) -> impl IntoElement {
-        let has_commits = self.has_commits();
+        let shows_revision_bar = self.shows_revision_bar();
+        let is_uncommitted = self.is_uncommitted();
         div()
             .px(px(16.0))
             .py(px(8.0))
@@ -806,13 +835,13 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t, cx))
-                    .when(!has_commits, |d| {
+                    .when(is_uncommitted, |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
                     .child(self.render_hint("S", "split", t, cx))
                     .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
-                    .when(has_commits, |d| {
-                        d.child(self.render_hint("[ ]", "commits", t, cx))
+                    .when(shows_revision_bar, |d| {
+                        d.child(self.render_hint("[ ]", "revisions", t, cx))
                     })
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {
@@ -1069,8 +1098,8 @@ impl Render for DiffViewer {
                         this.scroll_x = (this.scroll_x + 40.0).min(max);
                         cx.notify();
                     }
-                    "[" => this.prev_commit(cx),
-                    "]" => this.next_commit(cx),
+                    "[" => this.navigate_newer(cx),
+                    "]" => this.navigate_older(cx),
                     "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
                     "a" if modifiers.platform || modifiers.control => this.select_all(cx),
                     _ => {}
@@ -1114,6 +1143,7 @@ impl Render for DiffViewer {
                 self.render_header(
                     &t,
                     has_files,
+                    self.loading,
                     self.file_stats.len(),
                     total_added,
                     total_removed,
@@ -1125,9 +1155,8 @@ impl Render for DiffViewer {
                     cx,
                 )
             })
-            // Commit info bar (when viewing a commit with navigation)
-            .when(self.has_commits(), |d| {
-                d.child(self.render_commit_info_bar(&t, cx))
+            .when(self.shows_revision_bar(), |d| {
+                d.child(self.render_revision_bar(&t, cx))
             })
             .child(self.render_content(
                 &t,

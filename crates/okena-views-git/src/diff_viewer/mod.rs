@@ -114,6 +114,13 @@ pub struct DiffViewer {
     pub(super) commits: Vec<CommitLogEntry>,
     /// Current index in the commits list.
     pub(super) commit_index: usize,
+    /// Whether the revision rail may cross from the newest commit into the
+    /// current working tree. False for histories opened on another branch.
+    pub(super) history_includes_uncommitted: bool,
+    /// Last selected uncommitted mode, restored when leaving commit history.
+    pub(super) uncommitted_mode: DiffMode,
+    /// Whether the current-branch history is being loaded for the revision rail.
+    pub(super) commit_history_loading: bool,
     /// Open file-tree right-click context menu (file or folder).
     pub(super) context_menu: Option<context_menu::DiffContextMenu>,
     /// Open "Delete file" confirmation modal.
@@ -150,6 +157,17 @@ impl DiffViewer {
         let view_mode = gs.diff_view_mode;
         let ignore_whitespace = gs.diff_ignore_whitespace;
         let is_dark = gs.is_dark;
+        let initial_mode = mode.unwrap_or(DiffMode::WorkingTree);
+        let initial_is_uncommitted =
+            matches!(initial_mode, DiffMode::WorkingTree | DiffMode::Staged);
+        let commits = commits.unwrap_or_default();
+        let history_includes_uncommitted =
+            initial_is_uncommitted || nav::history_starts_at_head(&commits);
+        let should_load_commit_history = initial_is_uncommitted && commits.is_empty();
+        let uncommitted_mode = match &initial_mode {
+            DiffMode::Staged => DiffMode::Staged,
+            _ => DiffMode::WorkingTree,
+        };
 
         let mut viewer = Self {
             focus_handle,
@@ -184,8 +202,11 @@ impl DiffViewer {
             current_file_old_content: None,
             current_file_new_content: None,
             commit_message,
-            commits: commits.unwrap_or_default(),
+            commits,
             commit_index: commit_index.unwrap_or(0),
+            history_includes_uncommitted,
+            uncommitted_mode,
+            commit_history_loading: false,
             context_menu: None,
             delete_confirm: None,
             discard_confirm: None,
@@ -201,7 +222,10 @@ impl DiffViewer {
             return viewer;
         }
 
-        viewer.load_diff_async(mode.unwrap_or(DiffMode::WorkingTree), select_file, cx);
+        viewer.load_diff_async(initial_mode, select_file, cx);
+        if should_load_commit_history {
+            viewer.load_commit_history_async(cx);
+        }
         viewer
     }
 
