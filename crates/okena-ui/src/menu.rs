@@ -317,10 +317,9 @@ pub fn menu_header_name(
         .text_size(MENU_TEXT)
         .text_color(rgb(t.text_primary))
         .child(
-            div()
-                .max_w(px(160.0))
-                .overflow_hidden()
-                .child(label.into()),
+            // `truncate` is overflow-hidden + nowrap + ellipsis: without the nowrap a long
+            // OSC-set title wraps to a second line and grows the header instead of clipping.
+            div().max_w(px(160.0)).truncate().child(label.into()),
         )
         .child(
             svg()

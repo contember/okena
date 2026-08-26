@@ -23,8 +23,12 @@ const CLOSE_GRACE: Duration = Duration::from_millis(300);
 /// Flyout width, pinned to `context_menu_panel`'s `min_w` so the edge-flip decision is exact.
 pub const FLYOUT_WIDTH: Pixels = px(240.0);
 
-/// `menu_item`'s horizontal margin. The flyout is pushed out by this much so it meets the
-/// parent panel's border, leaving no gap for the pointer to fall through.
+/// `menu_item`'s horizontal margin (`SPACE_SM`) plus the panel's 1px border. The flyout is
+/// pulled back over both so it touches the parent panel with no gap for the pointer to
+/// fall through.
+const PANEL_EDGE_OVERLAP: Pixels = px(7.0);
+
+/// `menu_item`'s horizontal margin, used by the pure edge-flip helpers.
 const PANEL_ITEM_MARGIN: Pixels = SPACE_SM;
 
 /// `context_menu_panel`'s border plus its vertical padding — lines the first flyout item
@@ -85,15 +89,6 @@ pub fn flyout_side(
     } else {
         FlyoutSide::Right
     }
-}
-
-/// Window-space origin of the flyout panel next to `row`.
-pub fn flyout_origin(row: Bounds<Pixels>, side: FlyoutSide, flyout_width: Pixels) -> Point<Pixels> {
-    let x = match side {
-        FlyoutSide::Right => row.right() + PANEL_ITEM_MARGIN,
-        FlyoutSide::Left => row.left() - PANEL_ITEM_MARGIN - flyout_width,
-    };
-    point(x, row.origin.y - PANEL_TOP_INSET)
 }
 
 // =============================================================================
@@ -375,10 +370,12 @@ impl Submenu {
         let handlers: Vec<ItemHandler> = items.iter().map(|item| item.on_click.clone()).collect();
         let item_count = items.len();
 
-        let placement = state.row_bounds(&id).map(|bounds| {
-            let side = flyout_side(bounds, FLYOUT_WIDTH, window.viewport_size().width);
-            flyout_origin(bounds, side, FLYOUT_WIDTH)
-        });
+        // Only the side comes from the measured row; the offset is relative to the row
+        // itself, so the flyout meets the panel edge whatever box the canvas reports.
+        let side = state
+            .row_bounds(&id)
+            .map(|bounds| flyout_side(bounds, FLYOUT_WIDTH, window.viewport_size().width))
+            .unwrap_or(FlyoutSide::Right);
 
         let bounds_setter = {
             let entity = entity.clone();
@@ -393,6 +390,7 @@ impl Submenu {
         };
 
         let row = menu_item(ElementId::Name(id.clone()), icon, label, t)
+            .relative()
             .track_focus(&row_focus)
             .when(is_open, |row| row.bg(rgb(t.bg_hover)))
             .child(div().flex_1())
@@ -526,17 +524,22 @@ impl Submenu {
             })
             .children(item_elements);
 
-        // Placed in window coordinates, so it composes with the menu's own
-        // `deferred(anchored())` instead of inheriting its offset. The higher priority keeps
-        // it painted above the parent panel.
-        let anchored_flyout = match placement {
-            Some(origin) => anchored().position(origin).snap_to_window().child(flyout),
-            // First frame only: the row has not painted yet, so fall back to GPUI's own fit.
-            None => anchored().snap_to_window().child(flyout),
+        // Anchored to the row's own edge rather than to window coordinates: the row is
+        // inset from the panel by its margin and padding, and deriving the offset from the
+        // measured bounds meant guessing which box `canvas` reports. `left_full` puts the
+        // flyout exactly on the row's outer edge, pulled back over the panel's border and
+        // item margin so the two panels touch and the pointer cannot fall between them.
+        let positioned = match side {
+            FlyoutSide::Right => flyout.left_full().ml(-PANEL_EDGE_OVERLAP),
+            FlyoutSide::Left => flyout.right_full().mr(-PANEL_EDGE_OVERLAP),
         };
 
-        row.child(deferred(anchored_flyout).with_priority(1))
-            .into_any_element()
+        // Deferred so it paints over the menu items that follow it in the panel.
+        row.child(
+            deferred(positioned.absolute().top(-PANEL_TOP_INSET))
+                .with_priority(1),
+        )
+        .into_any_element()
     }
 }
 
@@ -592,7 +595,7 @@ mod tests {
     // Imported one by one on purpose: a glob of `super::*` would pull in gpui's own
     // `test` attribute macro and make `#[test]` expand into itself.
     use super::{
-        FLYOUT_WIDTH, FlyoutSide, SubmenuLayout, SubmenuState, flyout_origin, flyout_side,
+        FLYOUT_WIDTH, FlyoutSide, SubmenuLayout, SubmenuState, flyout_side,
         submenu_layout,
     };
     use gpui::{Bounds, Pixels, SharedString, point, px, size};
@@ -704,19 +707,5 @@ mod tests {
         assert_eq!(side, FlyoutSide::Right);
     }
 
-    #[test]
-    fn right_origin_sits_against_the_parent_panel() {
-        let bounds = row(100.0, 228.0);
-        let origin = flyout_origin(bounds, FlyoutSide::Right, FLYOUT_WIDTH);
-        assert_eq!(origin.x, px(334.0));
-        assert_eq!(origin.y, px(93.0));
-    }
 
-    #[test]
-    fn left_origin_places_the_far_edge_against_the_parent_panel() {
-        let bounds = row(700.0, 228.0);
-        let origin = flyout_origin(bounds, FlyoutSide::Left, FLYOUT_WIDTH);
-        assert_eq!(origin.x, px(454.0));
-        assert_eq!(origin.y, px(93.0));
-    }
 }

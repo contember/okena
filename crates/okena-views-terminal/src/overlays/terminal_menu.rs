@@ -97,6 +97,10 @@ pub struct TerminalMenu {
     /// Set by the host, which owns the terminals and so the bell state.
     has_bell: bool,
     invocation: TerminalMenuInvocation,
+    /// Mirrors the terminal header: the shell chip is opt-in via `show_shell_selector`.
+    /// Read once on open — the settings lookup is a serde round-trip, and this view
+    /// re-renders for the life of the menu.
+    show_shell_selector: bool,
     focus_handle: FocusHandle,
     submenus: SubmenuState,
 }
@@ -117,6 +121,7 @@ impl TerminalMenu {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let show_shell_selector = crate::terminal_view_settings(cx).show_shell_selector;
         Self {
             terminal_id,
             project_id,
@@ -127,6 +132,7 @@ impl TerminalMenu {
             can_export_buffer,
             has_bell,
             invocation,
+            show_shell_selector,
             focus_handle,
             submenus: SubmenuState::default(),
         }
@@ -290,20 +296,22 @@ impl Render for TerminalMenu {
                                         });
                                     })),
                                 )
-                                .child(
-                                    shell_indicator_chip(
-                                        "terminal-menu-change-shell",
-                                        self.current_shell.display_name(),
-                                        &t,
+                                .when(self.show_shell_selector, |header| {
+                                    header.child(
+                                        shell_indicator_chip(
+                                            "terminal-menu-change-shell",
+                                            self.current_shell.display_name(),
+                                            &t,
+                                        )
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            cx.emit(TerminalMenuEvent::ChangeShell {
+                                                project_id: this.project_id.clone(),
+                                                terminal_id: this.terminal_id.clone(),
+                                                current_shell: this.current_shell.clone(),
+                                            });
+                                        })),
                                     )
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::ChangeShell {
-                                            project_id: this.project_id.clone(),
-                                            terminal_id: this.terminal_id.clone(),
-                                            current_shell: this.current_shell.clone(),
-                                        });
-                                    })),
-                                ),
+                                }),
                         )
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {
