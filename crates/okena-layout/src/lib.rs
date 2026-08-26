@@ -211,6 +211,54 @@ impl LayoutNode {
         }
     }
 
+    /// Whether the node at `path` sits directly inside a `Tabs` group — i.e.
+    /// it already has a tab bar of its own.
+    pub fn is_in_tab_group(&self, path: &[usize]) -> bool {
+        let Some((_, parent_path)) = path.split_last() else {
+            return false;
+        };
+        matches!(self.get_at_path(parent_path), Some(LayoutNode::Tabs { .. }))
+    }
+
+    /// The tree's only terminal and its path, or `None` when it holds zero or
+    /// several. Single-pass counterpart to `collect_terminal_ids()` followed by
+    /// `find_terminal_path()`, for render-path checks.
+    pub fn single_terminal(&self) -> Option<(&str, Vec<usize>)> {
+        let mut found = None;
+        let mut path = Vec::new();
+        self.single_terminal_recursive(&mut path, &mut found)
+            .then_some(found)?
+    }
+
+    /// Returns `false` as soon as a second terminal is seen.
+    fn single_terminal_recursive<'a>(
+        &'a self,
+        path: &mut Vec<usize>,
+        found: &mut Option<(&'a str, Vec<usize>)>,
+    ) -> bool {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => match terminal_id {
+                Some(_) if found.is_some() => false,
+                Some(id) => {
+                    *found = Some((id.as_str(), path.clone()));
+                    true
+                }
+                None => true,
+            },
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (index, child) in children.iter().enumerate() {
+                    path.push(index);
+                    let still_single = child.single_terminal_recursive(path, found);
+                    path.pop();
+                    if !still_single {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
     /// Whether any leaf still carries a terminal ID. Allocation-free counterpart
     /// to `collect_terminal_ids().is_empty()` for render-path checks.
     pub fn has_terminal_ids(&self) -> bool {
@@ -2505,5 +2553,57 @@ mod tests {
             }
             _ => panic!("Expected split"),
         }
+    }
+
+    #[test]
+    fn single_terminal_finds_the_only_pane_with_its_path() {
+        assert_eq!(terminal("t1").single_terminal(), Some(("t1", vec![])));
+
+        let nested = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![LayoutNode::Tabs {
+                children: vec![terminal("t1")],
+                active_tab: 0,
+            }],
+            sizes: vec![1.0],
+        };
+        assert_eq!(nested.single_terminal(), Some(("t1", vec![0, 0])));
+    }
+
+    #[test]
+    fn single_terminal_is_none_for_zero_or_several() {
+        let empty = LayoutNode::Terminal {
+            terminal_id: None,
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        };
+        assert_eq!(empty.single_terminal(), None);
+
+        let two = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![terminal("t1"), terminal("t2")],
+            sizes: vec![0.5, 0.5],
+        };
+        assert_eq!(two.single_terminal(), None);
+    }
+
+    #[test]
+    fn is_in_tab_group_tracks_the_parent_node() {
+        let tabs = LayoutNode::Tabs {
+            children: vec![terminal("t1"), terminal("t2")],
+            active_tab: 0,
+        };
+        assert!(tabs.is_in_tab_group(&[1]));
+        // The root itself has no parent, so it is never "in" a group.
+        assert!(!tabs.is_in_tab_group(&[]));
+
+        let split = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![terminal("t1"), terminal("t2")],
+            sizes: vec![0.5, 0.5],
+        };
+        assert!(!split.is_in_tab_group(&[1]));
     }
 }
