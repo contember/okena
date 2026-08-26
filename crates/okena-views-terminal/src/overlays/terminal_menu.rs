@@ -313,6 +313,28 @@ impl Render for TerminalMenu {
                                     )
                                 }),
                         )
+                        // With the chip hidden there is no other way to reach the
+                        // shell picker, so the command falls back to a plain row
+                        // under the header it belongs to.
+                        .when(!self.show_shell_selector, |menu| {
+                            menu.child(
+                                menu_item(
+                                    "terminal-menu-change-shell",
+                                    "icons/terminal.svg",
+                                    "Change Shell…",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::ChangeShell {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                            current_shell: this.current_shell.clone(),
+                                        });
+                                    },
+                                )),
+                            )
+                        })
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {
                             menu.when_some(link_url, |menu, url| {
@@ -554,6 +576,23 @@ mod tests {
     use super::{BufferAction, buffer_actions};
     use okena_ui::submenu::{SubmenuLayout, submenu_layout};
     use okena_workspace::requests::TerminalMenuInvocation;
+
+    /// The chip and the fallback row are gated on opposite sides of the same flag,
+    /// which is what keeps the shell picker reachable with the setting off — it was
+    /// unreachable everywhere once the chip became opt-in.
+    #[test]
+    fn shell_switching_is_reachable_whatever_the_setting() {
+        let source = include_str!("terminal_menu.rs");
+
+        assert!(
+            source.contains(".when(self.show_shell_selector, |header| {"),
+            "the header chip must stay gated on the setting"
+        );
+        assert!(
+            source.contains(".when(!self.show_shell_selector, |menu| {"),
+            "hiding the chip must leave a plain Change Shell row behind"
+        );
+    }
 
     #[test]
     fn content_mode_gives_the_buffer_group_a_flyout() {
