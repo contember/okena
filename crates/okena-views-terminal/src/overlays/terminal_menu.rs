@@ -4,9 +4,10 @@ use crate::actions::Cancel;
 use gpui::prelude::*;
 use gpui::*;
 use okena_terminal::shell_config::ShellType;
+use okena_ui::chip::shell_indicator_chip;
 use okena_ui::menu::{
-    context_menu_panel, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color,
-    menu_separator,
+    ActionBarButton, action_bar, context_menu_panel, menu_header, menu_header_name, menu_item,
+    menu_item_conditional, menu_item_with_color, menu_section, menu_separator,
 };
 use okena_ui::submenu::{Submenu, SubmenuHost, SubmenuItem, SubmenuState};
 use okena_ui::theme::theme;
@@ -271,12 +272,39 @@ impl Render for TerminalMenu {
             .child(deferred(
                 anchored().position(position).snap_to_window().child(
                     context_menu_panel("terminal-menu", &t)
-                        .child(menu_item_disabled(
-                            "terminal-menu-target",
-                            "icons/terminal.svg",
-                            self.current_name.clone(),
-                            &t,
-                        ))
+                        // The terminal's own properties, not commands: the name
+                        // renames, the chip switches shell.
+                        .child(
+                            menu_header("icons/terminal.svg", &t)
+                                .child(
+                                    menu_header_name(
+                                        "terminal-menu-rename",
+                                        self.current_name.clone(),
+                                        &t,
+                                    )
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::RenameTerminal {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                            current_name: this.current_name.clone(),
+                                        });
+                                    })),
+                                )
+                                .child(
+                                    shell_indicator_chip(
+                                        "terminal-menu-change-shell",
+                                        self.current_shell.display_name(),
+                                        &t,
+                                    )
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::ChangeShell {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                            current_shell: this.current_shell.clone(),
+                                        });
+                                    })),
+                                ),
+                        )
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {
                             menu.when_some(link_url, |menu, url| {
@@ -313,6 +341,7 @@ impl Render for TerminalMenu {
                                 )
                                 .child(menu_separator(&t))
                             })
+                            .child(menu_section("Clipboard", &t))
                             .child(
                                 menu_item_conditional(
                                     "terminal-menu-copy",
@@ -325,23 +354,6 @@ impl Render for TerminalMenu {
                                     item.on_click(cx.listener(|this, _, _window, cx| {
                                         cx.emit(TerminalMenuEvent::Copy {
                                             terminal_id: this.terminal_id.clone(),
-                                        });
-                                    }))
-                                }),
-                            )
-                            .child(
-                                menu_item_conditional(
-                                    "terminal-menu-annotate",
-                                    "icons/terminal.svg",
-                                    "Send to Terminal…",
-                                    has_selection,
-                                    &t,
-                                )
-                                .when(has_selection, |item| {
-                                    item.on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::AnnotateSelection {
-                                            terminal_id: this.terminal_id.clone(),
-                                            position: this.position,
                                         });
                                     }))
                                 }),
@@ -361,126 +373,72 @@ impl Render for TerminalMenu {
                                     },
                                 )),
                             )
-                            .child(menu_separator(&t))
                             .child(
-                                menu_item(
-                                    "terminal-menu-toggle-unread",
-                                    "icons/bell.svg",
-                                    if has_bell {
-                                        "Mark as Read"
-                                    } else {
-                                        "Mark as Unread"
-                                    },
+                                menu_item_conditional(
+                                    "terminal-menu-annotate",
+                                    "icons/terminal.svg",
+                                    "Send to Terminal…",
+                                    has_selection,
                                     &t,
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::ToggleUnread {
+                                .when(has_selection, |item| {
+                                    item.on_click(cx.listener(|this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::AnnotateSelection {
                                             terminal_id: this.terminal_id.clone(),
+                                            position: this.position,
                                         });
-                                    },
-                                )),
+                                    }))
+                                }),
                             )
-                            .child(menu_separator(&t))
                         })
-                        .child(
-                            menu_item(
-                                "terminal-menu-rename",
-                                "icons/edit.svg",
-                                "Rename Terminal…",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::RenameTerminal {
-                                        project_id: this.project_id.clone(),
-                                        terminal_id: this.terminal_id.clone(),
-                                        current_name: this.current_name.clone(),
-                                    });
-                                },
-                            )),
-                        )
-                        .child(
-                            menu_item(
-                                "terminal-menu-change-shell",
-                                "icons/terminal.svg",
-                                "Change Shell…",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::ChangeShell {
-                                        project_id: this.project_id.clone(),
-                                        terminal_id: this.terminal_id.clone(),
-                                        current_shell: this.current_shell.clone(),
-                                    });
-                                },
-                            )),
-                        )
-                        .child(menu_separator(&t))
                         .when(include_primary_actions, |menu| {
-                            menu.child(
-                                menu_item("terminal-menu-add-tab", "icons/tabs.svg", "Add Tab", &t)
+                            menu.child(menu_section("New", &t))
+                                .child(
+                                    menu_item(
+                                        "terminal-menu-add-tab",
+                                        "icons/tabs.svg",
+                                        "Add Tab",
+                                        &t,
+                                    )
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         cx.emit(TerminalMenuEvent::AddTab {
                                             project_id: this.project_id.clone(),
                                             layout_path: this.layout_path.clone(),
                                         });
                                     })),
-                            )
-                            .child(
-                                menu_item(
-                                    "terminal-menu-split-horizontal",
-                                    "icons/split-horizontal.svg",
-                                    "Split Horizontal",
-                                    &t,
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::Split {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                            direction: SplitDirection::Horizontal,
-                                        });
-                                    },
-                                )),
-                            )
-                            .child(
-                                menu_item(
-                                    "terminal-menu-split-vertical",
-                                    "icons/split-vertical.svg",
-                                    "Split Vertical",
+                                // One verb, pick the direction — the case a bar is for.
+                                .child(action_bar(
+                                    vec![
+                                        ActionBarButton::new(
+                                            "terminal-menu-split-vertical",
+                                            "icons/split-vertical.svg",
+                                            "Vertical",
+                                            cx.listener(|this: &mut Self, _, _window, cx| {
+                                                cx.emit(TerminalMenuEvent::Split {
+                                                    project_id: this.project_id.clone(),
+                                                    layout_path: this.layout_path.clone(),
+                                                    direction: SplitDirection::Vertical,
+                                                });
+                                            }),
+                                        ),
+                                        ActionBarButton::new(
+                                            "terminal-menu-split-horizontal",
+                                            "icons/split-horizontal.svg",
+                                            "Horizontal",
+                                            cx.listener(|this: &mut Self, _, _window, cx| {
+                                                cx.emit(TerminalMenuEvent::Split {
+                                                    project_id: this.project_id.clone(),
+                                                    layout_path: this.layout_path.clone(),
+                                                    direction: SplitDirection::Horizontal,
+                                                });
+                                            }),
+                                        ),
+                                    ],
                                     &t,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::Split {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                            direction: SplitDirection::Vertical,
-                                        });
-                                    },
-                                )),
-                            )
-                            .child(menu_separator(&t))
+                                ))
                         })
-                        .child(
-                            menu_item(
-                                "terminal-menu-minimize",
-                                "icons/minimize.svg",
-                                "Minimize Terminal",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::MinimizeTerminal {
-                                        project_id: this.project_id.clone(),
-                                        terminal_id: this.terminal_id.clone(),
-                                    });
-                                },
-                            )),
-                        )
-                        .child(buffer_group)
+                        .child(menu_section("Pane", &t))
                         .child(
                             menu_item(
                                 "terminal-menu-zoom",
@@ -491,6 +449,22 @@ impl Render for TerminalMenu {
                             .on_click(cx.listener(
                                 |this, _, _window, cx| {
                                     cx.emit(TerminalMenuEvent::ZoomTerminal {
+                                        project_id: this.project_id.clone(),
+                                        terminal_id: this.terminal_id.clone(),
+                                    });
+                                },
+                            )),
+                        )
+                        .child(
+                            menu_item(
+                                "terminal-menu-minimize",
+                                "icons/minimize.svg",
+                                "Minimize Terminal",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TerminalMenuEvent::MinimizeTerminal {
                                         project_id: this.project_id.clone(),
                                         terminal_id: this.terminal_id.clone(),
                                     });
@@ -513,6 +487,29 @@ impl Render for TerminalMenu {
                                 },
                             )),
                         )
+                        .when(include_content_actions, |menu| {
+                            menu.child(
+                                menu_item(
+                                    "terminal-menu-toggle-unread",
+                                    "icons/bell.svg",
+                                    if has_bell {
+                                        "Mark as Read"
+                                    } else {
+                                        "Mark as Unread"
+                                    },
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::ToggleUnread {
+                                            terminal_id: this.terminal_id.clone(),
+                                        });
+                                    },
+                                )),
+                            )
+                        })
+                        .child(menu_separator(&t))
+                        .child(buffer_group)
                         .when(include_primary_actions, |menu| {
                             menu.child(menu_separator(&t)).child(
                                 menu_item_with_color(

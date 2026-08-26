@@ -153,3 +153,179 @@ pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful
 pub fn menu_separator(t: &ThemeColors) -> Div {
     div().h(px(1.0)).mx(SPACE_XL).my(SPACE_SM).bg(rgb(t.border))
 }
+
+/// Section label above a run of menu items.
+///
+/// Replaces a bare `menu_separator` where the group has a name worth showing: the
+/// divider costs a line either way, so it may as well say what the group is.
+/// Aligns with `menu_item`'s text, not the panel edge.
+pub fn menu_section(label: impl Into<SharedString>, t: &ThemeColors) -> Div {
+    div()
+        .mx(SPACE_SM)
+        .px(SPACE_LG)
+        .pt(SPACE_MD)
+        .pb(SPACE_XS)
+        .text_size(TEXT_SM)
+        .text_color(rgb(t.text_muted))
+        .child(label.into().to_uppercase())
+}
+
+/// Bar button icon size — a touch smaller than `MENU_ICON`, which reads too heavy
+/// next to a short centred label.
+const BAR_ICON: Pixels = px(13.0);
+
+/// Click handler shape produced by `Context::listener`, so callers pass one straight in.
+type BarHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// One button inside an [`action_bar`].
+pub struct ActionBarButton {
+    id: SharedString,
+    icon: SharedString,
+    label: SharedString,
+    enabled: bool,
+    on_click: BarHandler,
+}
+
+impl ActionBarButton {
+    pub fn new(
+        id: impl Into<SharedString>,
+        icon: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon: icon.into(),
+            label: label.into(),
+            enabled: true,
+            on_click: std::rc::Rc::new(on_click),
+        }
+    }
+
+    /// A disabled button keeps its slot so the bar's widths stay put.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+/// A row of buttons that together fill the menu's width — two split it in half,
+/// three in thirds.
+///
+/// Use it where the buttons are one decision rather than separate commands: the
+/// clearest case is one verb with a parameter, such as splitting a pane vertically
+/// or horizontally. Commands that merely sit near each other belong in plain rows.
+pub fn action_bar(buttons: Vec<ActionBarButton>, t: &ThemeColors) -> Div {
+    let mut bar = div()
+        .mx(SPACE_SM)
+        .mb(SPACE_XS)
+        .flex()
+        .items_center()
+        .gap(SPACE_XS);
+
+    for button in buttons {
+        let (text_color, icon_color) = if button.enabled {
+            (t.text_primary, t.text_muted)
+        } else {
+            (t.text_muted, t.text_muted)
+        };
+        let bg_hover = t.bg_hover;
+        let handler = button.on_click;
+
+        let slot = div()
+            .id(ElementId::from(button.id))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(SPACE_SM)
+            .px(SPACE_MD)
+            .py(SPACE_SM)
+            .rounded(RADIUS_STD)
+            .bg(rgb(t.bg_secondary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_size(TEXT_MD)
+            .text_color(rgb(text_color))
+            .cursor(if button.enabled {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .child(
+                svg()
+                    .path(button.icon)
+                    .size(BAR_ICON)
+                    .text_color(rgb(icon_color)),
+            )
+            .child(button.label);
+
+        bar = bar.child(if button.enabled {
+            slot.hover(move |s| s.bg(rgb(bg_hover)))
+                .on_click(move |event, window, cx| handler(event, window, cx))
+        } else {
+            slot
+        });
+    }
+
+    bar
+}
+
+/// Header row of a menu: the target's icon and name, plus trailing controls.
+///
+/// The caller fills it with [`menu_header_name`] and whatever belongs on the right
+/// edge, such as a shell chip. Lets a menu act on the thing it names without
+/// spending a command row on each of its properties.
+pub fn menu_header(icon: impl Into<SharedString>, t: &ThemeColors) -> Div {
+    div()
+        .mx(SPACE_SM)
+        .px(SPACE_LG)
+        .py(SPACE_SM)
+        .flex()
+        .items_center()
+        .gap(SPACE_MD)
+        .child(
+            svg()
+                .path(icon)
+                .size(MENU_ICON)
+                .text_color(rgb(t.border_active)),
+        )
+}
+
+/// The clickable name inside a [`menu_header`], with a pencil marking it editable.
+///
+/// Takes the row's spare width so trailing controls sit against the right edge, and
+/// caps its own width — an OSC-set terminal title can be arbitrarily long.
+pub fn menu_header_name(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(SPACE_SM)
+        .px(SPACE_XS)
+        .py(px(2.0))
+        .rounded(RADIUS_STD)
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .text_size(MENU_TEXT)
+        .text_color(rgb(t.text_primary))
+        .child(
+            div()
+                .max_w(px(160.0))
+                .overflow_hidden()
+                .child(label.into()),
+        )
+        .child(
+            svg()
+                .path("icons/edit.svg")
+                .size(px(11.0))
+                .text_color(rgb(t.text_muted)),
+        )
+}
