@@ -34,6 +34,7 @@ pub mod resize_handle;
 pub mod selectable_list;
 pub mod settings;
 pub mod simple_input;
+pub mod submenu;
 pub mod text_utils;
 pub mod theme;
 pub mod title_subtitle;

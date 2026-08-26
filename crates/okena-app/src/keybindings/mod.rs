@@ -193,6 +193,12 @@ pub fn reload_keybindings(cx: &mut App) {
             okena_views_terminal::actions::Cancel,
             Some("ShellSelectorOverlay"),
         ),
+        // The terminal menu peels an open submenu flyout first, then closes itself.
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalMenu"),
+        ),
         KeyBinding::new(
             "escape",
             okena_views_terminal::actions::Cancel,
@@ -268,6 +274,7 @@ pub fn register_keybindings(cx: &mut App) {
     //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
     //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
     //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
+    //   TerminalMenu:       escape → Cancel        (close the flyout, then the menu)
     cx.bind_keys([
         KeyBinding::new("escape", Cancel, None),
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
@@ -319,6 +326,12 @@ pub fn register_keybindings(cx: &mut App) {
             "escape",
             okena_views_terminal::actions::Cancel,
             Some("ShellSelectorOverlay"),
+        ),
+        // The terminal menu peels an open submenu flyout first, then closes itself.
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalMenu"),
         ),
         KeyBinding::new(
             "escape",
@@ -483,4 +496,32 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("right", "→")
         .replace("up", "↑")
         .replace("down", "↓")
+}
+
+#[cfg(test)]
+mod escape_binding_tests {
+    /// Every dismissable popup needs an `escape` binding in *both* the initial
+    /// registration and the reload path, or its `Cancel` handler is dead code —
+    /// which is exactly what happened to the terminal menu until it grew a submenu.
+    #[test]
+    fn dismissable_overlays_bind_escape_in_both_paths() {
+        let src = include_str!("mod.rs");
+
+        for context in [
+            "TerminalMenu",
+            "TerminalRename",
+            "ShellSelectorOverlay",
+            "SendComposer",
+            "ContextMenu",
+            "FolderContextMenu",
+            "RemoteContextMenu",
+        ] {
+            let bound = src.matches(&format!("Some(\"{context}\")")).count();
+            assert!(
+                bound >= 2,
+                "{context} must bind escape in register_keybindings and reload_keybindings \
+                 (found {bound} occurrences)"
+            );
+        }
+    }
 }

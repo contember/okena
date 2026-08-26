@@ -8,6 +8,7 @@ use okena_ui::menu::{
     context_menu_panel, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color,
     menu_separator,
 };
+use okena_ui::submenu::{Submenu, SubmenuHost, SubmenuItem, SubmenuState};
 use okena_ui::theme::theme;
 use okena_workspace::requests::TerminalMenuInvocation;
 use okena_workspace::state::SplitDirection;
@@ -96,6 +97,7 @@ pub struct TerminalMenu {
     has_bell: bool,
     invocation: TerminalMenuInvocation,
     focus_handle: FocusHandle,
+    submenus: SubmenuState,
 }
 
 impl TerminalMenu {
@@ -125,6 +127,7 @@ impl TerminalMenu {
             has_bell,
             invocation,
             focus_handle,
+            submenus: SubmenuState::default(),
         }
     }
 
@@ -135,11 +138,68 @@ impl TerminalMenu {
 
 impl EventEmitter<TerminalMenuEvent> for TerminalMenu {}
 
+impl SubmenuHost for TerminalMenu {
+    fn submenu_state(&mut self) -> &mut SubmenuState {
+        &mut self.submenus
+    }
+}
+
+/// One entry of the Buffer group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferAction {
+    SelectAll,
+    Clear,
+    Export,
+}
+
+impl BufferAction {
+    fn id(self) -> &'static str {
+        match self {
+            Self::SelectAll => "terminal-menu-select-all",
+            Self::Clear => "terminal-menu-clear",
+            Self::Export => "terminal-menu-export-buffer",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::SelectAll => "icons/select-all.svg",
+            Self::Clear => "icons/eraser.svg",
+            Self::Export => "icons/copy.svg",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SelectAll => "Select All",
+            Self::Clear => "Clear",
+            Self::Export => "Export to File",
+        }
+    }
+}
+
+/// Buffer-group entries for one invocation, in flyout order.
+///
+/// The group shrinks with the invocation, and the submenu collapse rule takes it from there:
+/// a flyout in Content mode, a plain Export row in Header mode, nothing at all with neither.
+fn buffer_actions(include_content_actions: bool, can_export_buffer: bool) -> Vec<BufferAction> {
+    let mut actions = Vec::new();
+    if include_content_actions {
+        actions.push(BufferAction::SelectAll);
+        actions.push(BufferAction::Clear);
+    }
+    if can_export_buffer {
+        actions.push(BufferAction::Export);
+    }
+    actions
+}
+
 impl Render for TerminalMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        if !self.focus_handle.is_focused(window) {
+        // Never pull focus off an open flyout — it lives in this menu's own subtree.
+        if !self.focus_handle.is_focused(window) && !self.submenus.holds_focus(window) {
             window.focus(&self.focus_handle, cx);
         }
 
@@ -155,11 +215,43 @@ impl Render for TerminalMenu {
             TerminalMenuInvocation::Header { .. } => (false, None),
         };
 
+        let buffer_items: Vec<SubmenuItem> =
+            buffer_actions(include_content_actions, self.can_export_buffer)
+                .into_iter()
+                .map(|action| {
+                    SubmenuItem::new(
+                        action.id(),
+                        action.icon(),
+                        action.label(),
+                        cx.listener(move |this: &mut Self, _, _window, cx| match action {
+                            BufferAction::SelectAll => cx.emit(TerminalMenuEvent::SelectAll {
+                                terminal_id: this.terminal_id.clone(),
+                            }),
+                            BufferAction::Clear => cx.emit(TerminalMenuEvent::Clear {
+                                terminal_id: this.terminal_id.clone(),
+                            }),
+                            BufferAction::Export => cx.emit(TerminalMenuEvent::ExportBuffer {
+                                project_id: this.project_id.clone(),
+                                terminal_id: this.terminal_id.clone(),
+                            }),
+                        }),
+                    )
+                })
+                .collect();
+        let buffer_group = Submenu::new("terminal-menu-buffer", "icons/file.svg", "Buffer")
+            .items(buffer_items)
+            .render(&mut self.submenus, &t, window, cx);
+
         div()
             .track_focus(&self.focus_handle)
             .key_context("TerminalMenu")
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                this.close(cx);
+                // Escape peels off the open flyout before it closes the menu itself.
+                if this.submenus.close() {
+                    cx.notify();
+                } else {
+                    this.close(cx);
+                }
             }))
             .absolute()
             .inset_0()
@@ -270,29 +362,6 @@ impl Render for TerminalMenu {
                                 )),
                             )
                             .child(menu_separator(&t))
-                            .child(
-                                menu_item("terminal-menu-clear", "icons/eraser.svg", "Clear", &t)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::Clear {
-                                            terminal_id: this.terminal_id.clone(),
-                                        });
-                                    })),
-                            )
-                            .child(
-                                menu_item(
-                                    "terminal-menu-select-all",
-                                    "icons/select-all.svg",
-                                    "Select All",
-                                    &t,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::SelectAll {
-                                            terminal_id: this.terminal_id.clone(),
-                                        });
-                                    },
-                                )),
-                            )
                             .child(
                                 menu_item(
                                     "terminal-menu-toggle-unread",
@@ -411,24 +480,7 @@ impl Render for TerminalMenu {
                                 },
                             )),
                         )
-                        .when(self.can_export_buffer, |menu| {
-                            menu.child(
-                                menu_item(
-                                    "terminal-menu-export-buffer",
-                                    "icons/copy.svg",
-                                    "Export Buffer to File",
-                                    &t,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::ExportBuffer {
-                                            project_id: this.project_id.clone(),
-                                            terminal_id: this.terminal_id.clone(),
-                                        });
-                                    },
-                                )),
-                            )
-                        })
+                        .child(buffer_group)
                         .child(
                             menu_item(
                                 "terminal-menu-zoom",
@@ -494,7 +546,37 @@ impl gpui::Focusable for TerminalMenu {
 
 #[cfg(test)]
 mod tests {
+    use super::{BufferAction, buffer_actions};
+    use okena_ui::submenu::{SubmenuLayout, submenu_layout};
     use okena_workspace::requests::TerminalMenuInvocation;
+
+    #[test]
+    fn content_mode_gives_the_buffer_group_a_flyout() {
+        assert_eq!(
+            submenu_layout(buffer_actions(true, true).len()),
+            SubmenuLayout::Flyout
+        );
+        assert_eq!(
+            submenu_layout(buffer_actions(true, false).len()),
+            SubmenuLayout::Flyout
+        );
+    }
+
+    #[test]
+    fn header_mode_collapses_the_buffer_group_to_a_plain_export_row() {
+        let actions = buffer_actions(false, true);
+
+        assert_eq!(actions, vec![BufferAction::Export]);
+        assert_eq!(submenu_layout(actions.len()), SubmenuLayout::Collapsed);
+    }
+
+    #[test]
+    fn header_mode_without_export_drops_the_buffer_group() {
+        assert_eq!(
+            submenu_layout(buffer_actions(false, false).len()),
+            SubmenuLayout::Empty
+        );
+    }
 
     #[test]
     fn content_invocation_includes_context_and_primary_actions() {
