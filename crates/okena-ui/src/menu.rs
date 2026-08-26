@@ -2,6 +2,7 @@
 
 use crate::theme::ThemeColors;
 use crate::tokens::*;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 /// Menu item text size (13px) — slightly larger than TEXT_MD for readability.
@@ -212,18 +213,27 @@ impl ActionBarButton {
 /// A row of buttons that together fill the menu's width — two split it in half,
 /// three in thirds.
 ///
-/// Use it where the buttons are one decision rather than separate commands: the
-/// clearest case is one verb with a parameter, such as splitting a pane vertically
-/// or horizontally. Commands that merely sit near each other belong in plain rows.
+/// Rendered as one segmented control rather than separate boxes: a single outline
+/// with hairline dividers, so the buttons read as one decision instead of several
+/// commands that happen to sit on a line.
+///
+/// Use it where the buttons really are one decision — the clearest case is one verb
+/// with a parameter, such as splitting a pane vertically or horizontally. Commands
+/// that merely sit near each other belong in plain rows.
 pub fn action_bar(buttons: Vec<ActionBarButton>, t: &ThemeColors) -> Div {
+    let last = buttons.len().saturating_sub(1);
+
     let mut bar = div()
         .mx(SPACE_SM)
         .mb(SPACE_XS)
         .flex()
-        .items_center()
-        .gap(SPACE_XS);
+        .items_stretch()
+        .rounded(RADIUS_STD)
+        .bg(rgb(t.bg_secondary))
+        .border_1()
+        .border_color(rgb(t.border));
 
-    for button in buttons {
+    for (index, button) in buttons.into_iter().enumerate() {
         let (text_color, icon_color) = if button.enabled {
             (t.text_primary, t.text_muted)
         } else {
@@ -242,10 +252,13 @@ pub fn action_bar(buttons: Vec<ActionBarButton>, t: &ThemeColors) -> Div {
             .gap(SPACE_SM)
             .px(SPACE_MD)
             .py(SPACE_SM)
-            .rounded(RADIUS_STD)
-            .bg(rgb(t.bg_secondary))
-            .border_1()
-            .border_color(rgb(t.border))
+            // Corners are set per end rather than clipped by the container, so a
+            // hover fill stays inside the outline instead of squaring it off.
+            .when(index == 0, |slot| slot.rounded_l(RADIUS_STD))
+            .when(index == last, |slot| slot.rounded_r(RADIUS_STD))
+            .when(index > 0, |slot| {
+                slot.border_l_1().border_color(rgb(t.border))
+            })
             .text_size(TEXT_MD)
             .text_color(rgb(text_color))
             .cursor(if button.enabled {
@@ -257,9 +270,10 @@ pub fn action_bar(buttons: Vec<ActionBarButton>, t: &ThemeColors) -> Div {
                 svg()
                     .path(button.icon)
                     .size(BAR_ICON)
+                    .flex_shrink_0()
                     .text_color(rgb(icon_color)),
             )
-            .child(button.label);
+            .child(div().min_w_0().truncate().child(button.label));
 
         bar = bar.child(if button.enabled {
             slot.hover(move |s| s.bg(rgb(bg_hover)))
