@@ -60,11 +60,12 @@ actions!(
 
 // Terminal-specific actions (defined in okena-views-terminal crate)
 pub use okena_views_terminal::actions::{
-    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
-    FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
-    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
-    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
+    AddTab, CloseSearch, CloseTerminal, Copy, DetachTerminal, ExportTerminalBuffer, FocusDown,
+    FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
+    FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
+    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
+    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
@@ -388,6 +389,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "AddTab" => Some(KeyBinding::new(keystroke, AddTab, context)),
         "CloseTerminal" => Some(KeyBinding::new(keystroke, CloseTerminal, context)),
         "MinimizeTerminal" => Some(KeyBinding::new(keystroke, MinimizeTerminal, context)),
+        "ExportTerminalBuffer" => Some(KeyBinding::new(keystroke, ExportTerminalBuffer, context)),
+        "DetachTerminal" => Some(KeyBinding::new(keystroke, DetachTerminal, context)),
         "ToggleUnread" => Some(KeyBinding::new(keystroke, ToggleUnread, context)),
         "FocusNextTerminal" => Some(KeyBinding::new(keystroke, FocusNextTerminal, context)),
         "FocusPrevTerminal" => Some(KeyBinding::new(keystroke, FocusPrevTerminal, context)),

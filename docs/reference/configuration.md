@@ -43,6 +43,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "scrollback_lines": 10000,
   "default_shell": "Default",
   "show_shell_selector": false,
+  "auto_hide_single_terminal_header": false,
   "session_backend": "Auto",
   "file_opener": "",
   "show_focused_border": false,
@@ -95,6 +96,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `scrollback_lines` | int | `10000` | Number of scrollback lines (100 - 100,000) |
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
+| `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
 | `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled) |
 
 #### Session Backend
@@ -298,6 +300,8 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `SplitHorizontal` | `Cmd+Shift+D` / `Ctrl+D` | Split terminal horizontally |
 | `AddTab` | `Cmd+T` / `Ctrl+Shift+T` | Add a new tab |
 | `CloseTerminal` | `Cmd+W` / `Ctrl+Shift+W` | Close the focused terminal |
+| `ExportTerminalBuffer` | — | Export the focused terminal's scrollback to a file |
+| `DetachTerminal` | — | Move the focused terminal into a separate window |
 | `Copy` | `Cmd+C` / `Ctrl+Shift+C` | Copy selection |
 | `Paste` | `Cmd+V` / `Ctrl+Shift+V` | Paste from clipboard |
 | `Search` | `Cmd+F` / `Ctrl+F` | Search in terminal |

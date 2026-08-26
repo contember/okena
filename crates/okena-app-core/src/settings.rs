@@ -147,6 +147,11 @@ impl SettingsState {
     }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
     setting_setter!(
+        set_auto_hide_single_terminal_header,
+        auto_hide_single_terminal_header,
+        bool
+    );
+    setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,
         bool

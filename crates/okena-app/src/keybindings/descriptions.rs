@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use super::types::ActionDescription;
 use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy, CreateWorktree,
-    EqualizeLayout, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal,
-    FocusRight, FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    InstallUpdate, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
-    JumpToPreviousPrompt, MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit,
-    ResetZoom, RestartDaemon, ReviewChanges, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev,
-    SendEscape, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
-    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
-    ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
-    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
-    ToggleUnread, ZoomIn, ZoomOut,
+    DetachTerminal, EqualizeLayout, ExportTerminalBuffer, FocusActiveProject, FocusDown, FocusLeft,
+    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusUp,
+    FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
+    JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
+    NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
+    ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowBranchSwitcher,
+    ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHookLog,
+    ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager,
+    ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
+    StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleProjectLayout,
+    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -158,6 +158,24 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Minimize/detach the terminal",
             category: "Terminal",
             factory: || Box::new(MinimizeTerminal),
+        },
+    );
+    map.insert(
+        "ExportTerminalBuffer",
+        ActionDescription {
+            name: "Export Terminal Buffer",
+            description: "Export the focused terminal's scrollback to a file",
+            category: "Terminal",
+            factory: || Box::new(ExportTerminalBuffer),
+        },
+    );
+    map.insert(
+        "DetachTerminal",
+        ActionDescription {
+            name: "Detach Terminal to Window",
+            description: "Move the focused terminal into a separate window",
+            category: "Terminal",
+            factory: || Box::new(DetachTerminal),
         },
     );
     map.insert(

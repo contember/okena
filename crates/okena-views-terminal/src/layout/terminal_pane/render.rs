@@ -2,12 +2,12 @@
 
 use crate::ActionDispatch;
 use crate::actions::{
-    AddTab, AnnotateSelection, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft,
-    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
-    FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
-    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
-    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen,
-    ToggleUnread, ZoomIn, ZoomOut,
+    AddTab, AnnotateSelection, CloseSearch, CloseTerminal, Copy, DetachTerminal,
+    ExportTerminalBuffer, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
+    FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, JumpToNextFailedCommand,
+    JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal, Paste,
+    ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape, SendTab, SplitHorizontal,
+    SplitVertical, ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
 };
 use crate::layout::navigation::NavigationDirection;
 use crate::terminal_view_settings;
@@ -159,6 +159,12 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             }))
             .on_action(cx.listener(|this, _: &MinimizeTerminal, _window, cx| {
                 this.handle_minimize(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExportTerminalBuffer, _window, cx| {
+                this.handle_export_buffer(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DetachTerminal, _window, cx| {
+                this.handle_detach(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleUnread, _window, cx| {
                 this.handle_toggle_unread(cx);

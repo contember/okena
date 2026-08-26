@@ -616,7 +616,7 @@ impl Render for WindowView {
         let has_context_menu = om.has_context_menu();
         let has_folder_context_menu = om.has_folder_context_menu();
         let has_remote_context_menu = om.has_remote_context_menu();
-        let has_terminal_context_menu = om.has_terminal_context_menu();
+        let has_terminal_menu = om.has_terminal_menu();
         let has_tab_context_menu = om.has_tab_context_menu();
         let has_send_composer = om.has_send_composer();
         let has_worktree_list = om.has_worktree_list();
@@ -1474,9 +1474,9 @@ impl Render for WindowView {
             .when(has_remote_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_remote_context_menu())
             })
-            // Terminal context menu overlay (positioned popup)
-            .when(has_terminal_context_menu, |d| {
-                d.children(self.overlay_manager.read(cx).render_terminal_context_menu())
+            // Adaptive terminal menu (right-click or header trigger)
+            .when(has_terminal_menu, |d| {
+                d.children(self.overlay_manager.read(cx).render_terminal_menu())
             })
             // Tab context menu overlay (positioned popup)
             .when(has_tab_context_menu, |d| {

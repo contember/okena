@@ -13,6 +13,8 @@ gpui::actions!(
         AddTab,
         CloseTerminal,
         MinimizeTerminal,
+        ExportTerminalBuffer,
+        DetachTerminal,
         FocusNextTerminal,
         FocusPrevTerminal,
         FocusLeft,

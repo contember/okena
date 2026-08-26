@@ -26,6 +26,14 @@ impl SettingsPanel {
                     |state, val, cx| state.set_show_shell_selector(val, cx),
                     cx,
                 ))
+                .child(self.render_toggle(
+                    "auto-hide-single-terminal-header",
+                    "Auto-hide Single-Terminal Header",
+                    s.auto_hide_single_terminal_header,
+                    true,
+                    |state, val, cx| state.set_auto_hide_single_terminal_header(val, cx),
+                    cx,
+                ))
                 .child(self.render_cursor_style_row(s.cursor_style, cx))
                 .child(self.render_toggle(
                     "cursor-blink",

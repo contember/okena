@@ -48,6 +48,9 @@ mod tests {
                                 cursor_blink: s.settings.cursor_blink,
                                 show_focused_border: s.settings.show_focused_border,
                                 show_shell_selector: s.settings.show_shell_selector,
+                                auto_hide_single_terminal_header: s
+                                    .settings
+                                    .auto_hide_single_terminal_header,
                                 idle_timeout_secs: s.settings.idle_timeout_secs,
                                 color_tinted_background: s.settings.color_tinted_background,
                                 file_opener: s.settings.file_opener.clone(),

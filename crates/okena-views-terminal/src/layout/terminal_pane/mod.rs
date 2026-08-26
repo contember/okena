@@ -183,12 +183,15 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                         broker.push_overlay_request(
                             okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                                 project_id: self.project_id.clone(),
-                                kind: okena_workspace::requests::ProjectOverlayKind::TerminalContextMenu {
+                                kind: okena_workspace::requests::ProjectOverlayKind::TerminalMenu {
                                     terminal_id: terminal_id.clone(),
                                     layout_path: self.layout_path.clone(),
                                     position: *position,
-                                    has_selection: *has_selection,
-                                    link_url: link_url.clone(),
+                                    can_export_buffer: self.backend.supports_buffer_capture(),
+                                    invocation: okena_workspace::requests::TerminalMenuInvocation::Content {
+                                        has_selection: *has_selection,
+                                        link_url: link_url.clone(),
+                                    },
                                 },
                             }),
                             cx,

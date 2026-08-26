@@ -281,6 +281,10 @@ pub struct AppSettings {
     /// Show shell selector in terminal header (default: false)
     #[serde(default)]
     pub show_shell_selector: bool,
+    /// Hide the terminal header for standalone, non-fullscreen terminals.
+    /// A real tab group always keeps its header visible (default: false).
+    #[serde(default)]
+    pub auto_hide_single_terminal_header: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -445,6 +449,7 @@ impl Default for AppSettings {
             terminal_close_grace_secs: default_terminal_close_grace_secs(),
             default_shell: ShellType::default(),
             show_shell_selector: false,
+            auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
@@ -1010,6 +1015,16 @@ mod tests {
         assert_eq!(recovered.font_family, "Custom Font");
         assert_eq!(recovered.font_size, 18.0);
         assert_eq!(recovered.scrollback_lines, 42000);
+    }
+
+    #[test]
+    fn single_terminal_header_auto_hide_is_opt_in() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.auto_hide_single_terminal_header);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"auto_hide_single_terminal_header":true}"#).unwrap();
+        assert!(loaded.auto_hide_single_terminal_header);
     }
 
     #[test]

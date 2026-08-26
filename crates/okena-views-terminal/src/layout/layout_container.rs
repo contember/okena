@@ -23,6 +23,55 @@ use std::sync::Arc;
 // Re-export rename state from okena-ui
 pub use okena_ui::rename_state::*;
 
+/// Trigger that opens the adaptive terminal menu for one pane.
+///
+/// Free-standing so the project header can render it without reaching into a
+/// `LayoutContainer` entity (and inheriting its `ActionDispatch` generic).
+#[allow(clippy::too_many_arguments)]
+pub fn terminal_actions_button(
+    action: okena_ui::header_buttons::HeaderAction,
+    id_suffix: &str,
+    project_id: String,
+    request_broker: Entity<RequestBroker>,
+    layout_path: Vec<usize>,
+    terminal_id: Option<String>,
+    can_export_buffer: bool,
+    include_primary_actions: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    use okena_ui::header_buttons::{ButtonSize, header_button_base};
+
+    let t = theme(cx);
+
+    header_button_base(action, id_suffix, ButtonSize::COMPACT, &t, None, None).on_click(
+        move |_, window, cx| {
+            if let Some(terminal_id) = terminal_id.as_ref() {
+                request_broker.update(cx, |broker, cx| {
+                    broker.push_overlay_request(
+                        okena_workspace::requests::OverlayRequest::Project(
+                            okena_workspace::requests::ProjectOverlay {
+                                project_id: project_id.clone(),
+                                kind: okena_workspace::requests::ProjectOverlayKind::TerminalMenu {
+                                    terminal_id: terminal_id.clone(),
+                                    layout_path: layout_path.clone(),
+                                    position: window.mouse_position(),
+                                    can_export_buffer,
+                                    invocation:
+                                        okena_workspace::requests::TerminalMenuInvocation::Header {
+                                            include_primary_actions,
+                                        },
+                                },
+                            },
+                        ),
+                        cx,
+                    );
+                });
+            }
+            cx.stop_propagation();
+        },
+    )
+}
+
 /// Recursive layout container that renders terminal/split/tabs nodes
 pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) workspace: Entity<Workspace>,
@@ -204,20 +253,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     }
 
     fn is_in_tab_group(&self, cx: &Context<Self>) -> bool {
-        if self.layout_path.is_empty() {
-            return false;
-        }
-        let parent_path = &self.layout_path[..self.layout_path.len() - 1];
-        let ws = self.workspace.read(cx);
-        if let Some(project) = ws.project(&self.project_id)
-            && let Some(LayoutNode::Tabs { .. }) = project
-                .layout
-                .as_ref()
-                .and_then(|l| l.get_at_path(parent_path))
-        {
-            return true;
-        }
-        false
+        self.workspace
+            .read(cx)
+            .project(&self.project_id)
+            .and_then(|project| project.layout.as_ref())
+            .is_some_and(|layout| layout.is_in_tab_group(&self.layout_path))
     }
 
     pub(super) fn start_tab_rename(
@@ -291,10 +331,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let fm = self.focus_manager.read(cx);
             fm.is_terminal_fullscreened(&self.project_id, tid)
         });
-
         let mut container = div().size_full().min_h_0().flex().flex_col().relative();
 
-        if !in_tab_group && !is_zoomed {
+        // Reading the settings is a serde round-trip, so only ask once the
+        // cheap structural checks have not already ruled the header out.
+        if !in_tab_group
+            && !is_zoomed
+            && !crate::terminal_view_settings(cx).auto_hide_single_terminal_header
+        {
             container = container.child(self.render_standalone_tab_bar(window, cx));
         }
 

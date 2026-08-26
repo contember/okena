@@ -583,6 +583,27 @@ mod tests {
     }
 
     #[test]
+    fn header_fallback_commands_are_bindable_and_described() {
+        let descriptions = crate::keybindings::get_action_descriptions();
+
+        for action in ["ExportTerminalBuffer", "DetachTerminal"] {
+            assert!(
+                descriptions.contains_key(action),
+                "{action} must be available in the command palette"
+            );
+            assert!(
+                crate::keybindings::create_keybinding(
+                    action,
+                    "ctrl-alt-shift-f12",
+                    Some("TerminalPane"),
+                )
+                .is_some(),
+                "{action} must remain bindable"
+            );
+        }
+    }
+
+    #[test]
     fn test_duplicate_keybinding_detected() {
         let mut config = KeybindingConfig::defaults();
         // Add a binding that conflicts with an existing one

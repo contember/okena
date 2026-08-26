@@ -682,6 +682,9 @@ fn main() {
                             cursor_blink: s.settings.cursor_blink,
                             show_focused_border: s.settings.show_focused_border,
                             show_shell_selector: s.settings.show_shell_selector,
+                            auto_hide_single_terminal_header: s
+                                .settings
+                                .auto_hide_single_terminal_header,
                             idle_timeout_secs: s.settings.idle_timeout_secs,
                             color_tinted_background: s.settings.color_tinted_background,
                             file_opener: s.settings.file_opener.clone(),
@@ -723,6 +726,8 @@ fn main() {
                                 state.settings.cursor_blink = tvs.cursor_blink;
                                 state.settings.show_focused_border = tvs.show_focused_border;
                                 state.settings.show_shell_selector = tvs.show_shell_selector;
+                                state.settings.auto_hide_single_terminal_header =
+                                    tvs.auto_hide_single_terminal_header;
                                 state.settings.idle_timeout_secs = tvs.idle_timeout_secs;
                                 state.settings.color_tinted_background = tvs.color_tinted_background;
                                 state.settings.file_opener = tvs.file_opener;

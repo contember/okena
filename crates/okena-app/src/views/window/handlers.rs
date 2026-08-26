@@ -8,6 +8,7 @@ use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
 use okena_core::api::ActionRequest;
+use okena_views_terminal::ActionDispatch;
 
 use super::WindowView;
 
@@ -816,6 +817,22 @@ impl WindowView {
                 // behind a `.cached()` wrapper a plain notify won't reach.
                 cx.refresh_windows();
             }
+            OverlayManagerEvent::ProjectAction {
+                project_id,
+                request,
+            } => {
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(request.clone(), cx);
+                }
+            }
+            OverlayManagerEvent::TerminalAddTab {
+                project_id,
+                layout_path,
+            } => {
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.add_tab(project_id, layout_path, false, cx);
+                }
+            }
             OverlayManagerEvent::TerminalSelectAll { terminal_id } => {
                 let terminals = self.terminals.lock();
                 if let Some(terminal) = terminals.get(terminal_id) {
@@ -823,35 +840,21 @@ impl WindowView {
                 }
                 cx.notify();
             }
-            OverlayManagerEvent::TerminalSplit {
-                project_id,
-                layout_path,
-                direction,
-            } => {
-                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(
-                        ActionRequest::SplitTerminal {
-                            project_id: project_id.clone(),
-                            path: layout_path.clone(),
-                            direction: *direction,
-                        },
-                        cx,
-                    );
-                }
-            }
-            OverlayManagerEvent::TerminalClose {
+            OverlayManagerEvent::TerminalExportBuffer {
                 project_id,
                 terminal_id,
             } => {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(
-                        ActionRequest::CloseTerminal {
-                            project_id: project_id.clone(),
-                            terminal_id: terminal_id.clone(),
-                        },
-                        cx,
-                    );
+                    dispatcher.export_buffer_to_clipboard(terminal_id, cx);
                 }
+            }
+            OverlayManagerEvent::TerminalDetach {
+                project_id,
+                layout_path,
+            } => {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.detach_terminal(project_id, layout_path, cx);
+                });
             }
             OverlayManagerEvent::TabClose {
                 project_id,
@@ -1205,27 +1208,45 @@ impl WindowView {
                             });
                         }
                     }
-                    ProjectOverlayKind::TerminalContextMenu {
+                    ProjectOverlayKind::TerminalMenu {
                         terminal_id,
                         layout_path,
                         position,
-                        has_selection,
-                        link_url,
+                        can_export_buffer,
+                        invocation,
                     } => {
-                        let has_bell = self
-                            .terminals
-                            .lock()
-                            .get(&terminal_id)
-                            .is_some_and(|t| t.has_bell());
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.show_terminal_context_menu(
+                        let (has_bell, osc_title) = {
+                            let terminals = self.terminals.lock();
+                            terminals
+                                .get(&terminal_id)
+                                .map_or((false, None), |terminal| {
+                                    (terminal.has_bell(), terminal.title())
+                                })
+                        };
+                        let (current_name, current_shell) = {
+                            let workspace = self.workspace.read(cx);
+                            let name = workspace
+                                .project(&project_id)
+                                .map(|project| {
+                                    project.terminal_display_name(&terminal_id, osc_title)
+                                })
+                                .unwrap_or_else(|| "Terminal".to_string());
+                            let shell = workspace
+                                .get_terminal_shell(&project_id, &layout_path)
+                                .unwrap_or_default();
+                            (name, shell)
+                        };
+                        self.overlay_manager.update(cx, |manager, cx| {
+                            manager.show_terminal_menu(
                                 terminal_id,
                                 project_id,
                                 layout_path,
                                 position,
-                                has_selection,
+                                current_name,
+                                current_shell,
+                                can_export_buffer,
                                 has_bell,
-                                link_url,
+                                invocation,
                                 cx,
                             );
                         });

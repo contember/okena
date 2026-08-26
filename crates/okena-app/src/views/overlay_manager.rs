@@ -31,13 +31,16 @@ use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDia
 use crate::views::overlays::rename_directory_dialog::{
     RenameDirectoryDialog, RenameDirectoryDialogEvent,
 };
+use crate::views::overlays::rename_terminal_dialog::{
+    RenameTerminalDialog, RenameTerminalDialogEvent,
+};
 use crate::views::overlays::send_composer::{SendComposer, SendComposerEvent};
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
-use crate::views::overlays::terminal_context_menu::{
-    TerminalContextMenu, TerminalContextMenuEvent,
-};
+use crate::views::overlays::terminal_menu::{TerminalMenu, TerminalMenuEvent};
+use crate::workspace::requests::TerminalMenuInvocation;
+use okena_core::api::ActionRequest;
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::views::overlays::{
@@ -274,41 +277,53 @@ pub enum OverlayManagerEvent {
         connection_id: String,
     },
 
-    /// Terminal context menu: copy
+    /// Terminal menu: copy
     TerminalCopy {
         terminal_id: String,
     },
-    /// Terminal context menu: annotate the selection and send it back.
+    /// Terminal menu: annotate the selection and send it back.
     /// The host owns the terminals, so only it can snapshot the selected text.
     TerminalAnnotate {
         terminal_id: String,
         position: gpui::Point<gpui::Pixels>,
     },
-    /// Terminal context menu: paste
+    /// Terminal menu: paste
     TerminalPaste {
         terminal_id: String,
     },
-    /// Terminal context menu: clear
+    /// Terminal menu: clear
     TerminalClear {
         terminal_id: String,
     },
     TerminalToggleUnread {
         terminal_id: String,
     },
-    /// Terminal context menu: select all
+    /// Terminal menu entry that is just a project-scoped `ActionRequest`
+    /// (split, zoom, minimize, close, rename). The host resolves the project's
+    /// dispatcher and forwards it — one arm instead of one per menu item.
+    ProjectAction {
+        project_id: String,
+        request: okena_core::api::ActionRequest,
+    },
+
+    /// Terminal menu: add a tab beside the focused terminal.
+    TerminalAddTab {
+        project_id: String,
+        layout_path: Vec<usize>,
+    },
+    /// Terminal menu: select all
     TerminalSelectAll {
         terminal_id: String,
     },
-    /// Terminal context menu: split
-    TerminalSplit {
-        project_id: String,
-        layout_path: Vec<usize>,
-        direction: crate::workspace::state::SplitDirection,
-    },
-    /// Terminal context menu: close terminal
-    TerminalClose {
+    /// Terminal menu: export the selected terminal's scrollback.
+    TerminalExportBuffer {
         project_id: String,
         terminal_id: String,
+    },
+    /// Terminal menu: detach the selected terminal.
+    TerminalDetach {
+        project_id: String,
+        layout_path: Vec<usize>,
     },
 
     /// Tab context menu: close tab
@@ -386,7 +401,7 @@ pub struct OverlayManager {
     context_menu: OverlaySlot<ContextMenu>,
     folder_context_menu: OverlaySlot<FolderContextMenu>,
     remote_context_menu: OverlaySlot<RemoteContextMenu>,
-    terminal_context_menu: OverlaySlot<TerminalContextMenu>,
+    terminal_menu: OverlaySlot<TerminalMenu>,
     tab_context_menu: OverlaySlot<TabContextMenu>,
     send_composer: OverlaySlot<SendComposer>,
 
@@ -418,7 +433,7 @@ impl OverlayManager {
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
             remote_context_menu: OverlaySlot::new(),
-            terminal_context_menu: OverlaySlot::new(),
+            terminal_menu: OverlaySlot::new(),
             tab_context_menu: OverlaySlot::new(),
             send_composer: OverlaySlot::new(),
             worktree_list: OverlaySlot::new(),
@@ -563,7 +578,7 @@ impl OverlayManager {
         self.context_menu.close();
         self.folder_context_menu.close();
         self.remote_context_menu.close();
-        self.terminal_context_menu.close();
+        self.terminal_menu.close();
         self.tab_context_menu.close();
         self.worktree_list.close();
         self.color_picker.close();
@@ -582,9 +597,9 @@ impl OverlayManager {
         self.folder_context_menu.is_open()
     }
 
-    /// Check if terminal context menu is open.
-    pub fn has_terminal_context_menu(&self) -> bool {
-        self.terminal_context_menu.is_open()
+    /// Check if the adaptive terminal menu is open.
+    pub fn has_terminal_menu(&self) -> bool {
+        self.terminal_menu.is_open()
     }
 
     /// Check if tab context menu is open.
@@ -1290,132 +1305,258 @@ impl OverlayManager {
     }
 
     // ========================================================================
-    // Terminal context menu (positioned popup)
+    // Terminal menu (positioned popup)
     // ========================================================================
 
-    /// Show terminal context menu.
-    // GPUI overlay setup: params are position/context inputs, not a group.
+    /// Show the adaptive terminal menu for either a content or header invocation.
     #[allow(clippy::too_many_arguments)]
-    pub fn show_terminal_context_menu(
+    pub fn show_terminal_menu(
         &mut self,
         terminal_id: String,
         project_id: String,
         layout_path: Vec<usize>,
-        position: gpui::Point<gpui::Pixels>,
-        has_selection: bool,
+        position: Point<Pixels>,
+        current_name: String,
+        current_shell: ShellType,
+        can_export_buffer: bool,
         has_bell: bool,
-        link_url: Option<String>,
+        invocation: TerminalMenuInvocation,
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
         self.close_all_context_menus(cx);
 
         let menu = cx.new(|cx| {
-            TerminalContextMenu::new(
+            TerminalMenu::new(
                 terminal_id,
                 project_id,
                 layout_path,
                 position,
-                has_selection,
+                current_name,
+                current_shell,
+                can_export_buffer,
                 has_bell,
-                link_url,
+                invocation,
                 cx,
             )
         });
 
-        cx.subscribe(
-            &menu,
-            |this, _, event: &TerminalContextMenuEvent, cx| match event {
-                TerminalContextMenuEvent::Close => {
-                    this.hide_terminal_context_menu(cx);
-                }
-                TerminalContextMenuEvent::Copy { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalCopy {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::AnnotateSelection {
-                    terminal_id,
-                    position,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalAnnotate {
-                        terminal_id: terminal_id.clone(),
-                        position: *position,
-                    });
-                }
-                TerminalContextMenuEvent::Paste { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalPaste {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::Clear { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalClear {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::SelectAll { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalSelectAll {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::ToggleUnread { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalToggleUnread {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::Split {
-                    project_id,
-                    layout_path,
-                    direction,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalSplit {
-                        project_id: project_id.clone(),
-                        layout_path: layout_path.clone(),
-                        direction: *direction,
-                    });
-                }
-                TerminalContextMenuEvent::CloseTerminal {
-                    project_id,
-                    terminal_id,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalClose {
-                        project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::OpenLink { url } => {
-                    this.hide_terminal_context_menu(cx);
-                    crate::views::layout::terminal_pane::url_detector::UrlDetector::open_url(url);
-                }
-                TerminalContextMenuEvent::CopyLink { url } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                }
-            },
-        )
+        cx.subscribe(&menu, |this, _, event: &TerminalMenuEvent, cx| {
+            this.handle_terminal_menu_event(event, cx);
+        })
         .detach();
 
-        self.terminal_context_menu.set(menu);
+        self.terminal_menu.set(menu);
         cx.notify();
     }
 
-    /// Hide terminal context menu.
-    pub fn hide_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.terminal_context_menu.close();
+    fn handle_terminal_menu_event(&mut self, event: &TerminalMenuEvent, cx: &mut Context<Self>) {
+        // Every entry dismisses the menu; only the follow-up differs.
+        self.hide_terminal_menu(cx);
+        match event {
+            TerminalMenuEvent::Close => {}
+            TerminalMenuEvent::Copy { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalCopy {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::AnnotateSelection {
+                terminal_id,
+                position,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalAnnotate {
+                    terminal_id: terminal_id.clone(),
+                    position: *position,
+                });
+            }
+            TerminalMenuEvent::Paste { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalPaste {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::Clear { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalClear {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::SelectAll { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalSelectAll {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::ToggleUnread { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalToggleUnread {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::RenameTerminal {
+                project_id,
+                terminal_id,
+                current_name,
+            } => {
+                self.show_rename_terminal_dialog(
+                    project_id.clone(),
+                    terminal_id.clone(),
+                    current_name.clone(),
+                    cx,
+                );
+            }
+            TerminalMenuEvent::ChangeShell {
+                project_id,
+                terminal_id,
+                current_shell,
+            } => {
+                self.show_shell_selector(
+                    current_shell.clone(),
+                    project_id.clone(),
+                    terminal_id.clone(),
+                    cx,
+                );
+            }
+            TerminalMenuEvent::AddTab {
+                project_id,
+                layout_path,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalAddTab {
+                    project_id: project_id.clone(),
+                    layout_path: layout_path.clone(),
+                });
+            }
+            TerminalMenuEvent::Split {
+                project_id,
+                layout_path,
+                direction,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::SplitTerminal {
+                        project_id: project_id.clone(),
+                        path: layout_path.clone(),
+                        direction: *direction,
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::ZoomTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::SetFullscreen {
+                        project_id: project_id.clone(),
+                        terminal_id: Some(terminal_id.clone()),
+                        window: None,
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::MinimizeTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::ToggleMinimized {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::ExportBuffer {
+                project_id,
+                terminal_id,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalExportBuffer {
+                    project_id: project_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::Detach {
+                project_id,
+                layout_path,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalDetach {
+                    project_id: project_id.clone(),
+                    layout_path: layout_path.clone(),
+                });
+            }
+            TerminalMenuEvent::CloseTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::CloseTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::OpenLink { url } => {
+                crate::views::layout::terminal_pane::url_detector::UrlDetector::open_url(url);
+            }
+            TerminalMenuEvent::CopyLink { url } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+            }
+        }
+    }
+
+    /// Forward a menu entry that is just a project-scoped `ActionRequest`.
+    fn emit_project_action(
+        &self,
+        project_id: &str,
+        request: ActionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(OverlayManagerEvent::ProjectAction {
+            project_id: project_id.to_string(),
+            request,
+        });
+    }
+
+    pub fn hide_terminal_menu(&mut self, cx: &mut Context<Self>) {
+        self.terminal_menu.close();
         cx.notify();
     }
 
-    /// Get terminal context menu entity for rendering.
-    pub fn render_terminal_context_menu(&self) -> Option<Entity<TerminalContextMenu>> {
-        self.terminal_context_menu.render()
+    pub fn render_terminal_menu(&self) -> Option<Entity<TerminalMenu>> {
+        self.terminal_menu.render()
+    }
+    /// Show a rename dialog that remains reachable when the terminal header is hidden.
+    pub fn show_rename_terminal_dialog(
+        &mut self,
+        project_id: String,
+        terminal_id: String,
+        current_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entity =
+            cx.new(|cx| RenameTerminalDialog::new(project_id, terminal_id, current_name, cx));
+        cx.subscribe(&entity, |this, _, event: &RenameTerminalDialogEvent, cx| {
+            if let RenameTerminalDialogEvent::Confirmed {
+                project_id,
+                terminal_id,
+                new_name,
+            } = event
+            {
+                cx.emit(OverlayManagerEvent::ProjectAction {
+                    project_id: project_id.clone(),
+                    request: ActionRequest::RenameTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                        name: new_name.clone(),
+                    },
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================

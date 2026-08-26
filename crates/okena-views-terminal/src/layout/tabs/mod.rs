@@ -22,7 +22,6 @@ use std::collections::HashSet;
 /// Context for tab action button closures.
 #[derive(Clone)]
 pub(super) struct TabActionContext<D: ActionDispatch> {
-    pub workspace: Entity<okena_workspace::state::Workspace>,
     pub project_id: String,
     pub layout_path: Vec<usize>,
     pub active_tab: usize,
@@ -75,21 +74,32 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let t = theme(cx);
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
-        let supports_buffer_capture = self.backend.supports_buffer_capture();
-        let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
-        let terminal_id_for_fullscreen = terminal_id.clone();
 
         let ctx_split_v = ctx.clone();
         let ctx_split_h = ctx.clone();
         let ctx_add_tab = ctx.clone();
-        let ctx_minimize = ctx.clone();
-        let ctx_export = ctx.clone();
-        let ctx_fullscreen = ctx.clone();
-        let ctx_detach = ctx.clone();
         let ctx_close = ctx.clone();
 
         let standalone = ctx.standalone;
+        let terminal_layout_path = if standalone {
+            ctx.layout_path.clone()
+        } else {
+            let mut path = ctx.layout_path.clone();
+            path.push(ctx.active_tab);
+            path
+        };
+        let more_button = crate::layout::layout_container::terminal_actions_button(
+            HeaderAction::More,
+            &id_suffix,
+            ctx.project_id.clone(),
+            self.request_broker.clone(),
+            terminal_layout_path,
+            terminal_id.clone(),
+            self.backend.supports_buffer_capture(),
+            false,
+            cx,
+        );
 
         div()
             .flex()
@@ -98,112 +108,92 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .gap(px(2.0))
             .px(px(4.0))
             .child(
-                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
-                            dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
+                header_button_base(
+                    HeaderAction::SplitVertical,
+                    &id_suffix,
+                    ButtonSize::COMPACT,
+                    &t,
+                    None,
+                    None,
+                )
+                .on_click(move |_, _window, cx| {
+                    if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
+                        dispatcher.dispatch(
+                            okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_v.project_id.clone(),
                                 path: ctx_split_v.layout_path.clone(),
                                 direction: SplitDirection::Vertical,
-                            }, cx);
-                        }
-                    }),
+                            },
+                            cx,
+                        );
+                    }
+                }),
             )
             .child(
-                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
-                            dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
+                header_button_base(
+                    HeaderAction::SplitHorizontal,
+                    &id_suffix,
+                    ButtonSize::COMPACT,
+                    &t,
+                    None,
+                    None,
+                )
+                .on_click(move |_, _window, cx| {
+                    if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
+                        dispatcher.dispatch(
+                            okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_h.project_id.clone(),
                                 path: ctx_split_h.layout_path.clone(),
                                 direction: SplitDirection::Horizontal,
-                            }, cx);
-                        }
-                    }),
+                            },
+                            cx,
+                        );
+                    }
+                }),
             )
             .child(
-                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
-                            dispatcher.add_tab(
-                                &ctx_add_tab.project_id,
-                                &ctx_add_tab.layout_path,
-                                !ctx_add_tab.standalone,
-                                cx,
-                            );
-                        }
-                    }),
-            )
-            .child(
-                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click({
-                        let terminal_id_for_minimize = terminal_id.clone();
-                        move |_, _window, cx| {
-                            if let Some(ref tid) = terminal_id_for_minimize
-                                && let Some(ref dispatcher) = ctx_minimize.action_dispatcher {
-                                    dispatcher.dispatch(okena_core::api::ActionRequest::ToggleMinimized {
-                                        project_id: ctx_minimize.project_id.clone(),
-                                        terminal_id: tid.clone(),
-                                    }, cx);
-                                }
-                        }
-                    }),
-            )
-            .when(supports_buffer_capture, |el| {
-                el.child(
-                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                        .on_click(move |_, _window, cx| {
-                            if let Some(ref tid) = terminal_id_for_export
-                                && let Some(ref dispatcher) = ctx_export.action_dispatcher {
-                                    if let Some(path) = dispatcher.export_buffer(tid, cx) {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-                                        log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
-                                    } else {
-                                        log::warn!("Buffer export unavailable for terminal {} (server needs a tmux session backend)", tid);
-                                    }
-                                }
-                        }),
+                header_button_base(
+                    HeaderAction::AddTab,
+                    &id_suffix,
+                    ButtonSize::COMPACT,
+                    &t,
+                    None,
+                    None,
                 )
-            })
-            .child(
-                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_fullscreen
-                            && let Some(ref dispatcher) = ctx_fullscreen.action_dispatcher {
-                                dispatcher.dispatch(okena_core::api::ActionRequest::SetFullscreen {
-                                    project_id: ctx_fullscreen.project_id.clone(),
-                                    terminal_id: Some(tid.clone()),
-                                    window: None,
-                                }, cx);
-                            }
-                    }),
+                .on_click(move |_, _window, cx| {
+                    if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
+                        dispatcher.add_tab(
+                            &ctx_add_tab.project_id,
+                            &ctx_add_tab.layout_path,
+                            !ctx_add_tab.standalone,
+                            cx,
+                        );
+                    }
+                }),
             )
-            .child(
-                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None, None)
-                    .on_click(move |_, _window, cx| {
-                        let full_path = if ctx_detach.standalone {
-                            ctx_detach.layout_path.clone()
-                        } else {
-                            let mut p = ctx_detach.layout_path.clone();
-                            p.push(ctx_detach.active_tab);
-                            p
-                        };
-                        ctx_detach.workspace.update(cx, |ws, cx| {
-                            ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
-                        });
-                    }),
-            )
+            .child(more_button)
             .child({
-                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }), None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_close
-                            && let Some(ref dispatcher) = ctx_close.action_dispatcher {
-                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
-                                    project_id: ctx_close.project_id.clone(),
-                                    terminal_id: tid.clone(),
-                                }, cx);
-                            }
-                    })
+                header_button_base(
+                    HeaderAction::Close,
+                    &id_suffix,
+                    ButtonSize::COMPACT,
+                    &t,
+                    Some(if standalone { "Close" } else { "Close Tab" }),
+                    None,
+                )
+                .on_click(move |_, _window, cx| {
+                    if let Some(ref tid) = terminal_id_for_close
+                        && let Some(ref dispatcher) = ctx_close.action_dispatcher
+                    {
+                        dispatcher.dispatch(
+                            okena_core::api::ActionRequest::CloseTerminal {
+                                project_id: ctx_close.project_id.clone(),
+                                terminal_id: tid.clone(),
+                            },
+                            cx,
+                        );
+                    }
+                })
             })
     }
 
@@ -807,7 +797,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         }
 
         let action_ctx = TabActionContext {
-            workspace: self.workspace.clone(),
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab,
