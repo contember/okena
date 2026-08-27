@@ -48,7 +48,7 @@ imports keep working. Same for `crate::settings::HooksConfig`,
 | `remote_apply.rs` | `apply_remote_snapshot` — pure, GPUI-free reconciliation of a daemon snapshot into `WorkspaceData`. Unit-tested. |
 | `visibility.rs` | `compute_visible_projects(&WindowState, …)` — pure per-window filtering. |
 | `claude_env.rs` | Shared gpui-free `CLAUDE_CONFIG_DIR` / Claude PTY env resolution. |
-| `remote_sync.rs` / `worktree_sync.rs` | Remote + worktree reconciliation helpers. |
+| `remote_sync.rs` | Remote reconciliation helpers. |
 
 ## Key Patterns
 

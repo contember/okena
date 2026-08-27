@@ -1087,7 +1087,9 @@ fn interrupted_create_is_usable(project: &ProjectData) -> bool {
     path.exists() && okena_git::is_complete_checkout(path)
 }
 
-pub(crate) fn worktree_checkout_path(project: &ProjectData) -> &Path {
+/// The directory a worktree project actually checks out into: its recorded
+/// worktree path, falling back to the project path when that is unset.
+pub fn worktree_checkout_path(project: &ProjectData) -> &Path {
     let path = project
         .worktree_info
         .as_ref()
