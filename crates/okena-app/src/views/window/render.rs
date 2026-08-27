@@ -1394,7 +1394,7 @@ impl Render for WindowView {
                         },
                     )
                     .child(
-                        // Sidebar container - animated width
+                        // Sidebar container
                         {
                             let sidebar_width = self.sidebar_ctrl.current_width();
                             let configured_width = self.sidebar_ctrl.width();
@@ -1408,7 +1408,6 @@ impl Render for WindowView {
                                 .flex_shrink_0()
                                 .when(show_sidebar, |d| {
                                     d.child(
-                                        // Inner wrapper to maintain sidebar at full width for clipping effect
                                         div().w(px(configured_width)).h_full().child(
                                             AnyView::from(self.sidebar.clone())
                                                 .cached(StyleRefinement::default().size_full()),
