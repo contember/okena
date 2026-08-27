@@ -263,16 +263,11 @@ impl WindowView {
         let app_settings = settings(cx);
         let mut sidebar_ctrl = SidebarController::new(&app_settings);
         if let Some(window_state) = workspace.read(cx).data().window(window_id) {
-            // Override open-state with per-window persisted value. If the
-            // controller's open flag doesn't match, toggle to flip it AND
-            // snap `animation` to the matching endpoint — toggle() returns an
-            // animation target the caller is expected to drive, but at init
-            // we want no animation, just the right starting visual.
+            // Override open-state with the per-window persisted value.
             if let Some(sidebar_open) = window_state.sidebar_open
                 && sidebar_ctrl.is_open() != sidebar_open
             {
                 sidebar_ctrl.toggle();
-                sidebar_ctrl.set_animation(if sidebar_open { 1.0 } else { 0.0 });
             }
         }
 
@@ -830,7 +825,7 @@ impl WindowView {
 
     /// Ensure project columns exist for all visible projects
     fn sync_project_columns(&mut self, cx: &mut Context<Self>) {
-        let visible_projects: Vec<(String, bool, Option<String>)> = {
+        let visible_projects: Vec<(String, Option<String>)> = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
             ws.visible_projects(
@@ -839,21 +834,19 @@ impl WindowView {
                 fm.is_focus_individual(),
             )
             .iter()
-            .map(|p| (p.id.clone(), p.is_remote, p.connection_id.clone()))
+            .map(|p| (p.id.clone(), p.connection_id.clone()))
             .collect()
         };
 
         // Clean up columns for projects that no longer exist
-        let visible_ids: std::collections::HashSet<&str> = visible_projects
-            .iter()
-            .map(|(id, _, _)| id.as_str())
-            .collect();
+        let visible_ids: std::collections::HashSet<&str> =
+            visible_projects.iter().map(|(id, _)| id.as_str()).collect();
         self.project_columns
             .retain(|id, _| visible_ids.contains(id.as_str()));
 
         // Create columns for new projects. Every project is a remote project
         // of the local daemon.
-        for (project_id, _is_remote, connection_id) in &visible_projects {
+        for (project_id, connection_id) in &visible_projects {
             if !self.project_columns.contains_key(project_id)
                 && let Some(entity) =
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
