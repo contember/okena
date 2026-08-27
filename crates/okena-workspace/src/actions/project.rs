@@ -671,9 +671,8 @@ impl Workspace {
 
         let parent_path = self
             .project(&parent_project_id)
-            .filter(|parent| !parent.is_remote)
             .map(|parent| parent.path.clone())
-            .ok_or_else(|| "Worktree parent project is not local".to_string())?;
+            .ok_or_else(|| "Worktree parent project not found".to_string())?;
         let checkout_query = if recorded_root.is_empty() {
             old_path.clone()
         } else {
@@ -770,7 +769,7 @@ impl Workspace {
         let canonical_root = std::fs::canonicalize(old_root)
             .map_err(|error| format!("Failed to resolve project directory: {error}"))?;
         let mut translated_paths = Vec::new();
-        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
+        for descendant in self.projects().iter() {
             let descendant_path = std::path::Path::new(&descendant.path);
             if !Self::physical_path_identity(descendant_path).starts_with(&old_identity) {
                 continue;
@@ -841,7 +840,7 @@ impl Workspace {
         let allowed_identity = allowed_worktree_root.map(Self::physical_path_identity);
         let mut repo_roots: Vec<std::path::PathBuf> = Vec::new();
 
-        for project in self.projects().iter().filter(|project| !project.is_remote) {
+        for project in self.projects().iter() {
             let project_path = std::path::Path::new(&project.path);
             let project_identity = Self::physical_path_identity(project_path);
             if project_identity.starts_with(&old_identity)

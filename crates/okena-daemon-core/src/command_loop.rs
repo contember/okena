@@ -279,7 +279,6 @@ fn with_unclaimed_worktree_root<R>(
     if workspace
         .projects()
         .iter()
-        .filter(|project| !project.is_remote)
         .map(|project| Workspace::physical_path_identity(std::path::Path::new(&project.path)))
         .any(|project_path| project_path.starts_with(&physical_root))
     {
@@ -778,9 +777,9 @@ fn snapshot_service_owner(
 ) -> Option<PreparedServiceOwner> {
     let (project_path, data_replacement_epoch) = {
         let workspace = workspace.lock();
-        workspace.project(project_id).and_then(|project| {
-            (!project.is_remote).then(|| (project.path.clone(), workspace.data_replacement_epoch()))
-        })
+        workspace
+            .project(project_id)
+            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
     }?;
     let service_state = service_manager.lock().project_state_token(project_id);
     Some(PreparedServiceOwner {
@@ -799,7 +798,7 @@ fn service_owner_is_current(
     workspace.data_replacement_epoch() == owner.data_replacement_epoch
         && workspace
             .project(project_id)
-            .is_some_and(|project| !project.is_remote && project.path == owner.project_path)
+            .is_some_and(|project| project.path == owner.project_path)
         && service_manager.is_project_state_token_current(project_id, &owner.service_state)
 }
 

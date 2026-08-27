@@ -173,7 +173,6 @@ impl Sidebar {
             .workspace
             .read(cx)
             .project(project_id)
-            .filter(|p| p.is_remote)
             .and_then(|p| p.connection_id.clone())
             && let Some(ref send_action) = self.send_remote_action
         {

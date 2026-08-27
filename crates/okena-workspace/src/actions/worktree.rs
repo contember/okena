@@ -502,16 +502,10 @@ impl Workspace {
         // add_discovered_worktree's path dedupe.
         let project_identity = Self::physical_path_identity(std::path::Path::new(project_path));
         let worktree_identity = Self::physical_path_identity(std::path::Path::new(worktree_path));
-        if self
-            .data
-            .projects
-            .iter()
-            .filter(|project| !project.is_remote)
-            .any(|project| {
-                let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
-                existing == project_identity || existing == worktree_identity
-            })
-        {
+        if self.data.projects.iter().any(|project| {
+            let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
+            existing == project_identity || existing == worktree_identity
+        }) {
             return Err(format!("A worktree for '{branch}' already exists"));
         }
 
@@ -704,16 +698,10 @@ impl Workspace {
 
         let project_identity = Self::physical_path_identity(std::path::Path::new(&project_path));
         let worktree_identity = Self::physical_path_identity(std::path::Path::new(wt_path));
-        if self
-            .data
-            .projects
-            .iter()
-            .filter(|project| !project.is_remote)
-            .any(|project| {
-                let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
-                existing == project_identity || existing == worktree_identity
-            })
-        {
+        if self.data.projects.iter().any(|project| {
+            let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
+            existing == project_identity || existing == worktree_identity
+        }) {
             return Err(format!("A worktree for '{branch}' already exists"));
         }
 
@@ -996,9 +984,6 @@ impl Workspace {
         let parent = self
             .project(&metadata.parent_project_id)
             .ok_or_else(|| "Worktree parent project not found".to_string())?;
-        if parent.is_remote {
-            return Err("Worktree parent project is not local".to_string());
-        }
         let checkout_root = if metadata.worktree_path.is_empty() {
             project_path.clone()
         } else {
@@ -1032,9 +1017,6 @@ impl Workspace {
         let parent = self
             .project(&metadata.parent_project_id)
             .ok_or_else(|| "Worktree parent project not found".to_string())?;
-        if parent.is_remote {
-            return Err("Worktree parent project is not local".to_string());
-        }
         let checkout_query = if metadata.worktree_path.is_empty() {
             project_path.clone()
         } else {

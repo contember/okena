@@ -329,7 +329,7 @@ pub fn apply_remote_snapshot(
     let removed_project_ids: Vec<String> = data
         .projects
         .iter()
-        .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
+        .filter(|p| !expected_remote_ids.contains(&p.id))
         .map(|p| p.id.clone())
         .collect();
     let removed_folder_ids: Vec<String> = data
@@ -355,13 +355,8 @@ pub fn apply_remote_snapshot(
     for folder_id in removed_folder_ids {
         data.delete_folder_scrub_all_windows(&folder_id);
     }
-    data.projects.retain(|p| {
-        if p.is_remote {
-            expected_remote_ids.contains(&p.id)
-        } else {
-            true
-        }
-    });
+    data.projects
+        .retain(|p| expected_remote_ids.contains(&p.id));
     data.folders.retain(|f| {
         if f.id.starts_with("remote:") {
             // Remote folder IDs are "remote:{conn_id}:{folder_id}"

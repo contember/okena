@@ -176,9 +176,7 @@ fn streaming_project_ids(
     if let Ok(subscribed) = remote_subscribed_terminals.read() {
         for terminal_ids in subscribed.values() {
             for terminal_id in terminal_ids {
-                if let Some(project) = workspace.find_project_for_terminal(terminal_id)
-                    && !project.is_remote
-                {
+                if let Some(project) = workspace.find_project_for_terminal(terminal_id) {
                     relevant.insert(project.id.clone());
                 }
             }
@@ -258,7 +256,6 @@ pub async fn run_git_head_poll(
             let projects = workspace
                 .projects()
                 .iter()
-                .filter(|project| !project.is_remote)
                 .map(|project| (project.id.clone(), project.path.clone()))
                 .collect();
             (projects, relevant)
@@ -654,7 +651,6 @@ pub async fn run_git_poll(
             let projects: Vec<(String, String)> = workspace
                 .projects()
                 .iter()
-                .filter(|project| !project.is_remote)
                 .map(|project| (project.id.clone(), project.path.clone()))
                 .collect();
             (projects, visible, streaming)

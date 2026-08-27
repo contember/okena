@@ -733,11 +733,6 @@ pub fn reserve_uninitialized_terminal_launches(
         let project = ws
             .project(project_id)
             .ok_or_else(|| format!("project not found: {project_id}"))?;
-        if project.is_remote {
-            return Err(format!(
-                "remote project terminals cannot be materialized locally: {project_id}"
-            ));
-        }
         let project_path = project.path.clone();
         let project_name = project.name.clone();
         let project_hooks = project.hooks.clone();

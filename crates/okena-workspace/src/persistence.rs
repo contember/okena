@@ -474,8 +474,6 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let local_data = data.without_remote_projects();
-
     // Layer 2: refuse to save an empty workspace ONLY if we started from a
     // fallback default this session. If load succeeded (LOADED_FROM_DEFAULT is
     // false), an empty workspace is a genuine user action (they deleted their
@@ -483,7 +481,7 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     // workspace is likely a startup glitch — skip the save to protect the good
     // file on disk. Crucially, do NOT latch LOADED_FROM_DEFAULT here: a single
     // empty save must not permanently disable all future persistence.
-    if local_data.projects.is_empty() && LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
+    if data.projects.is_empty() && LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
         log::warn!(
             "Skipping save of empty workspace — loaded from fallback default this session, \
              protecting file on disk."
@@ -491,7 +489,7 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(&local_data)?;
+    let json = serde_json::to_string_pretty(data)?;
 
     // Layer 3: rolling backup — move the current file to .bak via an atomic
     // rename (not a copy). A rename never produces a truncated .bak, so the
@@ -2311,40 +2309,6 @@ mod tests {
         validate_workspace_data(&mut data, false, SessionBackend::None);
 
         assert!(data.projects[0].terminal_names.is_empty());
-    }
-
-    #[test]
-    fn without_remote_projects_filters_correctly() {
-        // Create mixed local + remote workspace data
-        let local = make_project("local1");
-        let mut remote1 = make_project("remote:conn1:p1");
-        remote1.is_remote = true;
-        remote1.connection_id = Some("conn1".to_string());
-        let mut remote2 = make_project("remote:conn1:p2");
-        remote2.is_remote = true;
-        remote2.connection_id = Some("conn1".to_string());
-
-        let data = make_workspace(
-            vec![local, remote1, remote2],
-            vec!["local1", "remote:conn1:folder1"],
-            vec![FolderData {
-                id: "remote:conn1:folder1".to_string(),
-                name: "Server 1".to_string(),
-                project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-                folder_color: FolderColor::default(),
-            }],
-        );
-        let filtered = data.without_remote_projects();
-
-        // Remote projects should be filtered out
-        assert_eq!(filtered.projects.len(), 1);
-        assert_eq!(filtered.projects[0].id, "local1");
-
-        // Remote folder should be filtered out
-        assert!(filtered.folders.is_empty());
-
-        // Remote folder should be removed from project_order
-        assert_eq!(filtered.project_order, vec!["local1".to_string()]);
     }
 
     fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
