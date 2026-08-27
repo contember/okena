@@ -514,7 +514,7 @@ impl WindowView {
         view.sync_project_columns(cx);
 
         // Seed path snapshot so the observer only fires on real changes.
-        view.last_project_paths = view.snapshot_local_project_paths(cx);
+        view.last_project_paths = view.snapshot_project_paths(cx);
 
         view
     }
@@ -775,21 +775,24 @@ impl WindowView {
         }
     }
 
-    /// Snapshot current on-disk paths for local projects (keyed by project_id).
-    fn snapshot_local_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
+    /// Snapshot every project's current path (keyed by project_id).
+    ///
+    /// Deliberately not filtered by `is_remote`: the desktop is a thin client
+    /// of its daemon, so *every* project it holds is remote and the old filter
+    /// made this permanently empty — renames stopped refreshing anything.
+    fn snapshot_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
         self.workspace
             .read(cx)
             .projects()
             .iter()
-            .filter(|p| !p.is_remote)
             .map(|p| (p.id.clone(), p.path.clone()))
             .collect()
     }
 
-    /// Detect local project directory renames and refresh caches that hold a
+    /// Detect project directory renames and refresh caches that hold a
     /// snapshotted path (git provider inside GitHeader, ServiceManager paths).
     fn refresh_for_project_path_changes(&mut self, cx: &mut Context<Self>) {
-        let current = self.snapshot_local_project_paths(cx);
+        let current = self.snapshot_project_paths(cx);
 
         let changed: Vec<(String, String)> = current
             .iter()
@@ -930,7 +933,6 @@ impl WindowView {
                 backend,
                 terminals_clone,
                 active_drag_clone,
-                None, // remote projects don't get git watcher
                 git_provider,
                 cx,
             );
