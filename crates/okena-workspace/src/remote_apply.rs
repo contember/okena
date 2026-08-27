@@ -251,7 +251,6 @@ pub fn apply_remote_snapshot(
                         worktree_ids,
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
-                        is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
                         default_shell: api_project.default_shell.clone(),
@@ -604,7 +603,6 @@ mod tests {
         assert_eq!(data.project_order, vec!["remote:c1:a", "remote:c1:b"]);
         let ids: Vec<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["remote:c1:a", "remote:c1:b"]);
-        assert!(data.projects.iter().all(|p| p.is_remote));
         assert_eq!(data.projects[0].connection_id.as_deref(), Some("c1"));
         // Terminal IDs in the layout are prefixed.
         assert_eq!(

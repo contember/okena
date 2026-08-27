@@ -1285,7 +1285,6 @@ mod reconnect_shell_tests {
             worktree_ids: Vec::new(),
             folder_color: Default::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell,

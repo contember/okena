@@ -192,9 +192,6 @@ pub struct ProjectData {
     /// Per-project lifecycle hooks (overrides global settings)
     #[serde(default)]
     pub hooks: HooksConfig,
-    /// Whether this is a remote project (materialized from a remote connection)
-    #[serde(default)]
-    pub is_remote: bool,
     /// Connection ID for remote projects (links to RemoteConnectionManager)
     #[serde(default)]
     pub connection_id: Option<String>,
@@ -326,7 +323,6 @@ mod tests {
             worktree_ids: Vec::new(),
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
@@ -422,6 +418,27 @@ mod tests {
         assert!(!is_bash_prompt_title("my-app dev server"));
         assert!(!is_bash_prompt_title("Terminal 1"));
         assert!(!is_bash_prompt_title(""));
+    }
+
+    #[test]
+    fn project_data_ignores_the_retired_is_remote_flag() {
+        // `is_remote` was persisted until the desktop became a thin client of
+        // its daemon, at which point it could only ever be one value on each
+        // side of the wire. Every workspace.json written before then still
+        // carries it, so loading must not choke on it.
+        let json = r#"{
+            "id": "p1",
+            "name": "Test",
+            "path": "/tmp/test",
+            "layout": null,
+            "is_remote": true,
+            "connection_id": "c1"
+        }"#;
+
+        let project: ProjectData = serde_json::from_str(json).unwrap();
+
+        assert_eq!(project.id, "p1");
+        assert_eq!(project.connection_id.as_deref(), Some("c1"));
     }
 
     #[test]

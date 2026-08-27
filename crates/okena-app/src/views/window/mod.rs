@@ -771,10 +771,6 @@ impl WindowView {
     }
 
     /// Snapshot every project's current path (keyed by project_id).
-    ///
-    /// Deliberately not filtered by `is_remote`: the desktop is a thin client
-    /// of its daemon, so *every* project it holds is remote and the old filter
-    /// made this permanently empty — renames stopped refreshing anything.
     fn snapshot_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
         self.workspace
             .read(cx)

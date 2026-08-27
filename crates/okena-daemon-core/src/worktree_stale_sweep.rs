@@ -4,12 +4,11 @@
 //! never adds anything — it only removes rows whose directory is gone (`git
 //! worktree remove` from a terminal, a manual `rm -rf`, a cleanup script).
 //!
-//! This used to live in the GUI as `okena-workspace`'s `WorktreeSyncWatcher`,
-//! filtered to `!project.is_remote`. Once the desktop became a thin client of
-//! the daemon every project it holds is remote, so that filter emptied the
-//! sweep — and the watcher itself stopped being constructed at all. The
-//! authoritative state lives here now, which is also the only place that can
-//! see the directories.
+//! This used to live in the GUI, where it skipped projects materialized from a
+//! remote connection. Once the desktop became a thin client of the daemon every
+//! project it held was such a projection, so the sweep matched nothing — and
+//! the watcher itself stopped being constructed at all. The authoritative state
+//! lives here now, which is also the only place that can see the directories.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -134,7 +133,6 @@ mod tests {
             worktree_ids: Vec::new(),
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,
