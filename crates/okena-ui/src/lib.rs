@@ -31,6 +31,7 @@ pub mod popover;
 pub mod rename_state;
 pub mod resizable_sidebar;
 pub mod resize_handle;
+pub mod scrollbar;
 pub mod selectable_list;
 pub mod settings;
 pub mod simple_input;
