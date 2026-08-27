@@ -1,10 +1,8 @@
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::ui::tokens::ui_text_md;
 use crate::workspace::settings::CursorShape;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::h_flex;
 
 use super::SettingsPanel;
 use super::components::*;
@@ -136,44 +134,23 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
+        let variants = CursorShape::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|style| Segment {
+                id: format!("{:?}", style).into(),
+                label: style.display_name(),
+                selected: *style == current,
+            })
+            .collect();
 
         settings_row("cursor-style".to_string(), "Cursor Style", &t, cx, true).child(
-            h_flex()
-                .gap(px(2.0))
-                .rounded(px(4.0))
-                .bg(rgb(t.bg_secondary))
-                .p(px(2.0))
-                .children(
-                    CursorShape::all_variants()
-                        .iter()
-                        .map(|&style: &CursorShape| {
-                            let is_selected = style == current;
-                            let hover_bg = t.bg_hover;
-                            div()
-                                .id(ElementId::Name(format!("cursor-style-{:?}", style).into()))
-                                .cursor_pointer()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(px(3.0))
-                                .text_size(ui_text_md(cx))
-                                .when(is_selected, |el: Stateful<Div>| {
-                                    el.bg(rgb(t.border_active)).text_color(rgb(t.text_primary))
-                                })
-                                .when(!is_selected, |el: Stateful<Div>| {
-                                    el.text_color(rgb(t.text_muted))
-                                        .hover(|s: StyleRefinement| s.bg(rgb(hover_bg)))
-                                })
-                                .child(style.display_name().to_string())
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_, _, _, cx| {
-                                        settings_entity(cx).update(cx, |state, cx| {
-                                            state.set_cursor_style(style, cx);
-                                        });
-                                    }),
-                                )
-                        }),
-                ),
+            segmented_control("cursor-style", &segments, &t, cx, move |i, _, cx| {
+                let style = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_cursor_style(style, cx);
+                });
+            }),
         )
     }
 }

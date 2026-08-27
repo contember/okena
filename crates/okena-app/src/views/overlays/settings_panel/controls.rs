@@ -4,7 +4,6 @@ use crate::terminal::shell_config::ShellType;
 use crate::theme::theme;
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
-use gpui_component::h_flex;
 
 use super::SettingsPanel;
 use super::components::*;
@@ -25,41 +24,21 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let dec_fn = update_fn.clone();
-        let inc_fn = update_fn;
+        let display = format.replace("{}", &format!("{:.1}", value));
 
-        settings_row(id.to_string(), label, &t, cx, has_border).child(
-            h_flex()
-                .gap(px(4.0))
-                .child(
-                    stepper_button(format!("{}-dec", id), "-", &t, cx).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            let dec_fn = dec_fn.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                dec_fn(state, value - step, cx);
-                            });
-                        }),
-                    ),
-                )
-                .child(value_display(
-                    format.replace("{}", &format!("{:.1}", value)),
-                    width,
-                    &t,
-                    cx,
-                ))
-                .child(
-                    stepper_button(format!("{}-inc", id), "+", &t, cx).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            let inc_fn = inc_fn.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                inc_fn(state, value + step, cx);
-                            });
-                        }),
-                    ),
-                ),
-        )
+        settings_row(id.to_string(), label, &t, cx, has_border).child(stepper(
+            id,
+            display,
+            width,
+            &t,
+            cx,
+            move |dir, _, cx| {
+                let update_fn = update_fn.clone();
+                settings_entity(cx).update(cx, |state, cx| {
+                    update_fn(state, value + step * dir as f32, cx);
+                });
+            },
+        ))
     }
 
     // GPUI render helper: params are render inputs (value, bounds, callbacks).
@@ -76,36 +55,25 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let dec_fn = update_fn.clone();
-        let inc_fn = update_fn;
 
-        settings_row(id.to_string(), label, &t, cx, has_border).child(
-            h_flex()
-                .gap(px(4.0))
-                .child(
-                    stepper_button(format!("{}-dec", id), "-", &t, cx).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            let dec_fn = dec_fn.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                dec_fn(state, value.saturating_sub(step), cx);
-                            });
-                        }),
-                    ),
-                )
-                .child(value_display(format!("{}", value), width, &t, cx))
-                .child(
-                    stepper_button(format!("{}-inc", id), "+", &t, cx).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
-                            let inc_fn = inc_fn.clone();
-                            settings_entity(cx).update(cx, |state, cx| {
-                                inc_fn(state, value + step, cx);
-                            });
-                        }),
-                    ),
-                ),
-        )
+        settings_row(id.to_string(), label, &t, cx, has_border).child(stepper(
+            id,
+            format!("{}", value),
+            width,
+            &t,
+            cx,
+            move |dir, _, cx| {
+                let update_fn = update_fn.clone();
+                let next = if dir < 0 {
+                    value.saturating_sub(step)
+                } else {
+                    value.saturating_add(step)
+                };
+                settings_entity(cx).update(cx, |state, cx| {
+                    update_fn(state, next, cx);
+                });
+            },
+        ))
     }
 
     pub(super) fn render_toggle(

@@ -13,7 +13,7 @@ use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_extensions::ExtensionSettingsStore;
-use okena_ui::settings::{section_container, section_header};
+use okena_ui::settings::{section_container, section_header, section_note};
 use okena_ui::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xs};
 
@@ -950,27 +950,14 @@ impl Render for WorkingDaysSetting {
         }
 
         v_flex()
-            .gap(px(8.0))
             .child(section_header("Working days", &t, cx))
-            .child(
-                section_container(&t).child(
-                    v_flex()
-                        .px(px(12.0))
-                        .py(px(10.0))
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(ui_text_sm(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(
-                                    "Tailor the weekly usage bar to the days you work — \
-                                     the bar shows one block per working day. \
-                                     Shared across Claude and Codex.",
-                                ),
-                        )
-                        .child(chips),
-                ),
-            )
+            .child(section_note(
+                "Tailor the weekly usage bar to the days you work — the bar shows \
+                 one block per working day. Shared across Claude and Codex.",
+                &t,
+                cx,
+            ))
+            .child(section_container(&t).child(v_flex().px(px(12.0)).py(px(10.0)).child(chips)))
     }
 }
 

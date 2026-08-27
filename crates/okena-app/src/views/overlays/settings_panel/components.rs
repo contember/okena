@@ -1,15 +1,14 @@
 use crate::theme::ThemeColors;
-use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
+use crate::ui::tokens::ui_text_md;
 use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use gpui::*;
-use gpui_component::v_flex;
 
 // Re-export from okena-ui
 pub use okena_ui::settings::{
-    section_container, section_header, settings_row, settings_row_with_desc, stepper_button,
-    value_display,
+    input_box, section_container, section_header, section_note, settings_input_row, settings_row,
+    settings_row_with_desc, stepper,
 };
-pub use okena_ui::toggle::toggle_switch;
+pub use okena_ui::toggle::{Segment, segmented_control, toggle_switch};
 
 /// Available monospace font families
 pub(super) const FONT_FAMILIES: &[&str] = &[
@@ -25,57 +24,18 @@ pub(super) const FONT_FAMILIES: &[&str] = &[
     "Hack",
 ];
 
-/// Render a hook input row with label, description, and text input
-// GPUI render helper: params are render inputs and event callbacks.
-#[allow(clippy::too_many_arguments)]
+/// Render a stacked row with label, description and a full-width text input.
 pub(super) fn hook_input_row(
     id: impl Into<SharedString>,
     label: &str,
     desc: &str,
     input: &Entity<SimpleInputState>,
-    placeholder: &str,
     t: &ThemeColors,
     has_border: bool,
     cx: &App,
 ) -> Stateful<Div> {
-    let _ = placeholder; // placeholder is set on the entity itself
-    let row = div()
-        .id(ElementId::Name(id.into()))
-        .px(px(12.0))
-        .py(px(8.0))
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(
-            v_flex()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(ui_text(13.0, cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(label.to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(desc.to_string()),
-                ),
-        )
-        .child(
-            div()
-                .bg(rgb(t.bg_secondary))
-                .border_1()
-                .border_color(rgb(t.border))
-                .rounded(px(4.0))
-                .child(SimpleInput::new(input).text_size(ui_text_md(cx))),
-        );
-
-    if has_border {
-        row.border_b_1().border_color(rgb(t.border))
-    } else {
-        row
-    }
+    settings_input_row(id, label, desc, t, cx, has_border)
+        .child(input_box(t).child(SimpleInput::new(input).text_size(ui_text_md(cx))))
 }
 
 /// Convert empty string to None, non-empty to Some

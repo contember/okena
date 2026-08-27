@@ -32,6 +32,7 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use okena_extensions::ExtensionRegistry;
+use okena_ui::scrollbar::vertical_scrollbar;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -97,6 +98,8 @@ pub struct SettingsPanel {
     pub(super) paired_devices: PairedDevices,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
+    /// Scroll position of the content pane, shared with its overlay scrollbar.
+    pub(super) content_scroll: ScrollHandle,
 }
 
 /// Load state of the paired-device list. Fetching it is a round trip to the
@@ -915,6 +918,7 @@ impl SettingsPanel {
             paired_devices: PairedDevices::Loading,
             daemon_endpoint,
             extension_views: HashMap::new(),
+            content_scroll: ScrollHandle::new(),
         };
 
         panel.load_paired_devices(cx);
@@ -1020,6 +1024,15 @@ impl SettingsPanel {
 
         // Reload project hook inputs for the new project
         self.reload_project_hook_inputs(cx);
+        self.content_scroll.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+    }
+
+    /// Switch the visible category, scrolling the content pane back to the top.
+    pub(super) fn set_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
+        self.active_category = category;
+        self.close_all_dropdowns();
+        self.content_scroll.set_offset(point(px(0.0), px(0.0)));
         cx.notify();
     }
 
@@ -1285,12 +1298,26 @@ impl SettingsPanel {
             }
         };
 
+        let t = theme(cx);
+
         div()
-            .id("settings-content")
+            .relative()
             .flex_1()
-            .overflow_y_scroll()
             .min_w_0()
-            .child(content)
+            .child(
+                div()
+                    .id("settings-content")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.content_scroll)
+                    .pb(px(16.0))
+                    .child(content),
+            )
+            .child(vertical_scrollbar(
+                "settings-content-scrollbar",
+                &self.content_scroll,
+                &t,
+            ))
     }
 
     fn render_extension_settings(&mut self, ext_id: String, cx: &mut Context<Self>) -> AnyElement {
@@ -1368,8 +1395,8 @@ impl Render for SettingsPanel {
             .child(
                 modal_content("settings-panel-modal", &t)
                     .relative()
-                    .w(px(720.0))
-                    .h(px(560.0))
+                    .w(px(780.0))
+                    .h(px(600.0))
                     // Header with project selector and edit button
                     .child(self.render_header(cx))
                     // Main body: sidebar + content

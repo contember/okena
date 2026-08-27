@@ -18,7 +18,6 @@ impl SettingsPanel {
                 "Path Template",
                 "relative to project dir. {repo} = repo name, {branch} = branch",
                 &self.worktree_dir_suffix_input,
-                "",
                 &t,
                 false,
                 cx,

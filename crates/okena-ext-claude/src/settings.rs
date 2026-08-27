@@ -1,6 +1,6 @@
 use gpui::*;
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
-use okena_ui::settings::{section_container, section_header, settings_row_with_desc};
+use okena_ui::settings::{input_box, section_container, section_header, settings_input_row};
 use okena_ui::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use okena_ui::tokens::ui_text_md;
 use okena_usage::WorkingDaysSetting;
@@ -73,11 +73,10 @@ impl Render for ClaudeSettingsView {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
             .child(section_header("Claude Code", &t, cx))
             .child(
                 section_container(&t).child(
-                    settings_row_with_desc(
+                    settings_input_row(
                         "claude-config-dir",
                         "Config directory",
                         "Optional override for Claude credentials/config. Supports ~/. Falls back to CLAUDE_CONFIG_DIR, then ~/.claude.",
@@ -86,12 +85,7 @@ impl Render for ClaudeSettingsView {
                         false,
                     )
                     .child(
-                        div()
-                            .w(px(260.0))
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border))
-                            .rounded(px(4.0))
+                        input_box(&t)
                             .child(SimpleInput::new(&self.config_dir_input).text_size(ui_text_md(cx))),
                     ),
                 ),

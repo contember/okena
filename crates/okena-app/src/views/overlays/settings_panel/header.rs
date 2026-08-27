@@ -1,5 +1,5 @@
 use crate::settings::open_settings_file;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_xl};
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
@@ -12,8 +12,10 @@ impl SettingsPanel {
         let t = theme(cx);
 
         div()
+            .flex_shrink_0()
             .px(px(16.0))
             .py(px(10.0))
+            .bg(with_alpha(t.bg_secondary, 0.4))
             .border_b_1()
             .border_color(rgb(t.border))
             .flex()
@@ -32,10 +34,11 @@ impl SettingsPanel {
                             .id("edit-settings-file-btn")
                             .cursor_pointer()
                             .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .py(px(5.0))
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_secondary))
                             .child("Edit in settings.json")
@@ -56,8 +59,8 @@ impl SettingsPanel {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .rounded(px(5.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
                             .text_size(ui_text_xl(cx))
                             .text_color(rgb(t.text_muted))
                             .child("\u{2715}")

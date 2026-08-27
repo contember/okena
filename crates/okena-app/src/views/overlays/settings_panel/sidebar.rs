@@ -1,4 +1,4 @@
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::ui_text_md;
 use gpui::prelude::*;
 use gpui::*;
@@ -47,14 +47,15 @@ impl SettingsPanel {
 
         div()
             .id("settings-sidebar")
-            .w(px(120.0))
+            .w(px(148.0))
             .flex_shrink_0()
+            .bg(with_alpha(t.bg_secondary, 0.4))
             .border_r_1()
             .border_color(rgb(t.border))
-            .py(px(8.0))
+            .py(px(10.0))
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(1.0))
             // Static categories
             .children(static_categories.iter().map(|cat| {
                 let is_active = *cat == self.active_category;
@@ -66,9 +67,7 @@ impl SettingsPanel {
                     is_active,
                     &t,
                     cx.listener(move |this, _, _, cx| {
-                        this.active_category = category.clone();
-                        this.close_all_dropdowns();
-                        cx.notify();
+                        this.set_category(category.clone(), cx);
                     }),
                     cx,
                 )
@@ -83,9 +82,7 @@ impl SettingsPanel {
                     is_active,
                     &t,
                     cx.listener(move |this, _, _, cx| {
-                        this.active_category = category.clone();
-                        this.close_all_dropdowns();
-                        cx.notify();
+                        this.set_category(category.clone(), cx);
                     }),
                     cx,
                 )
@@ -102,19 +99,21 @@ impl SettingsPanel {
         div()
             .id(ElementId::Name(format!("sidebar-{}", label).into()))
             .cursor_pointer()
-            .mx(px(6.0))
+            .mx(px(8.0))
             .px(px(10.0))
             .py(px(6.0))
-            .rounded(px(4.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
             .text_size(ui_text_md(cx))
             .when(is_active, |d| {
-                d.bg(rgb(t.bg_secondary))
+                d.bg(with_alpha(t.border_active, 0.18))
                     .text_color(rgb(t.text_primary))
                     .font_weight(FontWeight::MEDIUM)
             })
             .when(!is_active, |d| {
                 d.text_color(rgb(t.text_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
             })
             .child(label.to_string())
             .on_mouse_down(MouseButton::Left, on_click)
