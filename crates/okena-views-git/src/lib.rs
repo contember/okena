@@ -9,7 +9,6 @@ pub mod history;
 pub mod project_header;
 pub mod settings;
 pub mod simple_input;
-pub mod watcher;
 pub mod worktree_dialog;
 
 gpui::actions!(okena_views_git, [Cancel]);

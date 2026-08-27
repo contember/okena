@@ -194,7 +194,6 @@ impl GitHeader {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     this.hide_branch_picker(cx);
-                    this.request_git_refresh(cx);
                 }
                 Err(e) => {
                     this.branch_picker_status = BranchPickerStatus::Error(e);
@@ -203,15 +202,6 @@ impl GitHeader {
             });
         })
         .detach();
-    }
-
-    /// Kick the centralized git watcher to repoll this project immediately,
-    /// so the branch chip / diff stats update without the usual 5s lag.
-    fn request_git_refresh(&self, cx: &mut Context<Self>) {
-        if let Some(watcher) = self.git_watcher.as_ref() {
-            let project_id = self.project_id.clone();
-            watcher.update(cx, |w, cx| w.refresh_project(project_id, cx));
-        }
     }
 
     fn create_branch_from_current(&mut self, cx: &mut Context<Self>) {
@@ -249,7 +239,6 @@ impl GitHeader {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     this.hide_branch_picker(cx);
-                    this.request_git_refresh(cx);
                 }
                 Err(e) => {
                     this.branch_picker_status = BranchPickerStatus::Error(e);

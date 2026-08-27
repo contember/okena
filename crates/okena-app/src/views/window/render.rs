@@ -1317,28 +1317,22 @@ impl Render for WindowView {
                             .and_then(|g| g.review_base.clone());
                         ws.projects()
                             .iter()
-                            .find(|p| p.id == pid)
-                            .map(move |p| (pid, p.path.clone(), p.is_remote, review_base))
+                            .any(|p| p.id == pid)
+                            .then_some((pid, review_base))
                     })
                 };
 
-                let Some((project_id, project_path, is_remote, review_base)) = target else {
+                let Some((project_id, review_base)) = target else {
                     return;
                 };
 
-                let mode = if is_remote {
-                    review_base.map(|base| crate::git::DiffMode::BranchCompare {
-                        base,
-                        head: "HEAD".to_string(),
-                    })
-                } else {
-                    crate::git::resolve_review_base(std::path::Path::new(&project_path)).map(
-                        |base| crate::git::DiffMode::BranchCompare {
-                            base,
-                            head: "HEAD".to_string(),
-                        },
-                    )
-                };
+                // The base comes over the wire (`ApiGitStatus.review_base`) —
+                // the daemon owns the repo, and on a genuinely remote one the
+                // path isn't on this machine to resolve against anyway.
+                let mode = review_base.map(|base| crate::git::DiffMode::BranchCompare {
+                    base,
+                    head: "HEAD".to_string(),
+                });
 
                 this.request_broker.update(cx, |broker, cx| {
                     broker.push_overlay_request(
