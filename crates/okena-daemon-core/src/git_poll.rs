@@ -102,6 +102,16 @@ impl TriggerAccumulator {
     }
 }
 
+/// A message from a running `gh` pass back to the poll loop.
+enum GithubPassMessage {
+    /// One project's outcome, sent the moment that project finishes. A pass
+    /// used to publish nothing until its slowest repo returned, so a 0.4s PR
+    /// lookup could sit behind another project's 15s `gh` timeout.
+    Project(GithubPollResult),
+    /// The pass is over; carries the ids it held so they can be polled again.
+    Finished(HashSet<String>),
+}
+
 struct GithubPollResult {
     head_generations: HashMap<String, u64>,
     branches: HashMap<String, Option<String>>,
@@ -308,10 +318,16 @@ fn update_head_snapshots<T: PartialEq>(
 
 /// Pick this cycle's `gh` slots.
 ///
-/// Two rules, both of which used to be missing: a project earns a slot only if
-/// it is *visible* (or explicitly asked for), and only when its own schedule
-/// says it is due — one repo with running CI no longer drags every other repo
-/// onto the fast cadence.
+/// Rules: a project earns a slot only if it is *visible* (or explicitly asked
+/// for), only when its own schedule says it is due — one repo with running CI
+/// no longer drags every other repo onto the fast cadence — and only when no
+/// running pass already covers it.
+///
+/// `urgent_only` is set while another pass is still running. A cadence pass
+/// waits its turn (passes used to stack copies of themselves), but a project
+/// someone explicitly forced — a branch switch — jumps straight out rather than
+/// waiting for that pass plus the next cadence tick.
+#[allow(clippy::too_many_arguments)]
 fn select_github_polls(
     projects: &[(String, String)],
     visible_ids: &HashSet<String>,
@@ -319,10 +335,14 @@ fn select_github_polls(
     pr_infos: &HashMap<String, Option<git::PrInfo>>,
     cycle: u64,
     cadence_due: bool,
+    in_flight: &HashSet<String>,
+    urgent_only: bool,
 ) -> Vec<ProjectPoll> {
     projects
         .iter()
         .filter(|(id, _)| visible_ids.contains(id) || schedule.is_urgent(id))
+        .filter(|(id, _)| !in_flight.contains(id))
+        .filter(|(id, _)| !urgent_only || schedule.is_urgent(id))
         .filter_map(|(id, path)| {
             let want_pr = schedule.pr_due(id, cycle, cadence_due);
             let want_ci = schedule.ci_due(id, cycle, cadence_due);
@@ -386,15 +406,19 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
     })
 }
 
+/// Run one `gh` pass, emitting each project's outcome on `result_tx` as soon as
+/// that project returns and a [`GithubPassMessage::Finished`] when all have.
+///
+/// Streaming rather than returning one aggregate is deliberate: `gh` per repo
+/// ranges from ~0.4s to the 15s [`GH_TIMEOUT`](okena_git::repository) cap, and
+/// an aggregate held every badge in the pass hostage to its slowest repo.
 async fn poll_github(
     polls: Vec<ProjectPoll>,
     head_generations: HashMap<String, u64>,
     branches: HashMap<String, Option<String>>,
-) -> GithubPollResult {
-    let mut pr_infos = HashMap::new();
-    let mut ci = HashMap::new();
-    let mut rate_limited = false;
-    let mut reached_github = false;
+    result_tx: mpsc::UnboundedSender<GithubPassMessage>,
+) {
+    let pass_ids: HashSet<String> = polls.iter().map(|poll| poll.id.clone()).collect();
 
     let permits = Arc::new(Semaphore::new(GH_FANOUT_CONCURRENCY));
     let mut tasks = tokio::task::JoinSet::new();
@@ -422,6 +446,11 @@ async fn poll_github(
             }
         };
 
+        let mut pr_infos = HashMap::new();
+        let mut ci = HashMap::new();
+        let mut rate_limited = false;
+        let mut reached_github = false;
+
         match outcome.pr {
             Some(PrFetch::Fetched(info)) => {
                 reached_github = true;
@@ -434,20 +463,32 @@ async fn poll_github(
             Some(CiFetch::RateLimited) => rate_limited = true,
             Some(fetch) => {
                 reached_github |= matches!(fetch, CiFetch::Fetched { .. });
-                ci.insert(id, fetch);
+                ci.insert(id.clone(), fetch);
             }
             None => {}
         }
+
+        // The staleness guard on the receiving side looks both up by id, so a
+        // single-entry map carries everything this project's result needs. The
+        // entries must exist even when empty — a missing branch reads as a
+        // mismatch and the result would be dropped.
+        let result = GithubPollResult {
+            head_generations: HashMap::from([(
+                id.clone(),
+                head_generations.get(&id).copied().unwrap_or_default(),
+            )]),
+            branches: HashMap::from([(id.clone(), branches.get(&id).cloned().flatten())]),
+            pr_infos,
+            ci,
+            rate_limited,
+            reached_github,
+        };
+        if result_tx.send(GithubPassMessage::Project(result)).is_err() {
+            return;
+        }
     }
 
-    GithubPollResult {
-        head_generations,
-        branches,
-        pr_infos,
-        ci,
-        rate_limited,
-        reached_github,
-    }
+    let _ = result_tx.send(GithubPassMessage::Finished(pass_ids));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,12 +512,17 @@ fn apply_github_result(
         reached_github,
     } = result;
 
+    // Guarded because results now arrive per project: without it, five refused
+    // projects in one pass would double the backoff five times over instead of
+    // once. One step per cycle keeps the doubling tied to elapsed time.
     if rate_limited {
-        schedule.note_rate_limited(cycle);
-        log::warn!(
-            "GitHub API rate limit hit; PR/CI polling paused for {} cycles",
-            schedule.rate_limit_backoff_cycles()
-        );
+        if !schedule.is_rate_limited(cycle) {
+            schedule.note_rate_limited(cycle);
+            log::warn!(
+                "GitHub API rate limit hit; PR/CI polling paused for {} cycles",
+                schedule.rate_limit_backoff_cycles()
+            );
+        }
     } else if reached_github {
         schedule.note_request_succeeded();
     }
@@ -561,9 +607,12 @@ pub async fn run_git_poll(
     // gate. Replaces the old global "is anything pending?" flag, which put every
     // project on the fast cadence as soon as one repo had CI running.
     let mut schedule = GithubPollSchedule::default();
-    // A `gh` pass is running. Passes used to be spawned unconditionally, so a
-    // fan-out slower than its own cadence stacked copies of itself.
-    let mut github_in_flight = false;
+    // Projects a running `gh` pass currently holds. Passes used to be spawned
+    // unconditionally, so a fan-out slower than its own cadence stacked copies
+    // of itself; tracking the ids (rather than a bare flag) keeps that
+    // protection while letting an explicitly forced project start its own pass
+    // instead of waiting out the one in progress.
+    let mut github_in_flight: HashSet<String> = HashSet::new();
     let mut cycle: u64 = 0;
     let mut trigger_acc = TriggerAccumulator::default();
     let mut known_streaming_ids: HashSet<String> = HashSet::new();
@@ -710,7 +759,11 @@ pub async fn run_git_poll(
         // ── 4. Start `gh` PR/CI fan-out without blocking local git refreshes ─
         // Only visible projects (plus anything explicitly asked for) and only
         // while no pass is already running and GitHub isn't refusing us.
-        if !github_in_flight && !schedule.is_rate_limited(cycle) {
+        if !schedule.is_rate_limited(cycle) {
+            // While a pass runs, only forced projects earn a second one — a
+            // branch switch shouldn't have to wait out the pass in progress
+            // and then the next cadence tick on top of it.
+            let urgent_only = !github_in_flight.is_empty();
             let polls = select_github_polls(
                 &projects,
                 &visible_ids,
@@ -718,6 +771,8 @@ pub async fn run_git_poll(
                 &pr_infos,
                 cycle,
                 cadence_due,
+                &github_in_flight,
+                urgent_only,
             );
 
             log::trace!(
@@ -758,11 +813,13 @@ pub async fn run_git_poll(
                     })
                     .collect();
                 let result_tx = github_result_tx.clone();
-                github_in_flight = true;
-                tokio::spawn(async move {
-                    let result = poll_github(polls, poll_generations, poll_branches).await;
-                    let _ = result_tx.send(result);
-                });
+                github_in_flight.extend(polls.iter().map(|poll| poll.id.clone()));
+                tokio::spawn(poll_github(
+                    polls,
+                    poll_generations,
+                    poll_branches,
+                    result_tx,
+                ));
             }
         }
 
@@ -787,19 +844,33 @@ pub async fn run_git_poll(
                         None => trigger_rx_closed = true,
                     }
                 }
-                Some(result) = github_result_rx.recv() => {
-                    github_in_flight = false;
-                    apply_github_result(
-                        result,
-                        cycle,
-                        &head_generations,
-                        &mut schedule,
-                        &mut pr_infos,
-                        &mut ci_checks,
-                        &mut last,
-                        &git_status_tx,
-                        &state_version,
-                    );
+                Some(message) = github_result_rx.recv() => {
+                    match message {
+                        // Applied and published the moment it lands, so a badge
+                        // never waits on the rest of its pass.
+                        GithubPassMessage::Project(result) => apply_github_result(
+                            result,
+                            cycle,
+                            &head_generations,
+                            &mut schedule,
+                            &mut pr_infos,
+                            &mut ci_checks,
+                            &mut last,
+                            &git_status_tx,
+                            &state_version,
+                        ),
+                        GithubPassMessage::Finished(ids) => {
+                            for id in &ids {
+                                github_in_flight.remove(id);
+                            }
+                            // A force this pass was covering (a branch switch
+                            // detected mid-pass) is now dispatchable — go round
+                            // instead of idling until the next cadence tick.
+                            if schedule.has_urgent() {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1312,7 +1383,16 @@ mod tests {
         let visible = HashSet::from(["visible".to_string()]);
         let schedule = GithubPollSchedule::default();
 
-        let polls = select_github_polls(&projects(), &visible, &schedule, &HashMap::new(), 1, true);
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            1,
+            true,
+            &HashSet::new(),
+            false,
+        );
 
         assert_eq!(polls.len(), 1);
         assert_eq!(polls[0].id, "visible");
@@ -1325,8 +1405,60 @@ mod tests {
         schedule.force("hidden");
 
         // Off-cadence too: an explicit action shouldn't wait for the next tick.
-        let polls =
-            select_github_polls(&projects(), &visible, &schedule, &HashMap::new(), 4, false);
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            4,
+            false,
+            &HashSet::new(),
+            false,
+        );
+
+        assert_eq!(polls.len(), 1);
+        assert_eq!(polls[0].id, "hidden");
+    }
+
+    #[test]
+    fn a_project_a_running_pass_holds_is_not_polled_twice() {
+        let visible = HashSet::from(["visible".to_string()]);
+        let schedule = GithubPollSchedule::default();
+        let in_flight = HashSet::from(["visible".to_string()]);
+
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            1,
+            true,
+            &in_flight,
+            false,
+        );
+
+        assert!(polls.is_empty());
+    }
+
+    #[test]
+    fn a_forced_project_starts_its_own_pass_while_another_runs() {
+        // "visible" is mid-pass, so this cycle is urgent-only: the ordinary due
+        // project waits, the branch-switched one goes out now.
+        let visible = HashSet::from(["visible".to_string(), "hidden".to_string()]);
+        let mut schedule = GithubPollSchedule::default();
+        schedule.force("hidden");
+        let in_flight = HashSet::from(["visible".to_string()]);
+
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            1,
+            true,
+            &in_flight,
+            true,
+        );
 
         assert_eq!(polls.len(), 1);
         assert_eq!(polls[0].id, "hidden");
@@ -1341,13 +1473,30 @@ mod tests {
 
         // Nothing due yet on the settled cadence…
         assert!(
-            select_github_polls(&projects(), &visible, &schedule, &HashMap::new(), 5, true)
-                .is_empty()
+            select_github_polls(
+                &projects(),
+                &visible,
+                &schedule,
+                &HashMap::new(),
+                5,
+                true,
+                &HashSet::new(),
+                false,
+            )
+            .is_empty()
         );
 
         // …and when it is, the cached commit rides along.
-        let polls =
-            select_github_polls(&projects(), &visible, &schedule, &HashMap::new(), 13, true);
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            13,
+            true,
+            &HashSet::new(),
+            false,
+        );
         assert_eq!(polls.len(), 1);
         assert_eq!(polls[0].ci_skip_sha.as_deref(), Some("abc"));
     }
@@ -1361,7 +1510,16 @@ mod tests {
         schedule.record_ci("visible", 1, true, None); // CI running
         schedule.record_ci("hidden", 1, false, Some("abc".to_string())); // settled
 
-        let polls = select_github_polls(&projects(), &visible, &schedule, &HashMap::new(), 4, true);
+        let polls = select_github_polls(
+            &projects(),
+            &visible,
+            &schedule,
+            &HashMap::new(),
+            4,
+            true,
+            &HashSet::new(),
+            false,
+        );
 
         assert_eq!(polls.len(), 1, "only the repo with running CI is due");
         assert_eq!(polls[0].id, "visible");
