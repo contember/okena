@@ -313,28 +313,6 @@ impl Render for TerminalMenu {
                                     )
                                 }),
                         )
-                        // With the chip hidden there is no other way to reach the
-                        // shell picker, so the command falls back to a plain row
-                        // under the header it belongs to.
-                        .when(!self.show_shell_selector, |menu| {
-                            menu.child(
-                                menu_item(
-                                    "terminal-menu-change-shell",
-                                    "icons/terminal.svg",
-                                    "Change Shell…",
-                                    &t,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::ChangeShell {
-                                            project_id: this.project_id.clone(),
-                                            terminal_id: this.terminal_id.clone(),
-                                            current_shell: this.current_shell.clone(),
-                                        });
-                                    },
-                                )),
-                            )
-                        })
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {
                             menu.when_some(link_url, |menu, url| {
@@ -539,6 +517,27 @@ impl Render for TerminalMenu {
                             )
                         })
                         .child(menu_separator(&t))
+                        // Keep the shell picker reachable when its header chip is hidden,
+                        // but group the fallback command with the bottom utility actions.
+                        .when(!self.show_shell_selector, |menu| {
+                            menu.child(
+                                menu_item(
+                                    "terminal-menu-change-shell",
+                                    "icons/terminal.svg",
+                                    "Change Shell…",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::ChangeShell {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                            current_shell: this.current_shell.clone(),
+                                        });
+                                    },
+                                )),
+                            )
+                        })
                         .child(buffer_group)
                         .when(include_primary_actions, |menu| {
                             menu.child(menu_separator(&t)).child(
