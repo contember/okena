@@ -26,7 +26,7 @@ impl FileViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.blame_visible {
+        if !self.blame_visible || self.active_tab().revision.is_some() {
             return None;
         }
         let tab = self.active_tab();

@@ -162,6 +162,18 @@ impl DiffViewer {
         cx.emit(DiffViewerEvent::Close);
     }
 
+    pub(super) fn back(&self, cx: &mut Context<Self>) {
+        cx.emit(DiffViewerEvent::Back);
+    }
+
+    pub(super) fn back_or_close(&self, cx: &mut Context<Self>) {
+        if self.can_go_back {
+            self.back(cx);
+        } else {
+            self.close(cx);
+        }
+    }
+
     /// Mark the viewer as hosted inside a detached window.
     pub fn set_detached(&mut self, detached: bool, cx: &mut Context<Self>) {
         if self.is_detached != detached {

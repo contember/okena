@@ -250,6 +250,8 @@ impl WindowView {
             return;
         };
         let blame = self.build_blame_provider(project_id, cx);
+        let history = self.build_file_history_provider(project_id, cx);
+        let project_id = project_id.to_string();
         let actual_terminal_id = okena_transport::client::strip_prefix(terminal_id, &connection_id);
         let overlay_manager = self.overlay_manager.clone();
         let line = line.and_then(|value| usize::try_from(value).ok());
@@ -306,9 +308,11 @@ impl WindowView {
                     let relative_path = path.relative_path.unwrap_or_default();
                     overlay_manager.update(cx, |manager, cx| {
                         manager.show_file_viewer_at(
+                            project_id,
                             relative_path,
                             project_fs,
                             blame,
+                            history,
                             line,
                             column,
                             cx,
@@ -376,6 +380,20 @@ impl WindowView {
         let (client, actual_id) = self.remote_params(project_id, conn_id, cx)?;
         Some(std::sync::Arc::new(
             okena_views_git::blame::RemoteBlameProvider::new(client, actual_id),
+        ))
+    }
+
+    pub(super) fn build_file_history_provider(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<std::sync::Arc<dyn okena_files::history::FileHistoryProvider>> {
+        let ws = self.workspace.read(cx);
+        let project = ws.project(project_id)?;
+        let conn_id = project.connection_id.as_ref()?;
+        let (client, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+        Some(std::sync::Arc::new(
+            okena_views_git::history::RemoteFileHistoryProvider::new(client, actual_id),
         ))
     }
 }
@@ -931,6 +949,30 @@ impl WindowView {
                             None,
                             None,
                             None,
+                            None,
+                            cx,
+                        );
+                    });
+                }
+            }
+            OverlayManagerEvent::OpenFileDiff {
+                project_id,
+                hash,
+                relative_path,
+                return_to,
+            } => {
+                if let Some(provider) = self.build_git_provider(project_id, cx) {
+                    let hash = hash.clone();
+                    let relative_path = relative_path.clone();
+                    self.overlay_manager.update(cx, |manager, cx| {
+                        manager.show_diff_viewer(
+                            provider,
+                            Some(relative_path),
+                            Some(okena_core::types::DiffMode::Commit(hash)),
+                            None,
+                            None,
+                            None,
+                            return_to.clone(),
                             cx,
                         );
                     });
@@ -1203,6 +1245,7 @@ impl WindowView {
                                     commit_message,
                                     commits,
                                     commit_index,
+                                    None,
                                     cx,
                                 );
                             });
@@ -1287,33 +1330,51 @@ impl WindowView {
                     ProjectOverlayKind::FileSearch => {
                         if let Some(fs) = self.build_project_fs(&project_id, cx) {
                             let blame = self.build_blame_provider(&project_id, cx);
+                            let history = self.build_file_history_provider(&project_id, cx);
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_file_search(fs, blame, cx);
+                                om.toggle_file_search(project_id.clone(), fs, blame, history, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::ContentSearch => {
                         if let Some(fs) = self.build_project_fs(&project_id, cx) {
                             let blame = self.build_blame_provider(&project_id, cx);
+                            let history = self.build_file_history_provider(&project_id, cx);
                             let is_dark = crate::theme::theme(cx).is_dark();
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_content_search(fs, blame, is_dark, cx);
+                                om.toggle_content_search(
+                                    project_id.clone(),
+                                    fs,
+                                    blame,
+                                    history,
+                                    is_dark,
+                                    cx,
+                                );
                             });
                         }
                     }
                     ProjectOverlayKind::FileBrowser => {
                         if let Some(fs) = self.build_project_fs(&project_id, cx) {
                             let blame = self.build_blame_provider(&project_id, cx);
+                            let history = self.build_file_history_provider(&project_id, cx);
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_browser(fs, blame, cx);
+                                om.show_file_browser(project_id.clone(), fs, blame, history, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::FileViewer { relative_path } => {
                         if let Some(fs) = self.build_project_fs(&project_id, cx) {
                             let blame = self.build_blame_provider(&project_id, cx);
+                            let history = self.build_file_history_provider(&project_id, cx);
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_viewer(relative_path, fs, blame, cx);
+                                om.show_file_viewer(
+                                    project_id.clone(),
+                                    relative_path,
+                                    fs,
+                                    blame,
+                                    history,
+                                    cx,
+                                );
                             });
                         }
                     }

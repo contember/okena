@@ -350,6 +350,11 @@ pub fn execute_action(
             project_id,
             relative_path,
         } => git::blame(ws, project_id, relative_path),
+        ActionRequest::GitFileHistory {
+            project_id,
+            relative_path,
+            count,
+        } => git::file_history(ws, project_id, relative_path, count),
 
         // ── Filesystem ops ───────────────────────────────────────────
         ActionRequest::ListFiles {

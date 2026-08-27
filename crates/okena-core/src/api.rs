@@ -831,6 +831,11 @@ pub enum ActionRequest {
         project_id: String,
         relative_path: String,
     },
+    GitFileHistory {
+        project_id: String,
+        relative_path: String,
+        count: usize,
+    },
     AddProject {
         name: String,
         path: String,
@@ -1687,6 +1692,11 @@ mod tests {
             ActionRequest::GitBlame {
                 project_id: "p1".into(),
                 relative_path: "src/main.rs".into(),
+            },
+            ActionRequest::GitFileHistory {
+                project_id: "p1".into(),
+                relative_path: "src/main.rs".into(),
+                count: 100,
             },
             ActionRequest::AddProject {
                 name: "My Project".into(),

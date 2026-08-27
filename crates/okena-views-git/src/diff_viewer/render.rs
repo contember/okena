@@ -57,6 +57,34 @@ impl DiffViewer {
             .items_center()
             .overflow_hidden()
             .gap(px(12.0))
+            .when(self.can_go_back, |d| {
+                d.child(
+                    h_flex()
+                        .id("back-to-file-history")
+                        .flex_shrink_0()
+                        .gap(px(6.0))
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Back to file history")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _window, cx| this.back(cx)))
+                        .child(
+                            svg()
+                                .path("icons/chevron-left.svg")
+                                .size(px(13.0))
+                                .text_color(rgb(t.text_muted)),
+                        )
+                        .child("Back to history"),
+                )
+                .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)))
+            })
             .child(
                 div()
                     .flex_1()
@@ -1080,7 +1108,7 @@ impl Render for DiffViewer {
                     this.selection_side = None;
                     cx.notify();
                 } else {
-                    this.close(cx);
+                    this.back_or_close(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

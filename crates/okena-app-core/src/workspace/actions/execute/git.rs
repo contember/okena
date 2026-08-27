@@ -321,3 +321,19 @@ pub(super) fn blame(ws: &Workspace, project_id: String, relative_path: String) -
         None => ActionResult::Err(format!("project not found: {}", project_id)),
     }
 }
+
+pub(super) fn file_history(
+    ws: &Workspace,
+    project_id: String,
+    relative_path: String,
+    count: usize,
+) -> ActionResult {
+    with_project_path(ws, project_id, |path| {
+        match okena_git::get_file_history(path, &relative_path, count) {
+            Ok(entries) => ActionResult::Ok(Some(
+                serde_json::to_value(entries).expect("BUG: FileHistoryEntry must serialize"),
+            )),
+            Err(error) => ActionResult::Err(error.to_string()),
+        }
+    })
+}

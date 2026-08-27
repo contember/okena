@@ -372,6 +372,26 @@ fn has_merge_base(repo_path: &str, base: &str, head: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+fn commit_diff_range(repo_path: &Path, revision: &str) -> crate::GitResult<String> {
+    use crate::error::GitError;
+
+    let repo = crate::gix_helpers::open(repo_path)
+        .ok_or_else(|| GitError::ParseError("not a git repository".to_string()))?;
+    let commit_id = repo
+        .rev_parse_single(revision)
+        .map_err(|error| GitError::ParseError(error.to_string()))?
+        .detach();
+    let commit = repo
+        .find_commit(commit_id)
+        .map_err(|error| GitError::ParseError(error.to_string()))?;
+    let base_id = commit
+        .parent_ids()
+        .next()
+        .map(|parent| parent.detach())
+        .unwrap_or_else(|| gix::ObjectId::empty_tree(commit_id.kind()));
+    Ok(format!("{base_id}..{commit_id}"))
+}
+
 /// Get diff for a repository path.
 #[allow(dead_code)]
 pub fn get_diff(path: &Path, mode: DiffMode) -> crate::GitResult<DiffResult> {
@@ -409,7 +429,7 @@ pub fn get_diff_with_options(
         ],
         DiffMode::Commit(ref hash) => {
             crate::validate_git_ref(hash)?;
-            range_str = format!("{}^..{}", hash, hash);
+            range_str = commit_diff_range(path, hash)?;
             vec![
                 "-C",
                 path_str,
@@ -731,6 +751,19 @@ mod tests {
 
         // Missing path resolves to nothing rather than erroring.
         assert!(get_file_from_git(&repo, "HEAD", "nope.txt").is_none());
+    }
+
+    #[test]
+    fn commit_diff_supports_the_root_commit() {
+        use crate::repository::test_support::init_temp_repo;
+
+        let (_tmp, repo) = init_temp_repo();
+        let diff = get_diff_with_options(&repo, DiffMode::Commit("HEAD".to_string()), false)
+            .expect("root commit diff");
+
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].new_path.as_deref(), Some("file.txt"));
+        assert_eq!(diff.files[0].lines_added, 1);
     }
 
     #[test]

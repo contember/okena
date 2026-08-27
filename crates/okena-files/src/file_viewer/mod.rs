@@ -6,6 +6,7 @@
 mod blame_load;
 mod blame_render;
 mod context_menu;
+mod history;
 mod loading;
 mod render;
 mod search;
@@ -15,6 +16,7 @@ mod tree;
 use crate::blame::{BlameError, BlameLine, BlameProvider};
 use crate::code_view::ScrollbarDrag;
 use crate::file_tree::FileTreeRow;
+use crate::history::{FileHistoryEntry, FileHistoryProvider};
 use crate::list_directory::DirEntry;
 use crate::selection::SelectionState;
 use crate::syntax::{HighlightedLine, load_syntax_set};
@@ -210,6 +212,12 @@ pub(super) struct FileViewerTab {
     /// Per-line git blame for this file. Lazy-loaded when the user toggles
     /// the blame gutter on.
     pub blame: BlameLoadState,
+    /// Commit history for this file. Loaded only when the history rail opens.
+    pub history: FileHistoryLoadState,
+    /// Historical revision currently shown in place of the working tree.
+    pub revision: Option<FileHistoryEntry>,
+    /// Monotonic token for history-list requests targeting this tab.
+    pub history_generation: u64,
     /// Monotonic counter bumped each time `spawn_tab_load` schedules a fresh
     /// async load for this tab. The bg task captures the generation it was
     /// scheduled at and `apply_loaded_content` is skipped if a newer load
@@ -305,6 +313,15 @@ pub enum BlameLoadState {
     Error(BlameError),
 }
 
+#[derive(Clone, Debug, Default)]
+pub enum FileHistoryLoadState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Loaded(std::sync::Arc<Vec<FileHistoryEntry>>),
+    Error(String),
+}
+
 /// Map an extension to a `gpui::ImageFormat` for files we can preview as
 /// images. Returns `None` for non-image extensions.
 pub(super) fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
@@ -395,6 +412,9 @@ impl FileViewerTab {
             modified_at: None,
             loading: false,
             blame: BlameLoadState::NotLoaded,
+            history: FileHistoryLoadState::NotLoaded,
+            revision: None,
+            history_generation: 0,
             load_generation: 0,
             is_image: false,
             is_svg: false,
@@ -440,6 +460,9 @@ impl FileViewerTab {
             modified_at: None,
             loading: true,
             blame: BlameLoadState::NotLoaded,
+            history: FileHistoryLoadState::NotLoaded,
+            revision: None,
+            history_generation: 0,
             load_generation: 0,
             is_image,
             is_svg,
@@ -603,6 +626,10 @@ pub struct FileViewer {
     pub(super) blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
     /// Whether the blame gutter column is visible. Persisted in settings.
     pub(super) blame_visible: bool,
+    /// Optional provider for per-file commit history and historical contents.
+    pub(super) history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
+    /// Whether the active file's revision rail is visible.
+    pub(super) history_visible: bool,
     /// Right-click context menu over a non-empty text selection.
     pub(super) selection_context_menu: Option<Point<Pixels>>,
     /// Monotonic counter used to stamp each `spawn_tab_load` invocation.
@@ -610,6 +637,7 @@ pub struct FileViewer {
     /// applies its result if the tab's recorded generation still matches,
     /// so a slow earlier load can't overwrite a faster later one.
     next_load_generation: u64,
+    next_history_generation: u64,
     /// Canonical daemon scope and its breadcrumb ancestry.
     pub(super) scope: Option<okena_core::api::ResolvedPath>,
     pub(super) scope_navigation_in_flight: bool,
@@ -636,6 +664,7 @@ impl FileViewer {
         &mut self,
         project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
         blame_visible: bool,
         relative_path: Option<String>,
         line: Option<usize>,
@@ -683,7 +712,9 @@ impl FileViewer {
         self.freshness_check_in_flight = false;
         self.sidebar_visible = true;
         self.blame_provider = blame_provider;
+        self.history_provider = history_provider;
         self.blame_visible = blame_visible;
+        self.history_visible = false;
         self.fetch_scope_info(cx);
         self.fetch_initial_dirs(cx);
         if let Some(relative_path) = relative_path {
@@ -701,6 +732,7 @@ impl FileViewer {
         relative_path: String,
         project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
         blame_visible: bool,
         font_size: f32,
         is_dark: bool,
@@ -710,6 +742,7 @@ impl FileViewer {
             relative_path,
             project_fs,
             blame_provider,
+            history_provider,
             blame_visible,
             font_size,
             is_dark,
@@ -725,6 +758,7 @@ impl FileViewer {
         relative_path: String,
         project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
         blame_visible: bool,
         font_size: f32,
         is_dark: bool,
@@ -777,8 +811,11 @@ impl FileViewer {
             is_detached: false,
             blame_provider,
             blame_visible,
+            history_provider,
+            history_visible: false,
             selection_context_menu: None,
             next_load_generation: 0,
+            next_history_generation: 0,
             scope: None,
             scope_navigation_in_flight: false,
             scope_generation: 0,
@@ -803,6 +840,7 @@ impl FileViewer {
     pub fn new_browse(
         project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
         blame_visible: bool,
         font_size: f32,
         is_dark: bool,
@@ -843,8 +881,11 @@ impl FileViewer {
             is_detached: false,
             blame_provider,
             blame_visible,
+            history_provider,
+            history_visible: false,
             selection_context_menu: None,
             next_load_generation: 0,
+            next_history_generation: 0,
             scope: None,
             scope_navigation_in_flight: false,
             scope_generation: 0,
@@ -1247,7 +1288,7 @@ impl FileViewer {
         self.last_change_check = std::time::Instant::now();
 
         let tab = &self.tabs[self.active_tab];
-        if tab.is_empty() {
+        if tab.is_empty() || tab.revision.is_some() {
             return;
         }
 
@@ -1269,7 +1310,14 @@ impl FileViewer {
                 }
                 this.freshness_check_in_flight = false;
                 match result {
-                    Ok(metadata) if metadata.modified_at_millis != old_mtime => {
+                    Ok(metadata)
+                        if metadata.modified_at_millis != old_mtime
+                            && this
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.relative_path == relative_path)
+                                .is_some_and(|tab| tab.revision.is_none()) =>
+                    {
                         this.spawn_tab_load(relative_path, cx);
                     }
                     Ok(_) => {}
@@ -1503,6 +1551,9 @@ impl FileViewer {
                 self.active_tab = idx;
             }
             self.expand_ancestors_and_fetch(&relative_path, cx);
+            if self.history_visible {
+                self.spawn_history_load_for_active(cx);
+            }
             cx.notify();
             return;
         }
@@ -1520,6 +1571,9 @@ impl FileViewer {
                 release_image_assets(decoded, cx);
             }
             self.spawn_tab_load(relative_path, cx);
+            if self.history_visible {
+                self.spawn_history_load_for_active(cx);
+            }
             cx.notify();
             return;
         }
@@ -1542,6 +1596,9 @@ impl FileViewer {
         }
 
         self.spawn_tab_load(relative_path, cx);
+        if self.history_visible {
+            self.spawn_history_load_for_active(cx);
+        }
         cx.notify();
     }
 
@@ -1625,6 +1682,10 @@ impl FileViewer {
         }
         // If closed tab was after active tab, active_tab stays the same
 
+        if self.history_visible {
+            self.spawn_history_load_for_active(cx);
+        }
+
         cx.notify();
     }
 
@@ -1681,6 +1742,9 @@ impl FileViewer {
             if self.blame_visible {
                 self.spawn_blame_load_for_active(cx);
             }
+            if self.history_visible {
+                self.spawn_history_load_for_active(cx);
+            }
             // Update expanded folders to reveal active tab's file
             let tab_rel = self.tabs[self.active_tab].relative_path.clone();
             self.expand_ancestors_and_fetch(&tab_rel, cx);
@@ -1717,6 +1781,9 @@ impl FileViewer {
             .position(|t| t.relative_path == relative_path)
         {
             self.active_tab = idx;
+            if self.history_visible {
+                self.spawn_history_load_for_active(cx);
+            }
             cx.notify();
             return;
         }
@@ -1731,6 +1798,9 @@ impl FileViewer {
             release_image_assets(decoded, cx);
         }
         self.spawn_tab_load(relative_path, cx);
+        if self.history_visible {
+            self.spawn_history_load_for_active(cx);
+        }
         cx.notify();
     }
 
@@ -1747,6 +1817,9 @@ impl FileViewer {
             .find(|t| t.relative_path == relative_path)
         {
             tab.load_generation = generation;
+            tab.revision = None;
+            tab.loading = true;
+            tab.error_message = None;
         }
         let fs = self.project_fs.clone();
         let rel = relative_path.clone();
@@ -1857,6 +1930,9 @@ impl FileViewer {
                 if this.blame_visible {
                     this.spawn_blame_load_for_active(cx);
                 }
+                if this.history_visible {
+                    this.spawn_history_load_for_active(cx);
+                }
             });
         })
         .detach();
@@ -1888,6 +1964,8 @@ pub enum FileViewerEvent {
     Detach,
     /// User clicked a blame entry — open the named commit in the diff viewer.
     OpenCommit(String),
+    /// Open the selected file's diff in the named commit.
+    OpenFileDiff { hash: String, relative_path: String },
     /// User toggled the blame gutter — host persists the preference.
     BlamePreferenceChanged(bool),
     /// User clicked "Send to terminal" on a selection. Carries the structured

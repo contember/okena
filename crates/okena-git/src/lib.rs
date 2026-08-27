@@ -5,6 +5,7 @@ pub mod branch_names;
 pub mod commit_graph;
 pub mod diff;
 pub mod error;
+pub mod file_history;
 pub(crate) mod gix_helpers;
 pub mod repository;
 
@@ -15,6 +16,7 @@ pub use diff::{
     get_file_contents_for_diff, is_git_repo,
 };
 pub use error::{GitError, GitResult};
+pub use file_history::{FileHistoryEntry, get_file_history};
 pub use repository::{
     BranchDetail, BranchList, CloneProgress, HeadSnapshot, OrphanedWorktree, UpstreamState,
     VerifiedWorktree, checkout_local_branch, checkout_remote_branch, clone_dir_name,

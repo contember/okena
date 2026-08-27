@@ -130,6 +130,8 @@ pub struct DiffViewer {
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,
+    /// Whether this diff is a drill-down that can return to its source view.
+    pub(super) can_go_back: bool,
     /// Open commit-hash right-click context menu.
     pub(super) commit_hash_menu: Option<context_menu::CommitHashContextMenu>,
     /// Right-click context menu over a non-empty text selection.
@@ -149,6 +151,7 @@ impl DiffViewer {
         commit_message: Option<String>,
         commits: Option<Vec<CommitLogEntry>>,
         commit_index: Option<usize>,
+        can_go_back: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -211,6 +214,7 @@ impl DiffViewer {
             delete_confirm: None,
             discard_confirm: None,
             is_detached: false,
+            can_go_back,
             commit_hash_menu: None,
             selection_context_menu: None,
             search: None,
@@ -254,6 +258,8 @@ impl DiffViewer {
 #[derive(Clone, Debug)]
 pub enum DiffViewerEvent {
     Close,
+    /// Return to the view that opened this diff.
+    Back,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
     /// User clicked "Send to terminal" on a selection. Carries the structured
@@ -265,6 +271,19 @@ impl EventEmitter<DiffViewerEvent> for DiffViewer {}
 
 impl okena_ui::overlay::CloseEvent for DiffViewerEvent {
     fn is_close(&self) -> bool {
-        matches!(self, Self::Close)
+        matches!(self, Self::Close | Self::Back)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use okena_ui::overlay::CloseEvent;
+
+    use super::DiffViewerEvent;
+
+    #[test]
+    fn back_closes_a_detached_diff_host() {
+        assert!(DiffViewerEvent::Back.is_close());
+        assert!(!DiffViewerEvent::Detach.is_close());
     }
 }

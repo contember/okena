@@ -1502,6 +1502,7 @@ impl Render for FileViewer {
         let is_image = tab.is_image;
         let is_svg = tab.is_svg;
         let is_font = tab.is_font;
+        let has_revision = tab.revision.is_some();
         let font_data = tab.font_data.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
@@ -1519,6 +1520,9 @@ impl Render for FileViewer {
         // Whether the header should expose the Preview/Source toggle.
         let supports_view_toggle = is_markdown || is_svg;
         let sidebar_visible = self.sidebar_visible;
+        let history_available =
+            self.history_provider.is_some() && has_file && !is_image && !is_font;
+        let history_visible = self.history_visible && history_available;
         let show_tabs = self.tabs.len() > 1;
 
         let filename = if has_file {
@@ -1866,7 +1870,7 @@ impl Render for FileViewer {
                                         .child(status),
                                 )
                             })
-                            .when(has_file, |d| d.child(
+                            .when(has_file && !has_revision, |d| d.child(
                                 div()
                                     .id("file-source-action")
                                     .cursor_pointer()
@@ -1888,7 +1892,7 @@ impl Render for FileViewer {
                                             .child(source_action_label),
                                     ),
                             ))
-                            .when(self.blame_provider.is_some() && !is_image && !is_font, |d| {
+                            .when(self.blame_provider.is_some() && !is_image && !is_font && !has_revision, |d| {
                                 let on = self.blame_visible;
                                 d.child(
                                     div()
@@ -1916,6 +1920,55 @@ impl Render for FileViewer {
                                                     t.text_muted
                                                 }))
                                                 .child("Blame"),
+                                        ),
+                                )
+                            })
+                            .when(history_available, |d| {
+                                d.child(
+                                    div()
+                                        .id("history-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgb(if history_visible {
+                                            t.bg_selection
+                                        } else {
+                                            t.bg_secondary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle file history",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_history(cx);
+                                        }))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(5.0))
+                                                .child(
+                                                    svg()
+                                                        .path("icons/git-commit.svg")
+                                                        .size(px(11.0))
+                                                        .text_color(rgb(if history_visible {
+                                                            t.text_primary
+                                                        } else {
+                                                            t.text_muted
+                                                        })),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(ui_text_sm(cx))
+                                                        .text_color(rgb(if history_visible {
+                                                            t.text_primary
+                                                        } else {
+                                                            t.text_muted
+                                                        }))
+                                                        .child("History"),
+                                                ),
                                         ),
                                 )
                             })
@@ -2010,6 +2063,9 @@ impl Render for FileViewer {
                             .min_w_0()
                             // Tab bar (above editor, not above sidebar)
                             .when_some(tab_bar, |d, tab_bar| d.child(tab_bar))
+                            .when(history_visible, |d| {
+                                d.child(self.render_revision_bar(&t, cx))
+                            })
                             // In-file search bar
                             .when(self.search_state.is_some(), |d| {
                                 d.child(self.render_search_bar(&t, cx))
@@ -2406,7 +2462,10 @@ impl Render for FileViewer {
                                             }),
                                     ),
                             ),
-                    ),
+                    )
+                    .when(history_visible, |d| {
+                        d.child(self.render_history_panel(&t, cx))
+                    }),
             )
             // Filter popover backdrop + overlay (at fullscreen overlay level)
             .when(self.filter_popover_open, |d| {
