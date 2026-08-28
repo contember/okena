@@ -69,6 +69,8 @@ pub struct DiffViewer {
     pub(super) provider: Arc<dyn provider::GitProvider>,
     /// Whether diff data is currently being loaded.
     pub(super) loading: bool,
+    /// Prevents stale async diff and file results from updating the viewer.
+    pub(super) request_generation: u64,
     /// Raw diff data for all files (not syntax highlighted).
     pub(super) raw_files: Vec<FileDiff>,
     /// Lightweight file stats for sidebar display.
@@ -179,6 +181,7 @@ impl DiffViewer {
             ignore_whitespace,
             provider: provider.clone(),
             loading: false,
+            request_generation: 0,
             raw_files: Vec::new(),
             file_stats: Vec::new(),
             current_file: None,

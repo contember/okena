@@ -18,6 +18,8 @@ impl DiffViewer {
         select_file: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.request_generation = self.request_generation.wrapping_add(1);
+        let request_generation = self.request_generation;
         if matches!(mode, DiffMode::WorkingTree | DiffMode::Staged) {
             self.uncommitted_mode = mode.clone();
             self.commit_message = None;
@@ -47,6 +49,9 @@ impl DiffViewer {
             let result = smol::unblock(move || provider.get_diff(mode, ignore_whitespace)).await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.request_generation != request_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(diff_result) => {
@@ -97,6 +102,8 @@ impl DiffViewer {
 
     /// Process the currently selected file with syntax highlighting (async).
     pub(super) fn process_current_file_async(&mut self, cx: &mut Context<Self>) {
+        self.request_generation = self.request_generation.wrapping_add(1);
+        let request_generation = self.request_generation;
         let Some(raw_file) = self.raw_files.get(self.selected_file_index).cloned() else {
             self.current_file = None;
             self.current_file_old_content = None;
@@ -128,6 +135,9 @@ impl DiffViewer {
             .await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.request_generation != request_generation {
+                    return;
+                }
                 match result {
                     Ok((old_content, new_content, display_file, max_line_num)) => {
                         this.current_file_old_content = old_content;
