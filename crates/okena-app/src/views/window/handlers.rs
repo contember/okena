@@ -1,5 +1,7 @@
 use crate::action_dispatch::ActionDispatcher;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
+use crate::views::overlays::diff_viewer::CommitNavigation;
+use crate::views::overlays::file_viewer::{FilePosition, FileViewerScope};
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
     SidebarRequest,
@@ -242,15 +244,13 @@ impl WindowView {
             );
             return;
         };
-        let Some(project_fs) = self.build_project_fs(project_id, cx) else {
+        let Some(viewer_scope) = self.build_file_viewer_scope(project_id, cx) else {
             okena_workspace::toast::ToastManager::error(
                 "Cannot create the project file provider",
                 cx,
             );
             return;
         };
-        let blame = self.build_blame_provider(project_id, cx);
-        let history = self.build_file_history_provider(project_id, cx);
         let project_id = project_id.to_string();
         let actual_terminal_id = okena_transport::client::strip_prefix(terminal_id, &connection_id);
         let overlay_manager = self.overlay_manager.clone();
@@ -310,11 +310,8 @@ impl WindowView {
                         manager.show_file_viewer_at(
                             project_id,
                             relative_path,
-                            project_fs,
-                            blame,
-                            history,
-                            line,
-                            column,
+                            viewer_scope,
+                            FilePosition { line, column },
                             cx,
                         );
                     });
@@ -326,7 +323,12 @@ impl WindowView {
                         client, scope,
                     ));
                     overlay_manager.update(cx, |manager, cx| {
-                        manager.show_path_browser(relative_path, fs, line, column, cx);
+                        manager.show_path_browser(
+                            relative_path,
+                            fs,
+                            FilePosition { line, column },
+                            cx,
+                        );
                     });
                 }
                 Err(error) => {
@@ -381,6 +383,21 @@ impl WindowView {
         Some(std::sync::Arc::new(
             okena_views_git::blame::RemoteBlameProvider::new(client, actual_id),
         ))
+    }
+
+    /// Build the file-viewer scope for a project: its filesystem plus the git
+    /// providers behind blame and history. `None` when the project has no
+    /// usable filesystem provider.
+    pub(super) fn build_file_viewer_scope(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<FileViewerScope> {
+        Some(FileViewerScope {
+            project_fs: self.build_project_fs(project_id, cx)?,
+            blame_provider: self.build_blame_provider(project_id, cx),
+            history_provider: self.build_file_history_provider(project_id, cx),
+        })
     }
 
     pub(super) fn build_file_history_provider(
@@ -946,9 +963,7 @@ impl WindowView {
                             provider,
                             None,
                             Some(okena_core::types::DiffMode::Commit(hash)),
-                            None,
-                            None,
-                            None,
+                            CommitNavigation::default(),
                             None,
                             cx,
                         );
@@ -969,9 +984,7 @@ impl WindowView {
                             provider,
                             Some(relative_path),
                             Some(okena_core::types::DiffMode::Commit(hash)),
-                            None,
-                            None,
-                            None,
+                            CommitNavigation::default(),
                             return_to.clone(),
                             cx,
                         );
@@ -1242,9 +1255,11 @@ impl WindowView {
                                     provider,
                                     file,
                                     mode,
-                                    commit_message,
-                                    commits,
-                                    commit_index,
+                                    CommitNavigation {
+                                        message: commit_message,
+                                        commits: commits.unwrap_or_default(),
+                                        index: commit_index.unwrap_or(0),
+                                    },
                                     None,
                                     cx,
                                 );
@@ -1328,53 +1343,31 @@ impl WindowView {
                         }
                     }
                     ProjectOverlayKind::FileSearch => {
-                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                            let blame = self.build_blame_provider(&project_id, cx);
-                            let history = self.build_file_history_provider(&project_id, cx);
+                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_file_search(project_id.clone(), fs, blame, history, cx);
+                                om.toggle_file_search(project_id.clone(), scope, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::ContentSearch => {
-                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                            let blame = self.build_blame_provider(&project_id, cx);
-                            let history = self.build_file_history_provider(&project_id, cx);
+                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
                             let is_dark = crate::theme::theme(cx).is_dark();
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_content_search(
-                                    project_id.clone(),
-                                    fs,
-                                    blame,
-                                    history,
-                                    is_dark,
-                                    cx,
-                                );
+                                om.toggle_content_search(project_id.clone(), scope, is_dark, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::FileBrowser => {
-                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                            let blame = self.build_blame_provider(&project_id, cx);
-                            let history = self.build_file_history_provider(&project_id, cx);
+                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_browser(project_id.clone(), fs, blame, history, cx);
+                                om.show_file_browser(project_id.clone(), scope, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::FileViewer { relative_path } => {
-                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                            let blame = self.build_blame_provider(&project_id, cx);
-                            let history = self.build_file_history_provider(&project_id, cx);
+                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_viewer(
-                                    project_id.clone(),
-                                    relative_path,
-                                    fs,
-                                    blame,
-                                    history,
-                                    cx,
-                                );
+                                om.show_file_viewer(project_id.clone(), relative_path, scope, cx);
                             });
                         }
                     }

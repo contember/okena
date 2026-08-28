@@ -144,18 +144,33 @@ pub struct DiffViewer {
     pub(super) search_sig: Option<DiffSearchSig>,
 }
 
+/// Which commit the viewer opens on and the history it can step through.
+#[derive(Default)]
+pub struct CommitNavigation {
+    /// Message of the commit being viewed, shown above the diff.
+    pub message: Option<String>,
+    /// Commit list for prev/next navigation. Empty disables stepping.
+    pub commits: Vec<CommitLogEntry>,
+    /// Index into `commits` of the commit being viewed.
+    pub index: usize,
+}
+
 impl DiffViewer {
-    /// Create a new diff viewer with the given provider, optionally selecting a specific file, mode, commit message, and commit navigation list.
+    /// Create a new diff viewer with the given provider, optionally selecting a
+    /// specific file and diff mode.
     pub fn new(
         provider: Arc<dyn provider::GitProvider>,
         select_file: Option<String>,
         mode: Option<DiffMode>,
-        commit_message: Option<String>,
-        commits: Option<Vec<CommitLogEntry>>,
-        commit_index: Option<usize>,
+        commit_nav: CommitNavigation,
         can_go_back: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let CommitNavigation {
+            message: commit_message,
+            commits,
+            index: commit_index,
+        } = commit_nav;
         let focus_handle = cx.focus_handle();
         let gs = git_settings(cx);
         let font_size = gs.file_font_size;
@@ -165,7 +180,6 @@ impl DiffViewer {
         let initial_mode = mode.unwrap_or(DiffMode::WorkingTree);
         let initial_is_uncommitted =
             matches!(initial_mode, DiffMode::WorkingTree | DiffMode::Staged);
-        let commits = commits.unwrap_or_default();
         let history_includes_uncommitted =
             initial_is_uncommitted || nav::history_starts_at_head(&commits);
         let should_load_commit_history = initial_is_uncommitted && commits.is_empty();
@@ -209,7 +223,7 @@ impl DiffViewer {
             current_file_new_content: None,
             commit_message,
             commits,
-            commit_index: commit_index.unwrap_or(0),
+            commit_index,
             history_includes_uncommitted,
             uncommitted_mode,
             commit_history_loading: false,

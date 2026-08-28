@@ -646,6 +646,41 @@ pub struct FileViewer {
     pub(super) transfer_status: Option<String>,
 }
 
+/// The project a viewer serves: its filesystem plus the optional git providers
+/// behind the blame gutter and the revision rail.
+#[derive(Clone)]
+pub struct FileViewerScope {
+    pub project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+    pub blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
+    pub history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
+}
+
+impl FileViewerScope {
+    /// A scope with no git providers, for plain filesystem browsing.
+    pub fn plain(project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>) -> Self {
+        Self {
+            project_fs,
+            blame_provider: None,
+            history_provider: None,
+        }
+    }
+}
+
+/// Presentation state, read from the user's settings and the active theme.
+#[derive(Clone, Copy)]
+pub struct FileViewerConfig {
+    pub font_size: f32,
+    pub is_dark: bool,
+    pub blame_visible: bool,
+}
+
+/// One-based caret target inside the opened file. Default means "no target".
+#[derive(Clone, Copy, Default)]
+pub struct FilePosition {
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
 impl FileViewer {
     /// Build a stable client-side identity path without touching local disk.
     fn tree_path(
@@ -659,18 +694,19 @@ impl FileViewer {
         self.project_fs.scope_path() == fs.scope_path()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn rebind_scope(
         &mut self,
-        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
-        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
+        scope: FileViewerScope,
         blame_visible: bool,
         relative_path: Option<String>,
-        line: Option<usize>,
-        column: Option<usize>,
+        position: FilePosition,
         cx: &mut Context<Self>,
     ) {
+        let FileViewerScope {
+            project_fs,
+            blame_provider,
+            history_provider,
+        } = scope;
         for tab in &mut self.tabs {
             if let Some(decoded) = tab.image_data.take() {
                 release_image_assets(decoded, cx);
@@ -697,9 +733,9 @@ impl FileViewer {
                     relative_path.clone(),
                     Self::tree_path(&self.project_fs, relative_path),
                 );
-                tab.target_line = line;
-                tab.target_column = column;
-                if line.is_some() {
+                tab.target_line = position.line;
+                tab.target_column = position.column;
+                if position.line.is_some() {
                     tab.display_mode = DisplayMode::Source;
                 }
                 tab
@@ -729,52 +765,41 @@ impl FileViewer {
     /// Create a new file viewer with `relative_path` (project-relative) opened
     /// in the first tab.
     pub fn new(
+        scope: FileViewerScope,
+        config: FileViewerConfig,
         relative_path: String,
-        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
-        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
-        blame_visible: bool,
-        font_size: f32,
-        is_dark: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_at(
-            relative_path,
-            project_fs,
-            blame_provider,
-            history_provider,
-            blame_visible,
-            font_size,
-            is_dark,
-            None,
-            None,
-            cx,
-        )
+        Self::new_at(scope, config, relative_path, FilePosition::default(), cx)
     }
 
     /// Create a project file viewer and focus an optional one-based position.
-    #[allow(clippy::too_many_arguments)]
     pub fn new_at(
+        scope: FileViewerScope,
+        config: FileViewerConfig,
         relative_path: String,
-        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
-        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
-        blame_visible: bool,
-        font_size: f32,
-        is_dark: bool,
-        line: Option<usize>,
-        column: Option<usize>,
+        position: FilePosition,
         cx: &mut Context<Self>,
     ) -> Self {
+        let FileViewerScope {
+            project_fs,
+            blame_provider,
+            history_provider,
+        } = scope;
+        let FileViewerConfig {
+            font_size,
+            is_dark,
+            blame_visible,
+        } = config;
         let focus_handle = cx.focus_handle();
         let expanded_folders = Self::compute_expanded_for_relative(&relative_path);
         let syntax_set = load_syntax_set();
 
         let file_path = Self::tree_path(&project_fs, &relative_path);
         let mut tab = FileViewerTab::new_loading(relative_path.clone(), file_path.clone());
-        tab.target_line = line;
-        tab.target_column = column;
-        if line.is_some() {
+        tab.target_line = position.line;
+        tab.target_column = position.column;
+        if position.line.is_some() {
             tab.display_mode = DisplayMode::Source;
         }
 
@@ -838,14 +863,20 @@ impl FileViewer {
     ///
     /// Opens the sidebar file tree with no file loaded.
     pub fn new_browse(
-        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
-        history_provider: Option<std::sync::Arc<dyn FileHistoryProvider>>,
-        blame_visible: bool,
-        font_size: f32,
-        is_dark: bool,
+        scope: FileViewerScope,
+        config: FileViewerConfig,
         cx: &mut Context<Self>,
     ) -> Self {
+        let FileViewerScope {
+            project_fs,
+            blame_provider,
+            history_provider,
+        } = scope;
+        let FileViewerConfig {
+            font_size,
+            is_dark,
+            blame_visible,
+        } = config;
         let focus_handle = cx.focus_handle();
 
         let mut viewer = Self {
@@ -1605,15 +1636,14 @@ impl FileViewer {
     pub fn open_file_in_tab_at(
         &mut self,
         relative_path: String,
-        line: Option<usize>,
-        column: Option<usize>,
+        position: FilePosition,
         cx: &mut Context<Self>,
     ) {
         self.open_file_in_tab(relative_path, cx);
         let tab = self.active_tab_mut();
-        tab.target_line = line;
-        tab.target_column = column;
-        if let Some(line) = line {
+        tab.target_line = position.line;
+        tab.target_column = position.column;
+        if let Some(line) = position.line {
             tab.display_mode = DisplayMode::Source;
             tab.source_scroll_handle
                 .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
