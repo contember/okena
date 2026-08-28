@@ -2240,6 +2240,11 @@ impl Render for FileViewer {
                                                     format!("md-codeblock-{node_idx}").into(),
                                                 ))
                                                 .overflow_x_scroll()
+                                                .map(|mut block| {
+                                                    block.style().restrict_scroll_to_axis =
+                                                        Some(true);
+                                                    block
+                                                })
                                                 .child(
                                                     div()
                                                         .px(px(14.0))
@@ -2320,6 +2325,13 @@ impl Render for FileViewer {
                                                                 ),
                                                             ))
                                                             .overflow_x_scroll()
+                                                            .map(|mut table| {
+                                                                table
+                                                                    .style()
+                                                                    .restrict_scroll_to_axis =
+                                                                    Some(true);
+                                                                table
+                                                            })
                                                             .track_scroll(&scroll_handle)
                                                             .children(table_rows),
                                                     )
@@ -2386,7 +2398,10 @@ impl Render for FileViewer {
                                                 },
                                             ),
                                         )
-                                        .child(md_list.w_full().h_full())
+                                        .child(md_list.w_full().h_full().map(|mut list| {
+                                            list.style().restrict_scroll_to_axis = Some(true);
+                                            list
+                                        }))
                                         .vertical_scrollbar(&list_state),
                                 )
                             })
@@ -2717,6 +2732,10 @@ mod markdown_selection_tests {
                             .items_start()
                             .pb(MARKDOWN_TABLE_SCROLLBAR_GUTTER)
                             .overflow_x_scroll()
+                            .map(|mut table| {
+                                table.style().restrict_scroll_to_axis = Some(true);
+                                table
+                            })
                             .track_scroll(&self.scroll_handle)
                             .children(table_rows),
                     )
@@ -2749,7 +2768,7 @@ mod markdown_selection_tests {
     }
 
     #[gpui::test]
-    fn markdown_table_scroll_container_measures_wide_rows(cx: &mut TestAppContext) {
+    fn markdown_table_scrollbar_layout_and_wheel_axes(cx: &mut TestAppContext) {
         let scroll_handle = ScrollHandle::new();
         let handle_for_view = scroll_handle.clone();
         cx.update(gpui_component::init);
@@ -2781,6 +2800,34 @@ mod markdown_selection_tests {
         assert!(
             table_bounds.bottom() - last_row_bounds.bottom() >= MARKDOWN_TABLE_SCROLLBAR_GUTTER,
             "scrollbar gutter must not overlap the last table row"
+        );
+
+        let scroll_area_bounds = vcx
+            .debug_bounds("test-markdown-table-container")
+            .expect("table scroll area should be rendered");
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_area_bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-20.0))),
+            ..Default::default()
+        });
+        assert_eq!(
+            scroll_handle.offset().x,
+            px(0.0),
+            "vertical wheel input must not move the horizontal scrollbar"
+        );
+
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_area_bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.0), px(0.0))),
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(
+            scroll_handle.offset().x < px(0.0),
+            "horizontal wheel input must move the horizontal scrollbar"
         );
     }
 }
