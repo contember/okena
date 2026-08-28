@@ -3653,8 +3653,6 @@ mod gpui_tests {
         }
     }
 
-    /// Project whose layout is a two-pane horizontal split.
-
     /// Focus `path` in `p1`, then replay what a sync brings: capture the anchor,
     /// swap in the layout the sync produced, resolve. Reports where focus landed
     /// and which terminal is there.
