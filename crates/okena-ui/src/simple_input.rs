@@ -34,7 +34,6 @@ pub struct SimpleInputState {
     multiline: bool,
     /// Multiline only: plain Enter bubbles to the parent, Shift+Enter breaks the line.
     submit_on_enter: bool,
-    input_bounds: Option<Bounds<Pixels>>,
     /// Per-line TextLayouts for accurate click-to-cursor mapping via index_for_position().
     text_layouts: Vec<TextLayout>,
     /// Whether the user is currently dragging to select text.
@@ -75,7 +74,6 @@ impl SimpleInputState {
             highlight_vars: false,
             multiline: false,
             submit_on_enter: false,
-            input_bounds: None,
             text_layouts: Vec::new(),
             is_selecting: false,
             select_anchor: 0,
@@ -534,28 +532,24 @@ impl SimpleInputState {
         }
     }
 
-    /// Resolve a mouse position to a char offset using stored text_layouts and input_bounds.
+    /// Resolve a mouse position to a char offset using the stored text_layouts.
     fn char_position_for_mouse(&self, position: Point<Pixels>) -> usize {
-        if self.multiline && self.value.contains('\n') {
-            if let Some(bounds) = self.input_bounds {
-                let line_height: f32 = 18.0;
-                let top_padding: f32 = 4.0;
-                let click_y = f32::from(position.y) - f32::from(bounds.origin.y) - top_padding;
-                let clicked_line = (click_y / line_height).floor().max(0.0) as usize;
-                let total_lines = self.value.split('\n').count();
-                let line_idx = clicked_line.min(total_lines - 1);
-
-                let col = if line_idx < self.text_layouts.len() {
-                    self.text_layouts[line_idx]
-                        .index_for_position(position)
-                        .unwrap_or_else(|ix| ix)
-                        .min(self.line_char_count(line_idx))
-                } else {
-                    0
-                };
-                self.line_start_char(line_idx) + col
-            } else {
+        if self.multiline {
+            // A soft-wrapped line is taller than one row, so ask each line's
+            // layout where it really sits instead of dividing by a row height.
+            if self.text_layouts.is_empty() {
                 self.value.chars().count()
+            } else {
+                let line_idx = self
+                    .text_layouts
+                    .iter()
+                    .position(|layout| position.y < layout.bounds().bottom())
+                    .unwrap_or(self.text_layouts.len() - 1);
+                let col = self.text_layouts[line_idx]
+                    .index_for_position(position)
+                    .unwrap_or_else(|ix| ix)
+                    .min(self.line_char_count(line_idx));
+                self.line_start_char(line_idx) + col
             }
         } else {
             let char_count = self.value.chars().count();
@@ -831,7 +825,7 @@ impl Render for SimpleInputState {
                     .child(placeholder)
                     .into_any_element()
             }
-        } else if multiline && value.contains('\n') {
+        } else if multiline {
             // Multiline: each line as a StyledText in its own row
             let lines: Vec<&str> = value.split('\n').collect();
             let (cursor_line, _) = self.cursor_line_col();
@@ -903,7 +897,12 @@ impl Render for SimpleInputState {
 
                 byte_offset += line_text.len() + 1; // +1 for '\n'
             }
-            container.into_any_element()
+            // Block layout hands the rows a definite width, so long lines wrap.
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(container)
+                .into_any_element()
         } else {
             // Single-line: one StyledText with optional highlights
             let styled = if let Some(ref sel) = selection {
@@ -966,23 +965,6 @@ impl Render for SimpleInputState {
             .when(!multiline, |d| d.h(px(24.0)))
             .px(px(8.0))
             .cursor_text()
-            .child(
-                canvas(
-                    {
-                        let entity = cx.entity().downgrade();
-                        move |bounds, _, cx: &mut App| {
-                            if let Some(entity) = entity.upgrade() {
-                                entity.update(cx, |this, _| {
-                                    this.input_bounds = Some(bounds);
-                                });
-                            }
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1117,5 +1099,100 @@ impl IntoElement for SimpleInput {
         let text_size = self.text_size.unwrap_or(px(12.0));
 
         div().w_full().text_size(text_size).child(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SimpleInput, SimpleInputState};
+    use gpui::prelude::*;
+    use gpui::{
+        Bounds, Context, Entity, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext,
+        Window, div, point, px,
+    };
+    use okena_theme::{DARK_THEME, GlobalThemeProvider};
+
+    /// Wide enough for roughly a dozen words per row at the default text size.
+    const WIDTH: f32 = 300.0;
+
+    /// `py(px(4.0))` on the multiline input's row.
+    const V_PADDING: f32 = 4.0;
+
+    const LONG_LINE: &str =
+        "please look at this output and explain why the build fails on the release profile only";
+
+    struct TestRoot {
+        input: Entity<SimpleInputState>,
+    }
+
+    impl Render for TestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            // The root fills the window, so the measured input is a child.
+            div().child(
+                div()
+                    .w(px(WIDTH))
+                    .debug_selector(|| "input".to_string())
+                    .child(SimpleInput::new(&self.input)),
+            )
+        }
+    }
+
+    fn draw<'a>(
+        cx: &'a mut TestAppContext,
+        value: &str,
+    ) -> (Entity<SimpleInputState>, &'a mut VisualTestContext) {
+        cx.update(|cx| cx.set_global(GlobalThemeProvider(|_| DARK_THEME)));
+        let (root, vcx) = cx.add_window_view(|_window, cx| TestRoot {
+            input: cx.new(|cx| SimpleInputState::new(cx).multiline().default_value(value)),
+        });
+        let input = root.read_with(vcx, |root, _| root.input.clone());
+        (input, vcx)
+    }
+
+    fn input_bounds(vcx: &mut VisualTestContext) -> Bounds<Pixels> {
+        vcx.debug_bounds("input").expect("input bounds recorded")
+    }
+
+    /// The text is a flex item, and `min-width: auto` resolves to a GPUI text
+    /// element's *max*-content width — so an unconstrained long line used to
+    /// run straight out of the send composer's panel instead of wrapping.
+    #[gpui::test]
+    fn a_long_line_wraps_instead_of_overflowing(cx: &mut TestAppContext) {
+        let (_, vcx) = draw(cx, LONG_LINE);
+        let wrapped = f32::from(input_bounds(vcx).size.height);
+
+        let (_, vcx) = draw(cx, "short");
+        let single_row = f32::from(input_bounds(vcx).size.height);
+
+        assert!(
+            wrapped > single_row,
+            "long line did not wrap: {wrapped}px is no taller than the {single_row}px single row"
+        );
+    }
+
+    /// Wrapping breaks the old click mapping, which divided the click's y by a
+    /// fixed row height to pick the *logical* line.
+    #[gpui::test]
+    fn a_click_on_a_wrapped_row_stays_on_its_logical_line(cx: &mut TestAppContext) {
+        let (input, vcx) = draw(cx, &format!("{LONG_LINE}\nsecond"));
+        let bounds = input_bounds(vcx);
+        // Three visual rows: the long line wraps onto two, then "second".
+        let row = (bounds.size.height - px(2.0 * V_PADDING)) / 3.0;
+
+        // Left edge of the second visual row — still the first logical line.
+        vcx.simulate_mouse_down(
+            point(
+                bounds.origin.x + px(2.0),
+                bounds.origin.y + px(V_PADDING) + row * 1.5,
+            ),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        let cursor = input.read_with(vcx, |input, _| input.cursor_position);
+        assert!(
+            cursor > 0 && cursor <= LONG_LINE.chars().count(),
+            "click on the wrapped row resolved to {cursor}, past the first line"
+        );
     }
 }
