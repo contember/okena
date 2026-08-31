@@ -636,21 +636,20 @@ impl ProjectColumn {
 
         // Reading the focus state clones a String + Vec, so stay behind the
         // opt-in rather than paying for it on every repaint by default.
-        let focused_terminal_target =
-            app_settings
-                .auto_hide_single_terminal_header
-                .then(|| {
-                    let focus_manager = self.focus_manager.read(cx);
-                    let focused = focus_manager.focused_terminal_state();
-                    focused_terminal_header_target(
-                        &self.project_id,
-                        project.layout.as_ref(),
-                        focused.as_ref(),
-                        true,
-                        focus_manager.has_fullscreen(),
-                    )
-                })
-                .flatten();
+        let focused_terminal_target = app_settings
+            .auto_hide_single_terminal_header
+            .then(|| {
+                let focus_manager = self.focus_manager.read(cx);
+                let focused = focus_manager.focused_terminal_state();
+                focused_terminal_header_target(
+                    &self.project_id,
+                    project.layout.as_ref(),
+                    focused.as_ref(),
+                    true,
+                    focus_manager.has_fullscreen(),
+                )
+            })
+            .flatten();
 
         // Fetch git status once for both header badge and git status area.
         // Goes through resolve_git_status so the CI popover (below) sees the

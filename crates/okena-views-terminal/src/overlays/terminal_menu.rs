@@ -288,13 +288,15 @@ impl Render for TerminalMenu {
                                         self.current_name.clone(),
                                         &t,
                                     )
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::RenameTerminal {
-                                            project_id: this.project_id.clone(),
-                                            terminal_id: this.terminal_id.clone(),
-                                            current_name: this.current_name.clone(),
-                                        });
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, _, _window, cx| {
+                                            cx.emit(TerminalMenuEvent::RenameTerminal {
+                                                project_id: this.project_id.clone(),
+                                                terminal_id: this.terminal_id.clone(),
+                                                current_name: this.current_name.clone(),
+                                            });
+                                        },
+                                    )),
                                 )
                                 .when(self.show_shell_selector, |header| {
                                     header.child(
@@ -303,13 +305,15 @@ impl Render for TerminalMenu {
                                             self.current_shell.display_name(),
                                             &t,
                                         )
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            cx.emit(TerminalMenuEvent::ChangeShell {
-                                                project_id: this.project_id.clone(),
-                                                terminal_id: this.terminal_id.clone(),
-                                                current_shell: this.current_shell.clone(),
-                                            });
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _, _window, cx| {
+                                                cx.emit(TerminalMenuEvent::ChangeShell {
+                                                    project_id: this.project_id.clone(),
+                                                    terminal_id: this.terminal_id.clone(),
+                                                    current_shell: this.current_shell.clone(),
+                                                });
+                                            }),
+                                        ),
                                     )
                                 }),
                         )
@@ -408,12 +412,14 @@ impl Render for TerminalMenu {
                                         "Add Tab",
                                         &t,
                                     )
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.emit(TerminalMenuEvent::AddTab {
-                                            project_id: this.project_id.clone(),
-                                            layout_path: this.layout_path.clone(),
-                                        });
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, _, _window, cx| {
+                                            cx.emit(TerminalMenuEvent::AddTab {
+                                                project_id: this.project_id.clone(),
+                                                layout_path: this.layout_path.clone(),
+                                            });
+                                        },
+                                    )),
                                 )
                                 // One verb, pick the direction — the case a bar is for.
                                 .child(action_bar(

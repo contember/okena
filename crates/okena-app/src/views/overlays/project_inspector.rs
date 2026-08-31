@@ -303,11 +303,11 @@ impl Render for ProjectInspector {
         let colors = theme(cx);
         fullscreen_panel("project-inspector", &colors)
             .track_focus(&self.focus_handle)
-            .children(self.screens.last().map(|screen| {
-                screen
-                    .view()
-                    .cached(StyleRefinement::default().size_full())
-            }))
+            .children(
+                self.screens
+                    .last()
+                    .map(|screen| screen.view().cached(StyleRefinement::default().size_full())),
+            )
     }
 }
 

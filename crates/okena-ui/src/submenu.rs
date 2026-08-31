@@ -535,11 +535,8 @@ impl Submenu {
         };
 
         // Deferred so it paints over the menu items that follow it in the panel.
-        row.child(
-            deferred(positioned.absolute().top(-PANEL_TOP_INSET))
-                .with_priority(1),
-        )
-        .into_any_element()
+        row.child(deferred(positioned.absolute().top(-PANEL_TOP_INSET)).with_priority(1))
+            .into_any_element()
     }
 }
 
@@ -595,8 +592,7 @@ mod tests {
     // Imported one by one on purpose: a glob of `super::*` would pull in gpui's own
     // `test` attribute macro and make `#[test]` expand into itself.
     use super::{
-        FLYOUT_WIDTH, FlyoutSide, SubmenuLayout, SubmenuState, flyout_side,
-        submenu_layout,
+        FLYOUT_WIDTH, FlyoutSide, SubmenuLayout, SubmenuState, flyout_side, submenu_layout,
     };
     use gpui::{Bounds, Pixels, SharedString, point, px, size};
 
@@ -706,6 +702,4 @@ mod tests {
         let side = flyout_side(row(10.0, 180.0), FLYOUT_WIDTH, px(200.0));
         assert_eq!(side, FlyoutSide::Right);
     }
-
-
 }
