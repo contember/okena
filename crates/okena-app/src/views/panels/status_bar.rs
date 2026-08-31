@@ -855,8 +855,6 @@ impl Render for StatusBar {
                                     .px(px(6.0))
                                     .py(px(1.0))
                                     .rounded(px(4.0))
-                                    .border_1()
-                                    .border_color(rgb(t.border_focused))
                                     .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
