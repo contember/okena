@@ -26,4 +26,25 @@ pub trait FileHistoryProvider: Send + Sync + 'static {
         relative_path: &str,
         revision: &str,
     ) -> Result<Option<String>, String>;
+
+    fn get_file_at_source(
+        &self,
+        relative_path: &str,
+        source: &crate::file_viewer::FileSource,
+    ) -> Result<Option<String>, String> {
+        match source {
+            crate::file_viewer::FileSource::GitRevision(revision) => {
+                self.get_file_at_revision(relative_path, revision)
+            }
+            crate::file_viewer::FileSource::WorkingTree => {
+                Err("Working-tree files are loaded through ProjectFs".to_string())
+            }
+            crate::file_viewer::FileSource::Index => {
+                Err("Index contents are not supported by this provider".to_string())
+            }
+            crate::file_viewer::FileSource::BranchMergeBase { .. } => {
+                Err("Branch merge-base contents are not supported by this provider".to_string())
+            }
+        }
+    }
 }

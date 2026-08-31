@@ -1654,7 +1654,7 @@ impl Render for FileViewer {
                 } else if this.active_tab().selection.normalized_non_empty().is_some() {
                     this.clear_source_selection(cx);
                 } else {
-                    this.close(cx);
+                    this.back_or_close(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1793,6 +1793,33 @@ impl Render for FileViewer {
                     .child(
                         h_flex()
                             .gap(px(10.0))
+                            .when(self.can_go_back, |d| {
+                                d.child(
+                                    div()
+                                        .id("back-button")
+                                        .cursor_pointer()
+                                        .w(px(28.0))
+                                        .h(px(28.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(6.0))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("Back")
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|_this, _, _window, cx| {
+                                            cx.emit(super::FileViewerEvent::Back);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/chevron-left.svg")
+                                                .size(px(14.0))
+                                                .text_color(rgb(t.text_muted)),
+                                        ),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("sidebar-toggle")

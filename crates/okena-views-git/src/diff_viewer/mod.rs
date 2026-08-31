@@ -279,6 +279,8 @@ pub enum DiffViewerEvent {
     Back,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
+    /// Open the selected file as a complete snapshot on the relevant side.
+    OpenFile(okena_files::file_viewer::FileTarget),
     /// User clicked "Send to terminal" on a selection. Carries the structured
     /// payload; the host formats it (relative to terminal CWD) before pasting.
     SendToTerminal(okena_core::send_payload::SendPayload),
@@ -294,13 +296,80 @@ impl okena_ui::overlay::CloseEvent for DiffViewerEvent {
 
 #[cfg(test)]
 mod tests {
+    use okena_files::file_viewer::FileSource;
+    use okena_git::{DiffMode, FileDiff};
     use okena_ui::overlay::CloseEvent;
 
-    use super::DiffViewerEvent;
+    use super::{DiffViewer, DiffViewerEvent};
 
     #[test]
     fn back_closes_a_detached_diff_host() {
         assert!(DiffViewerEvent::Back.is_close());
         assert!(!DiffViewerEvent::Detach.is_close());
+    }
+
+    #[test]
+    fn file_target_uses_the_result_side_of_a_commit() {
+        let file = FileDiff {
+            old_path: Some("old.rs".to_string()),
+            new_path: Some("new.rs".to_string()),
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 1,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(&file, &DiffMode::Commit("abc123".to_string()))
+            .expect("renamed file has a result side");
+        assert_eq!(target.relative_path, "new.rs");
+        assert_eq!(target.source, FileSource::GitRevision("abc123".to_string()));
+    }
+
+    #[test]
+    fn file_target_uses_the_parent_side_for_a_deleted_file() {
+        let file = FileDiff {
+            old_path: Some("deleted.rs".to_string()),
+            new_path: None,
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(&file, &DiffMode::Commit("abc123".to_string()))
+            .expect("deleted file has a parent side");
+        assert_eq!(target.relative_path, "deleted.rs");
+        assert_eq!(
+            target.source,
+            FileSource::GitRevision("abc123^".to_string())
+        );
+    }
+
+    #[test]
+    fn file_target_uses_the_merge_base_for_a_branch_deletion() {
+        let file = FileDiff {
+            old_path: Some("deleted.rs".to_string()),
+            new_path: None,
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(
+            &file,
+            &DiffMode::BranchCompare {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            },
+        )
+        .expect("deleted file has a merge-base side");
+        assert_eq!(
+            target.source,
+            FileSource::BranchMergeBase {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            }
+        );
     }
 }

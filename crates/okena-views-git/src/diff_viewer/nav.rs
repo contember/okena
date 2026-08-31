@@ -63,6 +63,54 @@ fn older_revision_target(
 }
 
 impl DiffViewer {
+    pub(super) fn open_current_file(&self, cx: &mut Context<Self>) {
+        let Some(file) = self.raw_files.get(self.selected_file_index) else {
+            return;
+        };
+        if let Some(target) = Self::file_target(file, &self.diff_mode) {
+            cx.emit(super::DiffViewerEvent::OpenFile(target));
+        }
+    }
+
+    pub(super) fn file_target(
+        file: &okena_git::FileDiff,
+        mode: &okena_git::DiffMode,
+    ) -> Option<okena_files::file_viewer::FileTarget> {
+        use okena_files::file_viewer::{FilePosition, FileSource, FileTarget};
+
+        let (relative_path, source) = if let Some(path) = &file.new_path {
+            let source = match mode {
+                okena_git::DiffMode::WorkingTree => FileSource::WorkingTree,
+                okena_git::DiffMode::Staged => FileSource::Index,
+                okena_git::DiffMode::Commit(revision) => FileSource::GitRevision(revision.clone()),
+                okena_git::DiffMode::BranchCompare { head, .. } => {
+                    FileSource::GitRevision(head.clone())
+                }
+            };
+            (path.clone(), source)
+        } else {
+            let path = file.old_path.clone()?;
+            let source = match mode {
+                okena_git::DiffMode::WorkingTree => FileSource::Index,
+                okena_git::DiffMode::Staged => FileSource::GitRevision("HEAD".to_string()),
+                okena_git::DiffMode::Commit(revision) => {
+                    FileSource::GitRevision(format!("{revision}^"))
+                }
+                okena_git::DiffMode::BranchCompare { base, head } => FileSource::BranchMergeBase {
+                    base: base.clone(),
+                    head: head.clone(),
+                },
+            };
+            (path, source)
+        };
+
+        Some(FileTarget {
+            relative_path,
+            source,
+            position: FilePosition::default(),
+        })
+    }
+
     pub(super) fn file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<usize>> {
         indexed_file_tree_rows(&self.file_tree, &self.expanded_folders, include_collapsed)
     }

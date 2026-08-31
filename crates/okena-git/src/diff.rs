@@ -368,8 +368,20 @@ fn parse_hunk_header(header: &str) -> (usize, usize) {
 ///
 /// Callers must have validated both refs — this feeds them to git verbatim.
 fn has_merge_base(repo_path: &str, base: &str, head: &str) -> bool {
-    safe_output(command("git").args(["-C", repo_path, "merge-base", base, head]))
-        .is_ok_and(|output| output.status.success())
+    merge_base(repo_path, base, head).is_some()
+}
+
+fn merge_base(repo_path: &str, base: &str, head: &str) -> Option<String> {
+    crate::validate_git_ref(base).ok()?;
+    crate::validate_git_ref(head).ok()?;
+    let output =
+        safe_output(command("git").args(["-C", repo_path, "merge-base", base, head])).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8(output.stdout).ok()?;
+    let revision = revision.trim();
+    (!revision.is_empty()).then(|| revision.to_string())
 }
 
 fn commit_diff_range(repo_path: &Path, revision: &str) -> crate::GitResult<String> {
@@ -697,8 +709,7 @@ pub fn get_file_contents_for_diff(
         DiffMode::Staged => {
             // Staged: comparing HEAD vs index
             let old = get_file_from_git(repo_path, "HEAD", file_path);
-            let new = get_file_from_git(repo_path, "", file_path)
-                .or_else(|| get_file_from_working_tree(repo_path, file_path));
+            let new = get_file_from_git(repo_path, "", file_path);
             (old, new)
         }
         DiffMode::Commit(ref hash) => {
@@ -709,7 +720,11 @@ pub fn get_file_contents_for_diff(
             (old, new)
         }
         DiffMode::BranchCompare { ref base, ref head } => {
-            let old = get_file_from_git(repo_path, base, file_path);
+            let effective_base = repo_path
+                .to_str()
+                .and_then(|repo_path| merge_base(repo_path, base, head))
+                .unwrap_or_else(|| base.clone());
+            let old = get_file_from_git(repo_path, &effective_base, file_path);
             let new = get_file_from_git(repo_path, head, file_path);
             (old, new)
         }
@@ -751,6 +766,52 @@ mod tests {
 
         // Missing path resolves to nothing rather than erroring.
         assert!(get_file_from_git(&repo, "HEAD", "nope.txt").is_none());
+    }
+
+    #[test]
+    fn staged_contents_do_not_fall_back_to_the_working_tree() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::remove_file(repo.join("file.txt")).unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        std::fs::write(repo.join("file.txt"), "working again").unwrap();
+
+        let (old, new) = get_file_contents_for_diff(&repo, "file.txt", DiffMode::Staged);
+        assert_eq!(old.as_deref(), Some("x"));
+        assert_eq!(new, None);
+    }
+
+    #[test]
+    fn branch_contents_use_the_merge_base_as_the_old_side() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("file.txt"), "feature").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+        );
+        git_in(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("file.txt"), "main advanced").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "main"],
+        );
+
+        let (old, new) = get_file_contents_for_diff(
+            &repo,
+            "file.txt",
+            DiffMode::BranchCompare {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            },
+        );
+        assert_eq!(old.as_deref(), Some("x"));
+        assert_eq!(new.as_deref(), Some("feature"));
     }
 
     #[test]

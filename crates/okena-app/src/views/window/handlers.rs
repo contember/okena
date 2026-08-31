@@ -2,6 +2,7 @@ use crate::action_dispatch::ActionDispatcher;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::views::overlays::diff_viewer::CommitNavigation;
 use crate::views::overlays::file_viewer::{FilePosition, FileViewerScope};
+use crate::views::overlays::project_inspector::ProjectInspectorContext;
 use crate::workspace::requests::{
     FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
     SidebarRequest,
@@ -244,14 +245,13 @@ impl WindowView {
             );
             return;
         };
-        let Some(viewer_scope) = self.build_file_viewer_scope(project_id, cx) else {
+        let Some(inspector_context) = self.build_project_inspector_context(project_id, cx) else {
             okena_workspace::toast::ToastManager::error(
                 "Cannot create the project file provider",
                 cx,
             );
             return;
         };
-        let project_id = project_id.to_string();
         let actual_terminal_id = okena_transport::client::strip_prefix(terminal_id, &connection_id);
         let overlay_manager = self.overlay_manager.clone();
         let line = line.and_then(|value| usize::try_from(value).ok());
@@ -308,9 +308,8 @@ impl WindowView {
                     let relative_path = path.relative_path.unwrap_or_default();
                     overlay_manager.update(cx, |manager, cx| {
                         manager.show_file_viewer_at(
-                            project_id,
+                            inspector_context,
                             relative_path,
-                            viewer_scope,
                             FilePosition { line, column },
                             cx,
                         );
@@ -344,14 +343,14 @@ impl WindowView {
         .detach();
     }
 
-    /// Evict cached file viewers for projects that no longer exist.
+    /// Evict cached project inspectors for projects that no longer exist.
     ///
     /// Rebuilds the set of `ProjectFs::project_id()` keys from the current
     /// workspace projects (using the same `build_project_fs` path that seeds
     /// the cache, so keys match exactly) and hands it to the OverlayManager,
-    /// which drops any cached viewer whose project is gone. Called from the
-    /// workspace observer so closing a project releases its FileViewer.
-    pub(super) fn prune_file_viewer_cache(&self, cx: &mut Context<Self>) {
+    /// which drops any cached inspector whose project is gone. Called from the
+    /// workspace observer so closing a project releases its viewers.
+    pub(super) fn prune_project_inspector_cache(&self, cx: &mut Context<Self>) {
         let project_ids: Vec<String> = self
             .workspace
             .read(cx)
@@ -364,7 +363,7 @@ impl WindowView {
             .filter_map(|id| self.build_project_fs(id, cx).map(|fs| fs.project_id()))
             .collect();
         self.overlay_manager.update(cx, |om, cx| {
-            om.prune_file_viewer_cache(&valid_keys, cx);
+            om.prune_project_inspector_cache(&valid_keys, cx);
         });
     }
 
@@ -397,6 +396,18 @@ impl WindowView {
             project_fs: self.build_project_fs(project_id, cx)?,
             blame_provider: self.build_blame_provider(project_id, cx),
             history_provider: self.build_file_history_provider(project_id, cx),
+        })
+    }
+
+    pub(super) fn build_project_inspector_context(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<ProjectInspectorContext> {
+        Some(ProjectInspectorContext {
+            project_id: project_id.to_string(),
+            file_scope: self.build_file_viewer_scope(project_id, cx)?,
+            git_provider: self.build_git_provider(project_id, cx)?,
         })
     }
 
@@ -955,42 +966,6 @@ impl WindowView {
                     );
                 }
             }
-            OverlayManagerEvent::OpenCommitFromBlame { project_id, hash } => {
-                if let Some(provider) = self.build_git_provider(project_id, cx) {
-                    let hash = hash.clone();
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_diff_viewer(
-                            provider,
-                            None,
-                            Some(okena_core::types::DiffMode::Commit(hash)),
-                            CommitNavigation::default(),
-                            None,
-                            cx,
-                        );
-                    });
-                }
-            }
-            OverlayManagerEvent::OpenFileDiff {
-                project_id,
-                hash,
-                relative_path,
-                return_to,
-            } => {
-                if let Some(provider) = self.build_git_provider(project_id, cx) {
-                    let hash = hash.clone();
-                    let relative_path = relative_path.clone();
-                    self.overlay_manager.update(cx, |manager, cx| {
-                        manager.show_diff_viewer(
-                            provider,
-                            Some(relative_path),
-                            Some(okena_core::types::DiffMode::Commit(hash)),
-                            CommitNavigation::default(),
-                            return_to.clone(),
-                            cx,
-                        );
-                    });
-                }
-            }
             OverlayManagerEvent::OpenFileExternally { path, line, column } => {
                 let path = path.clone();
                 let line = line.and_then(|value| u32::try_from(value).ok());
@@ -1249,10 +1224,11 @@ impl WindowView {
                         commits,
                         commit_index,
                     } => {
-                        if let Some(provider) = self.build_git_provider(&project_id, cx) {
+                        if let Some(context) = self.build_project_inspector_context(&project_id, cx)
+                        {
                             self.overlay_manager.update(cx, |om, cx| {
                                 om.show_diff_viewer(
-                                    provider,
+                                    context,
                                     file,
                                     mode,
                                     CommitNavigation {
@@ -1260,7 +1236,6 @@ impl WindowView {
                                         commits: commits.unwrap_or_default(),
                                         index: commit_index.unwrap_or(0),
                                     },
-                                    None,
                                     cx,
                                 );
                             });
@@ -1343,31 +1318,35 @@ impl WindowView {
                         }
                     }
                     ProjectOverlayKind::FileSearch => {
-                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
+                        if let Some(context) = self.build_project_inspector_context(&project_id, cx)
+                        {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_file_search(project_id.clone(), scope, cx);
+                                om.toggle_file_search(context, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::ContentSearch => {
-                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
+                        if let Some(context) = self.build_project_inspector_context(&project_id, cx)
+                        {
                             let is_dark = crate::theme::theme(cx).is_dark();
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_content_search(project_id.clone(), scope, is_dark, cx);
+                                om.toggle_content_search(context, is_dark, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::FileBrowser => {
-                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
+                        if let Some(context) = self.build_project_inspector_context(&project_id, cx)
+                        {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_browser(project_id.clone(), scope, cx);
+                                om.show_file_browser(context, cx);
                             });
                         }
                     }
                     ProjectOverlayKind::FileViewer { relative_path } => {
-                        if let Some(scope) = self.build_file_viewer_scope(&project_id, cx) {
+                        if let Some(context) = self.build_project_inspector_context(&project_id, cx)
+                        {
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.show_file_viewer(project_id.clone(), relative_path, scope, cx);
+                                om.show_file_viewer(context, relative_path, cx);
                             });
                         }
                     }

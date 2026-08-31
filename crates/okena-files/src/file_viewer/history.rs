@@ -9,7 +9,7 @@ use okena_core::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 
 use super::loading::LoadedContent;
-use super::{BlameLoadState, FileHistoryLoadState, FileViewer, FileViewerEvent};
+use super::{BlameLoadState, FileHistoryLoadState, FileSource, FileViewer, FileViewerEvent};
 use crate::history::FileHistoryEntry;
 
 const FILE_HISTORY_LIMIT: usize = 200;
@@ -92,9 +92,6 @@ impl FileViewer {
     }
 
     pub(super) fn show_revision(&mut self, hash: String, cx: &mut Context<Self>) {
-        let Some(provider) = self.history_provider.clone() else {
-            return;
-        };
         let Some(entry) = self
             .history_entries()
             .and_then(|entries| entries.iter().find(|entry| entry.hash == hash).cloned())
@@ -102,16 +99,65 @@ impl FileViewer {
             return;
         };
 
+        self.load_source(
+            entry.path.clone(),
+            FileSource::GitRevision(entry.hash.clone()),
+            entry,
+            cx,
+        );
+    }
+
+    pub(super) fn show_source(
+        &mut self,
+        relative_path: String,
+        source: FileSource,
+        cx: &mut Context<Self>,
+    ) {
+        let label = match &source {
+            FileSource::GitRevision(revision) => revision.clone(),
+            FileSource::Index => "Index".to_string(),
+            FileSource::BranchMergeBase { base, head } => format!("{base}...{head}"),
+            FileSource::WorkingTree => {
+                self.show_working_tree(cx);
+                return;
+            }
+        };
+        let short_hash = label.chars().take(7).collect();
+        let entry = FileHistoryEntry {
+            hash: label.clone(),
+            short_hash,
+            author: String::new(),
+            author_email: String::new(),
+            timestamp: 0,
+            summary: match &source {
+                FileSource::Index => "Staged contents".to_string(),
+                FileSource::BranchMergeBase { .. } => "File at merge base".to_string(),
+                _ => format!("File at {label}"),
+            },
+            path: relative_path,
+        };
+        self.load_source(entry.path.clone(), source, entry, cx);
+    }
+
+    fn load_source(
+        &mut self,
+        revision_path: String,
+        source: FileSource,
+        entry: FileHistoryEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(provider) = self.history_provider.clone() else {
+            return;
+        };
         self.next_load_generation = self.next_load_generation.wrapping_add(1);
         let request_generation = self.next_load_generation;
         let scope_generation = self.scope_generation;
         let relative_path = self.active_tab().relative_path.clone();
-        let revision_path = entry.path.clone();
-        let revision_hash = entry.hash.clone();
-        let revision_hash_for_request = revision_hash.clone();
+        let source_for_request = source.clone();
         let tab = self.active_tab_mut();
         tab.load_generation = request_generation;
         tab.revision = Some(entry);
+        tab.revision_source = Some(source.clone());
         tab.loading = true;
         tab.error_message = None;
         tab.selection.clear();
@@ -122,9 +168,9 @@ impl FileViewer {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    provider.get_file_at_revision(&revision_path, &revision_hash_for_request)
-                })
+                .spawn(
+                    async move { provider.get_file_at_source(&revision_path, &source_for_request) },
+                )
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 if this.scope_generation != scope_generation {
@@ -138,8 +184,7 @@ impl FileViewer {
                     return;
                 };
                 if tab.load_generation != request_generation
-                    || tab.revision.as_ref().map(|entry| entry.hash.as_str())
-                        != Some(revision_hash.as_str())
+                    || tab.revision_source.as_ref() != Some(&source)
                 {
                     return;
                 }
@@ -234,6 +279,10 @@ impl FileViewer {
         use gpui_component::tooltip::Tooltip;
 
         let revision = self.active_tab().revision.clone();
+        let can_view_diff = matches!(
+            self.active_tab().revision_source,
+            Some(FileSource::GitRevision(_))
+        );
         let entries = self.history_entries();
         let can_newer = self.can_navigate_newer_revision();
         let can_older = self.can_navigate_older_revision();
@@ -345,29 +394,31 @@ impl FileViewer {
                             .text_color(rgb(t.text_secondary))
                             .child(revision.summary),
                     )
-                    .child(
-                        div()
-                            .id("file-revision-view-diff")
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_primary))
-                            .hover(|style| style.bg(rgb(t.bg_hover)))
-                            .text_size(ui_text_sm(cx))
-                            .text_color(rgb(t.text_secondary))
-                            .tooltip(|window, cx| {
-                                Tooltip::new("View this file's diff").build(window, cx)
-                            })
-                            .on_click(cx.listener(move |_this, _, _window, cx| {
-                                cx.emit(FileViewerEvent::OpenFileDiff {
-                                    hash: diff_hash.clone(),
-                                    relative_path: diff_path.clone(),
-                                });
-                            }))
-                            .child("View diff"),
-                    )
+                    .when(can_view_diff, |d| {
+                        d.child(
+                            div()
+                                .id("file-revision-view-diff")
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(t.bg_primary))
+                                .hover(|style| style.bg(rgb(t.bg_hover)))
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("View this file's diff").build(window, cx)
+                                })
+                                .on_click(cx.listener(move |_this, _, _window, cx| {
+                                    cx.emit(FileViewerEvent::OpenFileDiff {
+                                        hash: diff_hash.clone(),
+                                        relative_path: diff_path.clone(),
+                                    });
+                                }))
+                                .child("View diff"),
+                        )
+                    })
             })
     }
 

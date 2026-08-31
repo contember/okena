@@ -30,6 +30,7 @@ pub mod keybindings_help;
 pub mod log_console;
 pub mod pairing_dialog;
 pub mod profile_manager;
+pub mod project_inspector;
 pub mod project_switcher;
 pub mod remote_connect_dialog;
 pub mod remote_context_menu;

@@ -635,6 +635,7 @@ impl DiffViewer {
             .min_h_0()
             .child(
                 div()
+                    .id("open-full-file")
                     .px(px(16.0))
                     .py(px(10.0))
                     .border_b_1()
@@ -643,6 +644,17 @@ impl DiffViewer {
                     .text_size(ui_text_md(cx))
                     .font_family("monospace")
                     .text_color(rgb(t.text_secondary))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(
+                            "Open the complete file at this revision",
+                        )
+                        .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.open_current_file(cx);
+                    }))
                     .child(file_path),
             )
             // In-page search bar (Cmd/Ctrl+F)

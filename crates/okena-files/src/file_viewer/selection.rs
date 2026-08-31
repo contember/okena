@@ -29,6 +29,14 @@ impl FileViewer {
         cx.emit(FileViewerEvent::Close);
     }
 
+    pub(super) fn back_or_close(&self, cx: &mut Context<Self>) {
+        if self.can_go_back {
+            cx.emit(FileViewerEvent::Back);
+        } else {
+            self.close(cx);
+        }
+    }
+
     /// Get selected text using the shared utility.
     pub(super) fn get_selected_text(&self) -> Option<String> {
         let tab = self.active_tab();

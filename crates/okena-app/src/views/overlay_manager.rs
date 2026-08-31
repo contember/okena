@@ -14,7 +14,7 @@ use crate::views::overlays::close_worktree_dialog::{
 use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::overlays::content_search::{ContentSearchDialog, ContentSearchDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
-use crate::views::overlays::diff_viewer::{CommitNavigation, DiffViewer, DiffViewerEvent};
+use crate::views::overlays::diff_viewer::CommitNavigation;
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::file_viewer::{
     FilePosition, FileViewer, FileViewerConfig, FileViewerEvent, FileViewerScope,
@@ -25,6 +25,9 @@ use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpE
 use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
+use crate::views::overlays::project_inspector::{
+    ProjectInspector, ProjectInspectorContext, ProjectInspectorEvent,
+};
 use crate::views::overlays::remote_connect_dialog::{
     RemoteConnectDialog, RemoteConnectDialogEvent,
 };
@@ -347,18 +350,6 @@ pub enum OverlayManagerEvent {
         tab_index: usize,
     },
 
-    /// File viewer blame click: open the named commit in the diff viewer.
-    OpenCommitFromBlame {
-        project_id: String,
-        hash: String,
-    },
-    OpenFileDiff {
-        project_id: String,
-        hash: String,
-        relative_path: String,
-        return_to: Option<Entity<FileViewer>>,
-    },
-
     OpenFileExternally {
         path: String,
         line: Option<usize>,
@@ -405,6 +396,9 @@ pub struct OverlayManager {
     /// Detach closure for the active modal, if it supports detaching.
     detach_active_modal_fn: Option<DetachFn>,
 
+    /// Active project inspector, used to ignore lifecycle events from detached inspectors.
+    active_project_inspector: Option<Entity<ProjectInspector>>,
+
     // Context menus remain separate (positioned popups, not full-screen modals)
     context_menu: OverlaySlot<ContextMenu>,
     folder_context_menu: OverlaySlot<FolderContextMenu>,
@@ -417,8 +411,8 @@ pub struct OverlayManager {
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
 
-    /// Cached file viewer entities per project name (survives close/reopen).
-    cached_file_viewers: std::collections::HashMap<String, Entity<FileViewer>>,
+    /// Cached project inspectors preserve file tabs across close/reopen.
+    cached_project_inspectors: std::collections::HashMap<String, Entity<ProjectInspector>>,
 }
 
 impl OverlayManager {
@@ -437,7 +431,8 @@ impl OverlayManager {
             active_modal: None,
             modal_type_id: None,
             detach_active_modal_fn: None,
-            cached_file_viewers: std::collections::HashMap::new(),
+            active_project_inspector: None,
+            cached_project_inspectors: std::collections::HashMap::new(),
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
             remote_context_menu: OverlaySlot::new(),
@@ -474,6 +469,7 @@ impl OverlayManager {
             self.active_modal = None;
             self.modal_type_id = None;
             self.detach_active_modal_fn = None;
+            self.active_project_inspector = None;
             // Clear any project-panel hover highlight published by the Switch
             // Project overlay. Harmless for other modals (only the switcher ever
             // sets it), and this is the single choke point all closes funnel
@@ -525,8 +521,24 @@ impl OverlayManager {
         E: CloseEvent + 'static,
         F: Fn(&mut Self, &Entity<T>, &mut Context<Self>) + 'static,
     {
+        let active_view = entity.clone().into();
+        self.open_modal_detachable_as(entity, active_view, title, before_detach, cx);
+    }
+
+    fn open_modal_detachable_as<T, E, F>(
+        &mut self,
+        entity: Entity<T>,
+        active_view: AnyView,
+        title: impl Into<SharedString>,
+        before_detach: F,
+        cx: &mut Context<Self>,
+    ) where
+        T: Render + Focusable + EventEmitter<E> + 'static,
+        E: CloseEvent + 'static,
+        F: Fn(&mut Self, &Entity<T>, &mut Context<Self>) + 'static,
+    {
         self.close_modal(cx);
-        self.active_modal = Some(entity.clone().into());
+        self.active_modal = Some(active_view);
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
 
         let title = title.into();
@@ -1862,30 +1874,21 @@ impl OverlayManager {
     // ========================================================================
 
     /// Toggle file search dialog for a project.
-    pub fn toggle_file_search(
-        &mut self,
-        project_id: String,
-        scope: FileViewerScope,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn toggle_file_search(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
         if self.is_modal::<FileSearchDialog>() {
             self.close_modal(cx);
         } else {
-            self.show_file_search(project_id, scope, cx);
+            self.show_file_search(context, cx);
         }
     }
 
     /// Show file search dialog for a project.
-    pub fn show_file_search(
-        &mut self,
-        project_id: String,
-        scope: FileViewerScope,
-        cx: &mut Context<Self>,
-    ) {
-        let scope_for_viewer = scope.clone();
+    pub fn show_file_search(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
+        let context_for_viewer = context.clone();
         let settings = crate::settings::settings(cx).file_finder.clone();
-        let dialog =
-            cx.new(|cx| FileSearchDialog::new(scope.project_fs, settings.show_ignored, cx));
+        let dialog = cx.new(|cx| {
+            FileSearchDialog::new(context.file_scope.project_fs, settings.show_ignored, cx)
+        });
 
         cx.subscribe(
             &dialog,
@@ -1896,12 +1899,7 @@ impl OverlayManager {
                 FileSearchDialogEvent::FileSelected(relative_path) => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(
-                        project_id.clone(),
-                        relative_path,
-                        scope_for_viewer.clone(),
-                        cx,
-                    );
+                    this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
                 FileSearchDialogEvent::FiltersChanged { show_ignored } => {
                     let show_ignored = *show_ignored;
@@ -1923,28 +1921,27 @@ impl OverlayManager {
     /// Toggle content search dialog for a project.
     pub fn toggle_content_search(
         &mut self,
-        project_id: String,
-        scope: FileViewerScope,
+        context: ProjectInspectorContext,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) {
         if self.is_modal::<ContentSearchDialog>() {
             self.close_modal(cx);
         } else {
-            self.show_content_search(project_id, scope, is_dark, cx);
+            self.show_content_search(context, is_dark, cx);
         }
     }
 
     /// Show content search dialog for a project.
     pub fn show_content_search(
         &mut self,
-        project_id: String,
-        scope: FileViewerScope,
+        context: ProjectInspectorContext,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) {
-        let scope_for_viewer = scope.clone();
-        let dialog = cx.new(|cx| ContentSearchDialog::new(scope.project_fs, is_dark, cx));
+        let context_for_viewer = context.clone();
+        let dialog =
+            cx.new(|cx| ContentSearchDialog::new(context.file_scope.project_fs, is_dark, cx));
 
         cx.subscribe(
             &dialog,
@@ -1958,12 +1955,7 @@ impl OverlayManager {
                 } => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(
-                        project_id.clone(),
-                        relative_path,
-                        scope_for_viewer.clone(),
-                        cx,
-                    );
+                    this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
             },
         )
@@ -1990,114 +1982,58 @@ impl OverlayManager {
     }
 
     /// Show file browser for a project (no pre-selected file).
-    pub fn show_file_browser(
-        &mut self,
-        project_id: String,
-        scope: FileViewerScope,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn show_file_browser(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
         let config = self.file_viewer_config(cx);
-        let cache_key = scope.project_fs.project_id();
-
-        // Reuse cached viewer if available
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |v, cx| {
-                v.update_config(config.font_size, config.is_dark, cx);
-                if v.is_scope(&scope.project_fs) {
-                    v.set_blame_visible(config.blame_visible, cx);
-                } else {
-                    v.rebind_scope(
-                        scope,
-                        config.blame_visible,
-                        None,
-                        FilePosition::default(),
-                        cx,
-                    );
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
-        }
-
-        let viewer = cx.new(|cx| FileViewer::new_browse(scope, config, cx));
-
-        self.subscribe_file_viewer(&viewer, Some(project_id), cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_browse(context, config, cx)
+        });
+        self.open_project_inspector_modal(inspector, cx);
     }
 
     /// Show file viewer for a file.
     pub fn show_file_viewer(
         &mut self,
-        project_id: String,
+        context: ProjectInspectorContext,
         relative_path: String,
-        scope: FileViewerScope,
         cx: &mut Context<Self>,
     ) {
-        let config = self.file_viewer_config(cx);
-        let cache_key = scope.project_fs.project_id();
-
-        // Reuse cached viewer if available
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |v, cx| {
-                v.update_config(config.font_size, config.is_dark, cx);
-                if v.is_scope(&scope.project_fs) {
-                    v.set_blame_visible(config.blame_visible, cx);
-                    v.open_file_in_tab(relative_path.clone(), cx);
-                } else {
-                    v.rebind_scope(
-                        scope,
-                        config.blame_visible,
-                        Some(relative_path.clone()),
-                        FilePosition::default(),
-                        cx,
-                    );
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
-        }
-
-        let viewer = cx.new(|cx| FileViewer::new(scope, config, relative_path.clone(), cx));
-
-        self.subscribe_file_viewer(&viewer, Some(project_id), cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        self.show_file_target(
+            context,
+            okena_files::file_viewer::FileTarget::working_tree(
+                relative_path,
+                FilePosition::default(),
+            ),
+            cx,
+        );
     }
 
     pub fn show_file_viewer_at(
         &mut self,
-        project_id: String,
+        context: ProjectInspectorContext,
         relative_path: String,
-        scope: FileViewerScope,
         position: FilePosition,
         cx: &mut Context<Self>,
     ) {
+        self.show_file_target(
+            context,
+            okena_files::file_viewer::FileTarget::working_tree(relative_path, position),
+            cx,
+        );
+    }
+
+    fn show_file_target(
+        &mut self,
+        context: ProjectInspectorContext,
+        target: okena_files::file_viewer::FileTarget,
+        cx: &mut Context<Self>,
+    ) {
         let config = self.file_viewer_config(cx);
-        let cache_key = scope.project_fs.project_id();
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |viewer, cx| {
-                viewer.update_config(config.font_size, config.is_dark, cx);
-                if viewer.is_scope(&scope.project_fs) {
-                    viewer.set_blame_visible(config.blame_visible, cx);
-                    viewer.open_file_in_tab_at(relative_path.clone(), position, cx);
-                } else {
-                    viewer.rebind_scope(
-                        scope,
-                        config.blame_visible,
-                        Some(relative_path.clone()),
-                        position,
-                        cx,
-                    );
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
-        }
-        let viewer = cx.new(|cx| FileViewer::new_at(scope, config, relative_path, position, cx));
-        self.subscribe_file_viewer(&viewer, Some(project_id), cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_file(context, config, target, cx)
+        });
+        self.open_project_inspector_modal(inspector, cx);
     }
 
     pub fn show_path_browser(
@@ -2117,107 +2053,56 @@ impl OverlayManager {
             Some(relative_path) => FileViewer::new_at(scope, config, relative_path, position, cx),
             None => FileViewer::new_browse(scope, config, cx),
         });
-        self.subscribe_file_viewer(&viewer, None, cx);
+        self.subscribe_file_viewer(&viewer, cx);
         self.open_file_viewer_modal(viewer, cx);
     }
 
-    /// Drop cached file viewers whose project is no longer present.
-    ///
-    /// `valid_keys` is the set of `ProjectFs::project_id()` keys for the
-    /// currently-known projects (the same keys used when inserting into the
-    /// cache). Any cached viewer whose key is absent belongs to a closed
-    /// project and is evicted, releasing its `ProjectFs` / blame-provider
-    /// `Arc`s.
-    ///
-    /// This only drops the cache's clone of the viewer. If a closed project's
-    /// viewer happens to be the active modal, the `active_modal` slot keeps it
-    /// alive (so the open UI is never yanked out from under the user); it is
-    /// released when that modal is next closed.
-    pub fn prune_file_viewer_cache(
+    /// Drop cached project inspectors whose project is no longer present.
+    pub fn prune_project_inspector_cache(
         &mut self,
         valid_keys: &std::collections::HashSet<String>,
         cx: &mut Context<Self>,
     ) {
-        // Collect the viewers about to be evicted and release their GPU
-        // image assets first. The cache is the only thing keeping these
-        // entities alive; once dropped, their RenderImage atlas tiles /
-        // decoded raster assets are only reclaimable via an explicit
-        // drop_image / remove_asset, which the per-tab close paths never
-        // get a chance to run here.
-        let evicted: Vec<Entity<FileViewer>> = self
-            .cached_file_viewers
+        // GPU image assets require explicit release before the cache drops its entity.
+        let evicted: Vec<Entity<ProjectInspector>> = self
+            .cached_project_inspectors
             .iter()
             .filter(|(key, _)| !valid_keys.contains(*key))
-            .map(|(_, viewer)| viewer.clone())
+            .map(|(_, inspector)| inspector.clone())
             .collect();
-        self.cached_file_viewers
+        self.cached_project_inspectors
             .retain(|key, _| valid_keys.contains(key));
-        for viewer in evicted {
-            viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+        for inspector in evicted {
+            inspector.update(cx, |inspector, cx| inspector.release_all_image_assets(cx));
         }
     }
 
-    /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
-    /// Detach moves it to a separate OS window, OpenCommit bubbles up to
-    /// RootView, SendToTerminal routes to the focused terminal via the broker.
-    fn subscribe_file_viewer(
-        &mut self,
-        viewer: &Entity<FileViewer>,
-        project_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Subscribe to a plain-path FileViewer, which has no project git context.
+    fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
         cx.subscribe(
             viewer,
-            move |this, viewer_entity, event: &FileViewerEvent, cx| {
-                match event {
-                    FileViewerEvent::Close => {
-                        // Closing keeps the cached viewer alive (cache holds its own
-                        // clone); only the modal slot is cleared.
-                        this.close_modal(cx);
-                    }
-                    FileViewerEvent::Detach => {
-                        this.detach_active_modal(cx);
-                    }
-                    FileViewerEvent::OpenCommit(hash) => {
-                        if let Some(project_id) = &project_id {
-                            cx.emit(OverlayManagerEvent::OpenCommitFromBlame {
-                                project_id: project_id.clone(),
-                                hash: hash.clone(),
-                            });
-                        }
-                    }
-                    FileViewerEvent::OpenFileDiff {
-                        hash,
-                        relative_path,
-                    } => {
-                        if let Some(project_id) = &project_id {
-                            let return_to = (!viewer_entity.read(cx).is_detached())
-                                .then(|| viewer_entity.clone());
-                            cx.emit(OverlayManagerEvent::OpenFileDiff {
-                                project_id: project_id.clone(),
-                                hash: hash.clone(),
-                                relative_path: relative_path.clone(),
-                                return_to,
-                            });
-                        }
-                    }
-                    FileViewerEvent::BlamePreferenceChanged(visible) => {
-                        crate::settings::settings_entity(cx).update(cx, |state, cx| {
-                            state.set_blame_visible(*visible, cx);
-                        });
-                    }
-                    FileViewerEvent::SendToTerminal(payload) => {
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_send_to_terminal(payload.clone(), cx);
-                        });
-                    }
-                    FileViewerEvent::OpenExternally { path, line, column } => {
-                        cx.emit(OverlayManagerEvent::OpenFileExternally {
-                            path: path.clone(),
-                            line: *line,
-                            column: *column,
-                        });
-                    }
+            move |this, _, event: &FileViewerEvent, cx| match event {
+                FileViewerEvent::Close | FileViewerEvent::Back => this.close_modal(cx),
+                FileViewerEvent::Detach => {
+                    this.detach_active_modal(cx);
+                }
+                FileViewerEvent::OpenCommit(_) | FileViewerEvent::OpenFileDiff { .. } => {}
+                FileViewerEvent::BlamePreferenceChanged(visible) => {
+                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                        state.set_blame_visible(*visible, cx);
+                    });
+                }
+                FileViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
+                    });
+                }
+                FileViewerEvent::OpenExternally { path, line, column } => {
+                    cx.emit(OverlayManagerEvent::OpenFileExternally {
+                        path: path.clone(),
+                        line: *line,
+                        column: *column,
+                    });
                 }
             },
         )
@@ -2229,10 +2114,7 @@ impl OverlayManager {
         self.open_modal_detachable::<FileViewer, FileViewerEvent, _>(
             viewer,
             "File Viewer",
-            |this, viewer, cx| {
-                // Drop cache so reopening creates a fresh modal viewer
-                // (the detached window owns the existing one).
-                this.cached_file_viewers.retain(|_, v| v != viewer);
+            |_this, viewer, cx| {
                 viewer.update(cx, |v, cx| v.set_detached(true, cx));
             },
             cx,
@@ -2247,51 +2129,93 @@ impl OverlayManager {
     /// diff mode.
     pub fn show_diff_viewer(
         &mut self,
-        provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>,
+        context: ProjectInspectorContext,
         select_file: Option<String>,
         mode: Option<okena_core::types::DiffMode>,
         commit_nav: CommitNavigation,
-        return_to: Option<Entity<FileViewer>>,
         cx: &mut Context<Self>,
     ) {
-        let can_go_back = return_to.is_some();
-        let viewer =
-            cx.new(|cx| DiffViewer::new(provider, select_file, mode, commit_nav, can_go_back, cx));
+        let config = self.file_viewer_config(cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_diff(context, config, select_file, mode, commit_nav, cx)
+        });
+        self.open_project_inspector_modal(inspector, cx);
+    }
 
-        cx.subscribe(&viewer, move |this, _, event: &DiffViewerEvent, cx| {
-            match event {
-                DiffViewerEvent::Close => {
-                    // Settings are now persisted through ExtensionSettingsStore
-                    // when toggled — no manual sync needed on close.
-                    this.close_modal(cx);
+    fn project_inspector(
+        &mut self,
+        context: ProjectInspectorContext,
+        config: FileViewerConfig,
+        cx: &mut Context<Self>,
+    ) -> Entity<ProjectInspector> {
+        let cache_key = context.file_scope.project_fs.project_id();
+        if let Some(inspector) = self.cached_project_inspectors.get(&cache_key) {
+            return inspector.clone();
+        }
+        let inspector = cx.new(|cx| ProjectInspector::new(context, config, cx));
+        cx.subscribe(
+            &inspector,
+            |this, inspector, event: &ProjectInspectorEvent, cx| match event {
+                ProjectInspectorEvent::Close
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.close_modal(cx)
                 }
-                DiffViewerEvent::Back => {
-                    if let Some(file_viewer) = &return_to {
-                        this.open_file_viewer_modal(file_viewer.clone(), cx);
-                    } else {
-                        this.close_modal(cx);
-                    }
+                ProjectInspectorEvent::Detach
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.detach_active_modal(cx)
                 }
-                DiffViewerEvent::Detach => {
-                    this.detach_active_modal(cx);
+                ProjectInspectorEvent::Close | ProjectInspectorEvent::Detach => {}
+                ProjectInspectorEvent::ScreenChanged
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.active_modal = Some(inspector.read(cx).current_view());
+                    cx.notify();
                 }
-                DiffViewerEvent::SendToTerminal(payload) => {
+                ProjectInspectorEvent::ScreenChanged => {}
+                ProjectInspectorEvent::SendToTerminal(payload) => {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_send_to_terminal(payload.clone(), cx);
                     });
                 }
-            }
-        })
+                ProjectInspectorEvent::OpenExternally { path, line, column } => {
+                    cx.emit(OverlayManagerEvent::OpenFileExternally {
+                        path: path.clone(),
+                        line: *line,
+                        column: *column,
+                    });
+                }
+            },
+        )
         .detach();
+        self.cached_project_inspectors
+            .insert(cache_key, inspector.clone());
+        inspector
+    }
 
-        self.open_modal_detachable::<DiffViewer, DiffViewerEvent, _>(
-            viewer,
-            "Diff",
-            |_this, viewer, cx| {
-                viewer.update(cx, |v, cx| v.set_detached(true, cx));
+    fn open_project_inspector_modal(
+        &mut self,
+        inspector: Entity<ProjectInspector>,
+        cx: &mut Context<Self>,
+    ) {
+        let active_view = inspector.read(cx).current_view();
+        self.open_modal_detachable_as::<ProjectInspector, ProjectInspectorEvent, _>(
+            inspector.clone(),
+            active_view,
+            "Project Inspector",
+            |this, inspector, cx| {
+                this.cached_project_inspectors
+                    .retain(|_, cached| cached != inspector);
+                this.active_project_inspector = None;
+                inspector.update(cx, |inspector, cx| inspector.set_detached(true, cx));
             },
             cx,
         );
+        if self.is_modal::<ProjectInspector>() {
+            self.active_project_inspector = Some(inspector);
+        }
     }
 
     // ========================================================================

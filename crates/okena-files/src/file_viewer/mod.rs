@@ -216,6 +216,9 @@ pub(super) struct FileViewerTab {
     pub history: FileHistoryLoadState,
     /// Historical revision currently shown in place of the working tree.
     pub revision: Option<FileHistoryEntry>,
+    /// Content source for `revision`; kept separately because direct opens do
+    /// not necessarily have a matching history entry.
+    pub revision_source: Option<FileSource>,
     /// Monotonic token for history-list requests targeting this tab.
     pub history_generation: u64,
     /// Monotonic counter bumped each time `spawn_tab_load` schedules a fresh
@@ -414,6 +417,7 @@ impl FileViewerTab {
             blame: BlameLoadState::NotLoaded,
             history: FileHistoryLoadState::NotLoaded,
             revision: None,
+            revision_source: None,
             history_generation: 0,
             load_generation: 0,
             is_image: false,
@@ -462,6 +466,7 @@ impl FileViewerTab {
             blame: BlameLoadState::NotLoaded,
             history: FileHistoryLoadState::NotLoaded,
             revision: None,
+            revision_source: None,
             history_generation: 0,
             load_generation: 0,
             is_image,
@@ -621,6 +626,8 @@ pub struct FileViewer {
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,
+    /// Whether this viewer is a drill-down that can return to another screen.
+    pub(super) can_go_back: bool,
     /// Optional provider for per-file git blame. `None` for projects that
     /// can't supply blame (no host wiring, non-git filesystems, etc).
     pub(super) blame_provider: Option<std::sync::Arc<dyn BlameProvider>>,
@@ -675,10 +682,35 @@ pub struct FileViewerConfig {
 }
 
 /// One-based caret target inside the opened file. Default means "no target".
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FilePosition {
     pub line: Option<usize>,
     pub column: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileSource {
+    WorkingTree,
+    GitRevision(String),
+    Index,
+    BranchMergeBase { base: String, head: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileTarget {
+    pub relative_path: String,
+    pub source: FileSource,
+    pub position: FilePosition,
+}
+
+impl FileTarget {
+    pub fn working_tree(relative_path: String, position: FilePosition) -> Self {
+        Self {
+            relative_path,
+            source: FileSource::WorkingTree,
+            position,
+        }
+    }
 }
 
 impl FileViewer {
@@ -834,6 +866,7 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
+            can_go_back: false,
             blame_provider,
             blame_visible,
             history_provider,
@@ -910,6 +943,7 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
+            can_go_back: false,
             blame_provider,
             blame_visible,
             history_provider,
@@ -940,6 +974,13 @@ impl FileViewer {
     /// Whether this viewer is hosted in a detached window.
     pub fn is_detached(&self) -> bool {
         self.is_detached
+    }
+
+    pub fn set_can_go_back(&mut self, can_go_back: bool, cx: &mut Context<Self>) {
+        if self.can_go_back != can_go_back {
+            self.can_go_back = can_go_back;
+            cx.notify();
+        }
     }
 
     /// Request to detach the viewer into a separate OS window.
@@ -1651,6 +1692,22 @@ impl FileViewer {
         cx.notify();
     }
 
+    pub fn open_target(&mut self, target: FileTarget, cx: &mut Context<Self>) {
+        let FileTarget {
+            relative_path,
+            source,
+            position,
+        } = target;
+        self.open_file_in_tab_at(relative_path.clone(), position, cx);
+        match source {
+            FileSource::WorkingTree if self.active_tab().revision.is_some() => {
+                self.spawn_tab_load(relative_path, cx);
+            }
+            FileSource::WorkingTree => {}
+            source => self.show_source(relative_path, source, cx),
+        }
+    }
+
     /// Insert `new_tab` directly after the active tab and return
     /// `(new_active_index, evicted_tab)`. When already at `MAX_TABS`, the
     /// oldest tab is evicted first to make room — never the active tab,
@@ -1848,6 +1905,7 @@ impl FileViewer {
         {
             tab.load_generation = generation;
             tab.revision = None;
+            tab.revision_source = None;
             tab.loading = true;
             tab.error_message = None;
         }
@@ -1990,6 +2048,8 @@ impl FileViewer {
 pub enum FileViewerEvent {
     /// Viewer was closed.
     Close,
+    /// Return to the screen that opened this file.
+    Back,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
     /// User clicked a blame entry — open the named commit in the diff viewer.
@@ -2084,7 +2144,7 @@ impl EventEmitter<FileViewerEvent> for FileViewer {}
 
 impl okena_ui::overlay::CloseEvent for FileViewerEvent {
     fn is_close(&self) -> bool {
-        matches!(self, Self::Close)
+        matches!(self, Self::Close | Self::Back)
     }
 }
 
