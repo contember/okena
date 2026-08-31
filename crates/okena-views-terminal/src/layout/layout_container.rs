@@ -1,7 +1,7 @@
 //! Recursive layout container that renders terminal/split/tabs nodes
 
 use crate::ActionDispatch;
-use crate::layout::pane_drag::{DropZone, PaneDrag};
+use crate::layout::pane_drag::{DropZone, PaneDrag, PaneMoveState, is_move_target};
 use crate::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::layout::terminal_pane::TerminalPane;
 use gpui::prelude::*;
@@ -12,6 +12,7 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_ui::click_detector::ClickDetector;
 use okena_ui::theme::with_alpha;
+use okena_ui::tokens::ui_text_sm;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{LayoutNode, SplitDirection, WindowId, Workspace};
@@ -88,6 +89,7 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) drop_animation: Option<(usize, f32)>,
     pub(super) active_drag: ActiveDrag,
+    pub(super) pane_move: Entity<PaneMoveState>,
     pub(super) tab_click_detector: ClickDetector<usize>,
     pub(super) empty_area_click_detector: ClickDetector<()>,
     pub(super) tab_rename_state: Option<RenameState<String>>,
@@ -110,8 +112,12 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        pane_move: Entity<PaneMoveState>,
         action_dispatcher: Option<D>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe(&pane_move, |_this, _state, cx| cx.notify())
+            .detach();
         Self {
             workspace,
             focus_manager,
@@ -133,6 +139,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             })),
             drop_animation: None,
             active_drag,
+            pane_move,
             tab_click_detector: ClickDetector::new(),
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
@@ -366,6 +373,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let tid = terminal_id.clone();
         let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
         let dispatcher = self.action_dispatcher.clone();
+        let move_source = self.pane_move.read(cx).source().cloned();
+        let pane_move = self.pane_move.clone();
 
         let make_zone =
             |zone: DropZone, id_suffix: &str, active_drag: &ActiveDrag| -> Stateful<Div> {
@@ -374,17 +383,20 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 let this_tid = tid.clone();
                 let active_drag_for_hover = active_drag.clone();
                 let active_drag_for_drop = active_drag.clone();
-                let dispatcher = dispatcher.clone();
+                let dispatcher_for_drop = dispatcher.clone();
+                let dispatcher_for_click = dispatcher.clone();
+                let move_source = move_source.clone();
+                let pane_move = pane_move.clone();
 
-                let zone_str = match zone {
-                    DropZone::Top => "top",
-                    DropZone::Bottom => "bottom",
-                    DropZone::Left => "left",
-                    DropZone::Right => "right",
-                    DropZone::Center => "center",
+                let (zone_str, zone_label) = match zone {
+                    DropZone::Top => ("top", "Above"),
+                    DropZone::Bottom => ("bottom", "Below"),
+                    DropZone::Left => ("left", "Left"),
+                    DropZone::Right => ("right", "Right"),
+                    DropZone::Center => ("center", "Tab"),
                 };
 
-                div()
+                let element = div()
                     .id(ElementId::Name(zone_id.into()))
                     .drag_over::<PaneDrag>(move |style, _, _, _| {
                         if active_drag_for_hover.borrow().is_some() {
@@ -403,7 +415,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 return;
                             }
                             if let Some(ref target_id) = this_tid
-                                && let Some(ref dispatcher) = dispatcher
+                                && let Some(ref dispatcher) = dispatcher_for_drop
                             {
                                 dispatcher.dispatch(
                                     ActionRequest::MovePaneTo {
@@ -417,7 +429,43 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 );
                             }
                         }
-                    }))
+                    }));
+
+                if let Some(source) =
+                    move_source.filter(|source| is_move_target(source, this_tid.as_deref()))
+                {
+                    element
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(with_alpha(t.border_active, 0.5))
+                        .bg(with_alpha(t.border_active, 0.1))
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_primary))
+                        .hover(|style| style.bg(highlight))
+                        .child(zone_label)
+                        .on_click(cx.listener(move |_this, _, _window, cx| {
+                            if let Some(ref target_id) = this_tid
+                                && let Some(ref dispatcher) = dispatcher_for_click
+                            {
+                                dispatcher.dispatch(
+                                    ActionRequest::MovePaneTo {
+                                        project_id: source.project_id.clone(),
+                                        terminal_id: source.terminal_id.clone(),
+                                        target_project_id: pid.clone(),
+                                        target_terminal_id: target_id.clone(),
+                                        zone: zone_str.to_string(),
+                                    },
+                                    cx,
+                                );
+                                pane_move.update(cx, |state, cx| state.cancel(cx));
+                            }
+                        }))
+                } else {
+                    element
+                }
             };
 
         div()
@@ -484,7 +532,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .child_containers
                 .entry(child_path.clone())
                 .or_insert_with(|| {
-                    cx.new(|_cx| {
+                    cx.new(|cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
                             self.focus_manager.clone(),
@@ -496,7 +544,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            cx,
                         )
                     })
                 })
@@ -563,7 +613,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .child_containers
                 .entry(child_path.clone())
                 .or_insert_with(|| {
-                    cx.new(|_cx| {
+                    cx.new(|cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
                             self.focus_manager.clone(),
@@ -575,7 +625,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            cx,
                         )
                     })
                 })

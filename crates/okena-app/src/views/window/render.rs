@@ -610,6 +610,7 @@ impl WindowView {
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let pane_move_source = self.pane_move.read(cx).source().cloned();
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);
@@ -644,10 +645,19 @@ impl Render for WindowView {
         div()
             .id("root")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(t.bg_primary))
             .track_focus(&focus_handle)
+            .on_action(cx.listener(
+                |this, _: &okena_views_terminal::actions::Cancel, _window, cx| {
+                    if this.pane_move.read(cx).source().is_some() {
+                        this.pane_move.update(cx, |state, cx| state.cancel(cx));
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             // Global mouse move handler for resize and auto-hide
             .on_mouse_move(cx.listener({
                 let active_drag = active_drag.clone();
@@ -1482,6 +1492,43 @@ impl Render for WindowView {
             // Single active modal overlay (renders on top of everything)
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {
                 d.child(modal)
+            })
+            .when_some(pane_move_source, |d, source| {
+                let pane_move = self.pane_move.clone();
+                d.child(
+                    div()
+                        .id("pane-move-status")
+                        .absolute()
+                        .top(px(40.0))
+                        .right(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .bg(rgb(t.bg_secondary))
+                        .border_1()
+                        .border_color(rgb(t.border_active))
+                        .rounded(px(6.0))
+                        .shadow_lg()
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child(format!("Move {}: choose a target", source.terminal_name))
+                        .child(
+                            div()
+                                .id("cancel-pane-move")
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .text_color(rgb(t.text_secondary))
+                                .hover(|style| style.bg(rgb(t.bg_hover)))
+                                .on_click(move |_, _window, cx| {
+                                    pane_move.update(cx, |state, cx| state.cancel(cx));
+                                })
+                                .child("Cancel"),
+                        ),
+                )
             })
             // Toast notifications (bottom-right, on top of everything)
             .child(self.toast_overlay.clone())

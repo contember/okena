@@ -5,6 +5,7 @@ use crate::terminal::backend::TerminalBackend;
 use crate::theme::{ThemeColors, theme};
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::views::layout::layout_container::LayoutContainer;
+use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{FocusedTerminalState, LayoutNode, ProjectData, WindowId, Workspace};
@@ -150,6 +151,7 @@ pub struct ProjectColumn {
     layout_container: Option<Entity<LayoutContainer<ActionDispatcher>>>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
+    pane_move: Entity<PaneMoveState>,
     /// Action dispatcher for routing terminal actions (local or remote)
     action_dispatcher: Option<ActionDispatcher>,
     /// Self-contained git header entity (diff popover, commit log)
@@ -182,6 +184,7 @@ impl ProjectColumn {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        pane_move: Entity<PaneMoveState>,
         git_provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -281,6 +284,7 @@ impl ProjectColumn {
             terminals,
             layout_container: None,
             active_drag,
+            pane_move,
             action_dispatcher: None,
             git_header,
             service_panel,
@@ -426,10 +430,11 @@ impl ProjectColumn {
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
+            let pane_move = self.pane_move.clone();
             let action_dispatcher = self.action_dispatcher.clone();
             let window_id = self.window_id;
 
-            self.layout_container = Some(cx.new(move |_cx| {
+            self.layout_container = Some(cx.new(move |cx| {
                 LayoutContainer::new(
                     workspace,
                     focus_manager,
@@ -441,7 +446,9 @@ impl ProjectColumn {
                     backend,
                     terminals,
                     active_drag,
+                    pane_move,
                     action_dispatcher,
+                    cx,
                 )
             }));
         } else if let Some(container) = &self.layout_container {

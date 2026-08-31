@@ -8,6 +8,7 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::settings::settings;
 use crate::views::chrome::title_bar::TitleBar;
+use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::{ActiveDrag, new_active_drag};
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
@@ -195,6 +196,8 @@ pub struct WindowView {
     toast_overlay: Entity<ToastOverlay>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
+    /// Source selected by the terminal menu's explicit move mode.
+    pane_move: Entity<PaneMoveState>,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
     /// Scroll handle for horizontal scrolling of project columns
@@ -255,6 +258,9 @@ impl WindowView {
         // child views (sidebar, project column, terminal pane, layout
         // container) can hold handles and update through Entity::update.
         let focus_manager = cx.new(|_| FocusManager::new());
+        let pane_move = cx.new(|_| PaneMoveState::default());
+        cx.observe(&pane_move, |_this, _state, cx| cx.notify())
+            .detach();
 
         // Sidebar open/closed state is per-window (persisted on WindowState).
         // Seed SidebarController from the calling window's persisted value;
@@ -387,6 +393,7 @@ impl WindowView {
             overlay_manager,
             toast_overlay,
             active_drag: new_active_drag(),
+            pane_move,
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
@@ -895,6 +902,7 @@ impl WindowView {
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
+        let pane_move_clone = self.pane_move.clone();
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
         let focus_manager_for_dispatch = self.focus_manager.clone();
@@ -922,6 +930,7 @@ impl WindowView {
                 backend,
                 terminals_clone,
                 active_drag_clone,
+                pane_move_clone,
                 git_provider,
                 cx,
             );

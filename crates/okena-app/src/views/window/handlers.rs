@@ -902,6 +902,24 @@ impl WindowView {
                     workspace.detach_terminal(project_id, layout_path, cx);
                 });
             }
+            OverlayManagerEvent::TerminalMove {
+                project_id,
+                terminal_id,
+                layout_path,
+                current_name,
+            } => {
+                self.pane_move.update(cx, |state, cx| {
+                    state.begin(
+                        crate::views::layout::pane_drag::PaneDrag {
+                            project_id: project_id.clone(),
+                            layout_path: layout_path.clone(),
+                            terminal_id: terminal_id.clone(),
+                            terminal_name: current_name.clone(),
+                        },
+                        cx,
+                    );
+                });
+            }
             OverlayManagerEvent::TabClose {
                 project_id,
                 layout_path,

@@ -215,7 +215,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .child_containers
                 .entry(child_path.clone())
                 .or_insert_with(|| {
-                    cx.new(|_cx| {
+                    cx.new(|cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
                             self.focus_manager.clone(),
@@ -227,7 +227,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            cx,
                         )
                     })
                 })
@@ -299,7 +301,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .child_containers
                     .entry(child_path.clone())
                     .or_insert_with(|| {
-                        cx.new(|_cx| {
+                        cx.new(|cx| {
                             LayoutContainer::new(
                                 self.workspace.clone(),
                                 self.focus_manager.clone(),
@@ -311,7 +313,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 self.backend.clone(),
                                 self.terminals.clone(),
                                 self.active_drag.clone(),
+                                self.pane_move.clone(),
                                 self.action_dispatcher.clone(),
+                                cx,
                             )
                         })
                     })

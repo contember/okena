@@ -330,6 +330,13 @@ pub enum OverlayManagerEvent {
         project_id: String,
         layout_path: Vec<usize>,
     },
+    /// Terminal menu: enter destination selection for moving a pane.
+    TerminalMove {
+        project_id: String,
+        terminal_id: String,
+        layout_path: Vec<usize>,
+        current_name: String,
+    },
 
     /// Tab context menu: close tab
     TabClose {
@@ -1483,6 +1490,19 @@ impl OverlayManager {
                     },
                     cx,
                 );
+            }
+            TerminalMenuEvent::MoveTerminal {
+                project_id,
+                terminal_id,
+                layout_path,
+                current_name,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalMove {
+                    project_id: project_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                    layout_path: layout_path.clone(),
+                    current_name: current_name.clone(),
+                });
             }
             TerminalMenuEvent::ExportBuffer {
                 project_id,

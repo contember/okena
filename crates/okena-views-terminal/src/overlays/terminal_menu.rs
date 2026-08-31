@@ -65,6 +65,12 @@ pub enum TerminalMenuEvent {
         project_id: String,
         terminal_id: String,
     },
+    MoveTerminal {
+        project_id: String,
+        terminal_id: String,
+        layout_path: Vec<usize>,
+        current_name: String,
+    },
     ExportBuffer {
         project_id: String,
         terminal_id: String,
@@ -481,6 +487,24 @@ impl Render for TerminalMenu {
                                     cx.emit(TerminalMenuEvent::MinimizeTerminal {
                                         project_id: this.project_id.clone(),
                                         terminal_id: this.terminal_id.clone(),
+                                    });
+                                },
+                            )),
+                        )
+                        .child(
+                            menu_item(
+                                "terminal-menu-move",
+                                "icons/unfold-vertical.svg",
+                                "Move Terminal…",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TerminalMenuEvent::MoveTerminal {
+                                        project_id: this.project_id.clone(),
+                                        terminal_id: this.terminal_id.clone(),
+                                        layout_path: this.layout_path.clone(),
+                                        current_name: this.current_name.clone(),
                                     });
                                 },
                             )),
