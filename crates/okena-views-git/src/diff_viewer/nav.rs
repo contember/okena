@@ -144,6 +144,11 @@ impl DiffViewer {
         cx.notify();
     }
 
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
     pub(super) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.ignore_whitespace = !self.ignore_whitespace;
         let mode = self.diff_mode.clone();
@@ -173,6 +178,18 @@ impl DiffViewer {
         if index == self.selected_file_index && self.current_file.is_some() {
             return;
         }
+        let mut ancestor = String::new();
+        let mut components = self.file_stats[index].path.split(['/', '\\']).peekable();
+        while let Some(component) = components.next() {
+            if components.peek().is_none() {
+                break;
+            }
+            if !ancestor.is_empty() {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            self.expanded_folders.insert(ancestor.clone());
+        }
         self.selected_file_index = index;
         self.selection.clear();
         self.selection_side = None;
@@ -189,13 +206,32 @@ impl DiffViewer {
         direction: FileTreeNavigationDirection,
         cx: &mut Context<Self>,
     ) {
-        let visible = self.file_tree_rows(false);
-        let all = self.file_tree_rows(true);
-        if let Some(index) =
-            adjacent_file_tree_item(&visible, &all, Some(&self.selected_file_index), direction)
-        {
+        if let Some(index) = self.adjacent_file_index(direction) {
             self.select_file(index, cx);
         }
+    }
+
+    pub(super) fn adjacent_file_index(
+        &self,
+        direction: FileTreeNavigationDirection,
+    ) -> Option<usize> {
+        let all = self.file_tree_rows(true);
+        adjacent_file_tree_item(&all, &all, Some(&self.selected_file_index), direction)
+    }
+
+    pub(super) fn file_navigation_position(&self) -> Option<(usize, usize)> {
+        let files: Vec<usize> = self
+            .file_tree_rows(true)
+            .into_iter()
+            .filter_map(|row| match row {
+                FileTreeRow::File { item, .. } => Some(item),
+                FileTreeRow::Folder { .. } | FileTreeRow::Loading { .. } => None,
+            })
+            .collect();
+        let position = files
+            .iter()
+            .position(|index| *index == self.selected_file_index)?;
+        Some((position + 1, files.len()))
     }
 
     pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {

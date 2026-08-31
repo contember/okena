@@ -913,7 +913,10 @@ impl FileViewer {
         let can_forward = self.history.can_go_forward();
 
         h_flex()
-            .gap(px(2.0))
+            .h(px(28.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
             .child(
                 div()
                     .id("fv-back")
@@ -927,8 +930,16 @@ impl FileViewer {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded_l(px(5.0))
                     .when(can_back, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if can_back {
+                            "Previous viewed file"
+                        } else {
+                            "No previously viewed file"
+                        })
+                        .build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.go_back(cx);
                     }))
@@ -954,11 +965,21 @@ impl FileViewer {
                     })
                     .w(px(28.0))
                     .h(px(28.0))
+                    .border_l_1()
+                    .border_color(rgb(t.border))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded_r(px(5.0))
                     .when(can_forward, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if can_forward {
+                            "Next viewed file"
+                        } else {
+                            "No next viewed file"
+                        })
+                        .build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.go_forward(cx);
                     }))
@@ -1784,7 +1805,7 @@ impl Render for FileViewer {
                 let is_maximized = window.is_maximized();
                 div()
                     .px(px(16.0))
-                    .py(if detached { px(6.0) } else { px(12.0) })
+                    .py(if detached { px(8.0) } else { px(10.0) })
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .flex()
@@ -1798,13 +1819,21 @@ impl Render for FileViewer {
                                     div()
                                         .id("back-button")
                                         .cursor_pointer()
-                                        .w(px(28.0))
                                         .h(px(28.0))
+                                        .px(px(8.0))
                                         .flex()
                                         .items_center()
                                         .justify_center()
+                                        .gap(px(6.0))
+                                        .flex_shrink_0()
                                         .rounded(px(6.0))
-                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .text_size(ui_text_md(cx))
+                                        .text_color(rgb(t.text_secondary))
+                                        .hover(|style| {
+                                            style
+                                                .bg(rgb(t.bg_hover))
+                                                .text_color(rgb(t.text_primary))
+                                        })
                                         .tooltip(|window, cx| {
                                             gpui_component::tooltip::Tooltip::new("Back")
                                                 .build(window, cx)
@@ -1814,11 +1843,15 @@ impl Render for FileViewer {
                                         }))
                                         .child(
                                             svg()
-                                                .path("icons/chevron-left.svg")
+                                                .path("icons/arrow-left.svg")
                                                 .size(px(14.0))
-                                                .text_color(rgb(t.text_muted)),
-                                        ),
+                                                .text_color(rgb(t.text_secondary)),
+                                        )
+                                        .child("Back"),
                                 )
+                            })
+                            .when(self.can_go_back, |d| {
+                                d.child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)))
                             })
                             .child(
                                 div()
@@ -1830,20 +1863,38 @@ impl Render for FileViewer {
                                     .items_center()
                                     .justify_center()
                                     .rounded(px(6.0))
-                                    .bg(rgb(if sidebar_visible {
-                                        t.bg_selection
+                                    .border_1()
+                                    .border_color(rgb(if sidebar_visible {
+                                        t.border_active
                                     } else {
+                                        t.bg_primary
+                                    }))
+                                    .bg(rgb(if sidebar_visible {
                                         t.bg_secondary
+                                    } else {
+                                        t.bg_primary
                                     }))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(if sidebar_visible {
+                                            "Hide files"
+                                        } else {
+                                            "Show files"
+                                        })
+                                        .build(window, cx)
+                                    })
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.toggle_sidebar(cx);
                                     }))
                                     .child(
                                         svg()
-                                            .path("icons/chevron-right.svg")
+                                            .path("icons/panel-left.svg")
                                             .size(px(14.0))
-                                            .text_color(rgb(t.text_muted)),
+                                            .text_color(rgb(if sidebar_visible {
+                                                t.text_primary
+                                            } else {
+                                                t.text_secondary
+                                            })),
                                     ),
                             )
                             .child(self.render_nav_buttons(&t, cx))
@@ -1884,7 +1935,7 @@ impl Render for FileViewer {
                     .child(window_drag_spacer(detached))
                     .child(
                         h_flex()
-                            .gap(px(12.0))
+                            .gap(px(8.0))
                             .when_some(transfer_status, |d, status| {
                                 d.child(
                                     div()
@@ -1928,7 +1979,13 @@ impl Render for FileViewer {
                                         .px(px(8.0))
                                         .py(px(4.0))
                                         .rounded(px(4.0))
-                                        .bg(rgb(if on { t.bg_selection } else { t.bg_secondary }))
+                                        .border_1()
+                                        .border_color(rgb(if on {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if on { t.bg_secondary } else { t.bg_primary }))
                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                         .tooltip(|window, cx| {
                                             gpui_component::tooltip::Tooltip::new("Toggle git blame").build(window, cx)
@@ -1944,7 +2001,7 @@ impl Render for FileViewer {
                                                 .text_color(rgb(if on {
                                                     t.text_primary
                                                 } else {
-                                                    t.text_muted
+                                                    t.text_secondary
                                                 }))
                                                 .child("Blame"),
                                         ),
@@ -1958,10 +2015,16 @@ impl Render for FileViewer {
                                         .px(px(8.0))
                                         .py(px(4.0))
                                         .rounded(px(4.0))
-                                        .bg(rgb(if history_visible {
-                                            t.bg_selection
+                                        .border_1()
+                                        .border_color(rgb(if history_visible {
+                                            t.border_active
                                         } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if history_visible {
                                             t.bg_secondary
+                                        } else {
+                                            t.bg_primary
                                         }))
                                         .hover(|style| style.bg(rgb(t.bg_hover)))
                                         .tooltip(|window, cx| {
@@ -1983,7 +2046,7 @@ impl Render for FileViewer {
                                                         .text_color(rgb(if history_visible {
                                                             t.text_primary
                                                         } else {
-                                                            t.text_muted
+                                                            t.text_secondary
                                                         })),
                                                 )
                                                 .child(
@@ -1992,7 +2055,7 @@ impl Render for FileViewer {
                                                         .text_color(rgb(if history_visible {
                                                             t.text_primary
                                                         } else {
-                                                            t.text_muted
+                                                            t.text_secondary
                                                         }))
                                                         .child("History"),
                                                 ),
@@ -2027,6 +2090,7 @@ impl Render for FileViewer {
                                 d.child(image_zoom_controls(zoom_label, &t, cx))
                                     .child(image_background_toggle(bg, &t, cx))
                             })
+                            .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                             .when(!self.is_detached, |d| {
                                 d.child(
                                     div()
@@ -2037,8 +2101,8 @@ impl Render for FileViewer {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(px(4.0))
-                                        .hover(|s| s.bg(rgb(t.bg_secondary)))
+                                        .rounded(px(6.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
                                         .tooltip(|window, cx| {
                                             gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
                                         })
@@ -2049,7 +2113,7 @@ impl Render for FileViewer {
                                             svg()
                                                 .path("icons/external-link.svg")
                                                 .size(px(14.0))
-                                                .text_color(rgb(t.text_muted)),
+                                                .text_color(rgb(t.text_secondary)),
                                         ),
                                 )
                             })
@@ -2060,16 +2124,23 @@ impl Render for FileViewer {
                                 div()
                                     .id("close-button")
                                     .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_secondary)))
+                                    .w(px(28.0))
+                                    .h(px(28.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new("Close")
+                                            .build(window, cx)
+                                    })
                                     .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                                     .child(
-                                        div()
-                                            .text_size(ui_text(18.0, cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("\u{00d7}"),
+                                        svg()
+                                            .path("icons/close.svg")
+                                            .size(px(14.0))
+                                            .text_color(rgb(t.text_secondary)),
                                     ),
                             ),
                     )

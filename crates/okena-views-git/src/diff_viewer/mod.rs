@@ -83,6 +83,8 @@ pub struct DiffViewer {
     pub(super) selection: Selection,
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) tree_scroll_handle: ScrollHandle,
+    /// Whether the file tree sidebar is visible.
+    pub(super) sidebar_visible: bool,
     /// Width and active resize gesture for the file tree sidebar.
     pub(super) sidebar_resize: ResizableSidebarState,
     pub(super) error_message: Option<String>,
@@ -205,6 +207,7 @@ impl DiffViewer {
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
             tree_scroll_handle: ScrollHandle::new(),
+            sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),
             error_message: None,
             line_num_width: 4,

@@ -6,7 +6,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_core::theme::ThemeColors;
-use okena_files::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
+use okena_files::file_tree::{
+    FileTreeNavigationDirection, FileTreeRow, expandable_file_row, expandable_folder_row,
+};
 use okena_files::selection::Selection2DNonEmpty;
 use okena_files::theme::theme;
 use okena_git::DiffMode;
@@ -39,6 +41,7 @@ impl DiffViewer {
     ) -> impl IntoElement {
         let is_unified = self.view_mode == DiffViewMode::Unified;
         let detached = self.is_detached;
+        let sidebar_visible = self.sidebar_visible;
         let title = match diff_mode {
             DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
             DiffMode::BranchCompare { base, head } => format!("{base} \u{2192} {head}"),
@@ -60,7 +63,7 @@ impl DiffViewer {
             .when(self.can_go_back, |d| {
                 d.child(
                     h_flex()
-                        .id("back-to-file-history")
+                        .id("back-button")
                         .flex_shrink_0()
                         .gap(px(6.0))
                         .px(px(8.0))
@@ -71,20 +74,74 @@ impl DiffViewer {
                         .text_color(rgb(t.text_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
                         .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new("Back to file history")
-                                .build(window, cx)
+                            gpui_component::tooltip::Tooltip::new("Back").build(window, cx)
                         })
                         .on_click(cx.listener(|this, _, _window, cx| this.back(cx)))
                         .child(
                             svg()
-                                .path("icons/chevron-left.svg")
-                                .size(px(13.0))
-                                .text_color(rgb(t.text_muted)),
+                                .path("icons/arrow-left.svg")
+                                .size(px(14.0))
+                                .text_color(rgb(t.text_secondary)),
                         )
-                        .child("Back to history"),
+                        .child("Back"),
                 )
                 .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)))
             })
+            .child(
+                div()
+                    .id("sidebar-toggle")
+                    .flex_shrink_0()
+                    .cursor(if has_files {
+                        CursorStyle::PointingHand
+                    } else {
+                        CursorStyle::default()
+                    })
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(if sidebar_visible && has_files {
+                        t.border_active
+                    } else {
+                        t.bg_primary
+                    }))
+                    .bg(rgb(if sidebar_visible && has_files {
+                        t.bg_secondary
+                    } else {
+                        t.bg_primary
+                    }))
+                    .when(has_files, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .when(has_files, |d| {
+                        d.on_click(cx.listener(|this, _, _window, cx| this.toggle_sidebar(cx)))
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if !has_files {
+                            "No files"
+                        } else if sidebar_visible {
+                            "Hide files"
+                        } else {
+                            "Show files"
+                        })
+                        .build(window, cx)
+                    })
+                    .child(
+                        svg()
+                            .path("icons/panel-left.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(if sidebar_visible && has_files {
+                                t.text_primary
+                            } else if has_files {
+                                t.text_secondary
+                            } else {
+                                t.text_muted
+                            }))
+                            .opacity(if has_files { 1.0 } else { 0.35 }),
+                    ),
+            )
+            .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)))
             .child(
                 div()
                     .flex_1()
@@ -167,12 +224,18 @@ impl DiffViewer {
                             .px(px(10.0))
                             .py(px(5.0))
                             .rounded(px(6.0))
-                            .bg(rgb(if ignore_whitespace {
-                                t.button_primary_bg
+                            .border_1()
+                            .border_color(rgb(if ignore_whitespace {
+                                t.border_active
                             } else {
-                                t.bg_secondary
+                                t.bg_primary
                             }))
-                            .hover(|s| s.opacity(0.85))
+                            .bg(rgb(if ignore_whitespace {
+                                t.bg_secondary
+                            } else {
+                                t.bg_primary
+                            }))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(
                                 cx.listener(|this, _, _window, cx| {
                                     this.toggle_ignore_whitespace(cx)
@@ -182,7 +245,7 @@ impl DiffViewer {
                                 div()
                                     .text_size(ui_text_md(cx))
                                     .text_color(rgb(if ignore_whitespace {
-                                        t.button_primary_fg
+                                        t.text_primary
                                     } else {
                                         t.text_secondary
                                     }))
@@ -232,7 +295,7 @@ impl DiffViewer {
                                     svg()
                                         .path("icons/external-link.svg")
                                         .size(px(14.0))
-                                        .text_color(rgb(t.text_muted)),
+                                        .text_color(rgb(t.text_secondary)),
                                 ),
                         )
                     })
@@ -253,7 +316,7 @@ impl DiffViewer {
                                 svg()
                                     .path("icons/close.svg")
                                     .size(px(14.0))
-                                    .text_color(rgb(t.text_muted)),
+                                    .text_color(rgb(t.text_secondary)),
                             ),
                     ),
             )
@@ -284,7 +347,7 @@ impl DiffViewer {
         } else if self.commits.is_empty() {
             "Commit".to_string()
         } else {
-            format!("{} / {}", self.commit_index + 1, self.commits.len())
+            format!("{} of {}", self.commit_index + 1, self.commits.len())
         };
 
         h_flex()
@@ -341,7 +404,7 @@ impl DiffViewer {
                     .child(
                         div()
                             .h_full()
-                            .w(px(88.0))
+                            .min_w(px(96.0))
                             .px(px(8.0))
                             .border_l_1()
                             .border_r_1()
@@ -506,6 +569,7 @@ impl DiffViewer {
         theme_colors: Arc<ThemeColors>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let sidebar_visible = self.sidebar_visible;
         div()
             .flex_1()
             .flex()
@@ -531,16 +595,18 @@ impl DiffViewer {
                 )
             })
             .when(!loading && !has_error && has_files, |d| {
-                d.child(self.render_sidebar(t, tree_elements, cx))
-                    .child(self.render_diff_pane(
-                        t,
-                        is_binary,
-                        file_path,
-                        line_count,
-                        gutter_width,
-                        theme_colors,
-                        cx,
-                    ))
+                d.when(sidebar_visible, |d| {
+                    d.child(self.render_sidebar(t, tree_elements, cx))
+                })
+                .child(self.render_diff_pane(
+                    t,
+                    is_binary,
+                    file_path,
+                    line_count,
+                    gutter_width,
+                    theme_colors,
+                    cx,
+                ))
             })
     }
 
@@ -605,6 +671,16 @@ impl DiffViewer {
     ) -> impl IntoElement {
         let scrollbar_geometry = self.get_scrollbar_geometry();
         let is_dragging = self.scrollbar_drag.is_some();
+        let can_previous_file = self
+            .adjacent_file_index(FileTreeNavigationDirection::Previous)
+            .is_some();
+        let can_next_file = self
+            .adjacent_file_index(FileTreeNavigationDirection::Next)
+            .is_some();
+        let file_position = self
+            .file_navigation_position()
+            .map(|(position, count)| format!("{position} of {count}"))
+            .unwrap_or_else(|| format!("{} files", self.file_stats.len()));
         let tc = theme_colors;
         let view = cx.entity().clone();
         let side_by_side_count = self.side_by_side_lines.len();
@@ -635,27 +711,95 @@ impl DiffViewer {
             .min_h_0()
             .child(
                 div()
-                    .id("open-full-file")
                     .px(px(16.0))
-                    .py(px(10.0))
+                    .py(px(6.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .bg(rgb(t.bg_header))
-                    .text_size(ui_text_md(cx))
-                    .font_family("monospace")
-                    .text_color(rgb(t.text_secondary))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(
-                            "Open the complete file at this revision",
-                        )
-                        .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.open_current_file(cx);
-                    }))
-                    .child(file_path),
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(10.0))
+                            .child(
+                                h_flex()
+                                    .flex_shrink_0()
+                                    .h(px(26.0))
+                                    .rounded(px(5.0))
+                                    .border_1()
+                                    .border_color(rgb(t.border))
+                                    .child(file_nav_button(
+                                        "diff-file-previous",
+                                        "icons/chevron-up.svg",
+                                        can_previous_file,
+                                        true,
+                                        t,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .min_w(px(52.0))
+                                            .px(px(7.0))
+                                            .border_l_1()
+                                            .border_r_1()
+                                            .border_color(rgb(t.border))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_size(ui_text_sm(cx))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(t.text_secondary))
+                                            .whitespace_nowrap()
+                                            .child(file_position),
+                                    )
+                                    .child(file_nav_button(
+                                        "diff-file-next",
+                                        "icons/chevron-down.svg",
+                                        can_next_file,
+                                        false,
+                                        t,
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("open-full-file")
+                                    .min_w_0()
+                                    .gap(px(5.0))
+                                    .text_size(ui_text_md(cx))
+                                    .font_family("monospace")
+                                    .text_color(rgb(t.text_secondary))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(t.text_primary)))
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            "Open the complete file at this revision",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.open_current_file(cx);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path("icons/external-link.svg")
+                                            .size(px(12.0))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(file_path),
+                                    ),
+                            ),
+                    ),
             )
             // In-page search bar (Cmd/Ctrl+F)
             .children(search_bar)
@@ -1040,6 +1184,61 @@ impl DiffViewer {
 
         elements
     }
+}
+
+fn file_nav_button(
+    id: &'static str,
+    icon: &'static str,
+    enabled: bool,
+    previous: bool,
+    t: &ThemeColors,
+    cx: &mut Context<DiffViewer>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .cursor(if enabled {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::default()
+        })
+        .w(px(28.0))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(enabled, |d| d.hover(|style| style.bg(rgb(t.bg_hover))))
+        .when(enabled, |d| {
+            if previous {
+                d.on_click(cx.listener(|this, _, _window, cx| this.prev_file(cx)))
+            } else {
+                d.on_click(cx.listener(|this, _, _window, cx| this.next_file(cx)))
+            }
+        })
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(if !enabled {
+                if previous {
+                    "No previous file"
+                } else {
+                    "No next file"
+                }
+            } else if previous {
+                "Previous file  ↑"
+            } else {
+                "Next file  ↓"
+            })
+            .build(window, cx)
+        })
+        .child(
+            svg()
+                .path(icon)
+                .size(px(13.0))
+                .text_color(rgb(if enabled {
+                    t.text_secondary
+                } else {
+                    t.text_muted
+                }))
+                .opacity(if enabled { 1.0 } else { 0.35 }),
+        )
 }
 
 impl Render for DiffViewer {

@@ -294,7 +294,7 @@ impl FileViewer {
                     entries
                         .iter()
                         .position(|entry| entry.hash == revision.hash)
-                        .map(|index| format!("{} / {}", index + 1, entries.len()))
+                        .map(|index| format!("{} of {}", index + 1, entries.len()))
                 })
             })
             .unwrap_or_else(|| {
