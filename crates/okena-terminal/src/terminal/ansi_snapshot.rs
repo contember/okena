@@ -1,10 +1,11 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 use super::event_listener::ZedEventListener;
+use super::modes::TerminalModeState;
 
 /// Tracked SGR state to minimize escape sequences in snapshot output.
 #[derive(Clone, Default, PartialEq)]
@@ -25,10 +26,15 @@ pub(super) fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
     let screen_lines = grid.screen_lines();
     let cols = grid.columns();
     let cursor = term.grid().cursor.point;
-    let cursor_hidden = !term.mode().contains(TermMode::SHOW_CURSOR);
+    let modes = TerminalModeState::from_term_mode(term.mode());
 
     // Generous pre-allocation
     let mut buf = Vec::with_capacity(screen_lines * cols * 4);
+
+    // Select the same screen buffer, then disable origin mode while drawing so
+    // absolute cursor positions are interpreted against the full viewport.
+    modes.write_screen_selection(&mut buf);
+    buf.extend_from_slice(b"\x1b[?6l");
 
     // Clear viewport, then clear scrollback history, then home cursor.
     // `\x1b[2J` alone scrolls the old viewport into history (alacritty's
@@ -103,10 +109,8 @@ pub(super) fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
     // Position cursor
     write_csi_pos(&mut buf, cursor.line.0 + 1, cursor.column.0 as i32 + 1);
 
-    // Hide cursor if needed
-    if cursor_hidden {
-        buf.extend_from_slice(b"\x1b[?25l");
-    }
+    // Snapshots initialize fresh clients and repair stale modes on reconnect.
+    buf.extend_from_slice(&modes.to_ansi());
 
     buf
 }

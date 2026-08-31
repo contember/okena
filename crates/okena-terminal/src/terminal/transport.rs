@@ -1,3 +1,5 @@
+use super::modes::TerminalModeState;
+
 /// Transport trait for terminal I/O operations.
 /// Implemented by PtyManager (local) and RemoteTransport (remote).
 pub trait TerminalTransport: Send + Sync {
@@ -24,4 +26,10 @@ pub trait TerminalTransport: Send + Sync {
     fn answers_terminal_queries(&self) -> bool {
         true
     }
+    /// Load terminal modes retained by a transparent persistent session backend.
+    fn load_terminal_modes(&self, _terminal_id: &str) -> Option<TerminalModeState> {
+        None
+    }
+    /// Retain terminal modes for a future attach to the same transparent session.
+    fn persist_terminal_modes(&self, _terminal_id: &str, _modes: TerminalModeState) {}
 }

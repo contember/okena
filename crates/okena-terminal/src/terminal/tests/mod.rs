@@ -2,6 +2,7 @@ mod focus_report;
 mod helpers;
 mod input_repaint;
 mod kitty;
+mod modes;
 mod osc;
 mod prompt_jump;
 mod resize_authority;

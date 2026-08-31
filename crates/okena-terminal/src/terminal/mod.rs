@@ -37,6 +37,7 @@ mod tests;
 pub use app_version::set_app_version;
 pub use child_processes::{foreground_command, has_child_processes};
 pub use event_listener::set_process_palette;
+pub use modes::TerminalModeState;
 pub use resize_authority::{
     claim_remote_resize_if_allowed, claim_resize_authority_local, claim_resize_authority_remote,
     claim_resize_authority_remote_owner, is_resize_authority_local, release_remote_resize_owner,
@@ -401,7 +402,11 @@ impl Terminal {
             transport.clone(),
             terminal_id.clone(),
         );
-        let term = Term::new(config, &term_size, event_listener);
+        let mut term = Term::new(config, &term_size, event_listener);
+        let mut processor = Processor::new();
+        if let Some(modes) = transport.load_terminal_modes(&terminal_id) {
+            processor.advance(&mut term, &modes.to_ansi());
+        }
 
         let reported_cwd = Arc::new(Mutex::new(None));
         let pending_notifications = Arc::new(Mutex::new(Vec::new()));
@@ -416,7 +421,7 @@ impl Terminal {
 
         Self {
             term: Arc::new(Mutex::new(term)),
-            processor: Mutex::new(Processor::new()),
+            processor: Mutex::new(processor),
             terminal_id,
             resize_state,
             transport,

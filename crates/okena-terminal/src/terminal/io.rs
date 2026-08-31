@@ -3,6 +3,7 @@ use alacritty_terminal::term::TermMode;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::modes::TerminalModeState;
 use super::prompt_marks::advance_with_prompt_marks;
 use super::{InputRepaintRequest, Terminal};
 
@@ -29,6 +30,7 @@ impl Terminal {
         let mut prompt_tracker = self.prompt_tracker.lock();
 
         let history_before = term.grid().history_size();
+        let modes_before = TerminalModeState::from_term_mode(term.mode());
 
         // OSC 7 / OSC 9 / XTVERSION observer runs on the full chunk in one
         // pass — it never needs cursor-accurate positioning.
@@ -51,6 +53,7 @@ impl Terminal {
         }
 
         let history_after = term.grid().history_size();
+        let modes_after = TerminalModeState::from_term_mode(term.mode());
         prompt_tracker.on_history_changed(
             history_before,
             history_after,
@@ -73,6 +76,15 @@ impl Terminal {
                 .fetch_max(output_epoch, Ordering::Release);
         }
         *self.last_output_time.lock() = Instant::now();
+        drop(prompt_tracker);
+        drop(prompt_sidecar);
+        drop(sidecar);
+        drop(processor);
+        drop(term);
+        if modes_after != modes_before {
+            self.transport
+                .persist_terminal_modes(&self.terminal_id, modes_after);
+        }
     }
 
     /// Enqueue output data for deferred processing.
