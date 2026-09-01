@@ -498,6 +498,21 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("down", "↓")
 }
 
+/// The active shortcut for an action, formatted for the current platform.
+pub fn shortcut_for_action(action: &str) -> Option<String> {
+    let config = get_config();
+    let entries = config.bindings.get(action)?;
+    let chosen = if cfg!(target_os = "macos") {
+        entries.iter().find(|entry| entry.enabled)
+    } else {
+        entries
+            .iter()
+            .find(|entry| entry.enabled && entry.keystroke.contains("ctrl"))
+            .or_else(|| entries.iter().find(|entry| entry.enabled))
+    }?;
+    Some(format_keystroke(&chosen.keystroke))
+}
+
 #[cfg(test)]
 mod escape_binding_tests {
     /// Every dismissable popup needs an `escape` binding in *both* the initial

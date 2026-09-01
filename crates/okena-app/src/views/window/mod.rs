@@ -291,8 +291,13 @@ impl WindowView {
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
-        let title_bar = cx.new(|cx| {
-            let mut tb = TitleBar::new("Okena");
+        let window_view = cx.entity().downgrade();
+        let title_bar = cx.new(move |cx| {
+            let mut tb = TitleBar::new("Okena", move |action, window, cx| {
+                let _ = window_view.update(cx, |view, cx| {
+                    view.handle_app_menu_action(action, window, cx);
+                });
+            });
             tb.set_sidebar_open(sidebar_initially_open, cx);
             tb
         });

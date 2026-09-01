@@ -22,6 +22,7 @@ mod macros;
 
 pub mod action_dispatch;
 pub mod app;
+pub mod app_menu;
 pub mod elements;
 pub mod git;
 pub mod keybindings;

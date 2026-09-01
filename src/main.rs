@@ -106,11 +106,9 @@ fn rotate_log_file(active: &std::path::Path, previous: &std::path::Path) -> std:
 
 use crate::assets::{Assets, embedded_fonts};
 use okena_app::app::Okena;
+use okena_app::app_menu::{MACOS_APP_MENU, MACOS_VIEW_MENU, MACOS_WINDOW_MENU, native_menu_items};
 use okena_app::keybindings;
-use okena_app::keybindings::{
-    About, NewWindow, Quit, ShowCommandPalette, ShowKeybindings, ShowProfileManager, ShowSettings,
-    ShowThemeSelector,
-};
+use okena_app::keybindings::Quit;
 use okena_app::logging;
 use okena_app::theme::{AppTheme, GlobalTheme, ThemeMode};
 use okena_app::views::panels::toast::ToastManager;
@@ -129,146 +127,13 @@ fn quit(_: &Quit, cx: &mut App) {
     cx.quit();
 }
 
-/// About action handler - shows native macOS about panel
-#[cfg(target_os = "macos")]
-#[allow(clippy::manual_c_str_literals)]
-fn about(_: &About, _cx: &mut App) {
-    use std::ffi::c_void;
-
-    // Non-variadic objc_msgSend trampolines — ARM64 requires the standard
-    // (non-variadic) calling convention; declaring `...` misplaces arguments.
-    #[allow(clashing_extern_declarations)]
-    unsafe extern "C" {
-        fn objc_getClass(name: *const u8) -> *mut c_void;
-        fn sel_registerName(name: *const u8) -> *mut c_void;
-
-        #[link_name = "objc_msgSend"]
-        fn msg(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
-
-        #[link_name = "objc_msgSend"]
-        fn msg_str(obj: *mut c_void, sel: *mut c_void, s: *const u8) -> *mut c_void;
-
-        #[link_name = "objc_msgSend"]
-        fn msg_id(obj: *mut c_void, sel: *mut c_void, a: *mut c_void) -> *mut c_void;
-
-        #[link_name = "objc_msgSend"]
-        fn msg_id2(
-            obj: *mut c_void,
-            sel: *mut c_void,
-            a: *mut c_void,
-            b: *mut c_void,
-        ) -> *mut c_void;
-
-        #[link_name = "objc_msgSend"]
-        fn msg_bytes_len(
-            obj: *mut c_void,
-            sel: *mut c_void,
-            bytes: *const u8,
-            len: usize,
-        ) -> *mut c_void;
-    }
-
-    unsafe {
-        let alloc = sel_registerName(b"alloc\0".as_ptr());
-        let init_utf8 = sel_registerName(b"initWithUTF8String:\0".as_ptr());
-        let ns_string = objc_getClass(b"NSString\0".as_ptr());
-
-        // Helper: create NSString from null-terminated bytes
-        let nsstring =
-            |s: &[u8]| -> *mut c_void { msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr()) };
-
-        // Build options dictionary with version
-        let dict = msg(
-            objc_getClass(b"NSMutableDictionary\0".as_ptr()),
-            sel_registerName(b"new\0".as_ptr()),
-        );
-        let set_obj = sel_registerName(b"setObject:forKey:\0".as_ptr());
-        let version_cstr = concat!(env!("CARGO_PKG_VERSION"), "\0");
-        msg_id2(
-            dict,
-            set_obj,
-            nsstring(version_cstr.as_bytes()),
-            nsstring(b"ApplicationVersion\0"),
-        );
-        // Set build number to empty to hide the "(x.y.z)" parenthetical
-        msg_id2(dict, set_obj, nsstring(b"\0"), nsstring(b"Version\0"));
-        // Override copyright from Info.plist to ensure it's always current
-        msg_id2(
-            dict,
-            set_obj,
-            nsstring(b"Copyright \xC2\xA9 2026 Contember. All rights reserved.\0"),
-            nsstring(b"Copyright\0"),
-        );
-
-        // Load embedded app icon as NSImage
-        let icon_png = include_bytes!("../assets/logo.png");
-        let ns_data = msg_bytes_len(
-            objc_getClass(b"NSData\0".as_ptr()),
-            sel_registerName(b"dataWithBytes:length:\0".as_ptr()),
-            icon_png.as_ptr(),
-            icon_png.len(),
-        );
-        let ns_image = msg_id(
-            msg(objc_getClass(b"NSImage\0".as_ptr()), alloc),
-            sel_registerName(b"initWithData:\0".as_ptr()),
-            ns_data,
-        );
-        if !ns_image.is_null() {
-            msg_id2(dict, set_obj, ns_image, nsstring(b"ApplicationIcon\0"));
-        }
-
-        // Credits as attributed string from HTML (supports clickable link)
-        let html = b"<div style=\"text-align:center; font-family:-apple-system; font-size:11px;\">Created by Contember Ltd.<br><a href=\"https://contember.com\">contember.com</a></div>";
-        let html_data = msg_bytes_len(
-            objc_getClass(b"NSData\0".as_ptr()),
-            sel_registerName(b"dataWithBytes:length:\0".as_ptr()),
-            html.as_ptr(),
-            html.len(),
-        );
-        let credits = msg_id2(
-            msg(objc_getClass(b"NSAttributedString\0".as_ptr()), alloc),
-            sel_registerName(b"initWithHTML:documentAttributes:\0".as_ptr()),
-            html_data,
-            std::ptr::null_mut::<c_void>(),
-        );
-        if !credits.is_null() {
-            msg_id2(dict, set_obj, credits, nsstring(b"Credits\0"));
-        }
-
-        // [[NSApplication sharedApplication] orderFrontStandardAboutPanelWithOptions:dict]
-        let app = msg(
-            objc_getClass(b"NSApplication\0".as_ptr()),
-            sel_registerName(b"sharedApplication\0".as_ptr()),
-        );
-        msg_id(
-            app,
-            sel_registerName(b"orderFrontStandardAboutPanelWithOptions:\0".as_ptr()),
-            dict,
-        );
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn about(_: &About, _cx: &mut App) {
-    log::info!("Okena v{}", env!("CARGO_PKG_VERSION"));
-}
-
 /// Set up macOS application menu
 fn set_app_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
             name: "Okena".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action("About Okena", About),
-                MenuItem::separator(),
-                MenuItem::action("Settings...", ShowSettings),
-                MenuItem::action("Profiles...", ShowProfileManager),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit Okena", Quit),
-            ],
+            items: native_menu_items(MACOS_APP_MENU),
         },
         Menu {
             name: "Edit".into(),
@@ -290,17 +155,12 @@ fn set_app_menus(cx: &mut App) {
         Menu {
             name: "View".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action("Command Palette", ShowCommandPalette),
-                MenuItem::action("Select Theme", ShowThemeSelector),
-                MenuItem::separator(),
-                MenuItem::action("Keyboard Shortcuts", ShowKeybindings),
-            ],
+            items: native_menu_items(MACOS_VIEW_MENU),
         },
         Menu {
             name: "Window".into(),
             disabled: false,
-            items: vec![MenuItem::action("New Window", NewWindow)],
+            items: native_menu_items(MACOS_WINDOW_MENU),
         },
     ]);
 }
@@ -630,8 +490,6 @@ fn main() {
 
         // Register action handlers for menu items
         cx.on_action(quit);
-        cx.on_action(about);
-
         // Set up macOS application menu
         set_app_menus(cx);
 

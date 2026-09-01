@@ -7,6 +7,7 @@ use gpui::*;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::terminal::shell_config::ShellType;
+use crate::views::overlays::about::{AboutModal, AboutModalEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::close_worktree_dialog::{
     CloseWorktreeDialog, CloseWorktreeDialogEvent,
@@ -69,6 +70,11 @@ pub use okena_ui::{open_overlay, toggle_overlay};
 // CloseEvent impls for overlay events defined in src/ (local types)
 
 impl CloseEvent for AddProjectDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
+}
+impl CloseEvent for AboutModalEvent {
     fn is_close(&self) -> bool {
         matches!(self, Self::Close)
     }
@@ -642,6 +648,10 @@ impl OverlayManager {
     // ========================================================================
     // Simple toggle overlays
     // ========================================================================
+
+    pub fn toggle_about(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, AboutModal, AboutModalEvent, AboutModal::new);
+    }
 
     /// Toggle add project dialog overlay.
     pub fn toggle_add_project_dialog(

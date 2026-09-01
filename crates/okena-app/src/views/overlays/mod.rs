@@ -14,6 +14,7 @@
 //! - Theme selector
 //! - Worktree dialog
 
+pub mod about;
 pub mod add_project_dialog;
 pub mod close_worktree_dialog;
 pub mod command_palette;

@@ -1,5 +1,6 @@
+use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
-    AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
+    About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
     FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
@@ -19,6 +20,57 @@ use gpui::prelude::*;
 use gpui::*;
 
 use super::WindowView;
+
+impl WindowView {
+    pub(super) fn handle_app_menu_action(
+        &mut self,
+        action: AppMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            AppMenuAction::About => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_about(cx));
+            }
+            AppMenuAction::Settings => {
+                let endpoint = self.local_daemon_endpoint(cx);
+                self.overlay_manager.update(cx, |manager, cx| {
+                    manager.toggle_settings_panel(endpoint, cx);
+                });
+            }
+            AppMenuAction::Profiles => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_profile_manager(cx));
+            }
+            AppMenuAction::CommandPalette => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_command_palette(cx));
+            }
+            AppMenuAction::Theme => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_theme_selector(cx));
+            }
+            AppMenuAction::Keybindings => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_keybindings_help(cx));
+            }
+            AppMenuAction::NewWindow => {
+                let bounds = window.window_bounds().get_bounds();
+                let spawning_bounds = crate::workspace::state::WindowBounds {
+                    origin_x: f32::from(bounds.origin.x),
+                    origin_y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.spawn_extra_window(Some(spawning_bounds), cx);
+                });
+            }
+            AppMenuAction::Quit => cx.quit(),
+        }
+    }
+}
 
 impl WindowView {
     fn to_pixel_widths(
@@ -1026,6 +1078,12 @@ impl Render for WindowView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowKeybindings, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_keybindings_help(cx));
+                }
+            }))
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &About, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_about(cx));
                 }
             }))
             // Handle show session manager action
