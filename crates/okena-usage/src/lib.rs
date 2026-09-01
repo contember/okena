@@ -849,39 +849,42 @@ pub fn usage_kv_row(
 /// time-elapsed value (so the color matches the popover headline exactly).
 pub type TriggerItem = (SharedString, f64, Option<f64>);
 
-/// Build the inner content of the status-bar trigger — `5h 42% | 7d 70%`.
+/// Build the inner content of the status-bar trigger with a bar below each value.
 /// The caller wraps these in a hoverable, bounds-tracking container.
 pub fn usage_trigger_items(t: &ThemeColors, cx: &App, items: &[TriggerItem]) -> Vec<AnyElement> {
-    let mut out = Vec::new();
-    for (i, (label, pct, time_pct)) in items.iter().enumerate() {
-        if i > 0 {
-            out.push(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("|")
-                    .into_any_element(),
-            );
-        }
-        out.push(
-            h_flex()
-                .gap(px(3.0))
+    let mut track_color = rgb(t.text_muted);
+    track_color.a = 0.55;
+
+    items
+        .iter()
+        .map(|(label, pct, time_pct)| {
+            let color = headline_color(t, *pct, *time_pct);
+            v_flex()
+                .gap(px(1.0))
                 .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(label.clone()),
+                    h_flex()
+                        .gap(px(3.0))
+                        .text_size(ui_text_sm(cx))
+                        .child(div().text_color(rgb(t.text_muted)).child(label.clone()))
+                        .child(div().text_color(rgb(color)).child(format!("{:.0}%", pct))),
                 )
                 .child(
                     div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(headline_color(t, *pct, *time_pct)))
-                        .child(format!("{:.0}%", pct)),
+                        .h(px(2.0))
+                        .w_full()
+                        .rounded_full()
+                        .bg(track_color)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(pct.clamp(0.0, 100.0) as f32 / 100.0))
+                                .rounded_full()
+                                .bg(rgb(color)),
+                        ),
                 )
-                .into_any_element(),
-        );
-    }
-    out
+                .into_any_element()
+        })
+        .collect()
 }
 
 // ============================================================================

@@ -6,6 +6,7 @@ use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::{ApiLayoutNode, ApiSystemStats};
 use okena_extensions::{ExtensionInstance, ExtensionRegistry};
@@ -609,8 +610,7 @@ impl Render for StatusBar {
         // Get current time using chrono-free approach
         let time_str = Self::format_time();
 
-        // Format memory
-        let memory_str = format!(
+        let memory_detail = format!(
             "{:.1}/{:.1} GB",
             stats.memory_used_gb, stats.memory_total_gb
         );
@@ -635,6 +635,8 @@ impl Render for StatusBar {
         } else {
             t.metric_normal
         };
+        let mut metric_track_color = rgb(t.text_muted);
+        metric_track_color.a = 0.55;
 
         // Collect widgets in stable registry order from active extensions
         let left_widgets: Vec<&Vec<AnyView>> = self
@@ -691,21 +693,67 @@ impl Render for StatusBar {
                     })
                     // CPU
                     .child(
-                        h_flex()
-                            .gap(px(4.0))
-                            .child(div().text_color(rgb(t.text_muted)).child("CPU"))
+                        v_flex()
+                            .gap(px(1.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(3.0))
+                                    .text_size(ui_text_sm(cx))
+                                    .child(div().text_color(rgb(t.text_muted)).child("CPU"))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(cpu_color))
+                                            .child(format!("{:02.0}%", stats.cpu_usage)),
+                                    ),
+                            )
                             .child(
                                 div()
-                                    .text_color(rgb(cpu_color))
-                                    .child(format!("{:02.0}%", stats.cpu_usage)),
+                                    .h(px(2.0))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(metric_track_color)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative((stats.cpu_usage / 100.0).clamp(0.0, 1.0)))
+                                            .rounded_full()
+                                            .bg(rgb(cpu_color)),
+                                    ),
                             ),
                     )
                     // Memory
                     .child(
-                        h_flex()
-                            .gap(px(4.0))
-                            .child(div().text_color(rgb(t.text_muted)).child("MEM"))
-                            .child(div().text_color(rgb(mem_color)).child(memory_str)),
+                        v_flex()
+                            .id("memory-status-metric")
+                            .gap(px(1.0))
+                            .child(
+                                h_flex()
+                                    .gap(px(3.0))
+                                    .text_size(ui_text_sm(cx))
+                                    .child(div().text_color(rgb(t.text_muted)).child("MEM"))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(mem_color))
+                                            .child(format!("{memory_percent}%")),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .h(px(2.0))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(metric_track_color)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(memory_percent.min(100) as f32 / 100.0))
+                                            .rounded_full()
+                                            .bg(rgb(mem_color)),
+                                    ),
+                            )
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(memory_detail.clone()).build(window, cx)
+                            }),
                     );
 
                 // Left-side extension widgets
