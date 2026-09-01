@@ -87,8 +87,8 @@ impl Sidebar {
     }
 
     /// Outer sidebar chrome shared by the manual and activity render paths:
-    /// header, projects header, and the scrolling body holding `flat_elements`
-    /// plus the remote section. Tracks pointer-inside for the activity view's
+    /// overview navigation with project controls, and the scrolling body holding
+    /// `flat_elements` plus the remote section. Tracks pointer-inside for the activity view's
     /// hover-freeze.
     pub(crate) fn render_sidebar_container(
         &mut self,
@@ -110,8 +110,7 @@ impl Sidebar {
             .on_action(cx.listener(Self::handle_sidebar_confirm))
             .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
             .on_action(cx.listener(Self::handle_sidebar_escape))
-            .child(self.render_header(cx))
-            .child(self.render_projects_header(cx))
+            .child(self.render_overview_row(cx))
             .child(
                 div()
                     .id("sidebar-scroll")
