@@ -1,6 +1,9 @@
-# Commit
+---
+description: Commit staged and unstaged changes following Okena's message and splitting conventions.
+allowed-tools: Bash(git:*)
+---
 
-Commit staged and unstaged changes following the rules below.
+# Commit
 
 ## Commit message format
 
@@ -17,18 +20,9 @@ Types: `feat`, `fix`, `refactor`, `perf`, `chore`, `ci`, `docs`, `test`
 - Keep the first line under 72 characters
 - Add a blank line + body only if the "why" isn't obvious from the summary
 
-## Splitting into logical commits
+## Splitting and staging
 
-- If you have context about what work was done (e.g. you just finished implementing something), commit **only** that work. Don't bundle unrelated changes — leave other unstaged/untracked changes alone.
-- You MAY split your work into multiple logical commits if it makes sense (e.g. a refactor commit + a feature commit, or separating test changes from implementation).
-- If you have no prior context, read `git diff` and `git diff --cached` to understand all changes, then group them into reasonable logical commits by topic/purpose. If some changes appear unrelated to each other and you can't determine what belongs together, ask before committing.
-- Each commit should be self-contained and buildable on its own when possible.
-
-## Procedure
-
-1. Run `git status` and `git diff` (staged + unstaged) to see all changes.
-2. Review the changes and decide how to split them into commits (if needed).
-3. For each commit:
-   - Stage the relevant files with `git add <specific files>` (never `git add -A` or `git add .`)
-   - Create the commit
-4. Run `git status` after all commits to verify nothing was missed.
+Group unrelated changes into separate commits; each one should compile on its own
+(`cargo check`). Stage files explicitly — never `git add -A` or `git add .`, since
+this tree routinely carries worktree and cross-branch edits that are not yours to
+commit (see the Git Rules in the root `CLAUDE.md`).
