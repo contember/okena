@@ -183,6 +183,32 @@ fn publish_committed_settings_change(
     }
 }
 
+/// Re-apply the scrollback depth after the user edits it.
+///
+/// The process-wide default only affects terminals built from here on, so live
+/// grids have to be resized explicitly. Shrinking frees the excess history
+/// immediately, which is the point: this is the daemon's half of the ~50 MB
+/// per fully-scrolled terminal that okena otherwise holds forever.
+fn apply_scrollback_after_committed_settings_change(
+    outcome: &SettingsUpdateOutcome,
+    settings: &Arc<Mutex<AppSettings>>,
+    terminals: &TerminalsRegistry,
+) {
+    if !outcome.committed {
+        return;
+    }
+    let lines = settings.lock().scrollback_lines;
+    okena_terminal::terminal::set_process_scrollback_lines(lines);
+
+    // Clone the handles out before touching any terminal: `set_scrollback_lines`
+    // takes the per-terminal locks, and holding the registry lock across that
+    // would serialize it against the PTY loop.
+    let live: Vec<_> = terminals.lock().values().cloned().collect();
+    for terminal in live {
+        terminal.set_scrollback_lines(lines);
+    }
+}
+
 fn refresh_claude_pty_env_after_committed_settings_change(
     outcome: &SettingsUpdateOutcome,
     settings: &Arc<Mutex<AppSettings>>,
@@ -2697,6 +2723,9 @@ pub async fn daemon_command_loop(
                             &outcome,
                             &settings,
                             backend.as_ref(),
+                        );
+                        apply_scrollback_after_committed_settings_change(
+                            &outcome, &settings, &terminals,
                         );
                         publish_committed_settings_change(&outcome, &state_version);
                         outcome.result

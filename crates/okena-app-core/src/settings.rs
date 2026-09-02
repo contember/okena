@@ -500,6 +500,11 @@ pub fn open_settings_file() {
 #[cfg(feature = "gpui")]
 pub fn init_settings(cx: &mut App) -> Entity<SettingsState> {
     let settings = load_settings();
+    // Terminals are built from a dozen places that have no route to settings,
+    // so the scrollback depth travels as a process-wide default (same shape as
+    // the terminal palette). Set it before any terminal exists; the daemon's
+    // value replaces it when the connection delivers `SettingsChanged`.
+    okena_terminal::terminal::set_process_scrollback_lines(settings.scrollback_lines);
     let entity = cx.new(|_cx| SettingsState::new(settings));
     cx.set_global(GlobalSettings(entity.clone()));
     entity

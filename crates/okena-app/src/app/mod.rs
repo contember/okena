@@ -415,6 +415,7 @@ impl Okena {
                 let settings = settings.as_ref().clone();
                 let mode = settings.theme_mode;
                 let custom_id = settings.custom_theme_id.clone();
+                this.apply_scrollback_setting(settings.scrollback_lines);
                 crate::settings::settings_entity(cx).update(cx, |state, cx| {
                     state.replace_from_daemon(settings.clone(), cx);
                 });
@@ -868,6 +869,28 @@ impl Okena {
     /// then re-points the loopback connection at the new endpoint/token.
     /// Single-flight and quit-aware; mirrors `perform_restart_daemon`'s pattern
     /// of running the blocking remote-server call on the background pool.
+    /// Apply the daemon's scrollback depth to this process.
+    ///
+    /// The client keeps its own alacritty grid per terminal, so the setting has
+    /// to be honored on both sides of the wire or the mirror alone would still
+    /// hold 10 000 lines (~50 MB per fully-scrolled terminal). Sets the
+    /// process-wide default for terminals created later and resizes the ones
+    /// already live.
+    pub(crate) fn apply_scrollback_setting(&self, lines: u32) {
+        if okena_terminal::terminal::process_scrollback_lines() == lines {
+            return;
+        }
+        okena_terminal::terminal::set_process_scrollback_lines(lines);
+
+        // Clone the handles out before resizing: `set_scrollback_lines` takes
+        // each terminal's own lock, and holding the registry lock across that
+        // would block the tokio reader tasks enqueueing output.
+        let live: Vec<_> = self.terminals.lock().values().cloned().collect();
+        for terminal in live {
+            terminal.set_scrollback_lines(lines);
+        }
+    }
+
     fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {
         if self.quitting.load(Ordering::SeqCst) {
             return;

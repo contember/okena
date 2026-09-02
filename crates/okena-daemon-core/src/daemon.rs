@@ -383,6 +383,13 @@ impl DaemonCore {
             okena_terminal::terminal::set_process_palette(colors);
         }
 
+        // Scrollback depth, same shape as the palette above: one user setting
+        // that has to reach terminals built anywhere in the process (hook
+        // runner, service manager, PTY loop), most of which have no route to
+        // `AppSettings`. Terminals created before this point would silently get
+        // alacritty's 10 000-line default, so set it before any PTY spawns.
+        okena_terminal::terminal::set_process_scrollback_lines(settings.lock().scrollback_lines);
+
         // ── 5. Server wiring channels ────────────────────────────────────────
         // Shared-watch trick: `tokio::sync::watch::Sender` is `Clone` and clones
         // share one underlying channel. The server + command loop READ this
