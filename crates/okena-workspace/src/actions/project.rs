@@ -639,13 +639,16 @@ impl Workspace {
         }
         self.ensure_project_path_mutation_allowed(project_id, &new_path_buf)?;
 
-        let (is_remote, old_path) = {
+        let (is_mirror, old_path) = {
             let project = self
                 .project(project_id)
                 .ok_or_else(|| "Project not found".to_string())?;
-            (project.is_remote, std::path::PathBuf::from(&project.path))
+            (
+                project.connection_id.is_some(),
+                std::path::PathBuf::from(&project.path),
+            )
         };
-        if is_remote {
+        if is_mirror {
             // Not a refusal of remote projects as such — a client routes this
             // action to the daemon that owns the project, and there it is
             // local. Reaching here means someone asked a workspace to repoint
@@ -660,7 +663,7 @@ impl Workspace {
         if let Some(claimant) = self
             .projects()
             .iter()
-            .filter(|other| !other.is_remote && other.id != project_id)
+            .filter(|other| other.id != project_id)
             .find(|other| {
                 Self::physical_path_identity(std::path::Path::new(&other.path)) == new_identity
             })
@@ -906,7 +909,7 @@ impl Workspace {
         let old_identity = Self::physical_path_identity(old_root);
         let old_lexical = Self::lexical_absolute(old_root);
         let mut translated_paths = Vec::new();
-        for descendant in self.projects().iter().filter(|project| !project.is_remote) {
+        for descendant in self.projects() {
             let descendant_path = std::path::Path::new(&descendant.path);
             if !Self::physical_path_identity(descendant_path).starts_with(&old_identity) {
                 continue;
