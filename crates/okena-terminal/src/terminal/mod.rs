@@ -45,8 +45,9 @@ pub use resize_authority::{
 };
 pub use transport::TerminalTransport;
 pub use types::{
-    AppCursorShape, ClipboardReadResponder, DetectedLink, PromptMark, PromptMarkKind, ResizeState,
-    SelectionState, TerminalProgress, TerminalProgressState, TerminalSize,
+    AppCursorShape, ClipboardReadResponder, DEFAULT_SCROLLBACK_LINES, DetectedLink, PromptMark,
+    PromptMarkKind, ResizeState, SelectionState, TerminalOptions, TerminalProgress,
+    TerminalProgressState, TerminalSize, process_scrollback_lines, set_process_scrollback_lines,
 };
 
 pub use osc_sidecar::TerminalNotification;
@@ -341,15 +342,43 @@ pub struct Terminal {
     /// lock-free by the idle-detection loop. Prevents flagging fresh
     /// terminals as idle before the user has interacted.
     pub(super) had_user_input: AtomicBool,
+
+    /// The exact `TermConfig` handed to `Term::new`, kept so
+    /// `set_scrollback_lines` can re-apply an otherwise-identical config with
+    /// only `scrolling_history` changed. alacritty's `Term::set_options`
+    /// resets the kitty-keyboard stacks when that flag differs and always
+    /// re-emits a title event, so the re-applied config must match this one
+    /// in every other field.
+    pub(super) term_config: Mutex<TermConfig>,
 }
 
 impl Terminal {
-    /// Create a new terminal
+    /// Create a new terminal, sized from the process-wide scrollback setting
+    /// (see [`set_process_scrollback_lines`]). Use [`Terminal::with_options`]
+    /// only when this terminal needs a depth different from every other one —
+    /// e.g. a client mirror of a project the user cannot currently see.
     pub fn new(
         terminal_id: String,
         size: TerminalSize,
         transport: Arc<dyn TerminalTransport>,
         initial_cwd: String,
+    ) -> Self {
+        Self::with_options(
+            terminal_id,
+            size,
+            transport,
+            initial_cwd,
+            TerminalOptions::default(),
+        )
+    }
+
+    /// Create a new terminal, sizing its scrollback from `options`.
+    pub fn with_options(
+        terminal_id: String,
+        size: TerminalSize,
+        transport: Arc<dyn TerminalTransport>,
+        initial_cwd: String,
+        options: TerminalOptions,
     ) -> Self {
         // Use HollowBlock as a sentinel for "app has not set a cursor shape
         // via DECSCUSR" — no real DECSCUSR code maps to HollowBlock, so if
@@ -375,6 +404,12 @@ impl Terminal {
             // (off by default). The actual security gate lives in Okena, not
             // here — alacritty just hands us the request.
             osc52: alacritty_terminal::term::Osc52::CopyPaste,
+            // Scrollback depth. alacritty's default is 10 000 lines, which at
+            // ~24 bytes per cell costs ~50 MB per fully-scrolled 200-column
+            // terminal — doubled, because the daemon and every client mirror
+            // keep their own grid. Honor the user's `scrollback_lines` setting
+            // instead of silently ignoring it.
+            scrolling_history: options.scrollback_lines as usize,
             ..TermConfig::default()
         };
         let term_size = TermSize::new(size.cols as usize, size.rows as usize);
@@ -402,7 +437,7 @@ impl Terminal {
             transport.clone(),
             terminal_id.clone(),
         );
-        let mut term = Term::new(config, &term_size, event_listener);
+        let mut term = Term::new(config.clone(), &term_size, event_listener);
         let mut processor = Processor::new();
         if let Some(modes) = transport.load_terminal_modes(&terminal_id) {
             processor.advance(&mut term, &modes.to_ansi());
@@ -459,6 +494,48 @@ impl Terminal {
             waiting_for_input: AtomicBool::new(false),
             had_user_input: AtomicBool::new(false),
             last_viewed_time: Arc::new(Mutex::new(Instant::now())),
+            term_config: Mutex::new(config),
         }
+    }
+
+    /// Resize the scrollback buffer of a live terminal.
+    ///
+    /// Shrinking drops the excess history immediately (alacritty's
+    /// `Grid::update_history` calls `Storage::shrink_lines`, which frees the
+    /// row allocations once more than one batch is spare); growing only raises
+    /// the cap, with rows allocated on demand. Used both when the user edits
+    /// `scrollback_lines` and when a project is hidden in every window, where
+    /// the client mirror does not need to hold history it cannot show.
+    ///
+    /// Only the *active* grid is updated, matching alacritty: a terminal
+    /// currently in the alternate screen keeps its primary-grid history until
+    /// this is called again after it leaves alt-screen.
+    pub fn set_scrollback_lines(&self, lines: u32) {
+        let mut config = self.term_config.lock();
+        if config.scrolling_history == lines as usize {
+            return;
+        }
+        config.scrolling_history = lines as usize;
+        let updated = config.clone();
+        drop(config);
+
+        use alacritty_terminal::grid::Dimensions;
+        let mut term = self.term.lock();
+        let before = term.grid().history_size();
+        term.set_options(updated);
+        let after = term.grid().history_size();
+        drop(term);
+
+        // Prompt marks are stored relative to the grid's top; dropping history
+        // rows invalidates the ones that fell off. `on_history_changed` only
+        // handles growth (it shifts marks down), so prune explicitly here.
+        if after < before {
+            self.prompt_tracker.lock().drop_marks_above(after);
+        }
+    }
+
+    /// The scrollback depth currently configured for this terminal.
+    pub fn scrollback_lines(&self) -> u32 {
+        self.term_config.lock().scrolling_history as u32
     }
 }

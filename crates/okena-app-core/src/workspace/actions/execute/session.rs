@@ -379,6 +379,7 @@ pub fn begin_workspace_replacement(
                 hook_type: result.hook_type.to_string(),
                 command: result.command.clone(),
                 cwd: result.cwd.clone(),
+                finished_at: None,
             },
         );
         project
@@ -961,6 +962,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         ProjectData {

@@ -123,6 +123,7 @@ mod tests {
                 hook_type: "before_worktree_remove".into(),
                 command: "true".into(),
                 cwd: project.path.clone(),
+                finished_at: None,
             },
         );
         let mut workspace = Workspace::new(WorkspaceData {

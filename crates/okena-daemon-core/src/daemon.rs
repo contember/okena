@@ -383,6 +383,37 @@ impl DaemonCore {
             okena_terminal::terminal::set_process_palette(colors);
         }
 
+        // Scrollback depth, same shape as the palette above: one user setting
+        // that has to reach terminals built anywhere in the process (hook
+        // runner, service manager, PTY loop), most of which have no route to
+        // `AppSettings`. Terminals created before this point would silently get
+        // alacritty's 10 000-line default, so set it before any PTY spawns.
+        okena_terminal::terminal::set_process_scrollback_lines(settings.lock().scrollback_lines);
+
+        // Retire hook terminals that piled up before eviction existed (or under
+        // an older build). Their PTYs did not survive the restart, so this only
+        // drops persisted records — no terminal is registered yet at this point.
+        {
+            let no_hook_runner = None;
+            let no_hook_monitor = None;
+            let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(
+                &reactor.workspace_tick,
+                &no_hook_runner,
+                &no_hook_monitor,
+            );
+            let mut ws = reactor.workspace.lock();
+            let project_ids: Vec<String> =
+                ws.projects().iter().map(|project| project.id.clone()).collect();
+            for project_id in project_ids {
+                for terminal_id in ws.finished_hook_terminals_to_evict(
+                    &project_id,
+                    okena_app_core::workspace::actions::execute::MAX_FINISHED_HOOK_TERMINALS,
+                ) {
+                    ws.remove_hook_terminal(&terminal_id, &mut cx);
+                }
+            }
+        }
+
         // ── 5. Server wiring channels ────────────────────────────────────────
         // Shared-watch trick: `tokio::sync::watch::Sender` is `Clone` and clones
         // share one underlying channel. The server + command loop READ this
@@ -829,6 +860,7 @@ mod shutdown_tests {
                     hook_type: "on_project_open".to_string(),
                     command: "true".to_string(),
                     cwd: "/tmp".to_string(),
+                    finished_at: None,
                 },
             )]),
             pinned: false,
@@ -935,6 +967,7 @@ mod shutdown_tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         data.projects.push(project);

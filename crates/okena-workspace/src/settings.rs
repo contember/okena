@@ -1042,6 +1042,16 @@ mod tests {
     }
 
     #[test]
+    fn recover_clamps_scrollback_up_to_the_floor() {
+        // The lower bound matters now that `scrollback_lines` actually sizes
+        // the alacritty grid: a tiny value would leave the user unable to
+        // scroll back at all, and 0 would be indistinguishable from the
+        // "hidden project" state the client uses to free a mirror's history.
+        let recovered = recover_settings_from_json(r#"{"scrollback_lines": 10}"#).unwrap();
+        assert_eq!(recovered.scrollback_lines, 100);
+    }
+
+    #[test]
     fn recover_all_garbage_fields_returns_defaults() {
         // Valid JSON object, but every value has the wrong type.
         let json = r#"{

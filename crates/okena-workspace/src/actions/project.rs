@@ -1489,6 +1489,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         project
@@ -1530,6 +1531,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
 
@@ -3461,6 +3463,7 @@ mod gpui_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "echo done".to_string(),
                 cwd: descendant_path.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         let mut data = make_workspace_data();

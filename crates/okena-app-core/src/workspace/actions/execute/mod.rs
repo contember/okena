@@ -30,6 +30,8 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use project::{MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal};
+
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
     execute_prepared_content_search_with_cancellation, prepare_content_search,

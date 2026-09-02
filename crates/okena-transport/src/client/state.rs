@@ -250,6 +250,7 @@ mod tests {
             hook_type: "on_worktree_create".to_string(),
             command: "echo hi".to_string(),
             cwd: "/tmp".to_string(),
+            finished_at: None,
         });
         let state = make_state(vec![proj]);
 

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 /// Formatter for an OSC 52 clipboard *read* request.
 ///
 /// `alacritty_terminal` hands us this closure with the
@@ -26,6 +28,61 @@ impl Default for TerminalSize {
             cell_width: 8.0,
             cell_height: 16.0,
         }
+    }
+}
+
+/// Construction-time knobs for a [`super::Terminal`].
+///
+/// Currently just the scrollback depth, which is the single biggest lever on
+/// okena's memory use: alacritty stores 24 bytes per cell, so a 200-column
+/// terminal that fills the default 10 000-line history costs ~50 MB — once in
+/// the daemon that owns the PTY, and again in every client mirroring it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalOptions {
+    /// Lines of scrollback to retain. Mirrors `AppSettings::scrollback_lines`,
+    /// which the settings layer clamps to 100..=100 000.
+    pub scrollback_lines: u32,
+}
+
+/// alacritty's own default, kept as ours so terminals built without settings
+/// in reach behave exactly as they did before this knob existed.
+pub const DEFAULT_SCROLLBACK_LINES: u32 = 10_000;
+
+/// Process-wide scrollback depth applied to terminals built without explicit
+/// options. Set at boot and on settings changes via
+/// [`set_process_scrollback_lines`], mirroring how the process palette reaches
+/// terminals that have no view to push one.
+///
+/// A global rather than a constructor argument because scrollback is one
+/// user-level setting shared by every terminal in the process, while terminals
+/// are constructed from a dozen places (hook runner, service manager, remote
+/// client, panes) that mostly have no route to `AppSettings`.
+static PROCESS_SCROLLBACK_LINES: AtomicU32 = AtomicU32::new(DEFAULT_SCROLLBACK_LINES);
+
+/// Set the process-wide default scrollback depth for terminals created from
+/// here on. Existing terminals are unaffected — call
+/// [`super::Terminal::set_scrollback_lines`] on them to resize a live grid.
+pub fn set_process_scrollback_lines(lines: u32) {
+    PROCESS_SCROLLBACK_LINES.store(lines, Ordering::Relaxed);
+}
+
+/// The current process-wide default scrollback depth.
+pub fn process_scrollback_lines() -> u32 {
+    PROCESS_SCROLLBACK_LINES.load(Ordering::Relaxed)
+}
+
+impl Default for TerminalOptions {
+    fn default() -> Self {
+        Self {
+            scrollback_lines: process_scrollback_lines(),
+        }
+    }
+}
+
+impl TerminalOptions {
+    /// Options with an explicit scrollback depth.
+    pub fn with_scrollback_lines(scrollback_lines: u32) -> Self {
+        Self { scrollback_lines }
     }
 }
 

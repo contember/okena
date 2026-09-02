@@ -25,7 +25,7 @@ pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
     PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
-    WorkspaceData, WorktreeMetadata,
+    WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -1775,6 +1775,7 @@ impl Workspace {
                     hook_type: result.hook_type.to_string(),
                     command: result.command,
                     cwd: result.cwd,
+                    finished_at: None,
                 },
                 cx,
             );
@@ -1790,12 +1791,63 @@ impl Workspace {
         for project in &mut self.data.projects {
             if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
                 if entry.status != status {
+                    // Stamp when it stopped running, so the oldest finished
+                    // hooks can be evicted before they accumulate. Set only on
+                    // the transition, so a re-reported status keeps the
+                    // original time.
+                    entry.finished_at = match status {
+                        HookTerminalStatus::Running => None,
+                        _ => Some(crate::state::now_unix_seconds()),
+                    };
                     entry.status = status;
                     cx.notify();
                 }
                 return;
             }
         }
+    }
+
+    /// Finished hook terminals to retire, keeping the `keep` most recent.
+    ///
+    /// A hook terminal that completes on a normal path is kept forever: its
+    /// entry persists, and its `Arc<Terminal>` keeps a full scrollback grid in
+    /// the daemon plus one in every client mirroring it. Only a manual dismiss
+    /// ever removed one, so a project whose hooks run on every worktree
+    /// operation accumulates them for the life of the workspace.
+    ///
+    /// Running hooks are never candidates. Successes go before failures at the
+    /// same age, since a failure is the one the user still wants to read.
+    /// Entries with no `finished_at` (written before the field existed) sort
+    /// oldest.
+    pub fn finished_hook_terminals_to_evict(&self, project_id: &str, keep: usize) -> Vec<String> {
+        let Some(project) = self.project(project_id) else {
+            return Vec::new();
+        };
+        let mut finished: Vec<(&String, &HookTerminalEntry)> = project
+            .hook_terminals
+            .iter()
+            .filter(|(_, entry)| entry.status != HookTerminalStatus::Running)
+            .collect();
+        if finished.len() <= keep {
+            return Vec::new();
+        }
+        // Newest first, so the tail past `keep` is what goes.
+        finished.sort_by(|(a_id, a), (b_id, b)| {
+            let failed = |entry: &HookTerminalEntry| {
+                matches!(entry.status, HookTerminalStatus::Failed { .. })
+            };
+            failed(b)
+                .cmp(&failed(a))
+                .then(b.finished_at.cmp(&a.finished_at))
+                // Ids last, so the order is total and eviction is deterministic
+                // for entries that finished within the same second.
+                .then(b_id.cmp(a_id))
+        });
+        finished
+            .split_off(keep)
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     pub fn remove_hook_terminal(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
@@ -1841,6 +1893,22 @@ impl Workspace {
         self.project(project_id)
             .map(|p| p.hook_terminals.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Every terminal id belonging to a project: its layout tree plus its hook
+    /// terminals, which live outside the tree but are real terminals all the
+    /// same. In a client mirror these are the registry's own keys.
+    pub fn all_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        let Some(project) = self.project(project_id) else {
+            return Vec::new();
+        };
+        let mut ids = project
+            .layout
+            .as_ref()
+            .map(|layout| layout.collect_terminal_ids())
+            .unwrap_or_default();
+        ids.extend(project.hook_terminals.keys().cloned());
+        ids
     }
 
     /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
@@ -2326,6 +2394,7 @@ mod workspace_tests {
                 hook_type: "before_worktree_remove".into(),
                 command: "true".into(),
                 cwd: "/tmp".into(),
+                finished_at: None,
             },
         );
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["wt1"]));
@@ -2405,6 +2474,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project
@@ -2761,6 +2831,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "echo done".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project.hook_terminals.insert(
@@ -2771,6 +2842,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "sleep 10".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project
@@ -4026,7 +4098,167 @@ mod gpui_tests {
             hook_type: hook_type.to_string(),
             command: "echo test".to_string(),
             cwd: ".".to_string(),
+            finished_at: None,
         }
+    }
+
+    fn finished_hook_entry(status: HookTerminalStatus, finished_at: Option<u64>) -> HookTerminalEntry {
+        HookTerminalEntry {
+            status,
+            finished_at,
+            ..make_hook_entry("on_project_open")
+        }
+    }
+
+    /// Build a project holding the given `(terminal_id, entry)` hook terminals.
+    fn project_with_hooks(id: &str, hooks: Vec<(&str, HookTerminalEntry)>) -> ProjectData {
+        let mut project = make_project(id);
+        for (terminal_id, entry) in hooks {
+            project
+                .hook_terminals
+                .insert(terminal_id.to_string(), entry);
+        }
+        project
+    }
+
+    fn evict_from(project: ProjectData, keep: usize) -> Vec<String> {
+        let id = project.id.clone();
+        let ws = Workspace::new(make_workspace_data(vec![project], vec![&id]));
+        ws.finished_hook_terminals_to_evict(&id, keep)
+    }
+
+    #[test]
+    fn eviction_keeps_the_most_recent_finished_hooks() {
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
+                    ("mid", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(300))),
+                ],
+            ),
+            2,
+        );
+
+        assert_eq!(stale, vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn eviction_never_touches_a_running_hook() {
+        // Two finished and one still running, keeping one: only a finished hook
+        // may go, and the running one must not count toward the budget.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    ("running", make_hook_entry("on_project_open")),
+                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
+                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn eviction_prefers_dropping_successes_over_failures() {
+        // A failure is the one the user still wants to read, so it outranks a
+        // newer success when something has to go.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    (
+                        "failed",
+                        finished_hook_entry(HookTerminalStatus::Failed { exit_code: 1 }, Some(100)),
+                    ),
+                    ("succeeded", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["succeeded".to_string()]);
+    }
+
+    #[test]
+    fn eviction_treats_entries_without_a_finish_time_as_oldest() {
+        // Written before `finished_at` existed, so they carry no timestamp.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    ("legacy", finished_hook_entry(HookTerminalStatus::Succeeded, None)),
+                    ("recent", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["legacy".to_string()]);
+    }
+
+    #[test]
+    fn eviction_is_a_no_op_within_budget() {
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![("only", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)))],
+            ),
+            5,
+        );
+
+        assert!(stale.is_empty());
+    }
+
+    #[gpui::test]
+    fn project_terminal_ids_cover_the_layout_and_the_hooks(cx: &mut gpui::TestAppContext) {
+        // The client's hidden-project scrollback pass walks these ids, so a
+        // hook terminal missing here would keep a full grid while hidden.
+        // `make_project` gives p1 a layout holding one terminal, `term_p1`.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let mut ids = ws.all_terminal_ids_for_project("p1");
+            ids.sort();
+            assert_eq!(ids, vec!["hook-1".to_string(), "term_p1".to_string()]);
+            assert!(ws.all_terminal_ids_for_project("missing").is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn finishing_a_hook_stamps_when_it_stopped(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            assert!(
+                ws.project("p1").unwrap().hook_terminals["hook-1"]
+                    .finished_at
+                    .is_none(),
+                "a running hook has no finish time"
+            );
+
+            ws.update_hook_terminal_status("hook-1", HookTerminalStatus::Succeeded, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                ws.project("p1").unwrap().hook_terminals["hook-1"]
+                    .finished_at
+                    .is_some(),
+                "finishing must stamp a time so eviction can order candidates"
+            );
+        });
     }
 
     #[gpui::test]
@@ -4133,6 +4365,7 @@ mod gpui_tests {
                     hook_type: "on_project_open".to_string(),
                     command: "echo test".to_string(),
                     cwd: ".".to_string(),
+                    finished_at: None,
                 },
                 cx,
             );
