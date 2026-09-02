@@ -400,6 +400,10 @@ pub struct ApiHookTerminalEntry {
     pub hook_type: String,
     pub command: String,
     pub cwd: String,
+    /// Unix seconds at which the hook finished, `None` while running. Older
+    /// daemons omit it; the client only uses it to order eviction candidates.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 
 /// Wire mirror of `okena_hooks::HookStatus`. Durations are carried as whole
@@ -1367,6 +1371,7 @@ mod tests {
                     hook_type: "on_project_open".into(),
                     command: "echo hi".into(),
                     cwd: "/tmp".into(),
+                    finished_at: None,
                 }],
                 hooks: ApiHooksConfig {
                     project: ApiProjectHooks {

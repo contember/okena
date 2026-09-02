@@ -635,6 +635,7 @@ mod tests {
             hook_type: "on_project_open".into(),
             command: "make".into(),
             cwd: "/srv/a".into(),
+            finished_at: None,
         }];
         let snap = RemoteSnapshot {
             config: config("c1"),

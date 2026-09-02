@@ -4608,6 +4608,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: path.to_string(),
+                finished_at: None,
             },
         );
         Workspace::new(data)
@@ -6676,6 +6677,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: tmp_path.to_string(),
+                finished_at: None,
             },
         );
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));
@@ -6771,6 +6773,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));
@@ -7573,6 +7576,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: worktree.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         data.projects[1]
@@ -7586,6 +7590,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo completed".to_string(),
                 cwd: worktree.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         let metadata = data.projects[1]
@@ -8069,6 +8074,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo completed".to_string(),
                 cwd: old_path.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         let mut nested = data.projects[0].clone();

@@ -36,6 +36,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_channel::Receiver;
+use okena_app_core::workspace::actions::execute::evict_stale_hook_terminals;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;
@@ -315,6 +316,7 @@ fn process_osc_hook_exits(
     if !status_updates.is_empty() {
         let mut cx = reactor.workspace_cx();
         let mut ws = reactor.workspace.lock();
+        let mut touched_projects: Vec<String> = Vec::new();
         for (tid, status, exit_code) in status_updates {
             if let Some(monitor) = reactor.hook_monitor.as_ref() {
                 monitor.finish_by_terminal_id(&tid, exit_code);
@@ -324,8 +326,25 @@ fn process_osc_hook_exits(
                 HookTerminalStatus::Failed { exit_code } => *exit_code,
                 HookTerminalStatus::Running => unreachable!("OSC produces a completed hook status"),
             };
+            if let Some(project_id) = ws.is_hook_terminal(&tid)
+                && !touched_projects.contains(&project_id)
+            {
+                touched_projects.push(project_id);
+            }
             ws.update_hook_terminal_status(&tid, status, &mut cx);
             results.push((tid, code));
+        }
+        // A keep-alive hook's PTY outlives its command, so nothing else ever
+        // releases this terminal. Retire the oldest finished ones now that this
+        // project has one more.
+        for project_id in touched_projects {
+            evict_stale_hook_terminals(
+                &mut ws,
+                &project_id,
+                reactor.backend.as_ref(),
+                terminals,
+                &mut cx,
+            );
         }
     }
     results
@@ -634,6 +653,10 @@ fn handle_hook_terminal_exits(
 
     let global_hooks = context.reactor.settings.lock().hooks.clone();
 
+    // Projects whose hook set gained a finished entry in this batch, revisited
+    // after the loop to retire the oldest ones.
+    let mut finished_in_projects: Vec<String> = Vec::new();
+
     for (terminal_id, generation, exit_code) in exit_events {
         if !hook_tids.contains(terminal_id) {
             continue;
@@ -655,6 +678,13 @@ fn handle_hook_terminal_exits(
         // scrollback remains registered; its late PTY exit must not rewrite it.
         if !hook_is_running {
             continue;
+        }
+        // Capture the owner while the entry is still present: the close paths
+        // below may remove it before the loop ends.
+        if let Some(project_id) = ws.is_hook_terminal(&tid)
+            && !finished_in_projects.contains(&project_id)
+        {
+            finished_in_projects.push(project_id);
         }
 
         if let Some(monitor) = context.reactor.hook_monitor.as_ref() {
@@ -765,8 +795,26 @@ fn handle_hook_terminal_exits(
                 }
             }
         }
-        // Hook terminal persists on non-close paths — no auto-cleanup. A client
-        // can dismiss or rerun it.
+        // Hook terminal persists on non-close paths — a client can dismiss or
+        // rerun it, and the eviction pass below retires the oldest.
+    }
+
+    // A finished hook keeps its entry, its PTY and a full scrollback grid — in
+    // the daemon and in every client mirroring it — and nothing on this path
+    // removes one. Retire the oldest so a project whose hooks fire on every
+    // worktree operation stops accumulating them for the life of the workspace.
+    if !finished_in_projects.is_empty() {
+        let mut cx = context.reactor.workspace_cx();
+        let mut ws = context.reactor.workspace.lock();
+        for project_id in finished_in_projects {
+            evict_stale_hook_terminals(
+                &mut ws,
+                &project_id,
+                context.reactor.backend.as_ref(),
+                context.terminals,
+                &mut cx,
+            );
+        }
     }
 
     hook_tids
@@ -1012,6 +1060,7 @@ mod tests {
                     hook_type: "before_worktree_remove".into(),
                     command: "true".into(),
                     cwd: worktree.to_string_lossy().into_owned(),
+                    finished_at: None,
                 },
             )]),
             pinned: false,
@@ -1134,6 +1183,7 @@ mod tests {
                 hook_type: "on_project_open".into(),
                 command: "exit 7".into(),
                 cwd: "/tmp/project-one".into(),
+                finished_at: None,
             },
         );
         let workspace = Workspace::new(WorkspaceData {
@@ -1182,6 +1232,105 @@ mod tests {
             HookStatus::Failed { exit_code: 7, .. }
         ));
         assert_eq!(monitor.drain_pending_toasts().len(), 1);
+    }
+
+    #[test]
+    fn osc_hook_exit_evicts_the_oldest_finished_hook_terminals() {
+        // A finished hook keeps its entry, its PTY and a full scrollback grid,
+        // in the daemon and in every client mirroring it. Nothing but a manual
+        // dismiss ever removed one, so a project whose hooks fire on every
+        // worktree operation accumulated them for the life of the workspace.
+        let mut project = plain_project("hook-new");
+
+        // Six already-finished hooks, oldest first, one over the budget of five.
+        for i in 0..6u64 {
+            project.hook_terminals.insert(
+                format!("hook-{i}"),
+                HookTerminalEntry {
+                    label: format!("Old hook {i}"),
+                    status: HookTerminalStatus::Succeeded,
+                    hook_type: "on_project_open".into(),
+                    command: "true".into(),
+                    cwd: "/tmp/project-one".into(),
+                    finished_at: Some(1_700_000_000 + i),
+                },
+            );
+        }
+        // Plus the one about to report its own exit through OSC.
+        project.hook_terminals.insert(
+            "hook-new".into(),
+            HookTerminalEntry {
+                label: "New hook".into(),
+                status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".into(),
+                command: "true".into(),
+                cwd: "/tmp/project-one".into(),
+                finished_at: None,
+            },
+        );
+
+        let workspace = Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project-1".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        });
+        let reactor = test_reactor(workspace, AppSettings::default());
+
+        // Every hook terminal is registered, holding a grid, as it would be live.
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        for i in 0..6u64 {
+            let id = format!("hook-{i}");
+            terminals.lock().insert(
+                id.clone(),
+                Arc::new(Terminal::new(
+                    id,
+                    terminal_size(),
+                    reactor.backend.transport(),
+                    "/tmp/project-one".into(),
+                )),
+            );
+        }
+        let terminal = Arc::new(Terminal::new(
+            "hook-new".into(),
+            terminal_size(),
+            reactor.backend.transport(),
+            "/tmp/project-one".into(),
+        ));
+        terminal.process_output(b"\x1b]0;__okena_hook_exit:0\x07");
+        terminals.lock().insert("hook-new".into(), terminal);
+
+        process_osc_hook_exits(&["hook-new".into()], &terminals, &reactor);
+
+        let workspace = reactor.workspace.lock();
+        let hooks = &workspace.project("project-1").expect("project").hook_terminals;
+        assert_eq!(
+            hooks.len(),
+            5,
+            "seven finished hooks must be trimmed to the budget, got {:?}",
+            hooks.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            hooks.contains_key("hook-new"),
+            "the one that just finished must survive"
+        );
+        assert!(
+            !hooks.contains_key("hook-0") && !hooks.contains_key("hook-1"),
+            "the two oldest must go: {:?}",
+            hooks.keys().collect::<Vec<_>>()
+        );
+        // The point of the eviction: the grids are released, not just the rows.
+        let registry = terminals.lock();
+        assert!(
+            !registry.contains_key("hook-0") && !registry.contains_key("hook-1"),
+            "evicted hooks must release their terminals: {:?}",
+            registry.keys().collect::<Vec<_>>()
+        );
+        assert!(registry.contains_key("hook-new"));
     }
 
     #[tokio::test]
@@ -1531,6 +1680,7 @@ mod tests {
                 hook_type: "on_project_open".into(),
                 command: "echo done".into(),
                 cwd: "/tmp/project-one".into(),
+                finished_at: None,
             },
         );
         let workspace = Workspace::new(WorkspaceData {

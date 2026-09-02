@@ -652,14 +652,61 @@ pub(super) fn dismiss_hook(
         return ActionResult::Err(format!("hook terminal not found: {terminal_id}"));
     }
 
-    backend.kill(&terminal_id);
-    if let Some(monitor) = cx.hook_monitor() {
-        monitor.cancel_by_terminal_id(&terminal_id);
-    }
-    ws.cancel_pending_worktree_close(&terminal_id);
-    ws.remove_hook_terminal(&terminal_id, cx);
-    terminals.lock().remove(&terminal_id);
+    teardown_hook_terminal(ws, &terminal_id, backend, terminals, cx);
     ActionResult::Ok(None)
+}
+
+/// Kill a hook terminal's PTY and drop every trace of it: monitor entry, any
+/// pending worktree close it gated, the workspace record, and the registry
+/// handle holding its scrollback grid.
+///
+/// Shared by the user-driven dismiss above and the daemon's automatic eviction
+/// of old finished hooks, so both release exactly the same things.
+pub fn teardown_hook_terminal(
+    ws: &mut Workspace,
+    terminal_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) {
+    backend.kill(terminal_id);
+    if let Some(monitor) = cx.hook_monitor() {
+        monitor.cancel_by_terminal_id(terminal_id);
+    }
+    ws.cancel_pending_worktree_close(terminal_id);
+    ws.remove_hook_terminal(terminal_id, cx);
+    terminals.lock().remove(terminal_id);
+}
+
+/// How many finished hook terminals a project keeps before the oldest are
+/// retired. Each one holds a scrollback grid in the daemon and in every client
+/// mirroring it, so an unbounded list is a slow leak; a handful is enough to
+/// still read what recently ran.
+pub const MAX_FINISHED_HOOK_TERMINALS: usize = 5;
+
+/// Retire finished hook terminals beyond [`MAX_FINISHED_HOOK_TERMINALS`].
+///
+/// Called after a hook reaches a terminal status. Skips anything still gating a
+/// pending worktree close — that path removes the terminal itself once it
+/// resolves, and tearing it down early would drop the gate.
+pub fn evict_stale_hook_terminals(
+    ws: &mut Workspace,
+    project_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) {
+    let stale = ws.finished_hook_terminals_to_evict(project_id, MAX_FINISHED_HOOK_TERMINALS);
+    if stale.is_empty() {
+        return;
+    }
+    let gated = ws.pending_worktree_close_terminal_ids();
+    for terminal_id in stale {
+        if gated.contains(&terminal_id) {
+            continue;
+        }
+        teardown_hook_terminal(ws, &terminal_id, backend, terminals, cx);
+    }
 }
 
 #[cfg(test)]
@@ -787,6 +834,7 @@ mod hook_action_tests {
                 hook_type: "on_project_open".to_string(),
                 command: "export OKENA_PROJECT_ID='p1'; echo test".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         let project = ProjectData {

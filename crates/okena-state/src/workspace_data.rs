@@ -112,6 +112,21 @@ pub struct HookTerminalEntry {
     pub command: String,
     /// Working directory for the hook command.
     pub cwd: String,
+    /// Unix seconds at which the hook reached a terminal status, or `None`
+    /// while it is still running (and on entries written before this field
+    /// existed). Used to evict the oldest finished hooks — a finished hook
+    /// holds a full terminal grid in the daemon and in every client mirroring
+    /// it, and nothing else ever removes one.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+}
+
+/// Wall-clock seconds since the Unix epoch, for stamping `finished_at`.
+pub fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl HookTerminalStatus {
@@ -150,6 +165,7 @@ impl HookTerminalEntry {
             hook_type: self.hook_type.clone(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
+            finished_at: self.finished_at,
         }
     }
 
@@ -163,6 +179,7 @@ impl HookTerminalEntry {
                 hook_type: api.hook_type.clone(),
                 command: api.command.clone(),
                 cwd: api.cwd.clone(),
+                finished_at: api.finished_at,
             },
         )
     }
@@ -439,6 +456,46 @@ mod tests {
 
         assert_eq!(project.id, "p1");
         assert_eq!(project.connection_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn hook_terminal_entry_loads_without_a_finish_time() {
+        // Every workspace.json written before `finished_at` existed omits it.
+        // Such entries must load and simply sort oldest for eviction.
+        let json = r#"{
+            "label": "on_project_open",
+            "status": "Succeeded",
+            "hook_type": "on_project_open",
+            "command": "echo hi",
+            "cwd": "/tmp"
+        }"#;
+
+        let entry: HookTerminalEntry = serde_json::from_str(json).unwrap();
+
+        assert_eq!(entry.finished_at, None);
+        assert_eq!(entry.status, HookTerminalStatus::Succeeded);
+    }
+
+    #[test]
+    fn hook_terminal_entry_round_trips_its_finish_time() {
+        let entry = HookTerminalEntry {
+            label: "on_project_open".to_string(),
+            status: HookTerminalStatus::Failed { exit_code: 2 },
+            hook_type: "on_project_open".to_string(),
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+            finished_at: Some(1_700_000_000),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: HookTerminalEntry = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.finished_at, Some(1_700_000_000));
+
+        // And across the wire mirror, which carries the same field.
+        let (id, from_wire) = HookTerminalEntry::from_api(&entry.to_api("h1".to_string()));
+        assert_eq!(id, "h1");
+        assert_eq!(from_wire.finished_at, Some(1_700_000_000));
     }
 
     #[test]
