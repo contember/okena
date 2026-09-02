@@ -1,6 +1,6 @@
 ---
 name: ui-screenshot
-description: Look at Okena's UI by taking a real screenshot of the running app, headlessly — nothing appears on the user's desktop and their live Okena instance is untouched. Use whenever a change is visual (layout, spacing, colors, a new widget, "make it prettier") and you need to see the result, or when a GPUI element renders nothing and you need to find out why. Triggers on "screenshot the app", "how does it look", "is it visible", "verify the UI", "the element doesn't render".
+description: Look at Okena's UI by taking a real screenshot of the running app, headlessly — nothing appears on the user's desktop and their live Okena instance is untouched. Linux/GNOME hosts only: the capture harness needs gnome-shell >= 45, and there is no macOS or Windows path. Use whenever a change is visual (layout, spacing, colors, a new widget, "make it prettier") and you need to see the result, or when a GPUI element renders nothing and you need to find out why. Triggers on "screenshot the app", "how does it look", "is it visible", "verify the UI", "the element doesn't render".
 ---
 
 # Seeing Okena's UI
@@ -10,6 +10,12 @@ GPUI will happily lay an element out at the wrong coordinates and clip every
 quad you paint. Take a screenshot.
 
 ## Run it
+
+Linux with GNOME only. `command -v gnome-shell` first: the harness nests a real
+`gnome-shell --headless`, and there is no macOS or Windows equivalent here. On
+those hosts say the screenshot is unavailable rather than reaching for a
+substitute — a debug build on the real display is the thing this skill exists to
+avoid.
 
 ```bash
 cargo build
