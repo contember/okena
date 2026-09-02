@@ -2736,6 +2736,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: "C:\\repo".to_string(),
+                finished_at: None,
             },
         );
         let mut data = make_workspace(
