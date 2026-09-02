@@ -12,4 +12,6 @@ mod unread;
 mod url_detect;
 mod xterm_color;
 
-pub(crate) use helpers::{CapturingTransport, MirrorTransport, NullTransport};
+pub(crate) use helpers::{
+    CapturingTransport, HeadlessOwnerTransport, MirrorTransport, NullTransport,
+};

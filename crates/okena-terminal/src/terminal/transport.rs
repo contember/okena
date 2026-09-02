@@ -26,6 +26,18 @@ pub trait TerminalTransport: Send + Sync {
     fn answers_terminal_queries(&self) -> bool {
         true
     }
+    /// Whether this side reaches a system clipboard, and so should queue OSC 52
+    /// requests for someone to service.
+    ///
+    /// True only in a process with a UI. The daemon parses the same byte stream
+    /// into its own emulator but has no clipboard and no drain, so anything
+    /// queued there is never read and never freed — every `printf '\e]52;c;…'`
+    /// from nvim, tmux or a `pbcopy` shim would accumulate for the life of the
+    /// terminal. Kept separate from [`Self::answers_terminal_queries`], which
+    /// asks the opposite question (does this side own the PTY).
+    fn handles_clipboard(&self) -> bool {
+        true
+    }
     /// Load terminal modes retained by a transparent persistent session backend.
     fn load_terminal_modes(&self, _terminal_id: &str) -> Option<TerminalModeState> {
         None

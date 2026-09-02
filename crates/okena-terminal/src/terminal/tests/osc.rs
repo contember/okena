@@ -1251,3 +1251,94 @@ fn test_process_palette_answers_color_query_without_per_terminal_palette() {
         "unexpected reply: {reply:?}"
     );
 }
+
+// ── OSC 52 queue bounds ────────────────────────────────────────────────────
+//
+// The daemon parses the same byte stream as the UI but has no clipboard and no
+// drain, so anything queued there is never read and never freed. These pin
+// that it queues nothing, and that a side which does queue stays bounded.
+
+#[test]
+fn test_osc52_write_is_dropped_without_a_clipboard() {
+    let transport = Arc::new(super::HeadlessOwnerTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // base64("hello") — a normal editor yank travelling over OSC 52.
+    terminal.process_output(b"\x1b]52;c;aGVsbG8=\x07");
+
+    assert!(
+        terminal.take_pending_clipboard_writes().is_empty(),
+        "a process with no clipboard must not accumulate copy payloads"
+    );
+}
+
+#[test]
+fn test_osc52_read_is_dropped_without_a_clipboard() {
+    let transport = Arc::new(super::HeadlessOwnerTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]52;c;?\x07");
+
+    assert!(
+        !terminal.has_pending_clipboard_reads(),
+        "a process that cannot answer must not hold the responder"
+    );
+    assert!(
+        transport.inner.writes().is_empty(),
+        "and must not reply on its own: {:?}",
+        transport.inner.writes()
+    );
+}
+
+#[test]
+fn test_osc52_writes_stay_bounded_when_the_host_stops_draining() {
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    // 100 copies with no drain in between. Each payload is a whole clipboard
+    // buffer, so an unbounded queue here is a real memory hazard.
+    for _ in 0..100 {
+        terminal.process_output(b"\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    let queued = terminal.take_pending_clipboard_writes();
+    assert_eq!(queued.len(), 16, "queue must be capped");
+    assert!(
+        queued.iter().all(|text| text == "hello"),
+        "the retained entries must still be the decoded payloads"
+    );
+}
+
+#[test]
+fn test_osc52_reads_stay_bounded_when_the_host_stops_draining() {
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    for _ in 0..100 {
+        terminal.process_output(b"\x1b]52;c;?\x07");
+    }
+
+    // Answering drains the queue and replies once per retained request.
+    terminal.answer_clipboard_reads("hi");
+    assert_eq!(transport.writes().len(), 32, "queue must be capped");
+}
