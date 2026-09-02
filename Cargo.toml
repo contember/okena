@@ -3,7 +3,7 @@ members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-tr
 resolver = "2"
 
 [workspace.package]
-version = "0.30.0"
+version = "0.31.0"
 
 [package]
 name = "okena"
