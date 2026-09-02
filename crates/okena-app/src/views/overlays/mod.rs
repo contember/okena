@@ -16,6 +16,7 @@
 
 pub mod about;
 pub mod add_project_dialog;
+pub mod change_path_dialog;
 pub mod close_worktree_dialog;
 pub mod command_palette;
 pub mod content_search;

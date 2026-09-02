@@ -9,6 +9,7 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::terminal::shell_config::ShellType;
 use crate::views::overlays::about::{AboutModal, AboutModalEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
+use crate::views::overlays::change_path_dialog::{ChangePathDialog, ChangePathDialogEvent};
 use crate::views::overlays::close_worktree_dialog::{
     CloseWorktreeDialog, CloseWorktreeDialogEvent,
 };
@@ -172,6 +173,23 @@ pub enum OverlayManagerEvent {
     RenameDirectoryConfirmed {
         project_id: String,
         new_name: String,
+    },
+
+    /// Context menu: point the project at a different existing directory
+    ChangeProjectPath {
+        project_id: String,
+        project_path: String,
+        /// Whether that directory is on this machine, so the dialog knows
+        /// whether it may check the typed path itself.
+        shares_local_filesystem: bool,
+    },
+
+    /// Change-path dialog confirmed: the host dispatches
+    /// `ActionRequest::ChangeProjectPath`; the daemon rewrites the record —
+    /// nothing on disk moves — and mirrors the new path back.
+    ChangeProjectPathConfirmed {
+        project_id: String,
+        new_path: String,
     },
 
     /// Context menu: Close worktree project (opens the confirm dialog)
@@ -1031,6 +1049,39 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Change path dialog (parametric)
+    // ========================================================================
+
+    /// Show the change-folder-path dialog for a project.
+    pub fn show_change_path_dialog(
+        &mut self,
+        project_id: String,
+        project_path: String,
+        shares_local_filesystem: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx
+            .new(|cx| ChangePathDialog::new(project_id, project_path, shares_local_filesystem, cx));
+        cx.subscribe(&entity, |this, _, event: &ChangePathDialogEvent, cx| {
+            if let ChangePathDialogEvent::Confirmed {
+                project_id,
+                new_path,
+            } = event
+            {
+                cx.emit(OverlayManagerEvent::ChangeProjectPathConfirmed {
+                    project_id: project_id.clone(),
+                    new_path: new_path.clone(),
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
+    }
+
+    // ========================================================================
     // Context menu (parametric - remains as separate OverlaySlot)
     // ========================================================================
 
@@ -1078,6 +1129,18 @@ impl OverlayManager {
                     cx.emit(OverlayManagerEvent::RenameDirectory {
                         project_id: project_id.clone(),
                         project_path: project_path.clone(),
+                    });
+                }
+                ContextMenuEvent::ChangeProjectPath {
+                    project_id,
+                    project_path,
+                    shares_local_filesystem,
+                } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ChangeProjectPath {
+                        project_id: project_id.clone(),
+                        project_path: project_path.clone(),
+                        shares_local_filesystem: *shares_local_filesystem,
                     });
                 }
                 ContextMenuEvent::CloseWorktree { project_id } => {

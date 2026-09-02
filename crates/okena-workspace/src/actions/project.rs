@@ -610,6 +610,86 @@ impl Workspace {
         });
     }
 
+    /// Repoint a project at a directory that already exists on disk.
+    ///
+    /// The filesystem is left untouched — this only rewrites the recorded
+    /// paths, for when a folder was moved or flattened outside okena and the
+    /// project's path went stale. Nested projects under the old root are
+    /// translated by suffix, the same way a directory rename translates them.
+    ///
+    /// Deliberately *not* built on `rename_project_directory`: that one moves
+    /// the directory and so requires the target to be absent, and its
+    /// translation canonicalizes the old root — which fails outright when that
+    /// root no longer exists, i.e. exactly the case this exists to repair.
+    pub fn change_project_path(
+        &mut self,
+        project_id: &str,
+        new_path: String,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
+        let new_path_buf = std::path::PathBuf::from(&new_path);
+        if !new_path_buf.is_absolute() {
+            return Err("path must be absolute".to_string());
+        }
+        if !new_path_buf.exists() {
+            return Err(format!("'{new_path}' does not exist"));
+        }
+        if !new_path_buf.is_dir() {
+            return Err(format!("'{new_path}' is not a directory"));
+        }
+        self.ensure_project_path_mutation_allowed(project_id, &new_path_buf)?;
+
+        let (is_mirror, old_path) = {
+            let project = self
+                .project(project_id)
+                .ok_or_else(|| "Project not found".to_string())?;
+            (
+                project.connection_id.is_some(),
+                std::path::PathBuf::from(&project.path),
+            )
+        };
+        if is_mirror {
+            // Not a refusal of remote projects as such — a client routes this
+            // action to the daemon that owns the project, and there it is
+            // local. Reaching here means someone asked a workspace to repoint
+            // its own *mirror* of a project, whose path that workspace does not
+            // own and whose disk it cannot see.
+            return Err("project is owned by another daemon".to_string());
+        }
+        let new_identity = Self::physical_path_identity(&new_path_buf);
+        if Self::physical_path_identity(&old_path) == new_identity {
+            return Err("project already points at this directory".to_string());
+        }
+        if let Some(claimant) = self
+            .projects()
+            .iter()
+            .filter(|other| other.id != project_id)
+            .find(|other| {
+                Self::physical_path_identity(std::path::Path::new(&other.path)) == new_identity
+            })
+        {
+            return Err(format!("'{}' already uses this directory", claimant.name));
+        }
+
+        let translated_paths = self.translate_project_paths_onto(&old_path, &new_path_buf)?;
+        self.apply_translated_project_paths(translated_paths);
+        // `worktree_path` is deprecated and mirrors `project.path`; keep the
+        // in-memory copy consistent for anything still reading it.
+        if let Some(project) = self
+            .data
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        {
+            let path = project.path.clone();
+            if let Some(metadata) = &mut project.worktree_info {
+                metadata.worktree_path = path;
+            }
+        }
+        self.notify_data(cx);
+        Ok(())
+    }
+
     /// Rename a project's directory path and update the project name to match
     pub fn rename_project_directory(
         &mut self,
@@ -809,6 +889,74 @@ impl Workspace {
             });
         }
         Ok(translated_paths)
+    }
+
+    /// Translate a project and its nested projects from `old_root` onto
+    /// `new_root` by path suffix, without touching the filesystem.
+    ///
+    /// The sibling `translate_local_project_paths` canonicalizes both ends,
+    /// which a repoint cannot do: the old root is usually already gone by the
+    /// time anyone reaches for this. Suffixes are therefore taken lexically,
+    /// using the same normalization `physical_path_identity` applies before it
+    /// compares. A descendant whose recorded path reaches the old root through
+    /// a symlink matches on identity but has no lexical suffix; that is
+    /// reported rather than guessed at.
+    fn translate_project_paths_onto(
+        &self,
+        old_root: &std::path::Path,
+        new_root: &std::path::Path,
+    ) -> Result<Vec<ProjectPathTranslation>, String> {
+        let old_identity = Self::physical_path_identity(old_root);
+        let old_lexical = Self::lexical_absolute(old_root);
+        let mut translated_paths = Vec::new();
+        for descendant in self.projects() {
+            let descendant_path = std::path::Path::new(&descendant.path);
+            if !Self::physical_path_identity(descendant_path).starts_with(&old_identity) {
+                continue;
+            }
+            let suffix = Self::lexical_absolute(descendant_path)
+                .strip_prefix(&old_lexical)
+                .map_err(|_| {
+                    format!(
+                        "Failed to translate nested project '{}' into the new directory",
+                        descendant.name
+                    )
+                })?
+                .to_path_buf();
+            let translated_path = if suffix.as_os_str().is_empty() {
+                new_root.to_path_buf()
+            } else {
+                new_root.join(suffix)
+            };
+            let translated_hook_terminal_ids = descendant
+                .hook_terminals
+                .iter()
+                .filter(|(_, entry)| {
+                    Self::physical_path_identity(std::path::Path::new(&entry.cwd))
+                        == Self::physical_path_identity(descendant_path)
+                })
+                .map(|(terminal_id, _)| terminal_id.clone())
+                .collect();
+            translated_paths.push(ProjectPathTranslation {
+                project_id: descendant.id.clone(),
+                old_path: descendant.path.clone(),
+                new_path: translated_path.to_string_lossy().into_owned(),
+                translated_hook_terminal_ids,
+            });
+        }
+        Ok(translated_paths)
+    }
+
+    /// Absolute, `.`/`..`-free form of `path`, without requiring it to exist.
+    fn lexical_absolute(path: &std::path::Path) -> std::path::PathBuf {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        okena_git::repository::normalize_path(&absolute)
     }
 
     fn apply_translated_project_paths(&mut self, translated_paths: Vec<ProjectPathTranslation>) {
@@ -3913,5 +4061,158 @@ mod gpui_tests {
             result.is_err(),
             "clone target inside an in-flight worktree must be rejected"
         );
+    }
+
+    /// Fixture for the case this action exists for: the project's recorded
+    /// directory is gone and the real one lives somewhere else.
+    fn moved_project_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let fixture = std::env::temp_dir().join(format!("okena-{name}-{}", uuid::Uuid::new_v4()));
+        let missing = fixture.join("old/nested");
+        let moved = fixture.join("moved");
+        std::fs::create_dir_all(&moved).expect("create moved dir");
+        (missing, moved)
+    }
+
+    #[gpui::test]
+    fn change_project_path_repoints_a_project_whose_folder_moved(cx: &mut gpui::TestAppContext) {
+        let (missing, moved) = moved_project_fixture("repoint");
+        let mut project = make_project("p1");
+        project.path = path_str(&missing).to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![project];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.change_project_path("p1", path_str(&moved).to_string(), cx)
+        });
+
+        assert_eq!(result, Ok(()));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.project("p1").unwrap().path, path_str(&moved));
+        });
+        // Nothing was moved on disk: the old path is still absent.
+        assert!(!missing.exists());
+        std::fs::remove_dir_all(moved.parent().unwrap()).ok();
+    }
+
+    #[gpui::test]
+    fn change_project_path_translates_nested_projects(cx: &mut gpui::TestAppContext) {
+        let (missing, moved) = moved_project_fixture("repoint-nested");
+        let mut root = make_project("root");
+        root.path = path_str(&missing).to_string();
+        let mut nested = make_project("nested");
+        nested.path = path_str(&missing.join("packages/app")).to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![root, nested];
+        data.project_order = vec!["root".to_string(), "nested".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let result = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.change_project_path("root", path_str(&moved).to_string(), cx)
+        });
+
+        assert_eq!(result, Ok(()));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.project("root").unwrap().path, path_str(&moved));
+            assert_eq!(
+                ws.project("nested").unwrap().path,
+                path_str(&moved.join("packages/app"))
+            );
+        });
+        std::fs::remove_dir_all(moved.parent().unwrap()).ok();
+    }
+
+    #[gpui::test]
+    fn change_project_path_rejects_a_directory_another_project_uses(cx: &mut gpui::TestAppContext) {
+        let (missing, moved) = moved_project_fixture("repoint-claimed");
+        let mut project = make_project("p1");
+        project.path = path_str(&missing).to_string();
+        let mut claimant = make_project("p2");
+        claimant.name = "Other".to_string();
+        claimant.path = path_str(&moved).to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![project, claimant];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.change_project_path("p1", path_str(&moved).to_string(), cx)
+                .err()
+        });
+
+        assert_eq!(err.as_deref(), Some("'Other' already uses this directory"));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.project("p1").unwrap().path, path_str(&missing));
+        });
+        std::fs::remove_dir_all(moved.parent().unwrap()).ok();
+    }
+
+    #[gpui::test]
+    fn change_project_path_rejects_targets_that_are_not_usable_directories(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (missing, moved) = moved_project_fixture("repoint-invalid");
+        let file = moved.join("a-file");
+        std::fs::write(&file, b"x").expect("write file");
+        let mut project = make_project("p1");
+        project.path = path_str(&missing).to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![project];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let absent = moved.join("not-there");
+        let errors = workspace.update(cx, |ws: &mut Workspace, cx| {
+            (
+                ws.change_project_path("p1", "relative/path".to_string(), cx)
+                    .err(),
+                ws.change_project_path("p1", path_str(&absent).to_string(), cx)
+                    .err(),
+                ws.change_project_path("p1", path_str(&file).to_string(), cx)
+                    .err(),
+                ws.change_project_path("p1", path_str(&missing).to_string(), cx)
+                    .err(),
+            )
+        });
+
+        assert_eq!(errors.0.as_deref(), Some("path must be absolute"));
+        assert_eq!(
+            errors.1.as_deref(),
+            Some(format!("'{}' does not exist", path_str(&absent)).as_str())
+        );
+        assert_eq!(
+            errors.2.as_deref(),
+            Some(format!("'{}' is not a directory", path_str(&file)).as_str())
+        );
+        // The current path is rejected before the "does not exist" check would
+        // fire, so a stale project cannot be pointed at its own dead path.
+        assert_eq!(
+            errors.3.as_deref(),
+            Some(format!("'{}' does not exist", path_str(&missing)).as_str())
+        );
+        std::fs::remove_dir_all(moved.parent().unwrap()).ok();
+    }
+
+    #[gpui::test]
+    fn change_project_path_rejects_the_path_it_already_has(cx: &mut gpui::TestAppContext) {
+        let (_missing, moved) = moved_project_fixture("repoint-same");
+        let mut project = make_project("p1");
+        project.path = path_str(&moved).to_string();
+        let mut data = make_workspace_data();
+        data.projects = vec![project];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let err = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.change_project_path("p1", path_str(&moved).to_string(), cx)
+                .err()
+        });
+
+        assert_eq!(
+            err.as_deref(),
+            Some("project already points at this directory")
+        );
+        std::fs::remove_dir_all(moved.parent().unwrap()).ok();
     }
 }

@@ -187,6 +187,11 @@ pub fn reload_keybindings(cx: &mut App) {
             okena_views_sidebar::Cancel,
             Some("RenameDirectoryDialog"),
         ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("ChangePathDialog"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
         KeyBinding::new(
             "escape",
@@ -319,6 +324,11 @@ pub fn register_keybindings(cx: &mut App) {
             "escape",
             okena_views_sidebar::Cancel,
             Some("RenameDirectoryDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("ChangePathDialog"),
         ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
         // okena-views-terminal crate Cancel for shell selector + send composer

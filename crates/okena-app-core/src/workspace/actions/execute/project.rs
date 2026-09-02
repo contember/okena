@@ -215,6 +215,20 @@ pub(super) fn rename_project_directory(
     }
 }
 
+pub(super) fn change_project_path(
+    ws: &mut Workspace,
+    project_id: String,
+    new_path: String,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    // Every check this needs — existence, directory-ness, collisions, missing
+    // project — belongs to the workspace, which owns the path invariants.
+    match ws.change_project_path(&project_id, new_path, cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(error) => ActionResult::Err(error),
+    }
+}
+
 pub(super) fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,

@@ -145,10 +145,13 @@ impl GitHeader {
                                 this.toggle_commit_log(cx);
                             }))
                             .child(
+                                // Matches the PR badge: at `text_muted` this
+                                // 10px glyph was near-invisible on the darker
+                                // themes.
                                 svg()
                                     .path("icons/git-commit.svg")
                                     .size(px(10.0))
-                                    .text_color(rgb(t.text_muted)),
+                                    .text_color(rgb(t.text_secondary)),
                             )
                             .child(
                                 canvas(
