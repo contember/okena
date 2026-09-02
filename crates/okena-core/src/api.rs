@@ -1064,6 +1064,15 @@ pub enum ActionRequest {
         project_id: String,
         new_name: String,
     },
+    /// Repoint a project at a directory that already exists on disk, without
+    /// moving anything. Unlike `RenameProjectDirectory` — which renames the
+    /// folder in place and therefore requires the target *not* to exist — this
+    /// adopts an existing directory, for when the folder was moved outside
+    /// okena and the recorded path went stale.
+    ChangeProjectPath {
+        project_id: String,
+        new_path: String,
+    },
     DeleteProject {
         project_id: String,
     },
@@ -1792,6 +1801,10 @@ mod tests {
             ActionRequest::RenameProjectDirectory {
                 project_id: "p1".into(),
                 new_name: "new-dir".into(),
+            },
+            ActionRequest::ChangeProjectPath {
+                project_id: "p1".into(),
+                new_path: "/tmp/moved".into(),
             },
             ActionRequest::DeleteProject {
                 project_id: "p1".into(),

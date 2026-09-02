@@ -520,6 +520,10 @@ pub fn execute_action(
             project_id,
             new_name,
         } => project::rename_project_directory(ws, project_id, new_name, cx),
+        ActionRequest::ChangeProjectPath {
+            project_id,
+            new_path,
+        } => project::change_project_path(ws, project_id, new_path, cx),
         ActionRequest::DeleteProject { project_id } => {
             project::delete_project(ws, focus_manager, project_id, settings, cx)
         }

@@ -569,6 +569,20 @@ impl WindowView {
                     om.show_rename_directory_dialog(project_id.clone(), project_path.clone(), cx);
                 });
             }
+            OverlayManagerEvent::ChangeProjectPath {
+                project_id,
+                project_path,
+                shares_local_filesystem,
+            } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_change_path_dialog(
+                        project_id.clone(),
+                        project_path.clone(),
+                        *shares_local_filesystem,
+                        cx,
+                    );
+                });
+            }
             OverlayManagerEvent::CloseWorktree { project_id } => {
                 let params = self
                     .workspace
@@ -645,6 +659,20 @@ impl WindowView {
                         ActionRequest::RenameProjectDirectory {
                             project_id: project_id.clone(),
                             new_name: new_name.clone(),
+                        },
+                        cx,
+                    );
+                }
+            }
+            OverlayManagerEvent::ChangeProjectPathConfirmed {
+                project_id,
+                new_path,
+            } => {
+                if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+                    dispatcher.dispatch(
+                        ActionRequest::ChangeProjectPath {
+                            project_id: project_id.clone(),
+                            new_path: new_path.clone(),
                         },
                         cx,
                     );
