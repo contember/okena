@@ -151,6 +151,29 @@ fn resizing_scrollback_preserves_an_app_set_title() {
 }
 
 #[test]
+fn shrinking_works_while_the_app_is_in_the_alternate_screen() {
+    let terminal = terminal_with(500);
+    feed_lines(&terminal, 1000);
+    assert_eq!(history_size(&terminal), 500);
+
+    // Enter the alternate screen, as a full-screen app (vim, less, a TUI) does.
+    // alacritty swaps the grids, so the primary — the one holding the history —
+    // becomes the *inactive* grid, which is what `set_options` then resizes.
+    // A long-running agent left in a TUI is exactly the terminal we most want
+    // to reclaim, so this must work without waiting for it to exit.
+    terminal.process_output(b"\x1b[?1049h");
+
+    terminal.set_scrollback_lines(0);
+
+    terminal.process_output(b"\x1b[?1049l");
+    assert_eq!(
+        history_size(&terminal),
+        0,
+        "history must be freed even when the shrink happened during alt-screen"
+    );
+}
+
+#[test]
 fn shrinking_drops_prompt_marks_that_fell_out_of_history() {
     let terminal = terminal_with(500);
 

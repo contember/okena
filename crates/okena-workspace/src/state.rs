@@ -1895,6 +1895,22 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// Every terminal id belonging to a project: its layout tree plus its hook
+    /// terminals, which live outside the tree but are real terminals all the
+    /// same. In a client mirror these are the registry's own keys.
+    pub fn all_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        let Some(project) = self.project(project_id) else {
+            return Vec::new();
+        };
+        let mut ids = project
+            .layout
+            .as_ref()
+            .map(|layout| layout.collect_terminal_ids())
+            .unwrap_or_default();
+        ids.extend(project.hook_terminals.keys().cloned());
+        ids
+    }
+
     /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
     /// Resets status back to Running.
     pub fn swap_hook_terminal_id(
@@ -4196,6 +4212,26 @@ mod gpui_tests {
         );
 
         assert!(stale.is_empty());
+    }
+
+    #[gpui::test]
+    fn project_terminal_ids_cover_the_layout_and_the_hooks(cx: &mut gpui::TestAppContext) {
+        // The client's hidden-project scrollback pass walks these ids, so a
+        // hook terminal missing here would keep a full grid while hidden.
+        // `make_project` gives p1 a layout holding one terminal, `term_p1`.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let mut ids = ws.all_terminal_ids_for_project("p1");
+            ids.sort();
+            assert_eq!(ids, vec!["hook-1".to_string(), "term_p1".to_string()]);
+            assert!(ws.all_terminal_ids_for_project("missing").is_empty());
+        });
     }
 
     #[gpui::test]
