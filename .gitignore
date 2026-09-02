@@ -16,6 +16,11 @@ Thumbs.db
 .ralph-tui/
 settings.local.json
 
+# Agent/human scratch: analysis notes, tool reports, draft comments.
+# Checked-in skills point here (see .claude/skills/duplicate-detection/SKILL.md),
+# so the ignore has to live in the repo, not in a personal excludes file.
+.mine/
+
 dist
 
 # Mobile (React Native)
