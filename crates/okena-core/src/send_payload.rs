@@ -176,6 +176,7 @@ fn fence_for(text: &str) -> String {
 /// directory). Otherwise return the absolute path as-is.
 fn relative_to_cwd(path: &Path, cwd: Option<&Path>) -> String {
     if let Some(cwd) = cwd
+        && !cwd.as_os_str().is_empty()
         && let Ok(rel) = path.strip_prefix(cwd)
     {
         let rel_str = rel.to_string_lossy();
@@ -406,5 +407,11 @@ mod tests {
         let p = SendPayload::path(PathBuf::from("/proj/src/foo.rs"));
         assert_eq!(p.format(Some(Path::new("/proj"))), "./src/foo.rs ");
         assert_eq!(p.format(None), "/proj/src/foo.rs ");
+    }
+
+    #[test]
+    fn empty_cwd_uses_absolute_path() {
+        let p = SendPayload::path(PathBuf::from("/proj/src/foo.rs"));
+        assert_eq!(p.format(Some(Path::new(""))), "/proj/src/foo.rs ");
     }
 }
