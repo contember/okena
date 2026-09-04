@@ -1559,6 +1559,7 @@ impl Render for WindowView {
                         .absolute()
                         .top(px(40.0))
                         .right(px(12.0))
+                        .occlude()
                         .flex()
                         .items_center()
                         .gap(px(10.0))
