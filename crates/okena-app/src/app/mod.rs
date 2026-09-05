@@ -346,6 +346,22 @@ impl Okena {
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
 
+        // Only the PTY-owning daemon answers OSC color queries. Share the
+        // resolved OS appearance with our local daemon so Auto matches the
+        // desktop, including OS appearance changes. Never persist this as a
+        // theme preference or send it to user-managed remote connections.
+        let theme = crate::theme::theme_entity(cx);
+        let mut last_is_dark = theme.read(cx).system_is_dark();
+        manager.sync_system_appearance(cx);
+        cx.observe(&theme, move |this, theme, cx| {
+            let is_dark = theme.read(cx).system_is_dark();
+            if is_dark != last_is_dark {
+                last_is_dark = is_dark;
+                this.sync_system_appearance(cx);
+            }
+        })
+        .detach();
+
         // Fire OS notifications for remote (daemon-served) terminals. Their PTY
         // output never reaches the local PTY event loop above — it arrives over
         // the WS and is only parsed by the remote activity pump, which drains
@@ -416,6 +432,9 @@ impl Okena {
                 this.recover_local_daemon(cx);
             }
             RemoteManagerEvent::SettingsChanged(settings) => {
+                // Initial/reconnected daemon snapshots also restore the
+                // transient appearance after a daemon restart.
+                this.sync_system_appearance(cx);
                 let settings = settings.as_ref().clone();
                 let mode = settings.theme_mode;
                 let custom_id = settings.custom_theme_id.clone();
@@ -951,6 +970,17 @@ impl Okena {
         // should hold just did — clear the memo so the sync actually runs.
         self.scrollback_visible_projects.lock().take();
         self.publish_visible_projects(cx);
+    }
+
+    fn sync_system_appearance(&self, cx: &mut Context<Self>) {
+        let is_dark = crate::theme::theme_entity(cx).read(cx).system_is_dark();
+        self.remote_manager.update(cx, |manager, cx| {
+            manager.send_action(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                okena_core::api::ActionRequest::SetSystemAppearance { is_dark },
+                cx,
+            );
+        });
     }
 
     fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {

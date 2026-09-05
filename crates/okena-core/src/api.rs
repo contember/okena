@@ -1216,6 +1216,11 @@ pub enum ActionRequest {
     SetTheme {
         id: String,
     },
+    /// Report the local desktop's system appearance for Auto terminal colors.
+    /// Transient: does not change the persisted theme preference.
+    SetSystemAppearance {
+        is_dark: bool,
+    },
     /// Write a custom theme JSON file (a full `CustomThemeConfig`) and,
     /// when `activate`, switch to it.
     SaveCustomTheme {
