@@ -8,6 +8,7 @@
 
 pub mod layout_container;
 pub mod navigation;
+mod new_terminal_menu;
 pub mod pane_drag;
 pub mod split_pane;
 mod tabs;

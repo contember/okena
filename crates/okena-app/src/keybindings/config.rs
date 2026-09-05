@@ -80,6 +80,15 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "ShowHarness".to_string(),
+            vec![
+                // `cmd-k cmd-t` would read better but belongs to the theme
+                // selector; `a` for "assigned".
+                KeybindingEntry::new("cmd-k cmd-a", None),
+                KeybindingEntry::new("ctrl-k ctrl-a", None),
+            ],
+        );
+        bindings.insert(
             "ShowSessionManager".to_string(),
             vec![
                 KeybindingEntry::new("cmd-k cmd-w", None),

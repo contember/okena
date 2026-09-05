@@ -54,6 +54,22 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         ActionRequest::RemoveWorktreeProject { .. }
         | ActionRequest::ForceRemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
+        // Starting work on a task is the longest action there is: a live call
+        // to the task provider, then a real `git worktree add` (checking out a
+        // full tree) per selected project, each running its creation hooks.
+        // The fast bucket's 10 s cannot cover one worktree, let alone several.
+        ActionRequest::TaskStartWork { .. } => ActionClientKind::LongMutation,
+        // Drafting a change creates a project — which runs the user's
+        // project-creation hooks — and launches an agent. Hooks are arbitrary
+        // shell with no bound, so the fast bucket is the wrong budget.
+        ActionRequest::SpecDraftChange { .. } => ActionClientKind::LongMutation,
+        // Task-provider calls cross the internet. The provider's own HTTP
+        // timeout is 20 s, so the fast bucket would abandon the request before
+        // the provider had given up — reporting a transport failure for what is
+        // really a slow API.
+        ActionRequest::TasksList { .. } | ActionRequest::TasksConnectApiKey { .. } => {
+            ActionClientKind::Search
+        }
         _ => ActionClientKind::Fast,
     }
 }
@@ -700,5 +716,92 @@ mod tests {
             server.join().unwrap(),
             "cancelled request must close its socket"
         );
+    }
+}
+
+#[cfg(test)]
+mod action_timeout_tests {
+    use super::{ActionClientKind, client_kind_for, timeout_for};
+    use okena_core::api::ActionRequest;
+
+    fn start_work() -> ActionRequest {
+        ActionRequest::TaskStartWork {
+            provider: "linear".into(),
+            task_external_id: "u1".into(),
+            project_ids: vec!["p1".into(), "p2".into()],
+            agent_root: None,
+            branch: None,
+            agent_command: None,
+        }
+    }
+
+    #[test]
+    fn starting_work_gets_the_long_mutation_budget() {
+        // It creates a worktree per project, each with hooks. Ten seconds is
+        // not enough for one, and the failure surfaces as an opaque transport
+        // error rather than anything actionable.
+        assert!(matches!(
+            client_kind_for(&start_work()),
+            ActionClientKind::LongMutation
+        ));
+        assert!(timeout_for(&start_work()) > 60);
+    }
+
+    #[test]
+    fn drafting_a_spec_gets_the_long_mutation_budget() {
+        // It creates a project (running its hooks) and launches an agent.
+        let action = ActionRequest::SpecDraftChange {
+            idea: "add login".into(),
+            name: None,
+            agent_command: None,
+        };
+        assert!(matches!(
+            client_kind_for(&action),
+            ActionClientKind::LongMutation
+        ));
+    }
+
+    #[test]
+    fn reading_specs_stays_in_the_fast_bucket() {
+        // Both are local filesystem reads; borrowing a longer budget would
+        // only delay how fast a broken connection is reported.
+        for action in [
+            ActionRequest::SpecsTree,
+            ActionRequest::SpecRead {
+                path: "openspec/specs/auth.md".into(),
+            },
+        ] {
+            assert!(matches!(client_kind_for(&action), ActionClientKind::Fast));
+        }
+    }
+
+    #[test]
+    fn provider_calls_outlast_the_providers_own_timeout() {
+        // The Linear client gives up at 20 s; the transport must not give up
+        // first, or a slow API reads as a broken connection.
+        for action in [
+            ActionRequest::TasksList {
+                provider: "linear".into(),
+            },
+            ActionRequest::TasksConnectApiKey {
+                provider: "linear".into(),
+                api_key: "k".into(),
+            },
+        ] {
+            assert!(
+                timeout_for(&action) > 20,
+                "{action:?} must outlast the provider's own 20 s timeout"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_actions_stay_fast() {
+        // The long budgets are opt-in; a stuck terminal action should fail
+        // quickly rather than hang for eleven minutes.
+        assert!(matches!(
+            client_kind_for(&ActionRequest::TasksAuthStatus),
+            ActionClientKind::Fast
+        ));
     }
 }

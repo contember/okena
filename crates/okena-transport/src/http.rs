@@ -112,6 +112,16 @@ impl HttpRequest {
         self.header("Authorization", format!("Bearer {}", token.as_ref()))
     }
 
+    /// Case-insensitive header lookup — the request-side mirror of
+    /// [`HttpResponse::header`]. Lets a caller assert what it built (or what
+    /// reached a [`testing::mock`]) without exposing the header vector.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
     /// JSON request body.
     pub fn json(mut self, value: &serde_json::Value) -> Self {
         self.body = Body::Json(value.clone());

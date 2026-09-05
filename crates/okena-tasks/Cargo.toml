@@ -1,0 +1,20 @@
+[package]
+name = "okena-tasks"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+# Blocking HTTP + the shared audit/throttle bus. Task providers are polled from
+# daemon worker threads, so the blocking facade is the right fit — the async
+# `client` feature (WS + TLS pinning) is not needed here.
+okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+log = "0.4"
+
+[dev-dependencies]
+okena-transport = { path = "../okena-transport", features = ["blocking-http", "test-support"] }

@@ -9,7 +9,7 @@ use super::{
     JumpToPreviousPrompt, MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit,
     ResetZoom, RestartDaemon, ReviewChanges, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev,
     SendEscape, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer,
-    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
+    ShowFileSearch, ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
     ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
     ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
@@ -410,6 +410,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Open session manager to save/load workspaces",
             category: "Global",
             factory: || Box::new(ShowSessionManager),
+        },
+    );
+    map.insert(
+        "ShowHarness",
+        ActionDescription {
+            name: "Engineering Harness",
+            description: "Open the harness window (projects, tasks, agents, specs, knowledge)",
+            category: "Global",
+            factory: || Box::new(ShowHarness),
         },
     );
     map.insert(

@@ -1,10 +1,14 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
+// GPUI-only: this is shared UI state (an Entity behind a global). The daemon
+// builds this crate without gpui and has no use for it.
 pub mod access_history;
 pub mod actions;
 pub mod claude_env;
 pub mod context;
 pub mod focus;
+#[cfg(feature = "gpui")]
+pub mod harness_state;
 pub mod hook_monitor;
 pub mod hooks;
 pub mod lifecycle;

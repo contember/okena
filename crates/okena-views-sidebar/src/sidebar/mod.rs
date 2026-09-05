@@ -7,7 +7,9 @@
 //! - Folder color customization
 //! - Organizing projects into collapsible folders
 
+mod agents_section;
 mod cursor;
+mod harness_nav;
 mod renames;
 mod render;
 mod worktree;
@@ -127,6 +129,17 @@ pub enum SidebarCursorItem {
     },
 }
 
+/// Which list the sidebar body is showing.
+///
+/// Per-sidebar and not persisted: it is a view toggle, and a window reopening
+/// on the agents list when the user last glanced at it would be surprising.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SidebarList {
+    #[default]
+    Projects,
+    Agents,
+}
+
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
     /// Identifies which window-scoped slot on the shared `Workspace` this
@@ -138,6 +151,7 @@ pub struct Sidebar {
     /// through `self.window_id`. Slice 05 then spawns extra windows that
     /// mint `WindowId::Extra(uuid)` and thread it in here so each `Sidebar`
     /// sees only its own per-window state.
+    pub(crate) list: SidebarList,
     pub(crate) window_id: WindowId,
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<okena_workspace::focus::FocusManager>,
@@ -222,6 +236,14 @@ impl Sidebar {
         terminals: TerminalsRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Re-render when the active harness view changes so the nav highlight
+        // follows the window. Shared through a global entity because the
+        // sidebar and the window hold no handle to each other.
+        if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
+            cx.observe(&harness, |_this, _state, cx| cx.notify())
+                .detach();
+        }
+
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
@@ -254,6 +276,7 @@ impl Sidebar {
         // longer auto-expand the sidebar project when hooks appear.
 
         Self {
+            list: SidebarList::default(),
             window_id,
             workspace,
             focus_manager,
@@ -479,7 +502,7 @@ impl Sidebar {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         div()
-            .h(px(35.0))
+            .h(okena_ui::tokens::HEADER_HEIGHT)
             .px(px(12.0))
             .flex()
             .items_center()
@@ -576,6 +599,9 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .id("projects-header")
             .on_click(move |_, _window, cx| {
+                // The PROJECTS header means "show me the projects", so it must
+                // also leave any harness view.
+                okena_workspace::harness_state::set_active_harness(window_id, None, cx);
                 focus_manager.update(cx, |fm, cx| {
                     workspace_entity.update(cx, |ws, cx| {
                         ws.set_focused_project(fm, None, cx);
@@ -584,13 +610,45 @@ impl Sidebar {
                     cx.notify();
                 });
             })
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(t.text_secondary))
-                    .child("PROJECTS"),
-            )
+            .child({
+                // Two tabs rather than a stacked AGENTS section: agent sessions
+                // are a different kind of thing from repos, and stacking them
+                // pushed the list the user was reading off-screen.
+                let list = self.list;
+                let tab = |label: &'static str, mode: SidebarList, cx: &mut Context<Self>| {
+                    let selected = list == mode;
+                    div()
+                        .id(ElementId::Name(label.into()))
+                        .cursor_pointer()
+                        .px(px(4.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .when(!selected, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                        .text_size(ui_text_ms(cx))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if selected {
+                            t.text_primary
+                        } else {
+                            t.text_muted
+                        }))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            // Stop propagation: the header itself clears the
+                            // folder filter, which would fire on every switch.
+                            cx.stop_propagation();
+                            if this.list != mode {
+                                this.list = mode;
+                                this.cursor_index = None;
+                                cx.notify();
+                            }
+                        }))
+                };
+                h_flex()
+                    .gap(px(2.0))
+                    .items_center()
+                    .child(tab("PROJECTS", SidebarList::Projects, cx))
+                    .child(tab("AGENTS", SidebarList::Agents, cx))
+            })
             .child(
                 h_flex()
                     .gap(px(4.0))
@@ -598,45 +656,56 @@ impl Sidebar {
                     // "Needs attention" opt-in. Only relevant in the manual
                     // (Custom) view — the Activity view already has a NEEDS
                     // ATTENTION tier — so it's hidden in activity mode.
-                    .when(!activity_mode, |row| {
-                        let attn_color = if show_attention {
-                            t.border_active
-                        } else {
-                            t.text_secondary
-                        };
-                        row.child(
-                            div()
-                                .id("attention-toggle")
-                                .cursor_pointer()
-                                .flex()
-                                .items_center()
-                                .px(px(4.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/bell.svg")
-                                        .size(px(13.0))
-                                        .text_color(rgb(attn_color)),
-                                )
-                                .tooltip(|_window, cx| {
-                                    Tooltip::new("Show a \"needs attention\" section at the top")
+                    .when(
+                        self.list == SidebarList::Projects && !activity_mode,
+                        |row| {
+                            let attn_color = if show_attention {
+                                t.border_active
+                            } else {
+                                t.text_secondary
+                            };
+                            row.child(
+                                div()
+                                    .id("attention-toggle")
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .px(px(4.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .child(
+                                        svg()
+                                            .path("icons/bell.svg")
+                                            .size(px(13.0))
+                                            .text_color(rgb(attn_color)),
+                                    )
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::new(
+                                            "Show a \"needs attention\" section at the top",
+                                        )
                                         .build(_window, cx)
-                                })
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_show_attention_section(window_id, cx);
-                                    });
-                                })),
-                        )
-                    })
+                                    })
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.workspace.update(cx, |ws, cx| {
+                                            ws.toggle_show_attention_section(window_id, cx);
+                                        });
+                                    })),
+                            )
+                        },
+                    )
                     // Sort-order toggle: Custom (hand-arranged folders) vs
                     // Activity (tiered, activity-sorted). Segmented so both
                     // states are visible and labeled. Stops click propagation
                     // so flipping the mode doesn't clear focus via the header.
-                    .child(self.render_sort_mode_toggle(activity_mode, cx)),
+                    //
+                    // Projects only: it orders the project tree, so on the
+                    // agents tab it would be a control that changes nothing
+                    // visible.
+                    .when(self.list == SidebarList::Projects, |row| {
+                        row.child(self.render_sort_mode_toggle(activity_mode, cx))
+                    }),
             )
     }
 

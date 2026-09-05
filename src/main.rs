@@ -806,6 +806,13 @@ fn main() {
         let project_hover = cx.new(|_| okena_app::views::project_hover::ProjectHoverState::new());
         cx.set_global(okena_app::views::project_hover::GlobalProjectHover(project_hover));
 
+        // Shared active-harness-view state: the sidebar renders the nav, the
+        // window renders the view, and neither holds the other's entity.
+        let harness_state = cx.new(|_| okena_workspace::harness_state::HarnessState::new());
+        cx.set_global(okena_workspace::harness_state::GlobalHarnessState(
+            harness_state,
+        ));
+
         // Register theme provider for okena-files crate
         cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
             okena_app::theme::theme(cx)

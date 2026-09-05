@@ -1,4 +1,4 @@
-use crate::requests::{OverlayRequest, SidebarRequest};
+use crate::requests::{OverlayRequest, SidebarRequest, WorkbenchRequest};
 use gpui::*;
 use okena_core::send_payload::SendPayload;
 use std::collections::VecDeque;
@@ -12,6 +12,8 @@ pub struct RequestBroker {
     overlay_requests: VecDeque<OverlayRequest>,
     sidebar_requests: VecDeque<SidebarRequest>,
     send_to_terminal: VecDeque<(SendPayload, Option<String>)>,
+    /// Pending sidebar → main-area view requests.
+    workbench_requests: Vec<WorkbenchRequest>,
 }
 
 impl Default for RequestBroker {
@@ -23,6 +25,7 @@ impl Default for RequestBroker {
 impl RequestBroker {
     pub fn new() -> Self {
         Self {
+            workbench_requests: Vec::new(),
             overlay_requests: VecDeque::new(),
             sidebar_requests: VecDeque::new(),
             send_to_terminal: VecDeque::new(),
@@ -61,6 +64,19 @@ impl RequestBroker {
         self.send_to_terminal
             .push_back((payload, Some(terminal_id)));
         cx.notify();
+    }
+
+    pub fn push_workbench_request(&mut self, request: WorkbenchRequest, cx: &mut Context<Self>) {
+        self.workbench_requests.push(request);
+        cx.notify();
+    }
+
+    pub fn drain_workbench_requests(&mut self) -> Vec<WorkbenchRequest> {
+        std::mem::take(&mut self.workbench_requests)
+    }
+
+    pub fn has_workbench_requests(&self) -> bool {
+        !self.workbench_requests.is_empty()
     }
 
     pub fn drain_overlay_requests(&mut self) -> Vec<OverlayRequest> {

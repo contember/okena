@@ -149,3 +149,15 @@ pub enum SidebarRequest {
         project_id: String,
     },
 }
+
+/// Requests from the sidebar to the window's main content area.
+///
+/// The sidebar and the window live in different crates and never hold each
+/// other's entities, so nav clicks travel through the same `RequestBroker` the
+/// overlay and sidebar requests already use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkbenchRequest {
+    /// Open the harness view as a tab in the main area (or focus it if the tab
+    /// is already open).
+    OpenHarnessView(okena_core::harness::HarnessSection),
+}

@@ -45,6 +45,23 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) action_dispatcher: Option<D>,
     pub(super) tab_scroll_handle: ScrollHandle,
     pub(super) last_scrolled_to_tab: Option<usize>,
+    /// Open "new terminal kind" menu, if any. Carries what the choice applies
+    /// to so one menu serves the split and new-tab buttons alike.
+    pub(super) new_terminal_menu: Option<NewTerminalMenu>,
+}
+
+/// What a pending shell choice will create.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewTerminalTarget {
+    Split(okena_core::types::SplitDirection),
+    Tab { in_group: bool },
+}
+
+/// An open "what should this terminal run?" menu.
+#[derive(Clone, Debug)]
+pub struct NewTerminalMenu {
+    pub target: NewTerminalTarget,
+    pub layout_path: Vec<usize>,
 }
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
@@ -90,6 +107,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             action_dispatcher,
             tab_scroll_handle: ScrollHandle::new(),
             last_scrolled_to_tab: None,
+            new_terminal_menu: None,
         }
     }
 
@@ -622,6 +640,10 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
             }
         }
 
+        // Built before the match: the arms borrow `children` out of `layout`,
+        // which would conflict with taking `&mut self` again here.
+        let new_terminal_menu = self.render_new_terminal_menu(cx);
+
         match layout {
             Some(LayoutNode::Terminal {
                 terminal_id,
@@ -643,9 +665,20 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
             Some(LayoutNode::Tabs {
                 ref children,
                 active_tab,
-            }) => self
-                .render_tabs(children, active_tab, window, cx)
-                .into_any_element(),
+            }) => {
+                let tabs = self.render_tabs(children, active_tab, window, cx);
+                // Layered over the tabs so the picker sits above the terminal
+                // content rather than displacing it.
+                match new_terminal_menu {
+                    Some(menu) => div()
+                        .relative()
+                        .size_full()
+                        .child(tabs)
+                        .child(menu)
+                        .into_any_element(),
+                    None => tabs.into_any_element(),
+                }
+            }
 
             None => div()
                 .size_full()

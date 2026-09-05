@@ -67,6 +67,7 @@ pub(super) fn split(
     project_id: String,
     path: Vec<usize>,
     direction: SplitDirection,
+    shell_type: Option<okena_terminal::shell_config::ShellType>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -76,6 +77,7 @@ pub(super) fn split(
     // mutation invalidates `path`) so the new pane opens in the same directory.
     let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
     ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
+    super::apply_requested_shell(ws, &project_id, shell_type);
     spawn_uninitialized_terminals(
         ws,
         &project_id,

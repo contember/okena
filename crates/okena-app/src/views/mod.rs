@@ -12,6 +12,7 @@
 // Submodules
 pub mod chrome;
 pub mod components;
+pub mod harness;
 pub mod layout;
 pub mod overlay_manager;
 pub mod overlays;

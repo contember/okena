@@ -975,6 +975,9 @@ mod tests {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig {
                 project: ProjectHooks {

@@ -834,6 +834,7 @@ impl WindowView {
                             project_id: project_id.clone(),
                             path: layout_path.clone(),
                             direction: *direction,
+                            shell_type: None,
                         },
                         cx,
                     );
@@ -1156,6 +1157,19 @@ impl WindowView {
     /// Drains the overlay request queue and dispatches each request to the
     /// OverlayManager. Requests for already-open overlays are silently dropped.
     pub(super) fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
+        // Sidebar HARNESS nav clicks arrive here: the sidebar and the window
+        // never hold each other's entities, so the broker is the only channel.
+        let workbench: Vec<_> = self
+            .request_broker
+            .update(cx, |broker, _cx| broker.drain_workbench_requests());
+        for request in workbench {
+            match request {
+                crate::workspace::requests::WorkbenchRequest::OpenHarnessView(section) => {
+                    self.show_harness_view(section, cx);
+                }
+            }
+        }
+
         let requests: Vec<_> = self
             .request_broker
             .update(cx, |broker, _cx| broker.drain_overlay_requests());

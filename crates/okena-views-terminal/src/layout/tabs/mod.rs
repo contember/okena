@@ -98,31 +98,58 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .gap(px(2.0))
             .px(px(4.0))
             .child(
-                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None, None)
+                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, Some("Split vertically (right-click to choose a shell or agent)"), None)
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
+                        this.open_new_terminal_menu(
+                            crate::layout::layout_container::NewTerminalTarget::Split(
+                                SplitDirection::Vertical,
+                            ),
+                            cx,
+                        );
+                    }))
                     .on_click(move |_, _window, cx| {
                         if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
                             dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_v.project_id.clone(),
                                 path: ctx_split_v.layout_path.clone(),
                                 direction: SplitDirection::Vertical,
+                                shell_type: None,
                             }, cx);
                         }
                     }),
             )
             .child(
-                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None, None)
+                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, Some("Split horizontally (right-click to choose a shell or agent)"), None)
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
+                        this.open_new_terminal_menu(
+                            crate::layout::layout_container::NewTerminalTarget::Split(
+                                SplitDirection::Horizontal,
+                            ),
+                            cx,
+                        );
+                    }))
                     .on_click(move |_, _window, cx| {
                         if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
                             dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_h.project_id.clone(),
                                 path: ctx_split_h.layout_path.clone(),
                                 direction: SplitDirection::Horizontal,
+                                shell_type: None,
                             }, cx);
                         }
                     }),
             )
             .child(
-                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None, None)
+                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, Some("New tab (right-click to choose a shell or agent)"), None)
+                    .on_mouse_down(MouseButton::Right, {
+                        let in_group = !ctx.standalone;
+                        cx.listener(move |this, _, _window, cx| {
+                            this.open_new_terminal_menu(
+                                crate::layout::layout_container::NewTerminalTarget::Tab { in_group },
+                                cx,
+                            );
+                        })
+                    })
                     .on_click(move |_, _window, cx| {
                         if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
                             dispatcher.add_tab(

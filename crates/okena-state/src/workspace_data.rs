@@ -19,6 +19,37 @@ pub struct FolderData {
     pub folder_color: FolderColor,
 }
 
+impl ProjectData {
+    /// Whether this project is an agent session rather than a repo.
+    ///
+    /// Agent sessions are created at the configured projects root when a task
+    /// spans several repos, so one agent can see every worktree it was handed.
+    /// They are identified by carrying a task link while not themselves being a
+    /// worktree — a plain project has no task, and a task's worktree has
+    /// `worktree_info`. Derived rather than stored so an existing workspace
+    /// gains the distinction without a migration.
+    pub fn is_agent_session(&self) -> bool {
+        self.task_ref.is_some() && self.worktree_info.is_none()
+    }
+
+    /// Whether this project is a spec-writing session.
+    ///
+    /// Stored rather than derived from the project's name: the name is a slug
+    /// the user can rename, and a session that stops being recognizable because
+    /// someone retitled it would silently fall out of the Specs view.
+    pub fn is_spec_session(&self) -> bool {
+        self.spec_change.is_some()
+    }
+
+    /// Whether this project is any kind of agent session.
+    ///
+    /// Both kinds are rooted above the repos rather than in one, so anything
+    /// that lists sessions apart from repos wants this rather than either half.
+    pub fn is_any_agent_session(&self) -> bool {
+        self.is_agent_session() || self.is_spec_session()
+    }
+}
+
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
@@ -232,6 +263,27 @@ pub struct ProjectData {
     /// Ordered list of worktree child project IDs (for parent projects)
     #[serde(default)]
     pub worktree_ids: Vec<String>,
+    /// The task this project was started for, when it came from the harness.
+    ///
+    /// Set on a worktree created via "start work on this task"; `None` for every
+    /// ordinary project. Denormalized (key/title/url, not just the id) so the
+    /// sidebar can label the worktree without a provider round-trip or a network
+    /// connection — see [`okena_core::tasks::TaskRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_ref: Option<okena_core::tasks::TaskRef>,
+    /// Agent-reported state for this session: status and produced assets.
+    ///
+    /// Written by agents through okena's MCP server, never by the UI. Lives on
+    /// the project so it dies with the session rather than leaking into a map
+    /// nothing prunes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<okena_core::harness::AgentSessionState>,
+    /// The OpenSpec change this session is drafting, if it is a spec session.
+    ///
+    /// Holds the change's directory name, which is its identity in OpenSpec, so
+    /// the Specs view can tie a running agent back to the change it is writing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_change: Option<String>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -370,6 +422,9 @@ mod tests {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            agent: None,
+            spec_change: None,
             folder_color: Default::default(),
             hooks: Default::default(),
             is_remote: false,
@@ -1940,5 +1995,167 @@ mod tests {
         assert_eq!(a.origin_y, 130.0);
         assert_eq!(b.origin_x, 130.0);
         assert_eq!(b.origin_y, 130.0);
+    }
+
+    #[test]
+    fn a_spec_session_is_a_session_but_not_a_task_session() {
+        // The two kinds are listed apart in the sidebar, so nothing may report
+        // as both — a spec session carries no task link.
+        let p: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "s1",
+            "name": "add-login (spec)",
+            "path": "/repo",
+            "spec_change": "add-login",
+        }))
+        .unwrap();
+        assert!(p.is_spec_session());
+        assert!(!p.is_agent_session());
+        assert!(p.is_any_agent_session());
+    }
+
+    #[test]
+    fn a_plain_project_is_neither_kind_of_session() {
+        let p: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "name": "okena",
+            "path": "/repo",
+        }))
+        .unwrap();
+        assert!(!p.is_spec_session());
+        assert!(!p.is_agent_session());
+        assert!(!p.is_any_agent_session());
+    }
+
+    #[test]
+    fn a_project_written_before_spec_sessions_still_loads() {
+        // Every workspace.json from before this field must absorb its absence,
+        // exactly as `task_ref` did.
+        let json = serde_json::json!({
+            "id": "p1",
+            "name": "proj",
+            "path": "/tmp/proj",
+        });
+        let p: ProjectData = serde_json::from_value(json).expect("legacy project should load");
+        assert!(p.spec_change.is_none());
+        assert!(!p.is_spec_session());
+    }
+
+    #[test]
+    fn project_without_task_ref_still_loads() {
+        // Every workspace.json written before the harness landed lacks the
+        // field. `serde(default)` must absorb that — a hard error here would
+        // make an existing workspace unloadable on upgrade.
+        let json = serde_json::json!({
+            "id": "p1",
+            "name": "proj",
+            "path": "/tmp/p1",
+            "layout": null
+        });
+        let p: ProjectData = serde_json::from_value(json).expect("legacy project should load");
+        assert_eq!(p.task_ref, None);
+    }
+
+    #[test]
+    fn task_ref_round_trips_through_persistence() {
+        use okena_core::tasks::{TaskId, TaskRef};
+
+        let mut p = make_project("/tmp/p");
+        p.task_ref = Some(TaskRef {
+            id: TaskId::new("linear", "uuid-9"),
+            display_key: "LIN-9".into(),
+            title: "Ship the harness".into(),
+            url: "https://linear.app/x/issue/LIN-9".into(),
+        });
+
+        let round: ProjectData =
+            serde_json::from_str(&serde_json::to_string(&p).expect("serialize"))
+                .expect("deserialize");
+        let got = round
+            .task_ref
+            .expect("task_ref should survive the round trip");
+        assert_eq!(got.id, TaskId::new("linear", "uuid-9"));
+        assert_eq!(got.display_key, "LIN-9");
+    }
+
+    #[test]
+    fn absent_task_ref_is_omitted_from_json() {
+        // `skip_serializing_if` keeps a null out of every ordinary project —
+        // this file is rewritten on every quit, for every project.
+        let p = make_project("/tmp/p");
+        let json = serde_json::to_value(&p).expect("serialize");
+        assert!(
+            json.get("task_ref").is_none(),
+            "unlinked project should not carry a task_ref key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_session_tests {
+    use super::*;
+
+    fn project() -> ProjectData {
+        ProjectData {
+            id: "p1".into(),
+            name: "p".into(),
+            path: "/tmp/p".into(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+            creating_progress: None,
+        }
+    }
+
+    fn task() -> okena_core::tasks::TaskRef {
+        okena_core::tasks::TaskRef {
+            id: okena_core::tasks::TaskId::new("linear", "u1"),
+            display_key: "LIN-1".into(),
+            title: "t".into(),
+            url: "u".into(),
+        }
+    }
+
+    #[test]
+    fn a_plain_project_is_not_an_agent_session() {
+        assert!(!project().is_agent_session());
+    }
+
+    #[test]
+    fn a_task_linked_non_worktree_is_an_agent_session() {
+        let mut p = project();
+        p.task_ref = Some(task());
+        assert!(p.is_agent_session());
+    }
+
+    #[test]
+    fn a_tasks_worktree_is_not_an_agent_session() {
+        // Single-project work links the worktree itself; that is a repo
+        // checkout, not the session rooted above several of them.
+        let mut p = project();
+        p.task_ref = Some(task());
+        p.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".into(),
+            color_override: None,
+            main_repo_path: String::new(),
+            worktree_path: String::new(),
+            branch_name: String::new(),
+        });
+        assert!(!p.is_agent_session());
     }
 }

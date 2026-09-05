@@ -1079,8 +1079,16 @@ impl PtyManager {
         launch_environment: &[(String, Option<String>)],
     ) -> CommandBuilder {
         let session_backend = self.session_backend();
-        // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
-        // so it can be passed to the session backend
+        // Turn a custom shell into the session backend's initial program, so it
+        // survives being wrapped in tmux/screen.
+        //
+        // `ShellType::for_command` produces the `<shell> -c <script>` shape,
+        // which the backend runs as a script. Anything else custom — an agent
+        // like `claude <prompt> --mcp-config <file>`, or a user's own shell — is
+        // a program with argv. Before this distinction existed, only the `-c`
+        // shape was forwarded and everything else silently fell through to the
+        // backend's default shell: the session opened on a bare prompt with the
+        // requested program never run.
         let custom_command = plan.initial_command.as_ref().map_or_else(
             || match &plan.route {
                 ShellType::Custom { args, .. }
@@ -1088,6 +1096,10 @@ impl PtyManager {
                 {
                     Some(SessionCommand::ShellScript(args[1].as_str()))
                 }
+                ShellType::Custom { path, args } => Some(SessionCommand::Program {
+                    program: path.as_str(),
+                    args,
+                }),
                 _ => None,
             },
             |command| {

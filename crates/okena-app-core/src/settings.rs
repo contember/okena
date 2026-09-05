@@ -403,6 +403,57 @@ impl SettingsState {
     }
 
     /// Set worktree default merge
+    /// Directory a multi-project agent session runs in.
+    pub fn set_harness_spec_repo(&mut self, value: String, cx: &mut Context<Self>) {
+        // Blank means "unset": the Specs view then says there is no repository
+        // rather than reporting an empty path as missing.
+        self.settings.harness.spec_repo = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_harness_agent_root(&mut self, value: String, cx: &mut Context<Self>) {
+        // Blank means "unset", not a literal empty path — the daemon falls back
+        // to the first project's parent directory.
+        self.settings.harness.agent_root = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
+    /// Program launched when starting work on a task.
+    pub fn set_harness_agent_command(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.harness.agent_command = value.and_then(opt_trimmed);
+        self.save_and_notify(cx);
+    }
+
+    /// Arguments passed to the agent. One per line in the UI, since an
+    /// argument may legitimately contain spaces.
+    pub fn set_harness_agent_args(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.harness.agent_args = value
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_harness_agent_mcp_injection(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness.agent_mcp_injection = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Override the flags used to hand an agent its MCP config. Empty restores
+    /// the built-in per-agent default.
+    pub fn set_harness_agent_mcp_args(&mut self, value: String, cx: &mut Context<Self>) {
+        let args: Vec<String> = value
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        self.settings.harness.agent_mcp_args = (!args.is_empty()).then_some(args);
+        self.save_and_notify(cx);
+    }
+
     pub fn set_worktree_default_merge(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.worktree.default_merge = value;
         self.save_and_notify(cx);
@@ -498,4 +549,30 @@ pub fn init_settings(cx: &mut App) -> Entity<SettingsState> {
     let entity = cx.new(|_cx| SettingsState::new(settings));
     cx.set_global(GlobalSettings(entity.clone()));
     entity
+}
+
+/// `None` for a blank or whitespace-only value, so an empty settings field
+/// reads as "unset" rather than an empty string the daemon would try to use.
+fn opt_trimmed(value: String) -> Option<String> {
+    let t = value.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+#[cfg(test)]
+mod harness_setting_tests {
+    use super::opt_trimmed;
+
+    #[test]
+    fn blank_values_become_unset() {
+        assert_eq!(opt_trimmed(String::new()), None);
+        assert_eq!(opt_trimmed("   ".into()), None);
+    }
+
+    #[test]
+    fn real_values_are_trimmed_and_kept() {
+        assert_eq!(
+            opt_trimmed("  /Users/me/p  ".into()),
+            Some("/Users/me/p".into())
+        );
+    }
 }
