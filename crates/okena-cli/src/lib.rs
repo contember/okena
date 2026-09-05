@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod mcp;
 pub mod parser;
 pub mod register;
 pub mod resolve;
@@ -90,6 +91,7 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Pair => commands::cli_pair(),
         Command::Health { json } => commands::cli_health(json),
         Command::State => commands::cli_state(),
+        Command::Mcp => mcp::run(),
         Command::Action { json } => commands::cli_action(&json),
         Command::Services { project, json } => commands::cli_services(project.as_deref(), json),
         Command::Service { cmd } => match cmd {
@@ -334,7 +336,7 @@ fn discover_server() -> Result<DiscoveredServer, String> {
 
 /// Ensure we have a valid token, auto-registering if needed.
 /// Returns the bearer token string.
-fn ensure_token() -> Result<String, String> {
+pub(crate) fn ensure_token() -> Result<String, String> {
     // Try existing token
     if let Some(config) = load_cli_config() {
         // Quick validation: try an authenticated request
@@ -375,7 +377,7 @@ fn api_get(path: &str, token: &str) -> Result<String, String> {
     resp.text().map_err(|e| format!("Failed to read body: {e}"))
 }
 
-fn api_action(token: &str, body: &str) -> Result<String, String> {
+pub(crate) fn api_action(token: &str, body: &str) -> Result<String, String> {
     let server = discover_server()?;
     let action: okena_core::api::ActionRequest =
         serde_json::from_str(body).map_err(|e| format!("Invalid action: {e}"))?;

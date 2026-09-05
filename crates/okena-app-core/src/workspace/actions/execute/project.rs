@@ -461,12 +461,18 @@ pub(super) fn set_worktree_color_override(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_worktree(
     ws: &mut Workspace,
     window_id: WindowId,
     project_id: String,
     branch: String,
     create_branch: bool,
+    // Shell the new worktree's terminals run. `None` keeps the ordinary
+    // default; the harness passes an agent command here so the worktree opens
+    // with the agent already running. Applied before terminals are spawned —
+    // setting it afterwards would only affect the *next* terminal.
+    default_shell: Option<okena_terminal::shell_config::ShellType>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -495,6 +501,11 @@ pub(super) fn create_worktree(
         cx,
     ) {
         Ok(new_project_id) => {
+            if let Some(shell) = default_shell
+                && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == new_project_id)
+            {
+                p.default_shell = Some(shell);
+            }
             let result = spawn_uninitialized_terminals(
                 ws,
                 &new_project_id,
@@ -798,6 +809,9 @@ mod hook_action_tests {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -1266,6 +1280,9 @@ mod set_show_in_overview_tests {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,

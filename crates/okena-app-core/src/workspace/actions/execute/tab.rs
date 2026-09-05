@@ -19,6 +19,7 @@ pub(super) fn add_tab(
     project_id: String,
     path: Vec<usize>,
     in_group: bool,
+    shell_type: Option<okena_terminal::shell_config::ShellType>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -32,6 +33,7 @@ pub(super) fn add_tab(
     } else {
         ws.add_tab(focus_manager, &project_id, &path, cx);
     }
+    super::apply_requested_shell(ws, &project_id, shell_type);
     spawn_uninitialized_terminals(
         ws,
         &project_id,

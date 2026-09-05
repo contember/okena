@@ -23,10 +23,12 @@ fn canonicalize_layout_action(action: ActionRequest, mode: ProjectLayoutMode) ->
             project_id,
             path,
             direction,
+            shell_type,
         } => ActionRequest::SplitTerminal {
             project_id,
             path,
             direction: direction.flipped(),
+            shell_type,
         },
         ActionRequest::MovePaneTo {
             project_id,
@@ -414,6 +416,7 @@ impl ActionDispatcher {
                 project_id: project_id.to_string(),
                 path: layout_path.to_vec(),
                 direction,
+                shell_type: None,
             },
             cx,
         );
@@ -427,11 +430,25 @@ impl ActionDispatcher {
         in_group: bool,
         cx: &mut impl AppContext,
     ) {
+        self.add_tab_with_shell(project_id, layout_path, in_group, None, cx);
+    }
+
+    /// Add a tab running a specific shell — a coding agent, say — instead of
+    /// the project default.
+    pub fn add_tab_with_shell(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        in_group: bool,
+        shell_type: Option<okena_terminal::shell_config::ShellType>,
+        cx: &mut impl AppContext,
+    ) {
         self.dispatch(
             ActionRequest::AddTab {
                 project_id: project_id.to_string(),
                 path: layout_path.to_vec(),
                 in_group,
+                shell_type,
             },
             cx,
         );
@@ -590,10 +607,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id,
             path,
             direction,
+            shell_type,
         } => ActionRequest::SplitTerminal {
             project_id: s(&project_id),
             path,
             direction,
+            shell_type,
         },
         ActionRequest::CloseTerminal {
             project_id,
@@ -694,10 +713,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id,
             path,
             in_group,
+            shell_type,
         } => ActionRequest::AddTab {
             project_id: s(&project_id),
             path,
             in_group,
+            // A shell is a program name, not an okena id.
+            shell_type,
         },
         ActionRequest::SetActiveTab {
             project_id,
@@ -846,6 +868,74 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branch,
             create_branch,
         },
+        // Harness task actions. Only `TaskStartWork` carries an okena-side id;
+        // the rest are provider-scoped and have nothing to translate. Task ids
+        // are never stripped — they name the provider's own issue, which is
+        // identical on every instance.
+        ActionRequest::TaskStartWork {
+            provider,
+            task_external_id,
+            project_ids,
+            agent_root,
+            branch,
+            agent_command,
+        } => ActionRequest::TaskStartWork {
+            provider,
+            task_external_id,
+            // Every assigned project is an okena-side id and needs stripping.
+            project_ids: project_ids.iter().map(|id| s(id)).collect(),
+            // A filesystem path, a branch name and a program name — none are
+            // okena ids, so none are translated.
+            agent_root,
+            branch,
+            agent_command,
+        },
+        ActionRequest::AgentRegisterAsset {
+            project_id,
+            kind,
+            title,
+            url,
+            project,
+        } => ActionRequest::AgentRegisterAsset {
+            project_id: s(&project_id),
+            kind,
+            title,
+            url,
+            // `project` is a human-facing repo label from the agent, not an
+            // okena id — nothing to translate.
+            project,
+        },
+        ActionRequest::AgentReportStatus { project_id, status } => {
+            ActionRequest::AgentReportStatus {
+                project_id: s(&project_id),
+                status,
+            }
+        }
+        ActionRequest::TaskDeleteWorkspace { project_id, force } => {
+            ActionRequest::TaskDeleteWorkspace {
+                project_id: s(&project_id),
+                force,
+            }
+        }
+        // Spec actions carry no ids — paths are relative to the daemon's own
+        // spec repository, which the client never names.
+        ActionRequest::SpecsTree => ActionRequest::SpecsTree,
+        ActionRequest::SpecRead { path } => ActionRequest::SpecRead { path },
+        ActionRequest::SpecDraftChange {
+            idea,
+            name,
+            agent_command,
+        } => ActionRequest::SpecDraftChange {
+            idea,
+            name,
+            agent_command,
+        },
+        ActionRequest::TasksAuthStatus => ActionRequest::TasksAuthStatus,
+        ActionRequest::TasksConnectApiKey { provider, api_key } => {
+            ActionRequest::TasksConnectApiKey { provider, api_key }
+        }
+        ActionRequest::TasksDisconnect { provider } => ActionRequest::TasksDisconnect { provider },
+        ActionRequest::TasksList { provider } => ActionRequest::TasksList { provider },
         ActionRequest::AddDiscoveredWorktree {
             parent_project_id,
             worktree_path,
@@ -1278,6 +1368,7 @@ mod tests {
                 project_id: "project".to_string(),
                 path: vec![0],
                 direction: SplitDirection::Horizontal,
+                shell_type: None,
             },
             ProjectLayoutMode::Rows,
         );

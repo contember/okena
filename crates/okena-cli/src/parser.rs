@@ -38,6 +38,11 @@ pub enum Command {
     },
     /// Print raw workspace state (JSON)
     State,
+    /// Run okena's MCP server on stdio (for AI agents okena is running)
+    ///
+    /// Point an agent at it with:
+    /// `{"mcpServers":{"okena":{"command":"okena","args":["mcp"]}}}`
+    Mcp,
     /// Execute a raw action (JSON ActionRequest)
     ///
     /// Escape hatch for actions without a dedicated subcommand. The body is a
@@ -502,9 +507,9 @@ pub enum TermCmd {
 /// control back to GUI/profile launch.
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
-        "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
-        "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
-        "command", "update",
+        "pair", "health", "state", "mcp", "action", "services", "service", "whoami", "ls",
+        "project", "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings",
+        "theme", "command", "update",
     ]
 }
 

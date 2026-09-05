@@ -6068,12 +6068,14 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
+ "dirs 5.0.1",
  "gpui",
  "log",
  "okena-core",
  "okena-files",
  "okena-git",
  "okena-hooks",
+ "okena-tasks",
  "okena-terminal",
  "okena-theme",
  "okena-workspace",
@@ -6440,6 +6442,18 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "okena-tasks"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-transport",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

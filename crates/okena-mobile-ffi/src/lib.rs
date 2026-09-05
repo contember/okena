@@ -572,6 +572,7 @@ pub async fn split_terminal(
             project_id,
             path: path.into_iter().map(|v| v as usize).collect(),
             direction: dir,
+            shell_type: None,
         },
     )
     .await
@@ -853,6 +854,8 @@ pub async fn add_tab(
             project_id,
             path: path.into_iter().map(|v| v as usize).collect(),
             in_group,
+            // Mobile has no shell picker yet; the project default applies.
+            shell_type: None,
         },
     )
     .await

@@ -2,7 +2,7 @@ use crate::keybindings::{
     AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
     FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
-    ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
+    ShowDiffViewer, ShowFileSearch, ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
     ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
     ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
@@ -681,6 +681,24 @@ impl Render for WindowView {
                                     });
                                 }
                             }
+                            DragState::HarnessLane {
+                                initial_mouse_x,
+                                initial_fraction,
+                                total_width,
+                            } => {
+                                // Computed from the gesture's origin rather
+                                // than per-frame deltas, which drift over a
+                                // long drag.
+                                if *total_width > 0.0 {
+                                    let delta = f32::from(event.position.x) - initial_mouse_x;
+                                    let fraction = initial_fraction + delta / total_width;
+                                    if let Some(pane) = this.active_harness_pane(cx) {
+                                        pane.update(cx, |pane, cx| {
+                                            pane.set_lane_fraction(fraction, cx);
+                                        });
+                                    }
+                                }
+                            }
                             DragState::HookPanel {
                                 project_id,
                                 initial_mouse_y,
@@ -1030,6 +1048,12 @@ impl Render for WindowView {
                     Err(error) => {
                         crate::views::panels::toast::ToastManager::error(error, cx);
                     }
+                }
+            }))
+            // Handle open harness view action
+            .on_action(cx.listener({
+                move |this, _: &ShowHarness, _window, cx| {
+                    this.show_harness_view(okena_core::harness::HarnessSection::Tasks, cx);
                 }
             }))
             // Handle show theme selector action
@@ -1437,13 +1461,36 @@ impl Render for WindowView {
                             .min_h_0()
                             .min_w_0()
                             .child(
-                                // Projects grid (zoom is handled by LayoutContainer)
+                                // Either the terminal workspace or the active
+                                // harness view — one or the other fills the
+                                // main area, never both.
                                 div()
                                     .id("projects-container")
                                     .flex_1()
                                     .min_h_0()
                                     .min_w_0()
-                                    .child(self.render_projects_grid(cx)),
+                                    .flex()
+                                    .flex_row()
+                                    .map(|d| match self.active_harness_pane(cx) {
+                                        Some(pane) => d.child(pane),
+                                        None => {
+                                            // An agent session gets a task
+                                            // workspace: its terminal on the
+                                            // left, task context on the right.
+                                            let session = self.focused_agent_session(cx);
+                                            d.child(
+                                                div()
+                                                    .id("projects-grid-wrap")
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .min_w_0()
+                                                    .child(self.render_projects_grid(cx)),
+                                            )
+                                            .children(
+                                                session.map(|id| self.render_task_panel(id, cx)),
+                                            )
+                                        }
+                                    }),
                             ),
                     ),
             )

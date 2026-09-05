@@ -65,6 +65,75 @@ impl CursorShape {
 // Hook configuration types live in `okena-state` to keep them GPUI-free.
 pub use okena_state::{HooksConfig, ProjectHooks, TerminalHooks, WorktreeHooks};
 
+/// Engineering-harness configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HarnessConfig {
+    /// Directory an agent session runs in when a task spans several projects.
+    ///
+    /// A multi-project task needs one working directory above the individual
+    /// repos so the agent can see every worktree it was given. When unset, the
+    /// daemon falls back to the parent directory of the first assigned project,
+    /// which is right for the common `~/p/<repo>` layout and wrong for repos
+    /// scattered across the disk — hence the override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_root: Option<String>,
+
+    /// Program to launch when starting work on a task, e.g. `claude`.
+    ///
+    /// Unset means okena creates the worktrees and leaves you a normal shell —
+    /// launching an AI agent is opt-in, not something that happens to you
+    /// because you clicked "Start work".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command: Option<String>,
+
+    /// Arguments passed to `agent_command`.
+    ///
+    /// Each argument may contain `{key}`, `{title}`, `{url}` and `{branch}`,
+    /// substituted from the task. Agents differ in how they take a prompt, so
+    /// this is a template rather than a fixed shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_args: Vec<String>,
+
+    /// Point launched agents at okena's own MCP server automatically.
+    ///
+    /// On by default: the whole value of the harness is that an agent can ask
+    /// okena what task it is on and report back, and requiring every user to
+    /// hand-edit an MCP config first would mean almost nobody does.
+    #[serde(default = "default_true")]
+    pub agent_mcp_injection: bool,
+
+    /// Git repository holding this person's OpenSpec documents.
+    ///
+    /// Specs live in their own repo rather than beside the code because a
+    /// change routinely spans several projects — the same reason `agent_root`
+    /// exists. Unset means the Specs view has nothing to show and says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_repo: Option<String>,
+
+    /// Override the flags used to hand an agent its MCP config.
+    ///
+    /// `{config}` is replaced with the generated file's path. Set this when an
+    /// agent's CLI differs from the built-in default, so a changed flag is a
+    /// settings edit rather than a wait for a release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mcp_args: Option<Vec<String>>,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            agent_root: None,
+            agent_command: None,
+            agent_args: Vec::new(),
+            // Must match `default_true` above, or a struct-built default would
+            // disagree with a deserialized one.
+            agent_mcp_injection: true,
+            agent_mcp_args: None,
+            spec_repo: None,
+        }
+    }
+}
+
 /// Configuration for worktree creation and close defaults
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorktreeConfig {
@@ -367,6 +436,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub worktree: WorktreeConfig,
 
+    /// Engineering-harness defaults (agent session root).
+    #[serde(default)]
+    pub harness: HarnessConfig,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -432,6 +505,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
+            harness: HarnessConfig::default(),
             show_focused_border: default_show_focused_border(),
             color_tinted_background: false,
             font_size: default_font_size(),

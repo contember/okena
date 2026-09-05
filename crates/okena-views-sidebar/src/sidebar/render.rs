@@ -111,6 +111,7 @@ impl Sidebar {
             .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
             .on_action(cx.listener(Self::handle_sidebar_escape))
             .child(self.render_header(cx))
+            .child(self.render_harness_nav(cx))
             .child(self.render_projects_header(cx))
             .child(
                 div()
@@ -218,6 +219,11 @@ impl Sidebar {
             let mut m = HashMap::new();
             let mut idx_map = HashMap::new();
             for (idx, project) in workspace.data().projects.iter().enumerate() {
+                // Agent sessions render in their own AGENTS section below, so
+                // they never appear among the repos.
+                if project.is_agent_session() {
+                    continue;
+                }
                 let mut info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
                 // Mirrored daemon flag OR the client-local optimistic flag: the
                 // mirror is authoritative (and heals on abort), the local flag
@@ -557,6 +563,8 @@ impl Sidebar {
                     ),
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
+                // Clicking a project returns to the terminal workspace.
+                this.leave_harness_view(cx);
                 this.cursor_index = None;
                 let workspace = this.workspace.clone();
                 this.focus_manager.update(cx, |fm, cx| {
@@ -738,6 +746,13 @@ impl Render for Sidebar {
             self.cursor_index = None;
         }
 
+        // Agents list: a different set of rows entirely, so skip building the
+        // project tree rather than building it and throwing it away.
+        if self.list == super::SidebarList::Agents {
+            let agents = self.render_agents_list(cx).into_any_element();
+            return self.render_sidebar_container(vec![agents], cx);
+        }
+
         // Activity-sorted view is a separate, self-contained build path that
         // ignores project_order and folders. Branch early so the manual path
         // below stays untouched.
@@ -872,6 +887,10 @@ impl Render for Sidebar {
                     && all_project_ids.contains(wt_info.parent_project_id.as_str())
                 {
                     // This is a worktree child shown under its parent, skip
+                    continue;
+                }
+                // Agent sessions have their own section below.
+                if project.is_agent_session() {
                     continue;
                 }
                 let mut wt_children = worktree_children_map

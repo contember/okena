@@ -11,6 +11,7 @@ mod header;
 mod render_extensions;
 mod render_font;
 mod render_general;
+mod render_harness;
 mod render_hooks;
 mod render_paired_devices;
 mod render_terminal;
@@ -87,6 +88,10 @@ pub struct SettingsPanel {
     pub(super) project_hook_terminal_shell_wrapper: Entity<SimpleInputState>,
     // Worktree dir suffix input
     pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
+    pub(super) harness_agent_root_input: Entity<SimpleInputState>,
+    pub(super) harness_spec_repo_input: Entity<SimpleInputState>,
+    pub(super) harness_agent_args_input: Entity<SimpleInputState>,
+    pub(super) harness_agent_mcp_args_input: Entity<SimpleInputState>,
     // File opener input
     pub(super) file_opener_input: Entity<SimpleInputState>,
     // Remote listen address input
@@ -832,6 +837,76 @@ impl SettingsPanel {
         )
         .detach();
 
+        // Harness inputs. Multi-line where the value is a list, since an
+        // argument may legitimately contain spaces and splitting on them would
+        // mangle a prompt.
+        let harness_agent_root_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("e.g. ~/p")
+                .default_value(s.harness.agent_root.clone().unwrap_or_default())
+        });
+        cx.subscribe(
+            &harness_agent_root_input,
+            |_this, entity, _: &InputChangedEvent, cx| {
+                let val = entity.read(cx).value().to_string();
+                settings_entity(cx).update(cx, |state, cx| state.set_harness_agent_root(val, cx));
+            },
+        )
+        .detach();
+
+        let harness_spec_repo_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("e.g. ~/p/specs")
+                .default_value(s.harness.spec_repo.clone().unwrap_or_default())
+        });
+        cx.subscribe(
+            &harness_spec_repo_input,
+            |_this, entity, _: &InputChangedEvent, cx| {
+                let val = entity.read(cx).value().to_string();
+                settings_entity(cx).update(cx, |state, cx| state.set_harness_spec_repo(val, cx));
+            },
+        )
+        .detach();
+
+        let harness_agent_args_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Work on {key}: {title}")
+                .multiline()
+                .highlight_vars()
+                .default_value(s.harness.agent_args.join("\n"))
+        });
+        cx.subscribe(
+            &harness_agent_args_input,
+            |_this, entity, _: &InputChangedEvent, cx| {
+                let val = entity.read(cx).value().to_string();
+                settings_entity(cx).update(cx, |state, cx| state.set_harness_agent_args(val, cx));
+            },
+        )
+        .detach();
+
+        let harness_agent_mcp_args_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("--mcp-config\n{config}")
+                .multiline()
+                .highlight_vars()
+                .default_value(
+                    s.harness
+                        .agent_mcp_args
+                        .clone()
+                        .unwrap_or_default()
+                        .join("\n"),
+                )
+        });
+        cx.subscribe(
+            &harness_agent_mcp_args_input,
+            |_this, entity, _: &InputChangedEvent, cx| {
+                let val = entity.read(cx).value().to_string();
+                settings_entity(cx)
+                    .update(cx, |state, cx| state.set_harness_agent_mcp_args(val, cx));
+            },
+        )
+        .detach();
+
         // File opener input
         let file_opener_input = cx.new(|cx| {
             let state = SimpleInputState::new(cx).placeholder("e.g. code, cursor, zed, vim");
@@ -910,6 +985,10 @@ impl SettingsPanel {
             project_hook_terminal_on_close,
             project_hook_terminal_shell_wrapper,
             worktree_dir_suffix_input,
+            harness_agent_root_input,
+            harness_spec_repo_input,
+            harness_agent_args_input,
+            harness_agent_mcp_args_input,
             file_opener_input,
             listen_address_input,
             paired_devices: PairedDevices::Loading,
@@ -1277,6 +1356,7 @@ impl SettingsPanel {
             SettingsCategory::Font => self.render_font(cx).into_any_element(),
             SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
+            SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),
             SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),

@@ -677,20 +677,28 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     struct TempDir {
         path: PathBuf,
     }
 
     impl TempDir {
         fn new() -> Self {
+            // A timestamp alone is not unique: tests run in parallel threads
+            // and two can land in the same nanosecond, whereupon `create_dir`
+            // fails with AlreadyExists and the test panics. The counter makes
+            // the name unique per process regardless of clock resolution.
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "okena-content-search-{}-{}",
+                "okena-content-search-{}-{}-{}",
                 std::process::id(),
-                now
+                now,
+                NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
             Self { path }

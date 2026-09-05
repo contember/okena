@@ -186,6 +186,12 @@ pub fn apply_remote_snapshot(
                         .iter()
                         .map(|id| format!("remote:{}:{}", conn_id, id))
                         .collect();
+                    // Mirrored so a task link made daemon-side (or cleared there)
+                    // reaches an already-materialized remote project. No id
+                    // translation — see the push path below.
+                    existing.task_ref = api_project.task_ref.clone();
+                    existing.spec_change = api_project.spec_change.clone();
+                    existing.agent = api_project.agent.clone();
                     existing.pinned = api_project.pinned;
                     existing.last_activity_at = api_project.last_activity_at;
                     existing.default_shell = api_project.default_shell.clone();
@@ -249,6 +255,12 @@ pub fn apply_remote_snapshot(
                         hidden_terminals: HashMap::new(),
                         worktree_info,
                         worktree_ids,
+                        // No id translation: a TaskRef names the provider and
+                        // that provider's own issue id, which are the same on
+                        // every instance.
+                        task_ref: api_project.task_ref.clone(),
+                        spec_change: api_project.spec_change.clone(),
+                        agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
                         is_remote: true,
@@ -549,6 +561,9 @@ mod tests {
             services: Vec::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
             pinned: false,
             last_activity_at: None,
             default_shell: None,

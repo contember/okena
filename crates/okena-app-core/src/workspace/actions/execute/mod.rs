@@ -12,8 +12,13 @@
 mod files;
 mod git;
 mod project;
+// Public so the Agents view can tell whether a session was handed okena's
+// MCP config, rather than guessing from the agent's name.
+pub mod agent_mcp;
 mod session;
+mod specs;
 mod tab;
+mod tasks;
 mod terminal;
 mod terminal_batch;
 
@@ -97,12 +102,14 @@ pub fn execute_action(
             project_id,
             path,
             direction,
+            shell_type,
         } => terminal::split(
             ws,
             focus_manager,
             project_id,
             path,
             direction,
+            shell_type,
             backend,
             terminals,
             settings,
@@ -236,12 +243,14 @@ pub fn execute_action(
             project_id,
             path,
             in_group,
+            shell_type,
         } => tab::add_tab(
             ws,
             focus_manager,
             project_id,
             path,
             in_group,
+            shell_type,
             backend,
             terminals,
             settings,
@@ -588,6 +597,67 @@ pub fn execute_action(
             project_id,
             branch,
             create_branch,
+            None,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+
+        // ── Engineering harness: task-manager integration ──────────────────
+        ActionRequest::AgentRegisterAsset {
+            project_id,
+            kind,
+            title,
+            url,
+            project,
+        } => tasks::register_asset(ws, project_id, kind, title, url, project, cx),
+        ActionRequest::AgentReportStatus { project_id, status } => {
+            tasks::report_status(ws, project_id, status, cx)
+        }
+        ActionRequest::TaskDeleteWorkspace { project_id, force } => {
+            tasks::delete_workspace(ws, focus_manager, project_id, force, settings, cx)
+        }
+        // ── Engineering harness: OpenSpec documents ────────────────────────
+        ActionRequest::SpecsTree => specs::tree(settings),
+        ActionRequest::SpecRead { path } => specs::read(settings, path),
+        ActionRequest::SpecDraftChange {
+            idea,
+            name,
+            agent_command,
+        } => specs::draft_change(
+            ws,
+            window_id,
+            idea,
+            name,
+            agent_command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::TasksAuthStatus => tasks::auth_status(),
+        ActionRequest::TasksConnectApiKey { provider, api_key } => {
+            tasks::connect_api_key(provider, api_key)
+        }
+        ActionRequest::TasksDisconnect { provider } => tasks::disconnect(provider),
+        ActionRequest::TasksList { provider } => tasks::list(provider),
+        ActionRequest::TaskStartWork {
+            provider,
+            task_external_id,
+            project_ids,
+            agent_root,
+            branch,
+            agent_command,
+        } => tasks::start_work(
+            ws,
+            window_id,
+            provider,
+            task_external_id,
+            project_ids,
+            agent_root,
+            branch,
+            agent_command,
             backend,
             terminals,
             settings,
@@ -851,6 +921,50 @@ pub(super) fn inherited_cwd(
     };
     let cwd = terminals.lock().get(terminal_id)?.current_cwd();
     (!cwd.is_empty()).then_some(cwd)
+}
+
+/// Stamp `shell` onto every not-yet-spawned terminal in a project.
+///
+/// Called between creating a pane and spawning it. Only nodes awaiting a PTY
+/// are touched, and at that moment the only such nodes are the ones just
+/// created — anything older already has a terminal id.
+fn assign_shell_to_uninitialized(node: &mut LayoutNode, shell: &ShellType) {
+    match node {
+        LayoutNode::Terminal {
+            terminal_id,
+            shell_type,
+            ..
+        } => {
+            if terminal_id.is_none() {
+                *shell_type = shell.clone();
+            }
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                assign_shell_to_uninitialized(child, shell);
+            }
+        }
+    }
+}
+
+/// Apply a caller-chosen shell to a project's pending panes, if one was given.
+pub(super) fn apply_requested_shell(
+    ws: &mut Workspace,
+    project_id: &str,
+    shell: Option<ShellType>,
+) {
+    let Some(shell) = shell else {
+        return;
+    };
+    if let Some(layout) = ws
+        .data
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.layout.as_mut())
+    {
+        assign_shell_to_uninitialized(layout, &shell);
+    }
 }
 
 pub fn spawn_uninitialized_terminals(
@@ -1283,6 +1397,9 @@ mod reconnect_shell_tests {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
+            task_ref: None,
+            spec_change: None,
+            agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),
             is_remote: false,

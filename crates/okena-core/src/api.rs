@@ -331,6 +331,23 @@ pub struct ApiProject {
     pub worktree_info: Option<ApiWorktreeMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_ids: Vec<String>,
+    /// The harness task this project was started for, when it came from one.
+    ///
+    /// Unlike `worktree_info`/`worktree_ids`, this is *not* remote-id prefixed
+    /// on the way across: a `TaskId` names the provider and that provider's own
+    /// issue id, which mean the same thing on every okena instance. Reusing
+    /// `crate::tasks::TaskRef` directly keeps the wire and local shapes from
+    /// drifting — it holds no okena-side identifiers to translate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_ref: Option<crate::tasks::TaskRef>,
+    /// Agent-reported status and produced assets for this session. Like
+    /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::harness::AgentSessionState>,
+    /// The OpenSpec change a spec session is drafting. A directory name, which
+    /// means the same thing on either side, so it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_change: Option<String>,
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Carried over the wire so daemon-client projects keep their pin marker
     /// and stable pinned-tier ordering.
@@ -644,6 +661,11 @@ pub enum ActionRequest {
         project_id: String,
         path: Vec<usize>,
         direction: SplitDirection,
+        /// Shell for the new pane. `None` keeps the existing behaviour — the
+        /// project's default, else the global one — so callers that don't care
+        /// are unaffected. Set it to open the pane directly on a coding agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_type: Option<ShellType>,
     },
     CloseTerminal {
         project_id: String,
@@ -726,6 +748,9 @@ pub enum ActionRequest {
         project_id: String,
         path: Vec<usize>,
         in_group: bool,
+        /// Shell for the new tab. `None` keeps the existing behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_type: Option<ShellType>,
     },
     SetActiveTab {
         project_id: String,
@@ -1051,6 +1076,139 @@ pub enum ActionRequest {
         // unboxed `ApiHooksConfig` here trips `clippy::large_enum_variant`.
         hooks: Box<ApiHooksConfig>,
     },
+    // ─── Engineering harness: task-manager integration ────────────────────
+    //
+    // `provider` is a provider id (`"linear"`). An unknown id is an error
+    // rather than a silent no-op, so a newer client asking an older daemon for
+    // a provider it lacks says so plainly.
+    /// Auth state for every known provider. Cheap and local — reads the stored
+    /// credential, makes no network call.
+    TasksAuthStatus,
+    /// Store a personal API key for `provider` and verify it with one live
+    /// call. The key is written only if that call succeeds, so a typo can't
+    /// leave a permanently-failing credential on disk.
+    TasksConnectApiKey {
+        provider: String,
+        api_key: String,
+    },
+    /// Forget the stored credential for `provider`.
+    TasksDisconnect {
+        provider: String,
+    },
+    /// Tasks assigned to the authenticated user. Hits the provider's API.
+    TasksList {
+        provider: String,
+    },
+    /// Start work on a task across one or more projects.
+    ///
+    /// Creates a worktree on the provider's branch name in every project in
+    /// `project_ids`, then — when more than one is given — an agent session
+    /// rooted above them so a single agent can see every worktree it was
+    /// handed. Each created project is linked back to the task.
+    ///
+    /// `task_external_id` is the provider's own id (Linear's UUID), not the
+    /// display key — the display key changes when an issue moves team.
+    ///
+    /// Partial failure is reported rather than rolled back: worktrees that were
+    /// created stay created, and the result names which projects failed. Undoing
+    /// a checkout that may already have an agent in it is worse than saying so.
+    TaskStartWork {
+        provider: String,
+        task_external_id: String,
+        /// Projects to create worktrees in. Must be non-empty.
+        project_ids: Vec<String>,
+        /// Directory the agent session runs in. Falls back to
+        /// `settings.harness.agent_root`, then the parent of the first project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_root: Option<String>,
+        /// Branch (and therefore worktree) name. `None` uses the provider's own
+        /// branch name for the task, which keeps its branch-to-issue linking
+        /// working — override only when the user asked for a different name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Agent to launch. `None` falls back to
+        /// `settings.harness.agent_command`; an empty string explicitly starts
+        /// no agent, so a caller can say "worktrees only" even when a default
+        /// agent is configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
+    /// Tear down everything created for a task: the agent session, every
+    /// worktree created for it, their terminals and the agent processes inside
+    /// them.
+    ///
+    /// `project_id` may be any project linked to the task; the daemon resolves
+    /// the rest from the shared task link. Destructive and not undoable — the
+    /// caller is responsible for confirming with the user first.
+    ///
+    /// `force` is passed through to `git worktree remove`, which otherwise
+    /// refuses to delete a checkout with uncommitted changes. Without it, a
+    /// dirty worktree is reported as a failure and left on disk rather than
+    /// silently discarding work.
+    TaskDeleteWorkspace {
+        project_id: String,
+        #[serde(default)]
+        force: bool,
+    },
+    // ─── Engineering harness: OpenSpec documents ──────────────────────────
+    //
+    // okena reads the OpenSpec layout directly off disk rather than shelling
+    // out to the `openspec` CLI: the convention is plain Markdown in a git
+    // repo, so browsing works whether or not the CLI is installed, while an
+    // agent authoring a change can still use the CLI itself.
+    /// The spec repository's OpenSpec tree: stable specs, active changes and
+    /// the archive. Reads `settings.harness.spec_repo`; an unset or missing
+    /// repo is reported as such rather than as an error.
+    SpecsTree,
+    /// Read one document from the spec repository.
+    ///
+    /// `path` is relative to the repository root, as returned by `SpecsTree`.
+    /// The daemon refuses any path that resolves outside the repo, so a
+    /// compromised or buggy client cannot use this to read arbitrary files.
+    SpecRead {
+        path: String,
+    },
+    /// Draft a new OpenSpec change from a free-text idea, with an agent.
+    ///
+    /// Scaffolds `openspec/changes/<slug>/` and opens an agent session in the
+    /// spec repo briefed to fill it in. okena creates the directory itself so
+    /// the change exists and is browsable even if the agent is closed
+    /// immediately; the agent's job is the thinking, not the mkdir.
+    SpecDraftChange {
+        idea: String,
+        /// Directory name for the change. `None` derives one from `idea`.
+        ///
+        /// Separate from the prompt because the prompt is now a paragraph:
+        /// slugging it directly produced a truncated, unreadable directory
+        /// name, and the directory is the change's identity in OpenSpec.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`; an empty string scaffolds the
+        /// change and starts no agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
+    // ─── Agent reporting (written by agents through okena's MCP server) ───
+    /// Record something an agent produced against its session project.
+    ///
+    /// Appends rather than replaces: an agent opening a second PR should not
+    /// erase the first. The daemon stamps `created_at` — agents have no
+    /// reliable clock agreement with the host.
+    AgentRegisterAsset {
+        project_id: String,
+        kind: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// Set the free-text status an agent reports for its session.
+    AgentReportStatus {
+        project_id: String,
+        status: String,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -1352,6 +1510,9 @@ mod tests {
                 services: vec![],
                 worktree_info: None,
                 worktree_ids: vec![],
+                task_ref: None,
+                agent: None,
+                spec_change: None,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
                 default_shell: Some(ShellType::Default),
@@ -1562,6 +1723,7 @@ mod tests {
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 direction: SplitDirection::Vertical,
+                shell_type: None,
             },
             ActionRequest::CloseTerminal {
                 project_id: "p1".into(),
@@ -1623,6 +1785,7 @@ mod tests {
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 in_group: true,
+                shell_type: None,
             },
             ActionRequest::SetActiveTab {
                 project_id: "p1".into(),

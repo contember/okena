@@ -41,6 +41,17 @@ pub const SPACE_LG: gpui::Pixels = px(12.0);
 pub const SPACE_XL: gpui::Pixels = px(16.0);
 
 // =============================================================================
+// Chrome
+// =============================================================================
+
+/// Height of a top-level pane header, excluding its 1px bottom border.
+///
+/// The sidebar header and any pane rendered beside it must use this so their
+/// bottom borders line up across the window — they live in different crates and
+/// had silently drifted apart (35px vs 32px) before this existed.
+pub const HEADER_HEIGHT: gpui::Pixels = px(35.0);
+
+// =============================================================================
 // Text sizes
 // =============================================================================
 

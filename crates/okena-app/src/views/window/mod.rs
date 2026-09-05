@@ -1,7 +1,9 @@
 mod handlers;
+mod harness_columns;
 mod pane_switcher;
 mod render;
 mod sidebar;
+mod task_panel;
 mod terminal_actions;
 
 use crate::remote_client::manager::RemoteConnectionManager;
@@ -220,6 +222,15 @@ pub struct WindowView {
     /// layout pass (set when exiting project focus). The overview is re-expanded
     /// asynchronously, so the restore is deferred until the grid reports overflow.
     pending_center_scroll: Option<String>,
+    /// Harness view panes, cached so switching away and back keeps their
+    /// loaded state. Only `active_harness` is rendered.
+    /// Agent session awaiting delete confirmation, with whether the user has
+    /// opted into discarding uncommitted work.
+    pending_workspace_delete: Option<(String, bool)>,
+    harness_panes: Vec<(
+        okena_core::harness::HarnessSection,
+        Entity<crate::views::harness::HarnessPane>,
+    )>,
     /// Grid scroll offset captured when entering project focus, restored on exit
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
@@ -326,13 +337,17 @@ impl WindowView {
         cx.subscribe(&toast_overlay, Self::handle_toast_action)
             .detach();
 
-        // Observe RequestBroker to process overlay + terminal-send requests
+        // Observe RequestBroker to process overlay, workbench + terminal-send requests
         // outside of render().
         cx.observe(&request_broker, |this, _broker, cx| {
             let broker = this.request_broker.read(cx);
             let has_overlay = broker.has_overlay_requests();
             let has_send = broker.has_send_to_terminal();
-            if has_overlay {
+            // Workbench requests (sidebar HARNESS nav) are drained by the same
+            // handler, so it must run for those too — otherwise a nav click
+            // queues a request nothing ever picks up.
+            let has_workbench = broker.has_workbench_requests();
+            if has_overlay || has_workbench {
                 this.process_pending_requests(cx);
             }
             if has_send {
@@ -340,6 +355,15 @@ impl WindowView {
             }
         })
         .detach();
+
+        // The active harness view lives in shared state (the sidebar sets it
+        // too), so this window must re-render when it changes — otherwise
+        // selecting a project in the sidebar would clear the state without the
+        // main area switching back to the grid.
+        if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
+            cx.observe(&harness, |_this, _state, cx| cx.notify())
+                .detach();
+        }
 
         // Observe the shared project-hover state so this window re-renders its
         // project panels when the hovered project changes — including hovers
@@ -394,6 +418,8 @@ impl WindowView {
             active_drag: new_active_drag(),
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
+            pending_workspace_delete: None,
+            harness_panes: Vec::new(),
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
                 size: Size {

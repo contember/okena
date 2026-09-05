@@ -402,6 +402,9 @@ impl Sidebar {
 
         match item.clone() {
             SidebarCursorItem::Project { project_id } => {
+                // Selecting a project leaves any harness view, so the grid is
+                // actually visible when focus lands.
+                self.leave_harness_view(cx);
                 // Project may be a group header (has worktrees) → non-individual focus
                 let has_worktrees = !self
                     .workspace
@@ -431,6 +434,7 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::WorktreeProject { project_id } => {
+                self.leave_harness_view(cx);
                 let workspace = self.workspace.clone();
                 self.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
@@ -504,6 +508,7 @@ impl Sidebar {
                 self.collapsed_connections.insert(connection_id, !collapsed);
             }
             SidebarCursorItem::RemoteProject { project_id, .. } => {
+                self.leave_harness_view(cx);
                 // Remote projects are now materialized in workspace, use unified focus
                 let workspace = self.workspace.clone();
                 self.focus_manager.update(cx, |fm, cx| {

@@ -23,6 +23,16 @@ pub enum DragState {
         visible_sizes_sum: f32,
         action_dispatcher: Option<Box<dyn ActionDispatchClone>>,
     },
+    /// Resizing the divider between harness swimlanes.
+    ///
+    /// Carries the fraction and total width captured at drag start so the new
+    /// fraction is computed from the gesture's origin rather than accumulated
+    /// per-frame deltas, which drift.
+    HarnessLane {
+        initial_mouse_x: f32,
+        initial_fraction: f32,
+        total_width: f32,
+    },
     /// Resizing project columns (or rows, when `vertical`)
     ProjectColumn {
         divider_index: usize,
@@ -172,6 +182,10 @@ pub fn compute_resize(
     cx: &mut App,
 ) {
     match drag_state {
+        // Harness lanes are owned by the harness pane, not the layout tree, so
+        // this workspace-level handler has nothing to do; `WindowView` applies
+        // it directly to the pane.
+        DragState::HarnessLane { .. } => {}
         DragState::Split {
             project_id,
             layout_path,
