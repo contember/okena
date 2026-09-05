@@ -568,14 +568,38 @@ fn ps_snapshot() -> crate::ServiceResult<Vec<ContainerSnapshot>> {
                 .map(|(_, snap)| snap.clone())
         })
     };
+    // Same read without the freshness filter, for callers that would rather
+    // have a stale answer than block behind an in-flight refresh.
+    let cached_snapshot = || {
+        PS_SNAPSHOT
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|(_, snap)| snap.clone()))
+    };
 
     if let Some(snap) = fresh_cached() {
         return Ok(snap);
     }
 
-    // Stale: serialize refreshes. Whoever gets the lock first refreshes; the
-    // rest re-check below and reuse the freshly stored snapshot.
-    let _flight = PS_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Stale: one caller refreshes, the rest carry on with what they have.
+    //
+    // This used to block on the lock, which parked a thread per polling
+    // project for the duration of a `docker ps` (up to the 3s timeout) on
+    // every 5s tick. Each of those threads is a `smol::unblock` task, and the
+    // blocking pool retires idle threads between ticks, so a machine with a
+    // couple of dozen compose projects churned through millions of thread
+    // spawns a week — all of them waiting to read a value one of them was
+    // already fetching.
+    let Ok(_flight) = PS_REFRESH_LOCK.try_lock() else {
+        // Serve the stale snapshot; it is at most one refresh out of date, and
+        // a container's state does not change meaningfully within one tick.
+        return match cached_snapshot() {
+            Some(snap) => Ok(snap),
+            // Nothing cached yet (first poll after boot, or just invalidated).
+            // The winner will store one shortly.
+            None => Err(crate::error::ServiceError::RefreshInFlight),
+        };
+    };
     if let Some(snap) = fresh_cached() {
         return Ok(snap);
     }
@@ -974,5 +998,56 @@ mod tests {
 
         ensure_no_compose_containers_under_with(&[], &runner)
             .expect("missing Docker means there is no local integration");
+    }
+
+    /// Serializes the tests that touch the process-wide snapshot statics.
+    static SNAPSHOT_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ps_snapshot_serves_stale_data_instead_of_blocking_on_a_refresh() {
+        let _guard = SNAPSHOT_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // A snapshot exists but has aged past the TTL, and someone else is
+        // already refreshing it — the shape every poller but one sees when a
+        // shared tick comes around.
+        *PS_SNAPSHOT.lock().unwrap() = Some((
+            Instant::now() - PS_SNAPSHOT_TTL - Duration::from_secs(1),
+            vec![ContainerSnapshot {
+                working_dir: None,
+                service: "web".to_string(),
+                state: "running".to_string(),
+                exit_code: None,
+                ports: Vec::new(),
+            }],
+        ));
+        let held = PS_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let snapshot = ps_snapshot().expect("stale data beats parking a thread");
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].service, "web");
+        drop(held);
+        *PS_SNAPSHOT.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn ps_snapshot_reports_in_flight_when_nothing_is_cached_yet() {
+        let _guard = SNAPSHOT_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        *PS_SNAPSHOT.lock().unwrap() = None;
+        let held = PS_REFRESH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let result = ps_snapshot();
+
+        assert!(
+            matches!(result, Err(crate::error::ServiceError::RefreshInFlight)),
+            "first poll after boot has nothing to serve, and must say so rather \
+             than block or look like a docker failure"
+        );
+        drop(held);
     }
 }

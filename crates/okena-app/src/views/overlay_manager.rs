@@ -7,22 +7,29 @@ use gpui::*;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::terminal::shell_config::ShellType;
+use crate::views::overlays::about::{AboutModal, AboutModalEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
+use crate::views::overlays::change_path_dialog::{ChangePathDialog, ChangePathDialogEvent};
 use crate::views::overlays::close_worktree_dialog::{
     CloseWorktreeDialog, CloseWorktreeDialogEvent,
 };
 use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::overlays::content_search::{ContentSearchDialog, ContentSearchDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
-use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
+use crate::views::overlays::diff_viewer::CommitNavigation;
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
-use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
+use crate::views::overlays::file_viewer::{
+    FilePosition, FileViewer, FileViewerConfig, FileViewerEvent, FileViewerScope,
+};
 use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
 use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
+use crate::views::overlays::project_inspector::{
+    ProjectInspector, ProjectInspectorContext, ProjectInspectorEvent,
+};
 use crate::views::overlays::remote_connect_dialog::{
     RemoteConnectDialog, RemoteConnectDialogEvent,
 };
@@ -31,24 +38,27 @@ use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDia
 use crate::views::overlays::rename_directory_dialog::{
     RenameDirectoryDialog, RenameDirectoryDialogEvent,
 };
+use crate::views::overlays::rename_terminal_dialog::{
+    RenameTerminalDialog, RenameTerminalDialogEvent,
+};
 use crate::views::overlays::send_composer::{SendComposer, SendComposerEvent};
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
-use crate::views::overlays::terminal_context_menu::{
-    TerminalContextMenu, TerminalContextMenuEvent,
-};
+use crate::views::overlays::terminal_menu::{TerminalMenu, TerminalMenuEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::views::overlays::{
     ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent,
 };
 use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::requests::TerminalMenuInvocation;
 use crate::workspace::requests::{
     ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay,
     ProjectOverlayKind, SidebarRequest,
 };
 use crate::workspace::state::{WindowId, Workspace};
+use okena_core::api::ActionRequest;
 use okena_remote_server::local::DaemonEndpoint;
 use okena_transport::client::RemoteConnectionConfig;
 use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
@@ -61,6 +71,11 @@ pub use okena_ui::{open_overlay, toggle_overlay};
 // CloseEvent impls for overlay events defined in src/ (local types)
 
 impl CloseEvent for AddProjectDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
+}
+impl CloseEvent for AboutModalEvent {
     fn is_close(&self) -> bool {
         matches!(self, Self::Close)
     }
@@ -158,6 +173,23 @@ pub enum OverlayManagerEvent {
     RenameDirectoryConfirmed {
         project_id: String,
         new_name: String,
+    },
+
+    /// Context menu: point the project at a different existing directory
+    ChangeProjectPath {
+        project_id: String,
+        project_path: String,
+        /// Whether that directory is on this machine, so the dialog knows
+        /// whether it may check the typed path itself.
+        shares_local_filesystem: bool,
+    },
+
+    /// Change-path dialog confirmed: the host dispatches
+    /// `ActionRequest::ChangeProjectPath`; the daemon rewrites the record —
+    /// nothing on disk moves — and mirrors the new path back.
+    ChangeProjectPathConfirmed {
+        project_id: String,
+        new_path: String,
     },
 
     /// Context menu: Close worktree project (opens the confirm dialog)
@@ -274,41 +306,60 @@ pub enum OverlayManagerEvent {
         connection_id: String,
     },
 
-    /// Terminal context menu: copy
+    /// Terminal menu: copy
     TerminalCopy {
         terminal_id: String,
     },
-    /// Terminal context menu: annotate the selection and send it back.
+    /// Terminal menu: annotate the selection and send it back.
     /// The host owns the terminals, so only it can snapshot the selected text.
     TerminalAnnotate {
         terminal_id: String,
         position: gpui::Point<gpui::Pixels>,
     },
-    /// Terminal context menu: paste
+    /// Terminal menu: paste
     TerminalPaste {
         terminal_id: String,
     },
-    /// Terminal context menu: clear
+    /// Terminal menu: clear
     TerminalClear {
         terminal_id: String,
     },
     TerminalToggleUnread {
         terminal_id: String,
     },
-    /// Terminal context menu: select all
+    /// Terminal menu entry that is just a project-scoped `ActionRequest`
+    /// (split, zoom, minimize, close, rename). The host resolves the project's
+    /// dispatcher and forwards it — one arm instead of one per menu item.
+    ProjectAction {
+        project_id: String,
+        request: okena_core::api::ActionRequest,
+    },
+
+    /// Terminal menu: add a tab beside the focused terminal.
+    TerminalAddTab {
+        project_id: String,
+        layout_path: Vec<usize>,
+    },
+    /// Terminal menu: select all
     TerminalSelectAll {
         terminal_id: String,
     },
-    /// Terminal context menu: split
-    TerminalSplit {
-        project_id: String,
-        layout_path: Vec<usize>,
-        direction: crate::workspace::state::SplitDirection,
-    },
-    /// Terminal context menu: close terminal
-    TerminalClose {
+    /// Terminal menu: export the selected terminal's scrollback.
+    TerminalExportBuffer {
         project_id: String,
         terminal_id: String,
+    },
+    /// Terminal menu: detach the selected terminal.
+    TerminalDetach {
+        project_id: String,
+        layout_path: Vec<usize>,
+    },
+    /// Terminal menu: enter destination selection for moving a pane.
+    TerminalMove {
+        project_id: String,
+        terminal_id: String,
+        layout_path: Vec<usize>,
+        current_name: String,
     },
 
     /// Tab context menu: close tab
@@ -328,12 +379,6 @@ pub enum OverlayManagerEvent {
         project_id: String,
         layout_path: Vec<usize>,
         tab_index: usize,
-    },
-
-    /// File viewer blame click: open the named commit in the diff viewer.
-    OpenCommitFromBlame {
-        project_id: String,
-        hash: String,
     },
 
     OpenFileExternally {
@@ -382,11 +427,14 @@ pub struct OverlayManager {
     /// Detach closure for the active modal, if it supports detaching.
     detach_active_modal_fn: Option<DetachFn>,
 
+    /// Active project inspector, used to ignore lifecycle events from detached inspectors.
+    active_project_inspector: Option<Entity<ProjectInspector>>,
+
     // Context menus remain separate (positioned popups, not full-screen modals)
     context_menu: OverlaySlot<ContextMenu>,
     folder_context_menu: OverlaySlot<FolderContextMenu>,
     remote_context_menu: OverlaySlot<RemoteContextMenu>,
-    terminal_context_menu: OverlaySlot<TerminalContextMenu>,
+    terminal_menu: OverlaySlot<TerminalMenu>,
     tab_context_menu: OverlaySlot<TabContextMenu>,
     send_composer: OverlaySlot<SendComposer>,
 
@@ -394,8 +442,8 @@ pub struct OverlayManager {
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
 
-    /// Cached file viewer entities per project name (survives close/reopen).
-    cached_file_viewers: std::collections::HashMap<String, Entity<FileViewer>>,
+    /// Cached project inspectors preserve file tabs across close/reopen.
+    cached_project_inspectors: std::collections::HashMap<String, Entity<ProjectInspector>>,
 }
 
 impl OverlayManager {
@@ -414,11 +462,12 @@ impl OverlayManager {
             active_modal: None,
             modal_type_id: None,
             detach_active_modal_fn: None,
-            cached_file_viewers: std::collections::HashMap::new(),
+            active_project_inspector: None,
+            cached_project_inspectors: std::collections::HashMap::new(),
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
             remote_context_menu: OverlaySlot::new(),
-            terminal_context_menu: OverlaySlot::new(),
+            terminal_menu: OverlaySlot::new(),
             tab_context_menu: OverlaySlot::new(),
             send_composer: OverlaySlot::new(),
             worktree_list: OverlaySlot::new(),
@@ -451,6 +500,7 @@ impl OverlayManager {
             self.active_modal = None;
             self.modal_type_id = None;
             self.detach_active_modal_fn = None;
+            self.active_project_inspector = None;
             // Clear any project-panel hover highlight published by the Switch
             // Project overlay. Harmless for other modals (only the switcher ever
             // sets it), and this is the single choke point all closes funnel
@@ -502,8 +552,24 @@ impl OverlayManager {
         E: CloseEvent + 'static,
         F: Fn(&mut Self, &Entity<T>, &mut Context<Self>) + 'static,
     {
+        let active_view = entity.clone().into();
+        self.open_modal_detachable_as(entity, active_view, title, before_detach, cx);
+    }
+
+    fn open_modal_detachable_as<T, E, F>(
+        &mut self,
+        entity: Entity<T>,
+        active_view: AnyView,
+        title: impl Into<SharedString>,
+        before_detach: F,
+        cx: &mut Context<Self>,
+    ) where
+        T: Render + Focusable + EventEmitter<E> + 'static,
+        E: CloseEvent + 'static,
+        F: Fn(&mut Self, &Entity<T>, &mut Context<Self>) + 'static,
+    {
         self.close_modal(cx);
-        self.active_modal = Some(entity.clone().into());
+        self.active_modal = Some(active_view);
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
 
         let title = title.into();
@@ -563,7 +629,7 @@ impl OverlayManager {
         self.context_menu.close();
         self.folder_context_menu.close();
         self.remote_context_menu.close();
-        self.terminal_context_menu.close();
+        self.terminal_menu.close();
         self.tab_context_menu.close();
         self.worktree_list.close();
         self.color_picker.close();
@@ -582,9 +648,9 @@ impl OverlayManager {
         self.folder_context_menu.is_open()
     }
 
-    /// Check if terminal context menu is open.
-    pub fn has_terminal_context_menu(&self) -> bool {
-        self.terminal_context_menu.is_open()
+    /// Check if the adaptive terminal menu is open.
+    pub fn has_terminal_menu(&self) -> bool {
+        self.terminal_menu.is_open()
     }
 
     /// Check if tab context menu is open.
@@ -600,6 +666,10 @@ impl OverlayManager {
     // ========================================================================
     // Simple toggle overlays
     // ========================================================================
+
+    pub fn toggle_about(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, AboutModal, AboutModalEvent, AboutModal::new);
+    }
 
     /// Toggle add project dialog overlay.
     pub fn toggle_add_project_dialog(
@@ -979,6 +1049,39 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Change path dialog (parametric)
+    // ========================================================================
+
+    /// Show the change-folder-path dialog for a project.
+    pub fn show_change_path_dialog(
+        &mut self,
+        project_id: String,
+        project_path: String,
+        shares_local_filesystem: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx
+            .new(|cx| ChangePathDialog::new(project_id, project_path, shares_local_filesystem, cx));
+        cx.subscribe(&entity, |this, _, event: &ChangePathDialogEvent, cx| {
+            if let ChangePathDialogEvent::Confirmed {
+                project_id,
+                new_path,
+            } = event
+            {
+                cx.emit(OverlayManagerEvent::ChangeProjectPathConfirmed {
+                    project_id: project_id.clone(),
+                    new_path: new_path.clone(),
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
+    }
+
+    // ========================================================================
     // Context menu (parametric - remains as separate OverlaySlot)
     // ========================================================================
 
@@ -1026,6 +1129,18 @@ impl OverlayManager {
                     cx.emit(OverlayManagerEvent::RenameDirectory {
                         project_id: project_id.clone(),
                         project_path: project_path.clone(),
+                    });
+                }
+                ContextMenuEvent::ChangeProjectPath {
+                    project_id,
+                    project_path,
+                    shares_local_filesystem,
+                } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ChangeProjectPath {
+                        project_id: project_id.clone(),
+                        project_path: project_path.clone(),
+                        shares_local_filesystem: *shares_local_filesystem,
                     });
                 }
                 ContextMenuEvent::CloseWorktree { project_id } => {
@@ -1290,132 +1405,274 @@ impl OverlayManager {
     }
 
     // ========================================================================
-    // Terminal context menu (positioned popup)
+    // Terminal menu (positioned popup)
     // ========================================================================
 
-    /// Show terminal context menu.
-    // GPUI overlay setup: params are position/context inputs, not a group.
+    /// Show the adaptive terminal menu for either a content or header invocation.
     #[allow(clippy::too_many_arguments)]
-    pub fn show_terminal_context_menu(
+    pub fn show_terminal_menu(
         &mut self,
         terminal_id: String,
         project_id: String,
         layout_path: Vec<usize>,
-        position: gpui::Point<gpui::Pixels>,
-        has_selection: bool,
+        position: Point<Pixels>,
+        current_name: String,
+        current_shell: ShellType,
+        can_export_buffer: bool,
         has_bell: bool,
-        link_url: Option<String>,
+        invocation: TerminalMenuInvocation,
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
         self.close_all_context_menus(cx);
 
         let menu = cx.new(|cx| {
-            TerminalContextMenu::new(
+            TerminalMenu::new(
                 terminal_id,
                 project_id,
                 layout_path,
                 position,
-                has_selection,
+                current_name,
+                current_shell,
+                can_export_buffer,
                 has_bell,
-                link_url,
+                invocation,
                 cx,
             )
         });
 
-        cx.subscribe(
-            &menu,
-            |this, _, event: &TerminalContextMenuEvent, cx| match event {
-                TerminalContextMenuEvent::Close => {
-                    this.hide_terminal_context_menu(cx);
-                }
-                TerminalContextMenuEvent::Copy { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalCopy {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::AnnotateSelection {
-                    terminal_id,
-                    position,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalAnnotate {
-                        terminal_id: terminal_id.clone(),
-                        position: *position,
-                    });
-                }
-                TerminalContextMenuEvent::Paste { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalPaste {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::Clear { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalClear {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::SelectAll { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalSelectAll {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::ToggleUnread { terminal_id } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalToggleUnread {
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::Split {
-                    project_id,
-                    layout_path,
-                    direction,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalSplit {
-                        project_id: project_id.clone(),
-                        layout_path: layout_path.clone(),
-                        direction: *direction,
-                    });
-                }
-                TerminalContextMenuEvent::CloseTerminal {
-                    project_id,
-                    terminal_id,
-                } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::TerminalClose {
-                        project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                    });
-                }
-                TerminalContextMenuEvent::OpenLink { url } => {
-                    this.hide_terminal_context_menu(cx);
-                    crate::views::layout::terminal_pane::url_detector::UrlDetector::open_url(url);
-                }
-                TerminalContextMenuEvent::CopyLink { url } => {
-                    this.hide_terminal_context_menu(cx);
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                }
-            },
-        )
+        cx.subscribe(&menu, |this, _, event: &TerminalMenuEvent, cx| {
+            this.handle_terminal_menu_event(event, cx);
+        })
         .detach();
 
-        self.terminal_context_menu.set(menu);
+        self.terminal_menu.set(menu);
         cx.notify();
     }
 
-    /// Hide terminal context menu.
-    pub fn hide_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.terminal_context_menu.close();
+    fn handle_terminal_menu_event(&mut self, event: &TerminalMenuEvent, cx: &mut Context<Self>) {
+        // Every entry dismisses the menu; only the follow-up differs.
+        self.hide_terminal_menu(cx);
+        match event {
+            TerminalMenuEvent::Close => {}
+            TerminalMenuEvent::Copy { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalCopy {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::AnnotateSelection {
+                terminal_id,
+                position,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalAnnotate {
+                    terminal_id: terminal_id.clone(),
+                    position: *position,
+                });
+            }
+            TerminalMenuEvent::Paste { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalPaste {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::Clear { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalClear {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::SelectAll { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalSelectAll {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::ToggleUnread { terminal_id } => {
+                cx.emit(OverlayManagerEvent::TerminalToggleUnread {
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::RenameTerminal {
+                project_id,
+                terminal_id,
+                current_name,
+            } => {
+                self.show_rename_terminal_dialog(
+                    project_id.clone(),
+                    terminal_id.clone(),
+                    current_name.clone(),
+                    cx,
+                );
+            }
+            TerminalMenuEvent::ChangeShell {
+                project_id,
+                terminal_id,
+                current_shell,
+            } => {
+                self.show_shell_selector(
+                    current_shell.clone(),
+                    project_id.clone(),
+                    terminal_id.clone(),
+                    cx,
+                );
+            }
+            TerminalMenuEvent::AddTab {
+                project_id,
+                layout_path,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalAddTab {
+                    project_id: project_id.clone(),
+                    layout_path: layout_path.clone(),
+                });
+            }
+            TerminalMenuEvent::Split {
+                project_id,
+                layout_path,
+                direction,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::SplitTerminal {
+                        project_id: project_id.clone(),
+                        path: layout_path.clone(),
+                        direction: *direction,
+                        // The terminal menu splits with the project's default
+                        // shell; choosing an agent is the tab bar's right-click.
+                        shell_type: None,
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::ZoomTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::SetFullscreen {
+                        project_id: project_id.clone(),
+                        terminal_id: Some(terminal_id.clone()),
+                        window: None,
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::MinimizeTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::ToggleMinimized {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::MoveTerminal {
+                project_id,
+                terminal_id,
+                layout_path,
+                current_name,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalMove {
+                    project_id: project_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                    layout_path: layout_path.clone(),
+                    current_name: current_name.clone(),
+                });
+            }
+            TerminalMenuEvent::ExportBuffer {
+                project_id,
+                terminal_id,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalExportBuffer {
+                    project_id: project_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                });
+            }
+            TerminalMenuEvent::Detach {
+                project_id,
+                layout_path,
+            } => {
+                cx.emit(OverlayManagerEvent::TerminalDetach {
+                    project_id: project_id.clone(),
+                    layout_path: layout_path.clone(),
+                });
+            }
+            TerminalMenuEvent::CloseTerminal {
+                project_id,
+                terminal_id,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::CloseTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::OpenLink { url } => {
+                crate::views::layout::terminal_pane::url_detector::UrlDetector::open_url(url);
+            }
+            TerminalMenuEvent::CopyLink { url } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+            }
+        }
+    }
+
+    /// Forward a menu entry that is just a project-scoped `ActionRequest`.
+    fn emit_project_action(
+        &self,
+        project_id: &str,
+        request: ActionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(OverlayManagerEvent::ProjectAction {
+            project_id: project_id.to_string(),
+            request,
+        });
+    }
+
+    pub fn hide_terminal_menu(&mut self, cx: &mut Context<Self>) {
+        self.terminal_menu.close();
         cx.notify();
     }
 
-    /// Get terminal context menu entity for rendering.
-    pub fn render_terminal_context_menu(&self) -> Option<Entity<TerminalContextMenu>> {
-        self.terminal_context_menu.render()
+    pub fn render_terminal_menu(&self) -> Option<Entity<TerminalMenu>> {
+        self.terminal_menu.render()
+    }
+    /// Show a rename dialog that remains reachable when the terminal header is hidden.
+    pub fn show_rename_terminal_dialog(
+        &mut self,
+        project_id: String,
+        terminal_id: String,
+        current_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entity =
+            cx.new(|cx| RenameTerminalDialog::new(project_id, terminal_id, current_name, cx));
+        cx.subscribe(&entity, |this, _, event: &RenameTerminalDialogEvent, cx| {
+            if let RenameTerminalDialogEvent::Confirmed {
+                project_id,
+                terminal_id,
+                new_name,
+            } = event
+            {
+                cx.emit(OverlayManagerEvent::ProjectAction {
+                    project_id: project_id.clone(),
+                    request: ActionRequest::RenameTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                        name: new_name.clone(),
+                    },
+                });
+            }
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     // ========================================================================
@@ -1713,30 +1970,21 @@ impl OverlayManager {
     // ========================================================================
 
     /// Toggle file search dialog for a project.
-    pub fn toggle_file_search(
-        &mut self,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn toggle_file_search(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
         if self.is_modal::<FileSearchDialog>() {
             self.close_modal(cx);
         } else {
-            self.show_file_search(fs, blame_provider, cx);
+            self.show_file_search(context, cx);
         }
     }
 
     /// Show file search dialog for a project.
-    pub fn show_file_search(
-        &mut self,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
-        cx: &mut Context<Self>,
-    ) {
-        let fs_for_viewer = fs.clone();
-        let blame_for_viewer = blame_provider.clone();
+    pub fn show_file_search(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
+        let context_for_viewer = context.clone();
         let settings = crate::settings::settings(cx).file_finder.clone();
-        let dialog = cx.new(|cx| FileSearchDialog::new(fs, settings.show_ignored, cx));
+        let dialog = cx.new(|cx| {
+            FileSearchDialog::new(context.file_scope.project_fs, settings.show_ignored, cx)
+        });
 
         cx.subscribe(
             &dialog,
@@ -1747,12 +1995,7 @@ impl OverlayManager {
                 FileSearchDialogEvent::FileSelected(relative_path) => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(
-                        relative_path,
-                        fs_for_viewer.clone(),
-                        blame_for_viewer.clone(),
-                        cx,
-                    );
+                    this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
                 FileSearchDialogEvent::FiltersChanged { show_ignored } => {
                     let show_ignored = *show_ignored;
@@ -1774,29 +2017,27 @@ impl OverlayManager {
     /// Toggle content search dialog for a project.
     pub fn toggle_content_search(
         &mut self,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
+        context: ProjectInspectorContext,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) {
         if self.is_modal::<ContentSearchDialog>() {
             self.close_modal(cx);
         } else {
-            self.show_content_search(fs, blame_provider, is_dark, cx);
+            self.show_content_search(context, is_dark, cx);
         }
     }
 
     /// Show content search dialog for a project.
     pub fn show_content_search(
         &mut self,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
+        context: ProjectInspectorContext,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) {
-        let fs_for_viewer = fs.clone();
-        let blame_for_viewer = blame_provider.clone();
-        let dialog = cx.new(|cx| ContentSearchDialog::new(fs, is_dark, cx));
+        let context_for_viewer = context.clone();
+        let dialog =
+            cx.new(|cx| ContentSearchDialog::new(context.file_scope.project_fs, is_dark, cx));
 
         cx.subscribe(
             &dialog,
@@ -1810,12 +2051,7 @@ impl OverlayManager {
                 } => {
                     let relative_path = relative_path.clone();
                     this.close_modal(cx);
-                    this.show_file_viewer(
-                        relative_path,
-                        fs_for_viewer.clone(),
-                        blame_for_viewer.clone(),
-                        cx,
-                    );
+                    this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
             },
         )
@@ -1828,271 +2064,141 @@ impl OverlayManager {
     // File browser / viewer (parametric)
     // ========================================================================
 
-    /// Show file browser for a project (no pre-selected file).
-    pub fn show_file_browser(
-        &mut self,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Presentation settings for a file viewer, from user settings and theme.
+    fn file_viewer_config(&self, cx: &mut Context<Self>) -> FileViewerConfig {
         let settings = crate::settings::settings_entity(cx)
             .read(cx)
             .settings
             .clone();
-        let font_size = settings.file_font_size;
-        let blame_visible = settings.blame_visible;
-        let is_dark = crate::theme::theme(cx).is_dark();
-        let cache_key = fs.project_id();
-
-        // Reuse cached viewer if available
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |v, cx| {
-                v.update_config(font_size, is_dark, cx);
-                if v.is_scope(&fs) {
-                    v.set_blame_visible(blame_visible, cx);
-                } else {
-                    v.rebind_scope(fs, blame_provider, blame_visible, None, None, None, cx);
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
+        FileViewerConfig {
+            font_size: settings.file_font_size,
+            is_dark: crate::theme::theme(cx).is_dark(),
+            blame_visible: settings.blame_visible,
         }
+    }
 
-        let viewer = cx.new(|cx| {
-            FileViewer::new_browse(fs, blame_provider, blame_visible, font_size, is_dark, cx)
+    /// Show file browser for a project (no pre-selected file).
+    pub fn show_file_browser(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
+        let config = self.file_viewer_config(cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_browse(context, config, cx)
         });
-
-        self.subscribe_file_viewer(&viewer, cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        self.open_project_inspector_modal(inspector, cx);
     }
 
     /// Show file viewer for a file.
     pub fn show_file_viewer(
         &mut self,
+        context: ProjectInspectorContext,
         relative_path: String,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
         cx: &mut Context<Self>,
     ) {
-        let settings = crate::settings::settings_entity(cx)
-            .read(cx)
-            .settings
-            .clone();
-        let font_size = settings.file_font_size;
-        let blame_visible = settings.blame_visible;
-        let is_dark = crate::theme::theme(cx).is_dark();
-        let cache_key = fs.project_id();
-
-        // Reuse cached viewer if available
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |v, cx| {
-                v.update_config(font_size, is_dark, cx);
-                if v.is_scope(&fs) {
-                    v.set_blame_visible(blame_visible, cx);
-                    v.open_file_in_tab(relative_path.clone(), cx);
-                } else {
-                    v.rebind_scope(
-                        fs,
-                        blame_provider,
-                        blame_visible,
-                        Some(relative_path.clone()),
-                        None,
-                        None,
-                        cx,
-                    );
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
-        }
-
-        let viewer = cx.new(|cx| {
-            FileViewer::new(
-                relative_path.clone(),
-                fs,
-                blame_provider,
-                blame_visible,
-                font_size,
-                is_dark,
-                cx,
-            )
-        });
-
-        self.subscribe_file_viewer(&viewer, cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        self.show_file_target(
+            context,
+            okena_files::file_viewer::FileTarget::working_tree(
+                relative_path,
+                FilePosition::default(),
+            ),
+            cx,
+        );
     }
 
     pub fn show_file_viewer_at(
         &mut self,
+        context: ProjectInspectorContext,
         relative_path: String,
-        fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        blame_provider: Option<std::sync::Arc<dyn okena_files::blame::BlameProvider>>,
-        line: Option<usize>,
-        column: Option<usize>,
+        position: FilePosition,
         cx: &mut Context<Self>,
     ) {
-        let settings = crate::settings::settings_entity(cx)
-            .read(cx)
-            .settings
-            .clone();
-        let is_dark = crate::theme::theme(cx).is_dark();
-        let cache_key = fs.project_id();
-        if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |viewer, cx| {
-                viewer.update_config(settings.file_font_size, is_dark, cx);
-                if viewer.is_scope(&fs) {
-                    viewer.set_blame_visible(settings.blame_visible, cx);
-                    viewer.open_file_in_tab_at(relative_path.clone(), line, column, cx);
-                } else {
-                    viewer.rebind_scope(
-                        fs,
-                        blame_provider,
-                        settings.blame_visible,
-                        Some(relative_path.clone()),
-                        line,
-                        column,
-                        cx,
-                    );
-                }
-            });
-            self.open_file_viewer_modal(viewer.clone(), cx);
-            return;
-        }
-        let viewer = cx.new(|cx| {
-            FileViewer::new_at(
-                relative_path,
-                fs,
-                blame_provider,
-                settings.blame_visible,
-                settings.file_font_size,
-                is_dark,
-                line,
-                column,
-                cx,
-            )
+        self.show_file_target(
+            context,
+            okena_files::file_viewer::FileTarget::working_tree(relative_path, position),
+            cx,
+        );
+    }
+
+    fn show_file_target(
+        &mut self,
+        context: ProjectInspectorContext,
+        target: okena_files::file_viewer::FileTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let config = self.file_viewer_config(cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_file(context, config, target, cx)
         });
-        self.subscribe_file_viewer(&viewer, cx);
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_file_viewer_modal(viewer, cx);
+        self.open_project_inspector_modal(inspector, cx);
     }
 
     pub fn show_path_browser(
         &mut self,
         relative_path: Option<String>,
         fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>,
-        line: Option<usize>,
-        column: Option<usize>,
+        position: FilePosition,
         cx: &mut Context<Self>,
     ) {
-        let settings = crate::settings::settings_entity(cx)
-            .read(cx)
-            .settings
-            .clone();
-        let is_dark = crate::theme::theme(cx).is_dark();
+        // A bare path has no project git wiring, so blame stays off.
+        let config = FileViewerConfig {
+            blame_visible: false,
+            ..self.file_viewer_config(cx)
+        };
+        let scope = FileViewerScope::plain(fs);
         let viewer = cx.new(|cx| match relative_path {
-            Some(relative_path) => FileViewer::new_at(
-                relative_path,
-                fs,
-                None,
-                false,
-                settings.file_font_size,
-                is_dark,
-                line,
-                column,
-                cx,
-            ),
-            None => FileViewer::new_browse(fs, None, false, settings.file_font_size, is_dark, cx),
+            Some(relative_path) => FileViewer::new_at(scope, config, relative_path, position, cx),
+            None => FileViewer::new_browse(scope, config, cx),
         });
         self.subscribe_file_viewer(&viewer, cx);
         self.open_file_viewer_modal(viewer, cx);
     }
 
-    /// Drop cached file viewers whose project is no longer present.
-    ///
-    /// `valid_keys` is the set of `ProjectFs::project_id()` keys for the
-    /// currently-known projects (the same keys used when inserting into the
-    /// cache). Any cached viewer whose key is absent belongs to a closed
-    /// project and is evicted, releasing its `ProjectFs` / blame-provider
-    /// `Arc`s.
-    ///
-    /// This only drops the cache's clone of the viewer. If a closed project's
-    /// viewer happens to be the active modal, the `active_modal` slot keeps it
-    /// alive (so the open UI is never yanked out from under the user); it is
-    /// released when that modal is next closed.
-    pub fn prune_file_viewer_cache(
+    /// Drop cached project inspectors whose project is no longer present.
+    pub fn prune_project_inspector_cache(
         &mut self,
         valid_keys: &std::collections::HashSet<String>,
         cx: &mut Context<Self>,
     ) {
-        // Collect the viewers about to be evicted and release their GPU
-        // image assets first. The cache is the only thing keeping these
-        // entities alive; once dropped, their RenderImage atlas tiles /
-        // decoded raster assets are only reclaimable via an explicit
-        // drop_image / remove_asset, which the per-tab close paths never
-        // get a chance to run here.
-        let evicted: Vec<Entity<FileViewer>> = self
-            .cached_file_viewers
+        // GPU image assets require explicit release before the cache drops its entity.
+        let evicted: Vec<Entity<ProjectInspector>> = self
+            .cached_project_inspectors
             .iter()
             .filter(|(key, _)| !valid_keys.contains(*key))
-            .map(|(_, viewer)| viewer.clone())
+            .map(|(_, inspector)| inspector.clone())
             .collect();
-        self.cached_file_viewers
+        self.cached_project_inspectors
             .retain(|key, _| valid_keys.contains(key));
-        for viewer in evicted {
-            viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+        for inspector in evicted {
+            inspector.update(cx, |inspector, cx| inspector.release_all_image_assets(cx));
         }
     }
 
-    /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
-    /// Detach moves it to a separate OS window, OpenCommit bubbles up to
-    /// RootView, SendToTerminal routes to the focused terminal via the broker.
+    /// Subscribe to a plain-path FileViewer, which has no project git context.
     fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
         cx.subscribe(
             viewer,
-            |this, viewer_entity, event: &FileViewerEvent, cx| {
-                match event {
-                    FileViewerEvent::Close => {
-                        // Closing keeps the cached viewer alive (cache holds its own
-                        // clone); only the modal slot is cleared.
-                        this.close_modal(cx);
-                    }
-                    FileViewerEvent::Detach => {
-                        this.detach_active_modal(cx);
-                    }
-                    FileViewerEvent::OpenCommit(hash) => {
-                        // Look up which project this FileViewer belongs to so the
-                        // host can pick the right GitProvider.
-                        if let Some(project_id) = this
-                            .cached_file_viewers
-                            .iter()
-                            .find(|(_, v)| **v == viewer_entity)
-                            .map(|(k, _)| k.clone())
-                        {
-                            cx.emit(OverlayManagerEvent::OpenCommitFromBlame {
-                                project_id,
-                                hash: hash.clone(),
-                            });
-                        }
-                    }
-                    FileViewerEvent::BlamePreferenceChanged(visible) => {
-                        crate::settings::settings_entity(cx).update(cx, |state, cx| {
-                            state.set_blame_visible(*visible, cx);
-                        });
-                    }
-                    FileViewerEvent::SendToTerminal(payload) => {
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_send_to_terminal(payload.clone(), cx);
-                        });
-                    }
-                    FileViewerEvent::OpenExternally { path, line, column } => {
-                        cx.emit(OverlayManagerEvent::OpenFileExternally {
-                            path: path.clone(),
-                            line: *line,
-                            column: *column,
-                        });
-                    }
+            move |this, _, event: &FileViewerEvent, cx| match event {
+                FileViewerEvent::Close | FileViewerEvent::Back => this.close_modal(cx),
+                FileViewerEvent::Detach => {
+                    this.detach_active_modal(cx);
+                }
+                FileViewerEvent::OpenCommit(_) | FileViewerEvent::OpenFileDiff { .. } => {}
+                FileViewerEvent::BlamePreferenceChanged(visible) => {
+                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                        state.set_blame_visible(*visible, cx);
+                    });
+                }
+                FileViewerEvent::SendToTerminal(payload) => {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_send_to_terminal(payload.clone(), cx);
+                    });
+                }
+                FileViewerEvent::OpenExternally { path, line, column } => {
+                    cx.emit(OverlayManagerEvent::OpenFileExternally {
+                        path: path.clone(),
+                        line: *line,
+                        column: *column,
+                    });
                 }
             },
         )
@@ -2104,10 +2210,7 @@ impl OverlayManager {
         self.open_modal_detachable::<FileViewer, FileViewerEvent, _>(
             viewer,
             "File Viewer",
-            |this, viewer, cx| {
-                // Drop cache so reopening creates a fresh modal viewer
-                // (the detached window owns the existing one).
-                this.cached_file_viewers.retain(|_, v| v != viewer);
+            |_this, viewer, cx| {
                 viewer.update(cx, |v, cx| v.set_detached(true, cx));
             },
             cx,
@@ -2118,58 +2221,97 @@ impl OverlayManager {
     // Diff viewer (parametric)
     // ========================================================================
 
-    /// Show diff viewer for a project, optionally selecting a specific file, diff mode, commit message, and commit navigation list.
-    // GPUI overlay setup: params are selection/context inputs, not a group.
-    #[allow(clippy::too_many_arguments)]
+    /// Show diff viewer for a project, optionally selecting a specific file and
+    /// diff mode.
     pub fn show_diff_viewer(
         &mut self,
-        provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>,
+        context: ProjectInspectorContext,
         select_file: Option<String>,
         mode: Option<okena_core::types::DiffMode>,
-        commit_message: Option<String>,
-        commits: Option<Vec<crate::git::CommitLogEntry>>,
-        commit_index: Option<usize>,
+        commit_nav: CommitNavigation,
         cx: &mut Context<Self>,
     ) {
-        let viewer = cx.new(|cx| {
-            DiffViewer::new(
-                provider,
-                select_file,
-                mode,
-                commit_message,
-                commits,
-                commit_index,
-                cx,
-            )
+        let config = self.file_viewer_config(cx);
+        let inspector = self.project_inspector(context.clone(), config, cx);
+        inspector.update(cx, |inspector, cx| {
+            inspector.show_diff(context, config, select_file, mode, commit_nav, cx)
         });
+        self.open_project_inspector_modal(inspector, cx);
+    }
 
-        cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
-            match event {
-                DiffViewerEvent::Close => {
-                    // Settings are now persisted through ExtensionSettingsStore
-                    // when toggled — no manual sync needed on close.
-                    this.close_modal(cx);
+    fn project_inspector(
+        &mut self,
+        context: ProjectInspectorContext,
+        config: FileViewerConfig,
+        cx: &mut Context<Self>,
+    ) -> Entity<ProjectInspector> {
+        let cache_key = context.file_scope.project_fs.project_id();
+        if let Some(inspector) = self.cached_project_inspectors.get(&cache_key) {
+            return inspector.clone();
+        }
+        let inspector = cx.new(|cx| ProjectInspector::new(context, config, cx));
+        cx.subscribe(
+            &inspector,
+            |this, inspector, event: &ProjectInspectorEvent, cx| match event {
+                ProjectInspectorEvent::Close
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.close_modal(cx)
                 }
-                DiffViewerEvent::Detach => {
-                    this.detach_active_modal(cx);
+                ProjectInspectorEvent::Detach
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.detach_active_modal(cx)
                 }
-                DiffViewerEvent::SendToTerminal(payload) => {
+                ProjectInspectorEvent::Close | ProjectInspectorEvent::Detach => {}
+                ProjectInspectorEvent::ScreenChanged
+                    if this.active_project_inspector.as_ref() == Some(&inspector) =>
+                {
+                    this.active_modal = Some(inspector.read(cx).current_view());
+                    cx.notify();
+                }
+                ProjectInspectorEvent::ScreenChanged => {}
+                ProjectInspectorEvent::SendToTerminal(payload) => {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_send_to_terminal(payload.clone(), cx);
                     });
                 }
-            }
-        })
+                ProjectInspectorEvent::OpenExternally { path, line, column } => {
+                    cx.emit(OverlayManagerEvent::OpenFileExternally {
+                        path: path.clone(),
+                        line: *line,
+                        column: *column,
+                    });
+                }
+            },
+        )
         .detach();
+        self.cached_project_inspectors
+            .insert(cache_key, inspector.clone());
+        inspector
+    }
 
-        self.open_modal_detachable::<DiffViewer, DiffViewerEvent, _>(
-            viewer,
-            "Diff",
-            |_this, viewer, cx| {
-                viewer.update(cx, |v, cx| v.set_detached(true, cx));
+    fn open_project_inspector_modal(
+        &mut self,
+        inspector: Entity<ProjectInspector>,
+        cx: &mut Context<Self>,
+    ) {
+        let active_view = inspector.read(cx).current_view();
+        self.open_modal_detachable_as::<ProjectInspector, ProjectInspectorEvent, _>(
+            inspector.clone(),
+            active_view,
+            "Project Inspector",
+            |this, inspector, cx| {
+                this.cached_project_inspectors
+                    .retain(|_, cached| cached != inspector);
+                this.active_project_inspector = None;
+                inspector.update(cx, |inspector, cx| inspector.set_detached(true, cx));
             },
             cx,
         );
+        if self.is_modal::<ProjectInspector>() {
+            self.active_project_inspector = Some(inspector);
+        }
     }
 
     // ========================================================================

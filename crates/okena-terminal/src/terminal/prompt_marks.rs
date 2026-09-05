@@ -60,6 +60,16 @@ impl PromptTracker {
         });
     }
 
+    /// Drop marks that no longer have a row, after the scrollback was
+    /// shrunk to `history_size` lines. `on_history_changed` only handles
+    /// growth (its `saturating_sub` makes a shrink a no-op), so an explicit
+    /// `set_scrollback_lines` has to prune here or stale marks would point
+    /// above the grid and `jump_to_prompt_*` would scroll nowhere.
+    pub(super) fn drop_marks_above(&mut self, history_size: usize) {
+        let topmost = -(history_size as i32);
+        self.marks.retain(|mark| mark.line >= topmost);
+    }
+
     pub(super) fn snapshot(&self) -> Vec<PromptMark> {
         self.marks.iter().copied().collect()
     }

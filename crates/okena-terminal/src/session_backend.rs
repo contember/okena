@@ -438,6 +438,7 @@ impl ResolvedBackend {
             ),
             Self::Dtach => {
                 let socket_path = get_dtach_socket_path(session_name);
+                let mode_state_path = dtach_mode_state_path(&socket_path);
                 if socket_path.exists() {
                     #[cfg(unix)]
                     if !terminate_dtach_process_tree(&socket_path, session_name) {
@@ -454,6 +455,15 @@ impl ResolvedBackend {
                         return false;
                     }
                     log::debug!("Removed dtach socket: {:?}", socket_path);
+                }
+                if let Err(error) = std::fs::remove_file(&mode_state_path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log::warn!(
+                        "failed to remove dtach mode state {:?}: {}",
+                        mode_state_path,
+                        error
+                    );
                 }
                 true
             }
@@ -1216,7 +1226,8 @@ pub fn reap_dtach_profile_sessions(profile_id: &str) -> std::io::Result<usize> {
                 "persistent terminal session {session_name} did not terminate"
             )));
         }
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dtach_mode_state_path(&path));
         reaped += 1;
     }
     Ok(reaped)
@@ -1264,6 +1275,7 @@ pub fn cleanup_stale_dtach_sockets() {
         let has_listener = holders.get(path).map(|v| !v.is_empty()).unwrap_or(false);
         if !has_listener && dtach_socket_is_definitively_dead(path) {
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(dtach_mode_state_path(path));
             removed += 1;
         }
     }
@@ -1605,6 +1617,44 @@ fn get_dtach_socket_path(session_name: &str) -> std::path::PathBuf {
         active_profile_id().as_deref(),
         session_name,
     )
+}
+
+fn dtach_mode_state_path(socket_path: &std::path::Path) -> std::path::PathBuf {
+    socket_path.with_extension("modes")
+}
+
+#[cfg(unix)]
+pub(crate) fn prepare_dtach_mode_state(session_name: &str) {
+    let socket_path = get_dtach_socket_path(session_name);
+    if !socket_path.exists() {
+        let _ = std::fs::remove_file(dtach_mode_state_path(&socket_path));
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn load_dtach_mode_state(
+    session_name: &str,
+) -> Option<crate::terminal::TerminalModeState> {
+    let socket_path = get_dtach_socket_path(session_name);
+    if !socket_path.exists() {
+        return None;
+    }
+    let encoded = std::fs::read_to_string(dtach_mode_state_path(&socket_path)).ok()?;
+    crate::terminal::TerminalModeState::decode(&encoded)
+}
+
+#[cfg(unix)]
+pub(crate) fn persist_dtach_mode_state(
+    session_name: &str,
+    modes: crate::terminal::TerminalModeState,
+) {
+    let socket_path = get_dtach_socket_path(session_name);
+    if !socket_path.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::write(dtach_mode_state_path(&socket_path), modes.encode()) {
+        log::warn!("failed to persist dtach terminal modes: {error}");
+    }
 }
 
 /// Extract directory name from a path for use as window name

@@ -379,6 +379,7 @@ pub fn begin_workspace_replacement(
                 hook_type: result.hook_type.to_string(),
                 command: result.command.clone(),
                 cwd: result.cwd.clone(),
+                finished_at: None,
             },
         );
         project
@@ -736,7 +737,7 @@ pub(super) fn save_session_action(ws: &Workspace, name: String) -> ActionResult 
     if session_exists(&name) {
         return ActionResult::Err(format!("session '{name}' already exists"));
     }
-    match save_session(&name, &ws.data().without_remote_projects()) {
+    match save_session(&name, ws.data()) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("failed to save session '{name}': {e}")),
     }
@@ -792,10 +793,7 @@ fn import_workspace_action_with_loader(
 }
 
 pub(super) fn export_workspace_action(ws: &Workspace, path: String) -> ActionResult {
-    match export_workspace(
-        &ws.data().without_remote_projects(),
-        std::path::Path::new(&path),
-    ) {
+    match export_workspace(ws.data(), std::path::Path::new(&path)) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("failed to export to '{path}': {e}")),
     }
@@ -964,6 +962,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         ProjectData {
@@ -986,7 +985,6 @@ mod tests {
                 },
                 ..Default::default()
             },
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,

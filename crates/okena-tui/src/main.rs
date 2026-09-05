@@ -96,6 +96,12 @@ impl TerminalTransport for TuiRemoteTransport {
     fn answers_terminal_queries(&self) -> bool {
         REMOTE_TERMINAL_ANSWERS_QUERIES
     }
+
+    /// The proof-of-concept TUI has no clipboard integration and never drains
+    /// the OSC 52 queues, so queueing there would only leak.
+    fn handles_clipboard(&self) -> bool {
+        false
+    }
 }
 
 struct TuiConnectionHandler {

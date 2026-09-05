@@ -82,6 +82,13 @@ pub enum ContextMenuEvent {
         project_id: String,
         project_path: String,
     },
+    ChangeProjectPath {
+        project_id: String,
+        project_path: String,
+        /// Whether the project's path is on this machine's disk, so the dialog
+        /// knows if it may check the typed path itself.
+        shares_local_filesystem: bool,
+    },
     CloseWorktree {
         project_id: String,
     },
@@ -179,6 +186,19 @@ impl ContextMenu {
         cx.emit(ContextMenuEvent::RenameDirectory {
             project_id: self.request.project_id.clone(),
             project_path,
+        });
+    }
+
+    fn change_project_path(
+        &self,
+        project_path: String,
+        shares_local_filesystem: bool,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ContextMenuEvent::ChangeProjectPath {
+            project_id: self.request.project_id.clone(),
+            project_path,
+            shares_local_filesystem,
         });
     }
 
@@ -288,7 +308,21 @@ impl Render for ContextMenu {
             .remote_snapshot(&self.request.project_id)
             .and_then(|s| s.git_status.as_ref())
             .is_some();
+        // Not `is_remote`: every project mirrored from a daemon connection
+        // carries that, including the local daemon a `--daemon-client` desktop
+        // talks to — i.e. most projects on a normal setup. What the change-path
+        // dialog needs to know is whether the project's path lives on *this*
+        // disk, so it can pre-validate against it. That is the connection,
+        // mirroring `ActionDispatcher::shares_local_filesystem`.
+        let shares_local_filesystem = project
+            .map(|p| {
+                p.connection_id
+                    .as_deref()
+                    .is_none_or(|id| id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
+            })
+            .unwrap_or(false);
         let project_path_for_rename_dir = project_path.clone();
+        let project_path_for_change_path = project_path.clone();
         let project_name_for_rename = project_name.clone();
         let extras_exist = !ws.data().extra_windows.is_empty();
         let is_hidden_in_window = ws
@@ -505,6 +539,28 @@ impl Render for ContextMenu {
                                 let project_path = project_path_for_rename_dir.clone();
                                 move |this, _, _window, cx| {
                                     this.rename_directory(project_path.clone(), cx);
+                                }
+                            })),
+                        )
+                        // Change Folder Path option. Offered for remote projects
+                        // too — the daemon that owns one validates the target
+                        // against its own disk. Only this dialog's *local*
+                        // pre-checks have to stand down, hence the flag.
+                        .child(
+                            menu_item(
+                                "context-menu-change-path",
+                                "icons/folder.svg",
+                                "Change Folder Path...",
+                                &t,
+                            )
+                            .on_click(cx.listener({
+                                let project_path = project_path_for_change_path.clone();
+                                move |this, _, _window, cx| {
+                                    this.change_project_path(
+                                        project_path.clone(),
+                                        shares_local_filesystem,
+                                        cx,
+                                    );
                                 }
                             })),
                         )

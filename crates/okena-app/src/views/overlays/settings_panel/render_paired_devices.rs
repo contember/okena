@@ -1,5 +1,5 @@
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
+use crate::ui::tokens::ui_text_ms;
 use gpui::*;
 use okena_ui::empty_state::empty_state;
 
@@ -77,60 +77,37 @@ impl SettingsPanel {
                     "expired".to_string()
                 };
 
-                let row = div()
-                    .id(ElementId::Name(format!("device-{}", i).into()))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(ui_text(13.0, cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .child(display_name),
-                            )
-                            .child(
-                                div()
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!(
-                                        "Created {} \u{2022} Last used {} \u{2022} Expires in {}",
-                                        created, last_used, expires,
-                                    )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("revoke-{}", i).into()))
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(0xE06C75)))
-                            .child("Revoke")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.revoke_paired_device(id_str.clone(), cx);
-                                }),
-                            ),
-                    );
+                let row = settings_row_with_desc(
+                    format!("device-{}", i),
+                    &display_name,
+                    &format!(
+                        "Created {} \u{2022} Last used {} \u{2022} Expires in {}",
+                        created, last_used, expires,
+                    ),
+                    &t,
+                    cx,
+                    !is_last,
+                )
+                .child(
+                    div()
+                        .id(ElementId::Name(format!("revoke-{}", i).into()))
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(0xE06C75)))
+                        .child("Revoke")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.revoke_paired_device(id_str.clone(), cx);
+                            }),
+                        ),
+                );
 
-                if is_last {
-                    row.into_any_element()
-                } else {
-                    row.border_b_1()
-                        .border_color(rgb(t.border))
-                        .into_any_element()
-                }
+                row.into_any_element()
             })
             .collect();
 

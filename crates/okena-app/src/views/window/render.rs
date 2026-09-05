@@ -1,5 +1,6 @@
+use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
-    AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
+    About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
     FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole,
@@ -19,6 +20,57 @@ use gpui::prelude::*;
 use gpui::*;
 
 use super::WindowView;
+
+impl WindowView {
+    pub(super) fn handle_app_menu_action(
+        &mut self,
+        action: AppMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            AppMenuAction::About => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_about(cx));
+            }
+            AppMenuAction::Settings => {
+                let endpoint = self.local_daemon_endpoint(cx);
+                self.overlay_manager.update(cx, |manager, cx| {
+                    manager.toggle_settings_panel(endpoint, cx);
+                });
+            }
+            AppMenuAction::Profiles => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_profile_manager(cx));
+            }
+            AppMenuAction::CommandPalette => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_command_palette(cx));
+            }
+            AppMenuAction::Theme => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_theme_selector(cx));
+            }
+            AppMenuAction::Keybindings => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_keybindings_help(cx));
+            }
+            AppMenuAction::NewWindow => {
+                let bounds = window.window_bounds().get_bounds();
+                let spawning_bounds = crate::workspace::state::WindowBounds {
+                    origin_x: f32::from(bounds.origin.x),
+                    origin_y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.spawn_extra_window(Some(spawning_bounds), cx);
+                });
+            }
+            AppMenuAction::Quit => cx.quit(),
+        }
+    }
+}
 
 impl WindowView {
     fn to_pixel_widths(
@@ -610,13 +662,14 @@ impl WindowView {
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let pane_move_source = self.pane_move.read(cx).source().cloned();
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);
         let has_context_menu = om.has_context_menu();
         let has_folder_context_menu = om.has_folder_context_menu();
         let has_remote_context_menu = om.has_remote_context_menu();
-        let has_terminal_context_menu = om.has_terminal_context_menu();
+        let has_terminal_menu = om.has_terminal_menu();
         let has_tab_context_menu = om.has_tab_context_menu();
         let has_send_composer = om.has_send_composer();
         let has_worktree_list = om.has_worktree_list();
@@ -644,10 +697,19 @@ impl Render for WindowView {
         div()
             .id("root")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(t.bg_primary))
             .track_focus(&focus_handle)
+            .on_action(cx.listener(
+                |this, _: &okena_views_terminal::actions::Cancel, _window, cx| {
+                    if this.pane_move.read(cx).source().is_some() {
+                        this.pane_move.update(cx, |state, cx| state.cancel(cx));
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             // Global mouse move handler for resize and auto-hide
             .on_mouse_move(cx.listener({
                 let active_drag = active_drag.clone();
@@ -1036,6 +1098,12 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_keybindings_help(cx));
                 }
             }))
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &About, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_about(cx));
+                }
+            }))
             // Handle show session manager action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
@@ -1341,28 +1409,22 @@ impl Render for WindowView {
                             .and_then(|g| g.review_base.clone());
                         ws.projects()
                             .iter()
-                            .find(|p| p.id == pid)
-                            .map(move |p| (pid, p.path.clone(), p.is_remote, review_base))
+                            .any(|p| p.id == pid)
+                            .then_some((pid, review_base))
                     })
                 };
 
-                let Some((project_id, project_path, is_remote, review_base)) = target else {
+                let Some((project_id, review_base)) = target else {
                     return;
                 };
 
-                let mode = if is_remote {
-                    review_base.map(|base| crate::git::DiffMode::BranchCompare {
-                        base,
-                        head: "HEAD".to_string(),
-                    })
-                } else {
-                    crate::git::resolve_review_base(std::path::Path::new(&project_path)).map(
-                        |base| crate::git::DiffMode::BranchCompare {
-                            base,
-                            head: "HEAD".to_string(),
-                        },
-                    )
-                };
+                // The base comes over the wire (`ApiGitStatus.review_base`) —
+                // the daemon owns the repo, and on a genuinely remote one the
+                // path isn't on this machine to resolve against anyway.
+                let mode = review_base.map(|base| crate::git::DiffMode::BranchCompare {
+                    base,
+                    head: "HEAD".to_string(),
+                });
 
                 this.request_broker.update(cx, |broker, cx| {
                     broker.push_overlay_request(
@@ -1424,7 +1486,7 @@ impl Render for WindowView {
                         },
                     )
                     .child(
-                        // Sidebar container - animated width
+                        // Sidebar container
                         {
                             let sidebar_width = self.sidebar_ctrl.current_width();
                             let configured_width = self.sidebar_ctrl.width();
@@ -1438,7 +1500,6 @@ impl Render for WindowView {
                                 .flex_shrink_0()
                                 .when(show_sidebar, |d| {
                                     d.child(
-                                        // Inner wrapper to maintain sidebar at full width for clipping effect
                                         div().w(px(configured_width)).h_full().child(
                                             AnyView::from(self.sidebar.clone())
                                                 .cached(StyleRefinement::default().size_full()),
@@ -1521,9 +1582,9 @@ impl Render for WindowView {
             .when(has_remote_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_remote_context_menu())
             })
-            // Terminal context menu overlay (positioned popup)
-            .when(has_terminal_context_menu, |d| {
-                d.children(self.overlay_manager.read(cx).render_terminal_context_menu())
+            // Adaptive terminal menu (right-click or header trigger)
+            .when(has_terminal_menu, |d| {
+                d.children(self.overlay_manager.read(cx).render_terminal_menu())
             })
             // Tab context menu overlay (positioned popup)
             .when(has_tab_context_menu, |d| {
@@ -1536,6 +1597,43 @@ impl Render for WindowView {
             // Single active modal overlay (renders on top of everything)
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {
                 d.child(modal)
+            })
+            .when_some(pane_move_source, |d, source| {
+                let pane_move = self.pane_move.clone();
+                d.child(
+                    div()
+                        .id("pane-move-status")
+                        .absolute()
+                        .top(px(40.0))
+                        .right(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .bg(rgb(t.bg_secondary))
+                        .border_1()
+                        .border_color(rgb(t.border_active))
+                        .rounded(px(6.0))
+                        .shadow_lg()
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child(format!("Move {}: choose a target", source.terminal_name))
+                        .child(
+                            div()
+                                .id("cancel-pane-move")
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .text_color(rgb(t.text_secondary))
+                                .hover(|style| style.bg(rgb(t.bg_hover)))
+                                .on_click(move |_, _window, cx| {
+                                    pane_move.update(cx, |state, cx| state.cancel(cx));
+                                })
+                                .child("Cancel"),
+                        ),
+                )
             })
             // Toast notifications (bottom-right, on top of everything)
             .child(self.toast_overlay.clone())

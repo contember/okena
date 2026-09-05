@@ -112,8 +112,8 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     border_bell: 0xe69500,
     border_idle: 0xe5a100,
     text_primary: 0xcccccc,
-    text_secondary: 0x808080,
-    text_muted: 0x6a6a6a,
+    text_secondary: 0xb0b0b0,
+    text_muted: 0x9a9a9a,
     selection_bg: 0x264f78,
     selection_fg: 0xffffff,
     search_match_bg: 0x613214,
@@ -182,8 +182,8 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     border_bell: 0xe69500,
     border_idle: 0xb38600,
     text_primary: 0x333333,
-    text_secondary: 0x6e6e6e,
-    text_muted: 0xa0a0a0,
+    text_secondary: 0x505050,
+    text_muted: 0x686868,
     selection_bg: 0xadd6ff,
     selection_fg: 0x000000,
     search_match_bg: 0xffd700,
@@ -252,8 +252,8 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     border_bell: 0xffa560,
     border_idle: 0xe5a100,
     text_primary: 0xeeeeee,
-    text_secondary: 0x999999,
-    text_muted: 0x666666,
+    text_secondary: 0xb0b0b0,
+    text_muted: 0x909090,
     selection_bg: 0x363983,
     selection_fg: 0xf2f2f2,
     search_match_bg: 0x613214,
@@ -497,6 +497,39 @@ impl ThemeColors {
 mod tests {
     use super::*;
     use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+
+    fn relative_luminance(color: u32) -> f64 {
+        let channel = |shift: u32| {
+            let value = f64::from((color >> shift) & 0xff) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        let (lighter, darker) = {
+            let a = relative_luminance(a);
+            let b = relative_luminance(b);
+            if a > b { (a, b) } else { (b, a) }
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn muted_text_is_readable_on_header_surfaces() {
+        for theme in [
+            DARK_THEME,
+            LIGHT_THEME,
+            PASTEL_DARK_THEME,
+            HIGH_CONTRAST_THEME,
+        ] {
+            assert!(contrast_ratio(theme.text_muted, theme.bg_header) >= 4.5);
+        }
+    }
 
     #[test]
     fn ansi_to_argb_named_colors() {

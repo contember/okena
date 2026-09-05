@@ -1037,6 +1037,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             relative_path,
         },
+        ActionRequest::GitFileHistory {
+            project_id,
+            relative_path,
+            count,
+        } => ActionRequest::GitFileHistory {
+            project_id: s(&project_id),
+            relative_path,
+            count,
+        },
         ActionRequest::ListFiles {
             project_id,
             show_ignored,
@@ -1243,6 +1252,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             new_name,
         },
+        ActionRequest::ChangeProjectPath {
+            project_id,
+            new_path,
+        } => ActionRequest::ChangeProjectPath {
+            project_id: s(&project_id),
+            new_path,
+        },
         ActionRequest::DeleteProject { project_id } => ActionRequest::DeleteProject {
             project_id: s(&project_id),
         },
@@ -1350,6 +1366,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::GetThemes
         | ActionRequest::GetTheme { .. }
         | ActionRequest::SetTheme { .. }
+        | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. }) => a,

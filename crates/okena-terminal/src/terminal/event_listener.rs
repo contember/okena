@@ -139,6 +139,15 @@ impl ZedEventListener {
     }
 }
 
+/// Cap on queued OSC 52 clipboard writes per terminal. Each entry is a whole
+/// clipboard payload, so this bounds a burst of copies rather than a count of
+/// small events. Only reached if the UI stops draining.
+const MAX_PENDING_CLIPBOARD_WRITES: usize = 16;
+
+/// Cap on queued OSC 52 clipboard *read* requests per terminal. Mirrors
+/// `OSC99_MAX_PENDING` in the OSC sidecar, including its drop-new policy.
+const MAX_PENDING_CLIPBOARD_READS: usize = 32;
+
 /// Process-wide fallback palette for answering OSC color queries when no
 /// per-terminal palette was pushed (headless daemon — no views). Set once at
 /// boot and on theme changes via [`set_process_palette`].
@@ -187,7 +196,20 @@ impl EventListener for ZedEventListener {
                 self.bell_pending.store(true, Ordering::Relaxed);
             }
             TermEvent::ClipboardStore(_, text) => {
-                self.clipboard.writes.lock().push(text);
+                // Only a side with a clipboard queues these. The daemon parses
+                // the same stream but has no clipboard and no drain, so a queue
+                // there would grow for the life of the terminal.
+                if !self.transport.handles_clipboard() {
+                    return;
+                }
+                let mut writes = self.clipboard.writes.lock();
+                // Bound regardless: an app can emit OSC 52 far faster than the
+                // UI drains, and payloads are whole clipboard buffers. Oldest
+                // out — a stale copy is worth less than the newest one.
+                if writes.len() >= MAX_PENDING_CLIPBOARD_WRITES {
+                    writes.remove(0);
+                }
+                writes.push(text);
             }
             TermEvent::ClipboardLoad(_ty, formatter) => {
                 // An app asked to READ the clipboard (`OSC 52 ; c ; ?`). We
@@ -197,7 +219,20 @@ impl EventListener for ZedEventListener {
                 // setting. The `ClipboardType` is ignored — primary-selection
                 // requests are answered from the regular clipboard like the
                 // rest, which matches what most terminals do.
-                self.clipboard.reads.lock().push(formatter);
+                //
+                // Dropping the formatter on a side that cannot answer is the
+                // same outcome the UI produces when `allow_clipboard_read` is
+                // off (`drop_clipboard_reads`): the app simply gets no reply.
+                if !self.transport.handles_clipboard() {
+                    return;
+                }
+                let mut reads = self.clipboard.reads.lock();
+                // Drop-new once saturated, matching `OSC99_MAX_PENDING`: the
+                // in-flight requests are the ones the app is still waiting on.
+                if reads.len() >= MAX_PENDING_CLIPBOARD_READS {
+                    return;
+                }
+                reads.push(formatter);
             }
             TermEvent::ColorRequest(index, response_fn) => {
                 // Mirrors must not answer queries — the PTY owner is the

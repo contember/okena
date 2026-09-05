@@ -4,6 +4,7 @@
 pub mod blame;
 pub mod content_search;
 pub mod file_scan;
+pub mod history;
 pub mod list_directory;
 pub mod project_fs;
 

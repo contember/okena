@@ -26,7 +26,6 @@ impl Render for CodexSettingsView {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
             .child(section_header("Codex", &t, cx))
             .child(self.working_days.clone())
     }

@@ -10,6 +10,7 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::settings::settings;
 use crate::views::chrome::title_bar::TitleBar;
+use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::{ActiveDrag, new_active_drag};
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
@@ -197,6 +198,8 @@ pub struct WindowView {
     toast_overlay: Entity<ToastOverlay>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
+    /// Source selected by the terminal menu's explicit move mode.
+    pane_move: Entity<PaneMoveState>,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
     /// Scroll handle for horizontal scrolling of project columns
@@ -266,6 +269,9 @@ impl WindowView {
         // child views (sidebar, project column, terminal pane, layout
         // container) can hold handles and update through Entity::update.
         let focus_manager = cx.new(|_| FocusManager::new());
+        let pane_move = cx.new(|_| PaneMoveState::default());
+        cx.observe(&pane_move, |_this, _state, cx| cx.notify())
+            .detach();
 
         // Sidebar open/closed state is per-window (persisted on WindowState).
         // Seed SidebarController from the calling window's persisted value;
@@ -274,16 +280,11 @@ impl WindowView {
         let app_settings = settings(cx);
         let mut sidebar_ctrl = SidebarController::new(&app_settings);
         if let Some(window_state) = workspace.read(cx).data().window(window_id) {
-            // Override open-state with per-window persisted value. If the
-            // controller's open flag doesn't match, toggle to flip it AND
-            // snap `animation` to the matching endpoint — toggle() returns an
-            // animation target the caller is expected to drive, but at init
-            // we want no animation, just the right starting visual.
+            // Override open-state with the per-window persisted value.
             if let Some(sidebar_open) = window_state.sidebar_open
                 && sidebar_ctrl.is_open() != sidebar_open
             {
                 sidebar_ctrl.toggle();
-                sidebar_ctrl.set_animation(if sidebar_open { 1.0 } else { 0.0 });
             }
         }
 
@@ -301,8 +302,13 @@ impl WindowView {
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
-        let title_bar = cx.new(|cx| {
-            let mut tb = TitleBar::new("Okena");
+        let window_view = cx.entity().downgrade();
+        let title_bar = cx.new(move |cx| {
+            let mut tb = TitleBar::new("Okena", move |action, window, cx| {
+                let _ = window_view.update(cx, |view, cx| {
+                    view.handle_app_menu_action(action, window, cx);
+                });
+            });
             tb.set_sidebar_open(sidebar_initially_open, cx);
             tb
         });
@@ -416,6 +422,7 @@ impl WindowView {
             overlay_manager,
             toast_overlay,
             active_drag: new_active_drag(),
+            pane_move,
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
             pending_workspace_delete: None,
@@ -532,7 +539,7 @@ impl WindowView {
                 this.sync_project_columns(cx);
             }
             this.refresh_for_project_path_changes(cx);
-            this.prune_file_viewer_cache(cx);
+            this.prune_project_inspector_cache(cx);
         })
         .detach();
 
@@ -540,7 +547,7 @@ impl WindowView {
         view.sync_project_columns(cx);
 
         // Seed path snapshot so the observer only fires on real changes.
-        view.last_project_paths = view.snapshot_local_project_paths(cx);
+        view.last_project_paths = view.snapshot_project_paths(cx);
 
         view
     }
@@ -801,21 +808,20 @@ impl WindowView {
         }
     }
 
-    /// Snapshot current on-disk paths for local projects (keyed by project_id).
-    fn snapshot_local_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
+    /// Snapshot every project's current path (keyed by project_id).
+    fn snapshot_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
         self.workspace
             .read(cx)
             .projects()
             .iter()
-            .filter(|p| !p.is_remote)
             .map(|p| (p.id.clone(), p.path.clone()))
             .collect()
     }
 
-    /// Detect local project directory renames and refresh caches that hold a
+    /// Detect project directory renames and refresh caches that hold a
     /// snapshotted path (git provider inside GitHeader, ServiceManager paths).
     fn refresh_for_project_path_changes(&mut self, cx: &mut Context<Self>) {
-        let current = self.snapshot_local_project_paths(cx);
+        let current = self.snapshot_project_paths(cx);
 
         let changed: Vec<(String, String)> = current
             .iter()
@@ -853,7 +859,7 @@ impl WindowView {
 
     /// Ensure project columns exist for all visible projects
     fn sync_project_columns(&mut self, cx: &mut Context<Self>) {
-        let visible_projects: Vec<(String, bool, Option<String>)> = {
+        let visible_projects: Vec<(String, Option<String>)> = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
             ws.visible_projects(
@@ -862,21 +868,19 @@ impl WindowView {
                 fm.is_focus_individual(),
             )
             .iter()
-            .map(|p| (p.id.clone(), p.is_remote, p.connection_id.clone()))
+            .map(|p| (p.id.clone(), p.connection_id.clone()))
             .collect()
         };
 
         // Clean up columns for projects that no longer exist
-        let visible_ids: std::collections::HashSet<&str> = visible_projects
-            .iter()
-            .map(|(id, _, _)| id.as_str())
-            .collect();
+        let visible_ids: std::collections::HashSet<&str> =
+            visible_projects.iter().map(|(id, _)| id.as_str()).collect();
         self.project_columns
             .retain(|id, _| visible_ids.contains(id.as_str()));
 
         // Create columns for new projects. Every project is a remote project
         // of the local daemon.
-        for (project_id, _is_remote, connection_id) in &visible_projects {
+        for (project_id, connection_id) in &visible_projects {
             if !self.project_columns.contains_key(project_id)
                 && let Some(entity) =
                     self.create_remote_column(project_id, connection_id.as_deref(), cx)
@@ -929,6 +933,7 @@ impl WindowView {
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
+        let pane_move_clone = self.pane_move.clone();
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
         let focus_manager_for_dispatch = self.focus_manager.clone();
@@ -956,7 +961,7 @@ impl WindowView {
                 backend,
                 terminals_clone,
                 active_drag_clone,
-                None, // remote projects don't get git watcher
+                pane_move_clone,
                 git_provider,
                 cx,
             );

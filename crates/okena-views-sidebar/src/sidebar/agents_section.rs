@@ -12,11 +12,11 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::v_flex;
+use gpui_component::{h_flex, v_flex};
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
 
-use super::{Sidebar, SidebarProjectInfo};
+use super::{Sidebar, SidebarList, SidebarProjectInfo};
 
 /// A session row: the project, and the task key or change name it belongs to.
 struct SessionRow {
@@ -86,6 +86,52 @@ impl Sidebar {
                 });
             }))
             .into_any_element()
+    }
+
+    /// PROJECTS / AGENTS tabs.
+    ///
+    /// Two tabs rather than stacking agent sessions under the repos: they are a
+    /// different kind of thing, and stacking them pushed the list the user was
+    /// reading off-screen. Its own row rather than part of the overview row,
+    /// which already carries the ordering and create menus.
+    pub(super) fn render_list_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let list = self.list;
+        let tab = |label: &'static str, mode: SidebarList, cx: &mut Context<Self>| {
+            let selected = list == mode;
+            div()
+                .id(ElementId::Name(label.into()))
+                .cursor_pointer()
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .when(!selected, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                .text_size(ui_text_ms(cx))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(if selected {
+                    t.text_primary
+                } else {
+                    t.text_muted
+                }))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if this.list != mode {
+                        this.list = mode;
+                        // The cursor indexes into the list that is going away.
+                        this.cursor_index = None;
+                        cx.notify();
+                    }
+                }))
+        };
+        h_flex()
+            .h(px(24.0))
+            .w_full()
+            .items_center()
+            .gap(px(2.0))
+            .pl(px(20.0))
+            .pr(px(12.0))
+            .child(tab("PROJECTS", SidebarList::Projects, cx))
+            .child(tab("AGENTS", SidebarList::Agents, cx))
     }
 
     pub(super) fn render_agents_list(&self, cx: &mut Context<Self>) -> impl IntoElement {

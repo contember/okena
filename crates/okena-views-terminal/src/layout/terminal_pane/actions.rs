@@ -46,6 +46,22 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
     }
 
+    pub(super) fn handle_export_buffer(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal_id) = self.terminal_id
+            && let Some(ref dispatcher) = self.action_dispatcher
+        {
+            dispatcher.export_buffer_to_clipboard(terminal_id, cx);
+        }
+    }
+
+    pub(super) fn handle_detach(&mut self, cx: &mut Context<Self>) {
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+        self.workspace.update(cx, |ws, cx| {
+            ws.detach_terminal(&project_id, &layout_path, cx);
+        });
+    }
+
     /// Toggle the pane's unread mark — the bell indicator the shell raises on
     /// BEL, set by hand so a pane can be flagged to come back to.
     pub(super) fn handle_toggle_unread(&mut self, cx: &mut Context<Self>) {

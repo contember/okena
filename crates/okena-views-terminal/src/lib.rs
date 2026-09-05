@@ -82,6 +82,25 @@ pub trait ActionDispatch: Clone + 'static {
         let _ = (terminal_id, cx);
         None
     }
+
+    /// `export_buffer` plus the shared reporting: the path lands on the
+    /// clipboard, and an unsupported backend is logged rather than silent.
+    /// Every trigger (keybinding, command palette, terminal menu) goes here.
+    fn export_buffer_to_clipboard(&self, terminal_id: &str, cx: &mut gpui::App) {
+        match self.export_buffer(terminal_id, cx) {
+            Some(path) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
+                log::info!(
+                    "Buffer exported to {} (path copied to clipboard)",
+                    path.display()
+                );
+            }
+            None => log::warn!(
+                "Buffer export unavailable for terminal {} (server needs a tmux session backend)",
+                terminal_id
+            ),
+        }
+    }
 }
 
 /// Settings namespace used in ExtensionSettingsStore.
@@ -100,6 +119,8 @@ pub struct TerminalViewSettings {
     pub cursor_blink: bool,
     pub show_focused_border: bool,
     pub show_shell_selector: bool,
+    #[serde(default)]
+    pub auto_hide_single_terminal_header: bool,
     pub idle_timeout_secs: u32,
     pub color_tinted_background: bool,
     pub file_opener: String,
@@ -140,6 +161,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             cursor_blink: false,
             show_focused_border: false,
             show_shell_selector: false,
+            auto_hide_single_terminal_header: false,
             idle_timeout_secs: 0,
             color_tinted_background: false,
             file_opener: String::new(),

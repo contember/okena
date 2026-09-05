@@ -92,7 +92,6 @@ impl Drop for AutosaveJob {
 struct ProjectSnapshot {
     id: String,
     path: String,
-    is_remote: bool,
     is_creating: bool,
     is_closing: bool,
     service_terminals: std::collections::HashMap<String, String>,
@@ -503,7 +502,6 @@ async fn run_services_sync_with_preparer<Prepare>(
                 .map(|p| ProjectSnapshot {
                     id: p.id.clone(),
                     path: p.path.clone(),
-                    is_remote: p.is_remote,
                     is_creating: p.is_creating,
                     is_closing: p.is_closing,
                     service_terminals: p.service_terminals.clone(),
@@ -514,7 +512,7 @@ async fn run_services_sync_with_preparer<Prepare>(
         )
     };
 
-    let expected_project_count = projects.iter().filter(|project| !project.is_remote).count();
+    let expected_project_count = projects.len();
     let prepared_projects = match runtime.spawn_blocking(move || prepare(projects)).await {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -534,7 +532,6 @@ async fn run_services_sync_with_preparer<Prepare>(
                 prepared.project.data_replacement_epoch == epoch
                     && ws.project(&prepared.project.id).is_some_and(|project| {
                         project.path == prepared.project.path
-                            && project.is_remote == prepared.project.is_remote
                             && project.is_creating == prepared.project.is_creating
                             && project.is_closing == prepared.project.is_closing
                     })
@@ -569,7 +566,6 @@ async fn run_services_sync_with_preparer<Prepare>(
 fn prepare_project_snapshots(projects: Vec<ProjectSnapshot>) -> Vec<PreparedProjectSnapshot> {
     projects
         .into_iter()
-        .filter(|project| !project.is_remote)
         .map(|project| {
             let config = (!project.is_creating && !project.is_closing)
                 .then(|| prepare_project_config(&project.path));
@@ -908,11 +904,10 @@ mod tests {
     }
 
     /// A `known`-set + project snapshot fixture for the diff logic.
-    fn project(id: &str, path: &str, is_remote: bool) -> ProjectSnapshot {
+    fn project(id: &str, path: &str) -> ProjectSnapshot {
         ProjectSnapshot {
             id: id.to_string(),
             path: path.to_string(),
-            is_remote,
             is_creating: false,
             is_closing: false,
             service_terminals: Default::default(),
@@ -956,7 +951,6 @@ mod tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals,
             default_shell: None,
@@ -1263,7 +1257,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut snapshot = project("project", &project_path, false);
+                let mut snapshot = project("project", &project_path);
                 snapshot
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -1400,14 +1394,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_services_loads_new_local_projects_and_tracks_them() {
+    async fn sync_services_loads_new_projects_and_tracks_them() {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
         let rr = reactor_ref(&sm);
 
-        let projects = vec![
-            project("local", &existing_path(), false),
-            project("remote", &existing_path(), true),
-        ];
+        let projects = vec![project("local", &existing_path())];
         let mut sync_state = ServiceSyncState::default();
 
         {
@@ -1416,9 +1407,7 @@ mod tests {
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
-        // Non-remote, on-disk project is tracked; remote project is skipped.
         assert!(sync_state.known.contains_key("local"));
-        assert!(!sync_state.known.contains_key("remote"));
     }
 
     #[tokio::test]
@@ -1426,7 +1415,7 @@ mod tests {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
         let rr = reactor_ref(&sm);
 
-        let projects = vec![project("ghost", "/path/that/does/not/exist/okena", false)];
+        let projects = vec![project("ghost", "/path/that/does/not/exist/okena")];
         let mut sync_state = ServiceSyncState::default();
 
         {
@@ -1447,7 +1436,7 @@ mod tests {
         // Pass 1: load a local project.
         let mut sync_state = ServiceSyncState::default();
         {
-            let projects = vec![project("local", &existing_path(), false)];
+            let projects = vec![project("local", &existing_path())];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
@@ -1469,7 +1458,7 @@ mod tests {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
         let rr = reactor_ref(&sm);
         let path = existing_path();
-        let mut closing = project("local", &path, false);
+        let mut closing = project("local", &path);
         closing.is_closing = true;
         let identity = KnownProject {
             path,
@@ -1517,7 +1506,7 @@ mod tests {
             terminals,
         )));
         let rr = reactor_ref(&sm);
-        let mut creating = project("project", &project_path, false);
+        let mut creating = project("project", &project_path);
         creating.is_creating = true;
         creating
             .service_terminals
@@ -1583,7 +1572,7 @@ mod tests {
         let sm = std::sync::Arc::new(parking_lot::Mutex::new(manager()));
         let rr = reactor_ref(&sm);
 
-        let projects = vec![project("local", &existing_path(), false)];
+        let projects = vec![project("local", &existing_path())];
         let mut sync_state = ServiceSyncState::default();
 
         // First pass loads and tracks.
@@ -1641,7 +1630,7 @@ mod tests {
             )]),
             ..ServiceSyncState::default()
         };
-        let mut renamed = project("project", &new_path, false);
+        let mut renamed = project("project", &new_path);
         renamed
             .service_terminals
             .insert("manual".into(), "manual-terminal".into());
@@ -1732,14 +1721,14 @@ mod tests {
         let mut sync_state = ServiceSyncState::default();
 
         {
-            let projects = vec![project("reused", &first_path, false)];
+            let projects = vec![project("reused", &first_path)];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         {
-            let mut replacement = project("reused", &second_path, false);
+            let mut replacement = project("reused", &second_path);
             replacement.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();
@@ -1786,7 +1775,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut initial = project("project", &project_path, false);
+                let mut initial = project("project", &project_path);
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -1805,7 +1794,7 @@ mod tests {
                 })
                 .await;
 
-                let mut replacement = project("project", &project_path, false);
+                let mut replacement = project("project", &project_path);
                 replacement.data_replacement_epoch = 1;
                 replacement
                     .service_terminals
@@ -1865,7 +1854,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut initial = project("project", &project_path, false);
+                let mut initial = project("project", &project_path);
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -1889,7 +1878,7 @@ mod tests {
                     "services:\n  - name: replacement\n    command: echo replacement\n",
                 )
                 .expect("write replacement service config");
-                let mut replacement = project("project", &project_path, false);
+                let mut replacement = project("project", &project_path);
                 replacement.data_replacement_epoch = 1;
                 replacement
                     .service_terminals
@@ -1950,7 +1939,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut initial = project("project", &project_path, false);
+                let mut initial = project("project", &project_path);
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -1969,7 +1958,7 @@ mod tests {
                 })
                 .await;
 
-                let mut replacement = project("project", &project_path, false);
+                let mut replacement = project("project", &project_path);
                 replacement.data_replacement_epoch = 1;
                 replacement
                     .service_terminals
@@ -2037,7 +2026,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut initial = project("project", &project_path, false);
+                let mut initial = project("project", &project_path);
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -2047,7 +2036,7 @@ mod tests {
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
 
-                let mut replacement = project("project", &missing_path, false);
+                let mut replacement = project("project", &missing_path);
                 replacement.data_replacement_epoch = 1;
                 replacement
                     .service_terminals
@@ -2117,7 +2106,7 @@ mod tests {
 
         local
             .run_until(async {
-                let mut initial = project("project", &initial_path, false);
+                let mut initial = project("project", &initial_path);
                 initial
                     .service_terminals
                     .insert("web".into(), "persistent-web".into());
@@ -2135,7 +2124,7 @@ mod tests {
                 })
                 .await;
 
-                let mut replacement = project("project", &recovered_path, false);
+                let mut replacement = project("project", &recovered_path);
                 replacement.data_replacement_epoch = 1;
                 replacement
                     .service_terminals
@@ -2209,7 +2198,7 @@ mod tests {
         )));
         let rr = reactor_ref(&sm);
         let mut sync_state = ServiceSyncState::default();
-        let mut snapshot = project("project", &project_path, false);
+        let mut snapshot = project("project", &project_path);
         snapshot
             .service_terminals
             .insert("web".into(), "persistent-web".into());
@@ -2269,14 +2258,14 @@ mod tests {
         let mut sync_state = ServiceSyncState::default();
 
         {
-            let projects = vec![project("local", &existing_path(), false)];
+            let projects = vec![project("local", &existing_path())];
             let mut guard = sm.lock();
             let mut cx = rr.cx();
             sync_services(&projects, &mut sync_state, &mut guard, &mut cx);
         }
 
         {
-            let mut missing = project("local", "/path/that/does/not/exist/okena", false);
+            let mut missing = project("local", "/path/that/does/not/exist/okena");
             missing.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();
@@ -2286,7 +2275,7 @@ mod tests {
         assert!(sm.lock().project_path("local").is_none());
 
         {
-            let mut recovered = project("local", &existing_path(), false);
+            let mut recovered = project("local", &existing_path());
             recovered.data_replacement_epoch = 1;
             let mut guard = sm.lock();
             let mut cx = rr.cx();

@@ -17,7 +17,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::terminal_input::TerminalInputHandler;
-use super::terminal_rendering::{BatchedTextLine, LayoutRect, is_default_bg};
+use super::terminal_rendering::{
+    BatchedTextLine, LayoutRect, is_default_bg, requires_independent_shaping,
+};
 
 type ResizeViewerSizes = HashMap<String, HashMap<u64, TerminalSize>>;
 
@@ -643,7 +645,17 @@ fn build_terminal_grid_layout(
                         },
                     };
 
-                    if let Some(line) = current_line.as_mut() {
+                    if requires_independent_shaping(cell.c) {
+                        if let Some(line) = current_line.take() {
+                            text_lines.push(line);
+                        }
+                        text_lines.push(BatchedTextLine::new(
+                            visual_line,
+                            col_i32,
+                            cell.c,
+                            text_style,
+                        ));
+                    } else if let Some(line) = current_line.as_mut() {
                         line.append(col_i32, cell.c, text_style);
                     } else {
                         current_line = Some(BatchedTextLine::new(

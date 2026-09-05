@@ -59,6 +59,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `soft_close.rs` | Soft-close deadline poll (grace window before killing a session). |
 | `toast_poll.rs` | Drains `HookMonitor` toasts onto the stream. |
 | `worktree_close_watchdog.rs` | Watches pending worktree closes. |
+| `worktree_stale_sweep.rs` | Drops worktree projects whose checkout was deleted outside Okena. |
 
 ## Patterns
 

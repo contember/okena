@@ -14,7 +14,9 @@
 //! - Theme selector
 //! - Worktree dialog
 
+pub mod about;
 pub mod add_project_dialog;
+pub mod change_path_dialog;
 pub mod close_worktree_dialog;
 pub mod command_palette;
 pub mod content_search;
@@ -30,17 +32,19 @@ pub mod keybindings_help;
 pub mod log_console;
 pub mod pairing_dialog;
 pub mod profile_manager;
+pub mod project_inspector;
 pub mod project_switcher;
 pub mod remote_connect_dialog;
 pub mod remote_context_menu;
 pub mod remote_pair_dialog;
 pub mod rename_directory_dialog;
+pub mod rename_terminal_dialog;
 pub mod send_composer;
 pub mod session_manager;
 pub mod settings_panel;
 pub mod shell_selector_overlay;
 pub mod tab_context_menu;
-pub mod terminal_context_menu;
+pub mod terminal_menu;
 pub mod terminal_overlay_utils;
 pub mod theme_selector;
 pub mod worktree_dialog;

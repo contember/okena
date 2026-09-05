@@ -126,7 +126,13 @@ pub fn render_branch_status(
     // typically wired to open the PR URL on GitHub.
     let pr_badge = pr_number.map(|num| {
         let pr_clickable = on_pr_click.is_some();
-        let badge_color = pr_state_color.unwrap_or(t.text_muted);
+        // `text_secondary`, not `text_muted`: at muted the badge sat around
+        // 3:1 against the header background on the darker themes, which is
+        // below the readable floor for something carrying an identifier you
+        // are meant to read. Secondary is the "quieter than body text but
+        // still legible" token in every theme — including light, where it is
+        // *darker* than muted rather than lighter.
+        let badge_color = pr_state_color.unwrap_or(t.text_secondary);
         let mut el = h_flex()
             .id("pr-badge")
             .gap(px(3.0))
@@ -145,7 +151,11 @@ pub fn render_branch_status(
                     .size(px(10.0))
                     .text_color(rgb(badge_color)),
             )
-            .child(div().text_color(rgb(t.text_muted)).child(format!("#{num}")));
+            .child(
+                div()
+                    .text_color(rgb(t.text_secondary))
+                    .child(format!("#{num}")),
+            );
         if let Some(cb) = on_pr_click {
             el = el.on_click(move |_, window, cx| {
                 cb(window, cx);

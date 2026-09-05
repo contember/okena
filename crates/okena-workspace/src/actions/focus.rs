@@ -299,7 +299,6 @@ mod gpui_tests {
             agent: None,
             folder_color: FolderColor::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,

@@ -173,6 +173,8 @@ export interface ApiHookTerminalEntry {
   hook_type: string;
   command: string;
   cwd: string;
+  /** Unix seconds at which the hook finished; absent while it is running. */
+  finished_at?: number | null;
 }
 
 export interface ApiProjectHooks {

@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::keybindings::{format_keystroke, get_config};
+pub use crate::keybindings::shortcut_for_action;
 
 /// A single discoverability tip.
 pub struct Tip {
@@ -239,23 +239,6 @@ pub fn next_start_index() -> usize {
             .unwrap_or(0)
     });
     base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
-}
-
-/// The shortcut currently bound to `action`, formatted for display, or `None`
-/// if it is unbound. On non-macOS we prefer a Ctrl-based binding so the chip
-/// shows the key the user will actually press.
-pub fn shortcut_for_action(action: &str) -> Option<String> {
-    let config = get_config();
-    let entries = config.bindings.get(action)?;
-    let chosen = if cfg!(target_os = "macos") {
-        entries.iter().find(|e| e.enabled)
-    } else {
-        entries
-            .iter()
-            .find(|e| e.enabled && e.keystroke.contains("ctrl"))
-            .or_else(|| entries.iter().find(|e| e.enabled))
-    }?;
-    Some(format_keystroke(&chosen.keystroke))
 }
 
 #[cfg(test)]

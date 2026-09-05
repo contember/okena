@@ -26,6 +26,35 @@ pub struct ProjectOverlay {
     pub kind: ProjectOverlayKind,
 }
 
+/// How the terminal menu was opened and which contextual sections it needs.
+#[derive(Clone, Debug)]
+pub enum TerminalMenuInvocation {
+    Content {
+        has_selection: bool,
+        link_url: Option<String>,
+    },
+    Header {
+        include_primary_actions: bool,
+    },
+}
+
+impl TerminalMenuInvocation {
+    /// Selection/clipboard entries only make sense on a right-click in the content.
+    pub fn includes_content_actions(&self) -> bool {
+        matches!(self, Self::Content { .. })
+    }
+
+    /// Add-tab/split/close: shown unless the trigger already sits next to them.
+    pub fn includes_primary_actions(&self) -> bool {
+        match self {
+            Self::Content { .. } => true,
+            Self::Header {
+                include_primary_actions,
+            } => *include_primary_actions,
+        }
+    }
+}
+
 /// The specific overlay to show for a project.
 #[derive(Clone, Debug)]
 pub enum ProjectOverlayKind {
@@ -45,12 +74,13 @@ pub enum ProjectOverlayKind {
         /// Current index into the commits list.
         commit_index: Option<usize>,
     },
-    TerminalContextMenu {
+    TerminalMenu {
         terminal_id: String,
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
-        has_selection: bool,
-        link_url: Option<String>,
+        /// Resolved at the trigger, which already holds the pane's backend.
+        can_export_buffer: bool,
+        invocation: TerminalMenuInvocation,
     },
     /// Annotate the terminal's current selection and send it back to it.
     /// `position` anchors the composer, normally just under the selection.

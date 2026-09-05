@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod activity_order;
+pub mod change_path_dialog;
 pub mod color_picker;
 pub mod context_menu;
 pub mod drag;
@@ -27,6 +28,7 @@ pub use sidebar::{
 };
 
 // Re-export context menu types
+pub use change_path_dialog::{ChangePathDialog, ChangePathDialogEvent};
 pub use context_menu::{ContextMenu, ContextMenuEvent};
 pub use folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 pub use hook_log::{HookLog, HookLogEvent};

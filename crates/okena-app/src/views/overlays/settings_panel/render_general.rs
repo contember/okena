@@ -1,11 +1,10 @@
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
+use crate::ui::tokens::{ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::SimpleInput;
 use crate::workspace::settings::HeaderDensity;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
 use okena_transport::client::tls::format_fingerprint;
 
 use super::SettingsPanel;
@@ -36,36 +35,17 @@ impl SettingsPanel {
             ))
             .when(s.remote_server_enabled, |d| {
                 d.child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            v_flex()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text(13.0, cx))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Listen Address"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_sm(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("IP address to bind the remote server. Binding beyond 127.0.0.1 exposes it UNENCRYPTED on the network (token + terminal I/O in cleartext) — only use on a trusted network or behind an SSH/WireGuard tunnel."),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .bg(rgb(t.bg_secondary))
-                                .border_1()
-                                .border_color(rgb(t.border))
-                                .rounded(px(4.0))
-                                .child(SimpleInput::new(&self.listen_address_input).text_size(ui_text_md(cx))),
-                        ),
+                    settings_input_row(
+                        "remote-listen-address",
+                        "Listen Address",
+                        "IP address to bind the remote server. Binding beyond 127.0.0.1 exposes it UNENCRYPTED on the network (token + terminal I/O in cleartext) — only use on a trusted network or behind an SSH/WireGuard tunnel.",
+                        &t,
+                        cx,
+                        true,
+                    )
+                    .child(input_box(&t).child(
+                        SimpleInput::new(&self.listen_address_input).text_size(ui_text_md(cx)),
+                    )),
                 )
                 .child(self.render_toggle(
                     "remote-tls", "Encrypt with TLS", s.remote_tls_enabled, true,
@@ -79,39 +59,24 @@ impl SettingsPanel {
                         &crate::workspace::persistence::config_dir(),
                     );
                     d.child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_size(ui_text(13.0, cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .child("Certificate fingerprint (SHA-256)"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("When pairing a new device, verify this matches the fingerprint shown on the client before trusting it."),
-                            )
-                            .child(
-                                div()
-                                    .bg(rgb(t.bg_secondary))
-                                    .border_1()
-                                    .border_color(rgb(t.border))
-                                    .rounded(px(4.0))
-                                    .px(px(8.0))
-                                    .py(px(6.0))
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .child(match fingerprint {
-                                        Some(fp) => format_fingerprint(&fp),
-                                        None => "(server not running — start it to view)".to_string(),
-                                    }),
-                            ),
+                        settings_input_row(
+                            "remote-tls-fingerprint",
+                            "Certificate fingerprint (SHA-256)",
+                            "When pairing a new device, verify this matches the fingerprint shown on the client before trusting it.",
+                            &t,
+                            cx,
+                            true,
+                        )
+                        .child(
+                            input_box(&t)
+                                .font_family("monospace")
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_primary))
+                                .child(match fingerprint {
+                                    Some(fp) => format_fingerprint(&fp),
+                                    None => "(server not running — start it to view)".to_string(),
+                                }),
+                        ),
                     )
                 })
             })
@@ -127,41 +92,19 @@ impl SettingsPanel {
             .child(section_header("File Opener", &t, cx))
             .child(
                 section_container(&t).child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            v_flex()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_text(13.0, cx))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Editor Command"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_text_sm(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(
-                                            "Command to open file paths (empty = system default)",
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .bg(rgb(t.bg_secondary))
-                                .border_1()
-                                .border_color(rgb(t.border))
-                                .rounded(px(4.0))
-                                .child(
-                                    SimpleInput::new(&self.file_opener_input)
-                                        .text_size(ui_text_md(cx)),
-                                ),
+                    settings_input_row(
+                        "file-opener-command",
+                        "Editor Command",
+                        "Command to open file paths (empty = system default)",
+                        &t,
+                        cx,
+                        false,
+                    )
+                    .child(
+                        input_box(&t).child(
+                            SimpleInput::new(&self.file_opener_input).text_size(ui_text_md(cx)),
                         ),
+                    ),
                 ),
             )
             .child(section_header("Notifications", &t, cx))
@@ -213,6 +156,15 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
+        let variants = HeaderDensity::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|density| Segment {
+                id: format!("{:?}", density).into(),
+                label: density.display_name(),
+                selected: *density == current,
+            })
+            .collect();
 
         settings_row(
             "header-density".to_string(),
@@ -221,45 +173,17 @@ impl SettingsPanel {
             cx,
             true,
         )
-        .child(
-            h_flex()
-                .gap(px(2.0))
-                .rounded(px(4.0))
-                .bg(rgb(t.bg_secondary))
-                .p(px(2.0))
-                .children(
-                    HeaderDensity::all_variants()
-                        .iter()
-                        .map(|&density: &HeaderDensity| {
-                            let is_selected = density == current;
-                            let hover_bg = t.bg_hover;
-                            div()
-                                .id(ElementId::Name(
-                                    format!("header-density-{:?}", density).into(),
-                                ))
-                                .cursor_pointer()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(px(3.0))
-                                .text_size(ui_text_md(cx))
-                                .when(is_selected, |el: Stateful<Div>| {
-                                    el.bg(rgb(t.border_active)).text_color(rgb(t.text_primary))
-                                })
-                                .when(!is_selected, |el: Stateful<Div>| {
-                                    el.text_color(rgb(t.text_muted))
-                                        .hover(|s: StyleRefinement| s.bg(rgb(hover_bg)))
-                                })
-                                .child(density.display_name().to_string())
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_, _, _, cx| {
-                                        settings_entity(cx).update(cx, |state, cx| {
-                                            state.set_header_density(density, cx);
-                                        });
-                                    }),
-                                )
-                        }),
-                ),
-        )
+        .child(segmented_control(
+            "header-density",
+            &segments,
+            &t,
+            cx,
+            move |i, _, cx| {
+                let density = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_header_density(density, cx);
+                });
+            },
+        ))
     }
 }

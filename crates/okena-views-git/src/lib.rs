@@ -5,10 +5,10 @@ pub mod close_worktree_dialog;
 pub mod commit_send;
 pub mod diff_viewer;
 pub mod git_header;
+pub mod history;
 pub mod project_header;
 pub mod settings;
 pub mod simple_input;
-pub mod watcher;
 pub mod worktree_dialog;
 
 gpui::actions!(okena_views_git, [Cancel]);

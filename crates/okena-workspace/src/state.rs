@@ -25,7 +25,7 @@ pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
     PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
-    WorkspaceData, WorktreeMetadata,
+    WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -593,11 +593,6 @@ impl Workspace {
             let project = self
                 .project(project_id)
                 .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            if project.is_remote {
-                return Err(format!(
-                    "remote project directories cannot be changed locally: {project_id}"
-                ));
-            }
             if reject_running_hooks
                 && project
                     .hook_terminals
@@ -820,12 +815,7 @@ impl Workspace {
         let mut ordinary_slots = Vec::new();
         let mut teardown_sessions = Vec::new();
         let mut hook_terminal_ids = Vec::new();
-        for project in self
-            .data
-            .projects
-            .iter_mut()
-            .filter(|project| !project.is_remote)
-        {
+        for project in self.data.projects.iter_mut() {
             project_ids.push(project.id.clone());
             if let Some(layout) = &mut project.layout {
                 take_layout_terminal_ownership(
@@ -1099,7 +1089,7 @@ impl Workspace {
     /// created, closed, merged, or removed.
     pub fn ensure_project_path_claim_allowed(&self, path: &Path) -> Result<(), String> {
         let candidate = Self::physical_path_identity(path);
-        for project in self.projects().iter().filter(|project| !project.is_remote) {
+        for project in self.projects().iter() {
             if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
                 continue;
             }
@@ -1120,7 +1110,7 @@ impl Workspace {
     /// either direction.
     pub fn ensure_worktree_target_claim_allowed(&self, root: &Path) -> Result<(), String> {
         let candidate = Self::physical_path_identity(root);
-        for project in self.projects().iter().filter(|project| !project.is_remote) {
+        for project in self.projects().iter() {
             if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
                 continue;
             }
@@ -1147,7 +1137,6 @@ impl Workspace {
         let root = Self::physical_path_identity(root);
         if let Some(claimant) = self.projects().iter().find(|project| {
             project.id != owner_project_id
-                && !project.is_remote
                 && Self::physical_path_identity(Path::new(&project.path)).starts_with(&root)
         }) {
             return Err(format!(
@@ -1174,7 +1163,7 @@ impl Workspace {
             .map(|project| Self::physical_path_identity(Path::new(&project.path)))
             .ok_or_else(|| "Project not found".to_string())?;
         let candidate = Self::physical_path_identity(new_path);
-        for project in self.projects().iter().filter(|project| !project.is_remote) {
+        for project in self.projects().iter() {
             if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
                 continue;
             }
@@ -1786,6 +1775,7 @@ impl Workspace {
                     hook_type: result.hook_type.to_string(),
                     command: result.command,
                     cwd: result.cwd,
+                    finished_at: None,
                 },
                 cx,
             );
@@ -1801,12 +1791,63 @@ impl Workspace {
         for project in &mut self.data.projects {
             if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
                 if entry.status != status {
+                    // Stamp when it stopped running, so the oldest finished
+                    // hooks can be evicted before they accumulate. Set only on
+                    // the transition, so a re-reported status keeps the
+                    // original time.
+                    entry.finished_at = match status {
+                        HookTerminalStatus::Running => None,
+                        _ => Some(crate::state::now_unix_seconds()),
+                    };
                     entry.status = status;
                     cx.notify();
                 }
                 return;
             }
         }
+    }
+
+    /// Finished hook terminals to retire, keeping the `keep` most recent.
+    ///
+    /// A hook terminal that completes on a normal path is kept forever: its
+    /// entry persists, and its `Arc<Terminal>` keeps a full scrollback grid in
+    /// the daemon plus one in every client mirroring it. Only a manual dismiss
+    /// ever removed one, so a project whose hooks run on every worktree
+    /// operation accumulates them for the life of the workspace.
+    ///
+    /// Running hooks are never candidates. Successes go before failures at the
+    /// same age, since a failure is the one the user still wants to read.
+    /// Entries with no `finished_at` (written before the field existed) sort
+    /// oldest.
+    pub fn finished_hook_terminals_to_evict(&self, project_id: &str, keep: usize) -> Vec<String> {
+        let Some(project) = self.project(project_id) else {
+            return Vec::new();
+        };
+        let mut finished: Vec<(&String, &HookTerminalEntry)> = project
+            .hook_terminals
+            .iter()
+            .filter(|(_, entry)| entry.status != HookTerminalStatus::Running)
+            .collect();
+        if finished.len() <= keep {
+            return Vec::new();
+        }
+        // Newest first, so the tail past `keep` is what goes.
+        finished.sort_by(|(a_id, a), (b_id, b)| {
+            let failed = |entry: &HookTerminalEntry| {
+                matches!(entry.status, HookTerminalStatus::Failed { .. })
+            };
+            failed(b)
+                .cmp(&failed(a))
+                .then(b.finished_at.cmp(&a.finished_at))
+                // Ids last, so the order is total and eviction is deterministic
+                // for entries that finished within the same second.
+                .then(b_id.cmp(a_id))
+        });
+        finished
+            .split_off(keep)
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     pub fn remove_hook_terminal(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
@@ -1852,6 +1893,22 @@ impl Workspace {
         self.project(project_id)
             .map(|p| p.hook_terminals.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Every terminal id belonging to a project: its layout tree plus its hook
+    /// terminals, which live outside the tree but are real terminals all the
+    /// same. In a client mirror these are the registry's own keys.
+    pub fn all_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        let Some(project) = self.project(project_id) else {
+            return Vec::new();
+        };
+        let mut ids = project
+            .layout
+            .as_ref()
+            .map(|layout| layout.collect_terminal_ids())
+            .unwrap_or_default();
+        ids.extend(project.hook_terminals.keys().cloned());
+        ids
     }
 
     /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
@@ -2114,63 +2171,6 @@ impl Workspace {
         result
     }
 
-    /// Check if a project is remote
-    #[allow(dead_code)]
-    pub fn is_remote_project(&self, id: &str) -> bool {
-        self.data.projects.iter().any(|p| p.id == id && p.is_remote)
-    }
-
-    /// Remove all remote projects (and their folder) for a given connection_id.
-    #[allow(dead_code)]
-    pub fn remove_remote_projects(
-        &mut self,
-        focus_manager: &mut FocusManager,
-        connection_id: &str,
-        cx: &mut impl WorkspaceCx,
-    ) {
-        let prefix = format!("remote:{}:", connection_id);
-
-        let removed_project_ids: Vec<String> = self
-            .data
-            .projects
-            .iter()
-            .filter(|p| p.id.starts_with(&prefix))
-            .map(|p| p.id.clone())
-            .collect();
-        let removed_folder_ids: Vec<String> = self
-            .data
-            .folders
-            .iter()
-            .filter(|f| f.id.starts_with(&prefix))
-            .map(|f| f.id.clone())
-            .collect();
-
-        self.data.projects.retain(|p| !p.id.starts_with(&prefix));
-        self.data.folders.retain(|f| !f.id.starts_with(&prefix));
-        self.data
-            .project_order
-            .retain(|id| !id.starts_with(&prefix));
-
-        for project_id in &removed_project_ids {
-            self.data.delete_project_scrub_all_windows(project_id);
-        }
-        for folder_id in &removed_folder_ids {
-            self.data.delete_folder_scrub_all_windows(folder_id);
-        }
-
-        for project_id in self.remote_sync.retain_not_starting_with(&prefix) {
-            self.data.delete_project_scrub_all_windows(&project_id);
-        }
-
-        if let Some(focused) = focus_manager.focused_project_id()
-            && focused.starts_with(&prefix)
-        {
-            focus_manager.set_focused_project_id(None);
-        }
-
-        cx.notify();
-    }
-
     /// Notify UI without bumping data_version (for remote state changes that shouldn't trigger auto-save).
     pub fn notify_ui_only(&mut self, cx: &mut impl WorkspaceCx) {
         cx.notify();
@@ -2394,6 +2394,7 @@ mod workspace_tests {
                 hook_type: "before_worktree_remove".into(),
                 command: "true".into(),
                 cwd: "/tmp".into(),
+                finished_at: None,
             },
         );
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["wt1"]));
@@ -2473,6 +2474,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project
@@ -2626,7 +2628,6 @@ mod workspace_tests {
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
@@ -2792,25 +2793,25 @@ mod workspace_tests {
 
     #[test]
     fn project_runtime_quiesce_batch_is_all_or_nothing() {
-        let mut blocked = make_project("blocked");
-        blocked.is_remote = true;
+        // The whole batch is validated before anything is mutated, so one bad
+        // member leaves the others untouched.
         let mut workspace = Workspace::new(make_workspace_data(
-            vec![make_project("ready"), blocked],
-            vec!["ready", "blocked"],
+            vec![make_project("ready")],
+            vec!["ready"],
         ));
         let mut cx = RecordingCx::default();
 
         let error = workspace
             .begin_project_runtimes_quiesce(
-                &["ready".to_string(), "blocked".to_string()],
+                &["ready".to_string(), "missing".to_string()],
                 &ShellType::Default,
                 SessionBackend::None,
                 true,
                 &mut cx,
             )
-            .expect_err("remote descendant rejects the full batch");
+            .expect_err("an unknown member rejects the full batch");
 
-        assert!(error.contains("remote project"));
+        assert!(error.contains("Project not found"));
         assert!(matches!(
             workspace.project("ready").and_then(|project| project.layout.as_ref()),
             Some(LayoutNode::Terminal {
@@ -2833,6 +2834,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "echo done".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project.hook_terminals.insert(
@@ -2843,6 +2845,7 @@ mod workspace_tests {
                 hook_type: "project.on_open".to_string(),
                 command: "sleep 10".to_string(),
                 cwd: "/tmp/test".to_string(),
+                finished_at: None,
             },
         );
         project
@@ -3641,14 +3644,17 @@ mod workspace_tests {
 
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
+    use crate::remote_apply::RemoteSnapshot;
     use crate::settings::HooksConfig;
     use crate::state::{
         HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, ProjectLayoutMode,
         WindowBounds, WindowId, WindowState, Workspace, WorkspaceData,
     };
     use gpui::AppContext as _;
+    use okena_core::api::{ApiLayoutNode, ApiProject, StateResponse};
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;
+    use okena_transport::client::RemoteConnectionConfig;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -3672,7 +3678,6 @@ mod gpui_tests {
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
@@ -3724,13 +3729,6 @@ mod gpui_tests {
             children: terminal_ids.iter().map(|tid| pane(tid)).collect(),
             active_tab,
         }
-    }
-
-    /// Project whose layout is a two-pane horizontal split.
-    fn project_with_split(id: &str, terminal_ids: [&str; 2]) -> ProjectData {
-        let mut project = make_project(id);
-        project.layout = Some(split_of(&terminal_ids));
-        project
     }
 
     /// Focus `path` in `p1`, then replay what a sync brings: capture the anchor,
@@ -3829,16 +3827,103 @@ mod gpui_tests {
         );
     }
 
-    /// Run a no-op remote sync (no connections) and report where focus ended up.
+    /// A snapshot from connection `c1` reporting project `p1` with `layout`.
+    ///
+    /// Focus re-anchoring is driven by what the daemon reports, so these tests
+    /// hand the new layout in over the wire rather than mutating the mirror in
+    /// place — a locally-edited row is not a state the client can be in.
+    fn snapshot_of(layout: ApiLayoutNode) -> RemoteSnapshot {
+        RemoteSnapshot {
+            config: RemoteConnectionConfig {
+                id: "c1".to_string(),
+                name: "conn-c1".to_string(),
+                host: "c1.example.com".to_string(),
+                port: 19100,
+                saved_token: None,
+                token_obtained_at: None,
+                tls: false,
+                pinned_cert_sha256: None,
+                local_endpoint: None,
+            },
+            state: Some(StateResponse {
+                state_version: 1,
+                projects: vec![ApiProject {
+                    task_ref: None,
+                    agent: None,
+                    spec_change: None,
+                    id: "p1".to_string(),
+                    name: "proj-p1".to_string(),
+                    path: "/srv/p1".to_string(),
+                    show_in_overview: true,
+                    layout: Some(layout),
+                    terminal_names: HashMap::new(),
+                    git_status: None,
+                    folder_color: FolderColor::Default,
+                    services: Vec::new(),
+                    worktree_info: None,
+                    worktree_ids: Vec::new(),
+                    pinned: false,
+                    last_activity_at: None,
+                    default_shell: None,
+                    hook_terminals: Vec::new(),
+                    hooks: Default::default(),
+                    is_creating: false,
+                    is_closing: false,
+                    creating_progress: None,
+                }],
+                focused_project_id: None,
+                fullscreen_terminal: None,
+                project_order: vec!["p1".to_string()],
+                folders: Vec::new(),
+                windows: Vec::new(),
+                hooks: Vec::new(),
+            }),
+        }
+    }
+
+    fn api_terminal(id: &str) -> ApiLayoutNode {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id.to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            cols: None,
+            rows: None,
+        }
+    }
+
+    fn api_split(ids: [&str; 2]) -> ApiLayoutNode {
+        ApiLayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children: ids.iter().map(|id| api_terminal(id)).collect(),
+        }
+    }
+
+    /// Apply one snapshot and report where focus ended up.
     fn sync_and_read_focus(
         workspace: &gpui::Entity<Workspace>,
         fm: &mut crate::focus::FocusManager,
         cx: &mut gpui::TestAppContext,
+        layout: ApiLayoutNode,
     ) -> Option<Vec<usize>> {
+        let snapshots = [snapshot_of(layout)];
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.apply_remote_snapshot(&[], WindowId::Main, fm, cx);
+            ws.apply_remote_snapshot(&snapshots, WindowId::Main, fm, cx);
         });
         fm.focused_terminal_state().map(|f| f.layout_path)
+    }
+
+    /// Mirror `p1` as a split and focus its second pane, the state every test
+    /// below starts from.
+    fn mirrored_split_with_focus(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<Workspace>, crate::focus::FocusManager) {
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data(vec![], vec![])));
+        let mut fm = crate::focus::FocusManager::new();
+        sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
+        fm.focus_terminal("remote:c1:p1".to_string(), vec![1]);
+        (workspace, fm)
     }
 
     #[gpui::test]
@@ -3847,40 +3932,22 @@ mod gpui_tests {
     ) {
         // A shell exits on its own (or another window closes the pane): the
         // split collapses and the focused path stops naming a terminal.
-        let workspace = cx.new(|_cx| {
-            Workspace::new(make_workspace_data(
-                vec![project_with_split("p1", ["t1", "t2"])],
-                vec!["p1"],
-            ))
-        });
-        let mut fm = crate::focus::FocusManager::new();
-        fm.focus_terminal("p1".to_string(), vec![1]);
+        let (workspace, mut fm) = mirrored_split_with_focus(cx);
 
-        workspace.update(cx, |ws: &mut Workspace, _cx| {
-            ws.project_mut("p1").unwrap().layout = Some(LayoutNode::Terminal {
-                terminal_id: Some("t1".to_string()),
-                minimized: false,
-                detached: false,
-                shell_type: ShellType::Default,
-                zoom_level: 1.0,
-            });
-        });
-
-        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![]));
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("t1")),
+            Some(vec![])
+        );
     }
 
     #[gpui::test]
     fn sync_leaves_a_focus_path_that_still_names_a_terminal_alone(cx: &mut gpui::TestAppContext) {
-        let workspace = cx.new(|_cx| {
-            Workspace::new(make_workspace_data(
-                vec![project_with_split("p1", ["t1", "t2"])],
-                vec!["p1"],
-            ))
-        });
-        let mut fm = crate::focus::FocusManager::new();
-        fm.focus_terminal("p1".to_string(), vec![1]);
+        let (workspace, mut fm) = mirrored_split_with_focus(cx);
 
-        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"])),
+            Some(vec![1])
+        );
     }
 
     #[gpui::test]
@@ -3888,27 +3955,23 @@ mod gpui_tests {
         // A degenerate tree has no terminal to offer. Re-anchoring onto the
         // empty container would leave focus just as orphaned and re-run the
         // heal — with its notify + debounced save — on every later sync.
-        let workspace = cx.new(|_cx| {
-            Workspace::new(make_workspace_data(
-                vec![project_with_split("p1", ["t1", "t2"])],
-                vec!["p1"],
-            ))
-        });
-        let mut fm = crate::focus::FocusManager::new();
-        fm.focus_terminal("p1".to_string(), vec![1]);
+        let (workspace, mut fm) = mirrored_split_with_focus(cx);
+        let degenerate = || ApiLayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: Vec::new(),
+            children: Vec::new(),
+        };
 
-        workspace.update(cx, |ws: &mut Workspace, _cx| {
-            ws.project_mut("p1").unwrap().layout = Some(LayoutNode::Split {
-                direction: crate::state::SplitDirection::Horizontal,
-                sizes: Vec::new(),
-                children: Vec::new(),
-            });
-        });
-
-        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, degenerate()),
+            Some(vec![1])
+        );
         let version = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
         // Still inert on the next sync — no repeated activity bumps.
-        assert_eq!(sync_and_read_focus(&workspace, &mut fm, cx), Some(vec![1]));
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, degenerate()),
+            Some(vec![1])
+        );
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data_version(), version);
         });
@@ -4037,99 +4100,6 @@ mod gpui_tests {
         });
     }
 
-    fn make_remote_project(id: &str, conn_id: &str) -> ProjectData {
-        let mut p = make_project(id);
-        p.is_remote = true;
-        p.connection_id = Some(conn_id.to_string());
-        p
-    }
-
-    #[gpui::test]
-    fn test_remove_remote_projects(cx: &mut gpui::TestAppContext) {
-        use crate::state::FolderData;
-
-        let local = make_project("local1");
-        let remote1 = make_remote_project("remote:conn1:p1", "conn1");
-        let remote2 = make_remote_project("remote:conn1:p2", "conn1");
-        let remote3 = make_remote_project("remote:conn2:p1", "conn2");
-
-        let mut data = make_workspace_data(
-            vec![local, remote1, remote2, remote3],
-            vec!["local1", "remote:conn1:folder1", "remote:conn2:folder2"],
-        );
-        data.folders.push(FolderData {
-            id: "remote:conn1:folder1".to_string(),
-            name: "Server 1".to_string(),
-            project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-            folder_color: FolderColor::default(),
-        });
-        data.folders.push(FolderData {
-            id: "remote:conn2:folder2".to_string(),
-            name: "Server 2".to_string(),
-            project_ids: vec!["remote:conn2:p1".to_string()],
-            folder_color: FolderColor::default(),
-        });
-
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.remove_remote_projects(&mut crate::focus::FocusManager::new(), "conn1", cx);
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.data.projects.len(), 2);
-            assert!(ws.project("local1").is_some());
-            assert!(ws.project("remote:conn2:p1").is_some());
-            assert!(ws.project("remote:conn1:p1").is_none());
-
-            assert_eq!(ws.data.folders.len(), 1);
-            assert_eq!(ws.data.folders[0].id, "remote:conn2:folder2");
-
-            assert!(
-                !ws.data
-                    .project_order
-                    .contains(&"remote:conn1:folder1".to_string())
-            );
-            assert!(
-                ws.data
-                    .project_order
-                    .contains(&"remote:conn2:folder2".to_string())
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn test_visible_projects_includes_remote_in_folders(cx: &mut gpui::TestAppContext) {
-        use crate::state::FolderData;
-
-        let local = make_project("local1");
-        let remote1 = make_remote_project("remote:conn1:p1", "conn1");
-        let remote2 = make_remote_project("remote:conn1:p2", "conn1");
-
-        let mut data = make_workspace_data(
-            vec![local, remote1, remote2],
-            vec!["local1", "remote:conn1:folder1"],
-        );
-        data.main_window
-            .hidden_project_ids
-            .insert("remote:conn1:p2".to_string());
-        data.folders.push(FolderData {
-            id: "remote:conn1:folder1".to_string(),
-            name: "Server 1".to_string(),
-            project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-            folder_color: FolderColor::default(),
-        });
-
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let visible = ws.visible_projects(WindowId::Main, None, false);
-            assert_eq!(visible.len(), 2);
-            assert_eq!(visible[0].id, "local1");
-            assert_eq!(visible[1].id, "remote:conn1:p1");
-        });
-    }
-
     fn make_hook_entry(hook_type: &str) -> HookTerminalEntry {
         HookTerminalEntry {
             label: format!("{} (test)", hook_type),
@@ -4137,7 +4107,197 @@ mod gpui_tests {
             hook_type: hook_type.to_string(),
             command: "echo test".to_string(),
             cwd: ".".to_string(),
+            finished_at: None,
         }
+    }
+
+    fn finished_hook_entry(
+        status: HookTerminalStatus,
+        finished_at: Option<u64>,
+    ) -> HookTerminalEntry {
+        HookTerminalEntry {
+            status,
+            finished_at,
+            ..make_hook_entry("on_project_open")
+        }
+    }
+
+    /// Build a project holding the given `(terminal_id, entry)` hook terminals.
+    fn project_with_hooks(id: &str, hooks: Vec<(&str, HookTerminalEntry)>) -> ProjectData {
+        let mut project = make_project(id);
+        for (terminal_id, entry) in hooks {
+            project
+                .hook_terminals
+                .insert(terminal_id.to_string(), entry);
+        }
+        project
+    }
+
+    fn evict_from(project: ProjectData, keep: usize) -> Vec<String> {
+        let id = project.id.clone();
+        let ws = Workspace::new(make_workspace_data(vec![project], vec![&id]));
+        ws.finished_hook_terminals_to_evict(&id, keep)
+    }
+
+    #[test]
+    fn eviction_keeps_the_most_recent_finished_hooks() {
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "mid",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(300)),
+                    ),
+                ],
+            ),
+            2,
+        );
+
+        assert_eq!(stale, vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn eviction_never_touches_a_running_hook() {
+        // Two finished and one still running, keeping one: only a finished hook
+        // may go, and the running one must not count toward the budget.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    ("running", make_hook_entry("on_project_open")),
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn eviction_prefers_dropping_successes_over_failures() {
+        // A failure is the one the user still wants to read, so it outranks a
+        // newer success when something has to go.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    (
+                        "failed",
+                        finished_hook_entry(HookTerminalStatus::Failed { exit_code: 1 }, Some(100)),
+                    ),
+                    (
+                        "succeeded",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["succeeded".to_string()]);
+    }
+
+    #[test]
+    fn eviction_treats_entries_without_a_finish_time_as_oldest() {
+        // Written before `finished_at` existed, so they carry no timestamp.
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![
+                    (
+                        "legacy",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, None),
+                    ),
+                    (
+                        "recent",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                ],
+            ),
+            1,
+        );
+
+        assert_eq!(stale, vec!["legacy".to_string()]);
+    }
+
+    #[test]
+    fn eviction_is_a_no_op_within_budget() {
+        let stale = evict_from(
+            project_with_hooks(
+                "p1",
+                vec![(
+                    "only",
+                    finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                )],
+            ),
+            5,
+        );
+
+        assert!(stale.is_empty());
+    }
+
+    #[gpui::test]
+    fn project_terminal_ids_cover_the_layout_and_the_hooks(cx: &mut gpui::TestAppContext) {
+        // The client's hidden-project scrollback pass walks these ids, so a
+        // hook terminal missing here would keep a full grid while hidden.
+        // `make_project` gives p1 a layout holding one terminal, `term_p1`.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let mut ids = ws.all_terminal_ids_for_project("p1");
+            ids.sort();
+            assert_eq!(ids, vec!["hook-1".to_string(), "term_p1".to_string()]);
+            assert!(ws.all_terminal_ids_for_project("missing").is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn finishing_a_hook_stamps_when_it_stopped(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            assert!(
+                ws.project("p1").unwrap().hook_terminals["hook-1"]
+                    .finished_at
+                    .is_none(),
+                "a running hook has no finish time"
+            );
+
+            ws.update_hook_terminal_status("hook-1", HookTerminalStatus::Succeeded, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                ws.project("p1").unwrap().hook_terminals["hook-1"]
+                    .finished_at
+                    .is_some(),
+                "finishing must stamp a time so eviction can order candidates"
+            );
+        });
     }
 
     #[gpui::test]
@@ -4244,6 +4404,7 @@ mod gpui_tests {
                     hook_type: "on_project_open".to_string(),
                     command: "echo test".to_string(),
                     cwd: ".".to_string(),
+                    finished_at: None,
                 },
                 cx,
             );

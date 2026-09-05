@@ -10,7 +10,6 @@ use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
 
 use crate::diff_viewer::provider::GitProvider;
-use crate::watcher::GitStatusWatcher;
 
 use gpui::*;
 use std::sync::Arc;
@@ -97,11 +96,7 @@ pub struct GitHeader {
     workspace: Entity<Workspace>,
     focus_manager: Entity<okena_workspace::focus::FocusManager>,
     git_provider: Arc<dyn GitProvider>,
-    /// Optional handle to the centralized git poller, used to trigger an
-    /// immediate refresh after user-initiated branch changes.
-    git_watcher: Option<Entity<GitStatusWatcher>>,
-
-    /// Current branch from git watcher (updated externally before rendering).
+    /// Current branch, pushed in by the parent before rendering.
     current_branch: Option<String>,
 
     // ── Diff popover state ──────────────────────────────────────────
@@ -166,7 +161,6 @@ impl GitHeader {
         workspace: Entity<Workspace>,
         focus_manager: Entity<okena_workspace::focus::FocusManager>,
         git_provider: Arc<dyn GitProvider>,
-        git_watcher: Option<Entity<GitStatusWatcher>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let branch_picker_filter = cx.new(|cx| {
@@ -193,7 +187,6 @@ impl GitHeader {
             workspace,
             focus_manager,
             git_provider,
-            git_watcher,
             current_branch: None,
             diff_popover_visible: false,
             diff_file_summaries: Vec::new(),
@@ -234,7 +227,7 @@ impl GitHeader {
         }
     }
 
-    /// Update the current branch name (from the git status watcher).
+    /// Update the current branch name (from the daemon's git status).
     pub fn set_current_branch(&mut self, branch: Option<String>) {
         self.current_branch = branch;
     }

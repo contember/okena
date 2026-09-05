@@ -213,10 +213,10 @@ fn default_text_primary() -> String {
     "#cccccc".to_string()
 }
 fn default_text_secondary() -> String {
-    "#808080".to_string()
+    "#b0b0b0".to_string()
 }
 fn default_text_muted() -> String {
-    "#6a6a6a".to_string()
+    "#9a9a9a".to_string()
 }
 fn default_selection_bg() -> String {
     "#264f78".to_string()
@@ -579,8 +579,8 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 border_bell: "#ffa560".to_string(),
                 border_idle: "#e5a100".to_string(),
                 text_primary: "#eeeeee".to_string(),
-                text_secondary: "#999999".to_string(),
-                text_muted: "#666666".to_string(),
+                text_secondary: "#b0b0b0".to_string(),
+                text_muted: "#909090".to_string(),
                 selection_bg: "#363983".to_string(),
                 selection_fg: "#f2f2f2".to_string(),
                 search_match_bg: "#613214".to_string(),

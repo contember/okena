@@ -87,7 +87,6 @@ impl SettingsPanel {
                 "Where a multi-project agent session runs, so one agent can see \
                  every worktree. Empty uses the parent of the first project.",
                 &self.harness_agent_root_input,
-                "",
                 &t,
                 false,
                 cx,
@@ -99,7 +98,6 @@ impl SettingsPanel {
                 "Git repository holding your OpenSpec documents. A change often \
                  spans several projects, so specs live in their own repo.",
                 &self.harness_spec_repo_input,
-                "",
                 &t,
                 false,
                 cx,
@@ -139,7 +137,6 @@ impl SettingsPanel {
                         "Agent arguments",
                         "One per line. {key} {title} {url} {branch} are replaced from the task.",
                         &self.harness_agent_args_input,
-                        "",
                         &t,
                         true,
                         cx,
@@ -162,7 +159,6 @@ impl SettingsPanel {
                         "One argument per line; {config} becomes the generated config path. \
                          Empty uses the built-in flags for the selected agent.",
                         &self.harness_agent_mcp_args_input,
-                        "",
                         &t,
                         false,
                         cx,
@@ -174,7 +170,6 @@ impl SettingsPanel {
                 "Worktree path template",
                 "Where a task's worktrees are created. Same setting as Worktree → Path.",
                 &self.worktree_dir_suffix_input,
-                "",
                 &t,
                 false,
                 cx,

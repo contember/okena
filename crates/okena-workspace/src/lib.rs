@@ -25,5 +25,3 @@ pub mod sidebar_controller;
 pub mod state;
 pub mod toast;
 pub mod visibility;
-#[cfg(feature = "gpui")]
-pub mod worktree_sync;

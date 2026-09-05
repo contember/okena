@@ -35,6 +35,10 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use project::{
+    MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
+};
+
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
     execute_prepared_content_search_with_cancellation, prepare_content_search,
@@ -359,6 +363,11 @@ pub fn execute_action(
             project_id,
             relative_path,
         } => git::blame(ws, project_id, relative_path),
+        ActionRequest::GitFileHistory {
+            project_id,
+            relative_path,
+            count,
+        } => git::file_history(ws, project_id, relative_path, count),
 
         // ── Filesystem ops ───────────────────────────────────────────
         ActionRequest::ListFiles {
@@ -522,6 +531,10 @@ pub fn execute_action(
             project_id,
             new_name,
         } => project::rename_project_directory(ws, project_id, new_name, cx),
+        ActionRequest::ChangeProjectPath {
+            project_id,
+            new_path,
+        } => project::change_project_path(ws, project_id, new_path, cx),
         ActionRequest::DeleteProject { project_id } => {
             project::delete_project(ws, focus_manager, project_id, settings, cx)
         }
@@ -712,6 +725,7 @@ pub fn execute_action(
         | ActionRequest::GetThemes
         | ActionRequest::GetTheme { .. }
         | ActionRequest::SetTheme { .. }
+        | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. } => {
@@ -798,11 +812,6 @@ pub fn reserve_uninitialized_terminal_launches(
         let project = ws
             .project(project_id)
             .ok_or_else(|| format!("project not found: {project_id}"))?;
-        if project.is_remote {
-            return Err(format!(
-                "remote project terminals cannot be materialized locally: {project_id}"
-            ));
-        }
         let project_path = project.path.clone();
         let project_name = project.name.clone();
         let project_hooks = project.hooks.clone();
@@ -1402,7 +1411,6 @@ mod reconnect_shell_tests {
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell,

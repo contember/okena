@@ -194,6 +194,9 @@ pub struct Okena {
     pub(super) extra_window_handles: HashMap<WindowId, AnyWindowHandle>,
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) terminals: TerminalsRegistry,
+    /// Visible-project set the scrollback pass last acted on, so it can skip
+    /// the walk when nothing moved. Cleared when the depth itself changes.
+    scrollback_visible_projects: parking_lot::Mutex<Option<std::collections::HashSet<String>>>,
     /// Track which detached windows we've already opened
     pub(crate) opened_detached_windows: HashSet<String>,
     /// Remote connection manager. Held so extras spawned at runtime can
@@ -327,6 +330,7 @@ impl Okena {
             extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
             terminals,
+            scrollback_visible_projects: parking_lot::Mutex::new(None),
             opened_detached_windows: HashSet::new(),
             remote_manager: remote_manager.clone(),
             terminal_activity_repaints: ActivityRepaintBatch::default(),
@@ -341,6 +345,22 @@ impl Okena {
 
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
+
+        // Only the PTY-owning daemon answers OSC color queries. Share the
+        // resolved OS appearance with our local daemon so Auto matches the
+        // desktop, including OS appearance changes. Never persist this as a
+        // theme preference or send it to user-managed remote connections.
+        let theme = crate::theme::theme_entity(cx);
+        let mut last_is_dark = theme.read(cx).system_is_dark();
+        manager.sync_system_appearance(cx);
+        cx.observe(&theme, move |this, theme, cx| {
+            let is_dark = theme.read(cx).system_is_dark();
+            if is_dark != last_is_dark {
+                last_is_dark = is_dark;
+                this.sync_system_appearance(cx);
+            }
+        })
+        .detach();
 
         // Fire OS notifications for remote (daemon-served) terminals. Their PTY
         // output never reaches the local PTY event loop above — it arrives over
@@ -412,9 +432,13 @@ impl Okena {
                 this.recover_local_daemon(cx);
             }
             RemoteManagerEvent::SettingsChanged(settings) => {
+                // Initial/reconnected daemon snapshots also restore the
+                // transient appearance after a daemon restart.
+                this.sync_system_appearance(cx);
                 let settings = settings.as_ref().clone();
                 let mode = settings.theme_mode;
                 let custom_id = settings.custom_theme_id.clone();
+                this.apply_scrollback_setting(settings.scrollback_lines, cx);
                 crate::settings::settings_entity(cx).update(cx, |state, cx| {
                     state.replace_from_daemon(settings.clone(), cx);
                 });
@@ -667,6 +691,67 @@ impl Okena {
         self.remote_manager.update(cx, |manager, _cx| {
             manager.publish_visible_projects(&visible)
         });
+        self.sync_hidden_project_scrollback(&visible, cx);
+    }
+
+    /// Free the scrollback of terminals in projects no window is showing, and
+    /// restore it when one comes back.
+    ///
+    /// The client mirrors every terminal the daemon has, not just the ones it
+    /// renders, because bells, OSC notifications, titles and clipboard requests
+    /// from a background project still have to reach the user. What it does not
+    /// need is that project's *history*: nothing can scroll a pane that is not
+    /// on screen. Keeping it costs a full grid per hidden terminal, up to ~50 MB
+    /// each once filled, which on a workspace with dozens of background projects
+    /// is most of the client's memory.
+    ///
+    /// The daemon still holds the full history, so re-showing a project restores
+    /// the cap and history refills from there. Scrollback recorded while hidden
+    /// is lost — the same trade the web client already makes, where switching
+    /// projects unsubscribes and drops the buffer outright.
+    fn sync_hidden_project_scrollback(
+        &self,
+        visible: &std::collections::HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let full = okena_terminal::terminal::process_scrollback_lines();
+        // This runs from the visible-projects tick, which fires on every
+        // workspace mutation — including activity bumps on PTY output. Walking
+        // every project's layout allocates, so do it only when the visible set
+        // actually moved. `set_scrollback_lines` resizes the grid that holds
+        // history even while the app is in the alternate screen, so there is
+        // nothing to catch up on later.
+        {
+            let mut last = self.scrollback_visible_projects.lock();
+            if last.as_ref() == Some(visible) {
+                return;
+            }
+            *last = Some(visible.clone());
+        }
+
+        let by_project: Vec<(bool, Vec<String>)> = {
+            let workspace = self.workspace.read(cx);
+            workspace
+                .projects()
+                .iter()
+                .map(|project| {
+                    (
+                        visible.contains(&project.id),
+                        workspace.all_terminal_ids_for_project(&project.id),
+                    )
+                })
+                .collect()
+        };
+
+        let registry = self.terminals.lock();
+        for (is_visible, terminal_ids) in by_project {
+            let depth = scrollback_depth_for(is_visible, full);
+            for terminal_id in terminal_ids {
+                if let Some(terminal) = registry.get(&terminal_id) {
+                    terminal.set_scrollback_lines(depth);
+                }
+            }
+        }
     }
 
     fn queue_terminal_activity_repaints(
@@ -868,6 +953,36 @@ impl Okena {
     /// then re-points the loopback connection at the new endpoint/token.
     /// Single-flight and quit-aware; mirrors `perform_restart_daemon`'s pattern
     /// of running the blocking remote-server call on the background pool.
+    /// Apply the daemon's scrollback depth to this process.
+    ///
+    /// The client keeps its own alacritty grid per terminal, so the setting has
+    /// to be honored on both sides of the wire or the mirror alone would still
+    /// hold 10 000 lines (~50 MB per fully-scrolled terminal). Sets the
+    /// process-wide default for terminals created later, then re-syncs the live
+    /// ones — through the visibility pass, so a project nobody is showing keeps
+    /// its freed history instead of being handed the new depth.
+    pub(crate) fn apply_scrollback_setting(&self, lines: u32, cx: &mut Context<Self>) {
+        if okena_terminal::terminal::process_scrollback_lines() == lines {
+            return;
+        }
+        okena_terminal::terminal::set_process_scrollback_lines(lines);
+        // The visible set has not moved, but the depth every visible terminal
+        // should hold just did — clear the memo so the sync actually runs.
+        self.scrollback_visible_projects.lock().take();
+        self.publish_visible_projects(cx);
+    }
+
+    fn sync_system_appearance(&self, cx: &mut Context<Self>) {
+        let is_dark = crate::theme::theme_entity(cx).read(cx).system_is_dark();
+        self.remote_manager.update(cx, |manager, cx| {
+            manager.send_action(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                okena_core::api::ActionRequest::SetSystemAppearance { is_dark },
+                cx,
+            );
+        });
+    }
+
     fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {
         if self.quitting.load(Ordering::SeqCst) {
             return;
@@ -1071,12 +1186,22 @@ impl Okena {
     }
 }
 
+/// Scrollback a client mirror should hold for a terminal, given whether any
+/// window is showing its project.
+///
+/// Hidden means zero: the mirror still parses output so bells, notifications
+/// and titles keep working, but no pane can scroll history the user cannot see,
+/// and the daemon retains the real thing.
+fn scrollback_depth_for(project_is_visible: bool, configured: u32) -> u32 {
+    if project_is_visible { configured } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, WindowLayoutSaveTracker,
         flush_window_layout_saves_before_final, is_okena_process, recovery_backoff_delay,
-        should_escalate_recovery,
+        scrollback_depth_for, should_escalate_recovery,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1196,5 +1321,18 @@ mod tests {
         }
         // The one-shot give-up toast fires during the ramp, not only at the cap.
         const { assert!(RECOVERY_TOAST_AFTER_ATTEMPTS >= 4) };
+    }
+
+    #[test]
+    fn a_visible_project_keeps_the_configured_scrollback() {
+        assert_eq!(scrollback_depth_for(true, 10_000), 10_000);
+        assert_eq!(scrollback_depth_for(true, 500), 500);
+    }
+
+    #[test]
+    fn a_hidden_project_keeps_no_scrollback() {
+        // The whole point of the pass: a mirror of a project no window shows
+        // holds no history, which is where most of the client's memory went.
+        assert_eq!(scrollback_depth_for(false, 10_000), 0);
     }
 }

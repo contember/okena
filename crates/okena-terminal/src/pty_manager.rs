@@ -907,6 +907,13 @@ impl PtyManager {
 
         let launch_environment = self.launch_environment(plan);
 
+        #[cfg(unix)]
+        if self.session_backend() == ResolvedBackend::Dtach {
+            crate::session_backend::prepare_dtach_mode_state(
+                &ResolvedBackend::Dtach.session_name(terminal_id),
+            );
+        }
+
         // Build command based on session backend and shell config
         #[cfg(unix)]
         let mut cmd = self.build_terminal_command(terminal_id, cwd, plan, &launch_environment);
@@ -2161,6 +2168,38 @@ impl crate::terminal::TerminalTransport for PtyManager {
 
     fn uses_mouse_backend(&self) -> bool {
         self.uses_mouse_backend()
+    }
+
+    /// The PTY owner is the headless daemon: no system clipboard to write to,
+    /// no UI thread to answer a read request, and nothing that drains the
+    /// queues. Dropping OSC 52 here is what keeps them from growing forever.
+    /// The client mirroring this terminal still services them.
+    fn handles_clipboard(&self) -> bool {
+        false
+    }
+
+    fn load_terminal_modes(&self, terminal_id: &str) -> Option<crate::terminal::TerminalModeState> {
+        #[cfg(unix)]
+        if self.session_backend() == ResolvedBackend::Dtach {
+            return crate::session_backend::load_dtach_mode_state(
+                &ResolvedBackend::Dtach.session_name(terminal_id),
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = terminal_id;
+        None
+    }
+
+    fn persist_terminal_modes(&self, terminal_id: &str, modes: crate::terminal::TerminalModeState) {
+        #[cfg(unix)]
+        if self.session_backend() == ResolvedBackend::Dtach {
+            crate::session_backend::persist_dtach_mode_state(
+                &ResolvedBackend::Dtach.session_name(terminal_id),
+                modes,
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = (terminal_id, modes);
     }
 }
 

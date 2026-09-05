@@ -69,6 +69,8 @@ pub struct DiffViewer {
     pub(super) provider: Arc<dyn provider::GitProvider>,
     /// Whether diff data is currently being loaded.
     pub(super) loading: bool,
+    /// Prevents stale async diff and file results from updating the viewer.
+    pub(super) request_generation: u64,
     /// Raw diff data for all files (not syntax highlighted).
     pub(super) raw_files: Vec<FileDiff>,
     /// Lightweight file stats for sidebar display.
@@ -81,6 +83,8 @@ pub struct DiffViewer {
     pub(super) selection: Selection,
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) tree_scroll_handle: ScrollHandle,
+    /// Whether the file tree sidebar is visible.
+    pub(super) sidebar_visible: bool,
     /// Width and active resize gesture for the file tree sidebar.
     pub(super) sidebar_resize: ResizableSidebarState,
     pub(super) error_message: Option<String>,
@@ -130,6 +134,8 @@ pub struct DiffViewer {
     /// True when this viewer is hosted inside a detached window.
     /// Hides the "detach" button and is set by the detached host.
     pub(super) is_detached: bool,
+    /// Whether this diff is a drill-down that can return to its source view.
+    pub(super) can_go_back: bool,
     /// Open commit-hash right-click context menu.
     pub(super) commit_hash_menu: Option<context_menu::CommitHashContextMenu>,
     /// Right-click context menu over a non-empty text selection.
@@ -140,17 +146,33 @@ pub struct DiffViewer {
     pub(super) search_sig: Option<DiffSearchSig>,
 }
 
+/// Which commit the viewer opens on and the history it can step through.
+#[derive(Default)]
+pub struct CommitNavigation {
+    /// Message of the commit being viewed, shown above the diff.
+    pub message: Option<String>,
+    /// Commit list for prev/next navigation. Empty disables stepping.
+    pub commits: Vec<CommitLogEntry>,
+    /// Index into `commits` of the commit being viewed.
+    pub index: usize,
+}
+
 impl DiffViewer {
-    /// Create a new diff viewer with the given provider, optionally selecting a specific file, mode, commit message, and commit navigation list.
+    /// Create a new diff viewer with the given provider, optionally selecting a
+    /// specific file and diff mode.
     pub fn new(
         provider: Arc<dyn provider::GitProvider>,
         select_file: Option<String>,
         mode: Option<DiffMode>,
-        commit_message: Option<String>,
-        commits: Option<Vec<CommitLogEntry>>,
-        commit_index: Option<usize>,
+        commit_nav: CommitNavigation,
+        can_go_back: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let CommitNavigation {
+            message: commit_message,
+            commits,
+            index: commit_index,
+        } = commit_nav;
         let focus_handle = cx.focus_handle();
         let gs = git_settings(cx);
         let font_size = gs.file_font_size;
@@ -160,7 +182,6 @@ impl DiffViewer {
         let initial_mode = mode.unwrap_or(DiffMode::WorkingTree);
         let initial_is_uncommitted =
             matches!(initial_mode, DiffMode::WorkingTree | DiffMode::Staged);
-        let commits = commits.unwrap_or_default();
         let history_includes_uncommitted =
             initial_is_uncommitted || nav::history_starts_at_head(&commits);
         let should_load_commit_history = initial_is_uncommitted && commits.is_empty();
@@ -176,6 +197,7 @@ impl DiffViewer {
             ignore_whitespace,
             provider: provider.clone(),
             loading: false,
+            request_generation: 0,
             raw_files: Vec::new(),
             file_stats: Vec::new(),
             current_file: None,
@@ -185,6 +207,7 @@ impl DiffViewer {
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
             tree_scroll_handle: ScrollHandle::new(),
+            sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),
             error_message: None,
             line_num_width: 4,
@@ -203,7 +226,7 @@ impl DiffViewer {
             current_file_new_content: None,
             commit_message,
             commits,
-            commit_index: commit_index.unwrap_or(0),
+            commit_index,
             history_includes_uncommitted,
             uncommitted_mode,
             commit_history_loading: false,
@@ -211,6 +234,7 @@ impl DiffViewer {
             delete_confirm: None,
             discard_confirm: None,
             is_detached: false,
+            can_go_back,
             commit_hash_menu: None,
             selection_context_menu: None,
             search: None,
@@ -254,8 +278,12 @@ impl DiffViewer {
 #[derive(Clone, Debug)]
 pub enum DiffViewerEvent {
     Close,
+    /// Return to the view that opened this diff.
+    Back,
     /// User requested to detach the viewer into a separate OS window.
     Detach,
+    /// Open the selected file as a complete snapshot on the relevant side.
+    OpenFile(okena_files::file_viewer::FileTarget),
     /// User clicked "Send to terminal" on a selection. Carries the structured
     /// payload; the host formats it (relative to terminal CWD) before pasting.
     SendToTerminal(okena_core::send_payload::SendPayload),
@@ -265,6 +293,86 @@ impl EventEmitter<DiffViewerEvent> for DiffViewer {}
 
 impl okena_ui::overlay::CloseEvent for DiffViewerEvent {
     fn is_close(&self) -> bool {
-        matches!(self, Self::Close)
+        matches!(self, Self::Close | Self::Back)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use okena_files::file_viewer::FileSource;
+    use okena_git::{DiffMode, FileDiff};
+    use okena_ui::overlay::CloseEvent;
+
+    use super::{DiffViewer, DiffViewerEvent};
+
+    #[test]
+    fn back_closes_a_detached_diff_host() {
+        assert!(DiffViewerEvent::Back.is_close());
+        assert!(!DiffViewerEvent::Detach.is_close());
+    }
+
+    #[test]
+    fn file_target_uses_the_result_side_of_a_commit() {
+        let file = FileDiff {
+            old_path: Some("old.rs".to_string()),
+            new_path: Some("new.rs".to_string()),
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 1,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(&file, &DiffMode::Commit("abc123".to_string()))
+            .expect("renamed file has a result side");
+        assert_eq!(target.relative_path, "new.rs");
+        assert_eq!(target.source, FileSource::GitRevision("abc123".to_string()));
+    }
+
+    #[test]
+    fn file_target_uses_the_parent_side_for_a_deleted_file() {
+        let file = FileDiff {
+            old_path: Some("deleted.rs".to_string()),
+            new_path: None,
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(&file, &DiffMode::Commit("abc123".to_string()))
+            .expect("deleted file has a parent side");
+        assert_eq!(target.relative_path, "deleted.rs");
+        assert_eq!(
+            target.source,
+            FileSource::GitRevision("abc123^".to_string())
+        );
+    }
+
+    #[test]
+    fn file_target_uses_the_merge_base_for_a_branch_deletion() {
+        let file = FileDiff {
+            old_path: Some("deleted.rs".to_string()),
+            new_path: None,
+            hunks: Vec::new(),
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 1,
+        };
+
+        let target = DiffViewer::file_target(
+            &file,
+            &DiffMode::BranchCompare {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            },
+        )
+        .expect("deleted file has a merge-base side");
+        assert_eq!(
+            target.source,
+            FileSource::BranchMergeBase {
+                base: "main".to_string(),
+                head: "feature".to_string(),
+            }
+        );
     }
 }

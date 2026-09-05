@@ -20,6 +20,13 @@ pub enum ServiceError {
         #[source]
         source: std::io::Error,
     },
+
+    /// Another caller is already refreshing the shared `docker ps` snapshot
+    /// and no usable snapshot exists yet. Not a failure: the caller should
+    /// keep whatever it last displayed and try again next tick, rather than
+    /// hold a thread parked on the refresh lock.
+    #[error("docker ps refresh already in flight")]
+    RefreshInFlight,
 }
 
 /// Convenience alias for `Result<T, ServiceError>`.

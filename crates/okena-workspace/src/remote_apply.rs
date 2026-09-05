@@ -263,7 +263,6 @@ pub fn apply_remote_snapshot(
                         agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
-                        is_remote: true,
                         connection_id: Some(conn_id_owned),
                         service_terminals: HashMap::new(),
                         default_shell: api_project.default_shell.clone(),
@@ -341,7 +340,7 @@ pub fn apply_remote_snapshot(
     let removed_project_ids: Vec<String> = data
         .projects
         .iter()
-        .filter(|p| p.is_remote && !expected_remote_ids.contains(&p.id))
+        .filter(|p| !expected_remote_ids.contains(&p.id))
         .map(|p| p.id.clone())
         .collect();
     let removed_folder_ids: Vec<String> = data
@@ -367,13 +366,8 @@ pub fn apply_remote_snapshot(
     for folder_id in removed_folder_ids {
         data.delete_folder_scrub_all_windows(&folder_id);
     }
-    data.projects.retain(|p| {
-        if p.is_remote {
-            expected_remote_ids.contains(&p.id)
-        } else {
-            true
-        }
-    });
+    data.projects
+        .retain(|p| expected_remote_ids.contains(&p.id));
     data.folders.retain(|f| {
         if f.id.starts_with("remote:") {
             // Remote folder IDs are "remote:{conn_id}:{folder_id}"
@@ -624,7 +618,6 @@ mod tests {
         assert_eq!(data.project_order, vec!["remote:c1:a", "remote:c1:b"]);
         let ids: Vec<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["remote:c1:a", "remote:c1:b"]);
-        assert!(data.projects.iter().all(|p| p.is_remote));
         assert_eq!(data.projects[0].connection_id.as_deref(), Some("c1"));
         // Terminal IDs in the layout are prefixed.
         assert_eq!(
@@ -657,6 +650,7 @@ mod tests {
             hook_type: "on_project_open".into(),
             command: "make".into(),
             cwd: "/srv/a".into(),
+            finished_at: None,
         }];
         let snap = RemoteSnapshot {
             config: config("c1"),

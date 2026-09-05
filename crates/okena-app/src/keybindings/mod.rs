@@ -61,11 +61,12 @@ actions!(
 
 // Terminal-specific actions (defined in okena-views-terminal crate)
 pub use okena_views_terminal::actions::{
-    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
-    FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt,
-    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
-    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
+    AddTab, CloseSearch, CloseTerminal, Copy, DetachTerminal, ExportTerminalBuffer, FocusDown,
+    FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
+    FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
+    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
+    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
@@ -187,11 +188,22 @@ pub fn reload_keybindings(cx: &mut App) {
             okena_views_sidebar::Cancel,
             Some("RenameDirectoryDialog"),
         ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("ChangePathDialog"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
         KeyBinding::new(
             "escape",
             okena_views_terminal::actions::Cancel,
             Some("ShellSelectorOverlay"),
+        ),
+        // The terminal menu peels an open submenu flyout first, then closes itself.
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalMenu"),
         ),
         KeyBinding::new(
             "escape",
@@ -268,6 +280,7 @@ pub fn register_keybindings(cx: &mut App) {
     //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
     //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
     //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
+    //   TerminalMenu:       escape → Cancel        (close the flyout, then the menu)
     cx.bind_keys([
         KeyBinding::new("escape", Cancel, None),
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
@@ -313,12 +326,23 @@ pub fn register_keybindings(cx: &mut App) {
             okena_views_sidebar::Cancel,
             Some("RenameDirectoryDialog"),
         ),
+        KeyBinding::new(
+            "escape",
+            okena_views_sidebar::Cancel,
+            Some("ChangePathDialog"),
+        ),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
         // okena-views-terminal crate Cancel for shell selector + send composer
         KeyBinding::new(
             "escape",
             okena_views_terminal::actions::Cancel,
             Some("ShellSelectorOverlay"),
+        ),
+        // The terminal menu peels an open submenu flyout first, then closes itself.
+        KeyBinding::new(
+            "escape",
+            okena_views_terminal::actions::Cancel,
+            Some("TerminalMenu"),
         ),
         KeyBinding::new(
             "escape",
@@ -389,6 +413,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "AddTab" => Some(KeyBinding::new(keystroke, AddTab, context)),
         "CloseTerminal" => Some(KeyBinding::new(keystroke, CloseTerminal, context)),
         "MinimizeTerminal" => Some(KeyBinding::new(keystroke, MinimizeTerminal, context)),
+        "ExportTerminalBuffer" => Some(KeyBinding::new(keystroke, ExportTerminalBuffer, context)),
+        "DetachTerminal" => Some(KeyBinding::new(keystroke, DetachTerminal, context)),
         "ToggleUnread" => Some(KeyBinding::new(keystroke, ToggleUnread, context)),
         "FocusNextTerminal" => Some(KeyBinding::new(keystroke, FocusNextTerminal, context)),
         "FocusPrevTerminal" => Some(KeyBinding::new(keystroke, FocusPrevTerminal, context)),
@@ -482,4 +508,47 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("right", "→")
         .replace("up", "↑")
         .replace("down", "↓")
+}
+
+/// The active shortcut for an action, formatted for the current platform.
+pub fn shortcut_for_action(action: &str) -> Option<String> {
+    let config = get_config();
+    let entries = config.bindings.get(action)?;
+    let chosen = if cfg!(target_os = "macos") {
+        entries.iter().find(|entry| entry.enabled)
+    } else {
+        entries
+            .iter()
+            .find(|entry| entry.enabled && entry.keystroke.contains("ctrl"))
+            .or_else(|| entries.iter().find(|entry| entry.enabled))
+    }?;
+    Some(format_keystroke(&chosen.keystroke))
+}
+
+#[cfg(test)]
+mod escape_binding_tests {
+    /// Every dismissable popup needs an `escape` binding in *both* the initial
+    /// registration and the reload path, or its `Cancel` handler is dead code —
+    /// which is exactly what happened to the terminal menu until it grew a submenu.
+    #[test]
+    fn dismissable_overlays_bind_escape_in_both_paths() {
+        let src = include_str!("mod.rs");
+
+        for context in [
+            "TerminalMenu",
+            "TerminalRename",
+            "ShellSelectorOverlay",
+            "SendComposer",
+            "ContextMenu",
+            "FolderContextMenu",
+            "RemoteContextMenu",
+        ] {
+            let bound = src.matches(&format!("Some(\"{context}\")")).count();
+            assert!(
+                bound >= 2,
+                "{context} must bind escape in register_keybindings and reload_keybindings \
+                 (found {bound} occurrences)"
+            );
+        }
+    }
 }

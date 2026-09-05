@@ -1,14 +1,14 @@
 use crate::action_dispatch::ActionDispatcher;
 use crate::git;
-use crate::git::watcher::GitStatusWatcher;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{ThemeColors, theme};
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::views::layout::layout_container::LayoutContainer;
+use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{ProjectData, WindowId, Workspace};
+use crate::workspace::state::{FocusedTerminalState, LayoutNode, ProjectData, WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -24,6 +24,60 @@ use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKi
 
 fn project_header_display_name(project: &ProjectData) -> String {
     project.name.clone()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FocusedTerminalHeaderTarget {
+    terminal_id: String,
+    layout_path: Vec<usize>,
+}
+
+/// The terminal at `layout_path`, if it is the kind of pane whose header the
+/// `auto_hide_single_terminal_header` setting hides — a live, standalone pane.
+/// A pane inside a tab group keeps its own action bar, so it is never a target.
+fn standalone_terminal_header_target(
+    layout: &LayoutNode,
+    layout_path: &[usize],
+) -> Option<FocusedTerminalHeaderTarget> {
+    if layout.is_in_tab_group(layout_path) {
+        return None;
+    }
+
+    match layout.get_at_path(layout_path) {
+        Some(LayoutNode::Terminal {
+            terminal_id: Some(terminal_id),
+            minimized: false,
+            detached: false,
+            ..
+        }) => Some(FocusedTerminalHeaderTarget {
+            terminal_id: terminal_id.clone(),
+            layout_path: layout_path.to_vec(),
+        }),
+        _ => None,
+    }
+}
+
+fn focused_terminal_header_target(
+    project_id: &str,
+    layout: Option<&LayoutNode>,
+    focused: Option<&FocusedTerminalState>,
+    auto_hide_single_terminal_header: bool,
+    has_fullscreen: bool,
+) -> Option<FocusedTerminalHeaderTarget> {
+    if !auto_hide_single_terminal_header || has_fullscreen {
+        return None;
+    }
+
+    let layout = layout?;
+
+    if let Some(focused) = focused.filter(|focused| focused.project_id == project_id)
+        && let Some(target) = standalone_terminal_header_target(layout, &focused.layout_path)
+    {
+        return Some(target);
+    }
+
+    let (_, layout_path) = layout.single_terminal()?;
+    standalone_terminal_header_target(layout, &layout_path)
 }
 
 /// What the project column paints in its main content area.
@@ -95,10 +149,9 @@ pub struct ProjectColumn {
     terminals: TerminalsRegistry,
     /// Stored layout container entity (must be created in new(), not render())
     layout_container: Option<Entity<LayoutContainer<ActionDispatcher>>>,
-    /// Git status watcher (centralized polling)
-    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
+    pane_move: Entity<PaneMoveState>,
     /// Action dispatcher for routing terminal actions (local or remote)
     action_dispatcher: Option<ActionDispatcher>,
     /// Self-contained git header entity (diff popover, commit log)
@@ -131,23 +184,12 @@ impl ProjectColumn {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
-        git_watcher: Option<Entity<GitStatusWatcher>>,
+        pane_move: Entity<PaneMoveState>,
         git_provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Observe git watcher for re-renders (replaces per-column polling).
-        // In daemon-client mode this is always `None` (every project is remote,
-        // so git status arrives via the remote snapshot); the immediate refresh
-        // for a newly visible project is requested by `WindowView` sending a
-        // `GitStatus` action to the daemon (see
-        // `request_git_poll_for_visible_project`).
-        if let Some(ref watcher) = git_watcher {
-            cx.observe(watcher, |_, _, cx| cx.notify()).detach();
-        }
-
-        // Observe the workspace itself. In daemon-client mode there is no local
-        // git_watcher (it's `None`); the header reads git status from the remote
-        // snapshot, which is refreshed via `apply_remote_snapshot` +
+        // Observe the workspace itself. The header reads git status from the
+        // remote snapshot, which is refreshed via `apply_remote_snapshot` +
         // `notify_ui_only` on the Workspace. Since ProjectColumn renders inside a
         // `.cached()` view, only a notify from an entity it observes repaints it
         // — without this observer remote git-status updates (branch, ahead/behind,
@@ -168,8 +210,7 @@ impl ProjectColumn {
             let rb = request_broker.clone();
             let ws = workspace.clone();
             let fm = focus_manager.clone();
-            let gw = git_watcher.clone();
-            cx.new(move |cx| GitHeader::new(pid, rb, ws, fm, git_provider, gw, cx))
+            cx.new(move |cx| GitHeader::new(pid, rb, ws, fm, git_provider, cx))
         };
         // Observe git_header so ProjectColumn re-renders when popovers change
         cx.observe(&git_header, |_, _, cx| cx.notify()).detach();
@@ -242,8 +283,8 @@ impl ProjectColumn {
             backend,
             terminals,
             layout_container: None,
-            git_watcher,
             active_drag,
+            pane_move,
             action_dispatcher: None,
             git_header,
             service_panel,
@@ -389,10 +430,11 @@ impl ProjectColumn {
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
+            let pane_move = self.pane_move.clone();
             let action_dispatcher = self.action_dispatcher.clone();
             let window_id = self.window_id;
 
-            self.layout_container = Some(cx.new(move |_cx| {
+            self.layout_container = Some(cx.new(move |cx| {
                 LayoutContainer::new(
                     workspace,
                     focus_manager,
@@ -404,7 +446,9 @@ impl ProjectColumn {
                     backend,
                     terminals,
                     active_drag,
+                    pane_move,
                     action_dispatcher,
+                    cx,
                 )
             }));
         } else if let Some(container) = &self.layout_container {
@@ -545,37 +589,31 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    /// Resolve the project's git status: prefer the local watcher, fall back to
-    /// the remote snapshot (daemon-client mode, where `git_watcher` is `None`).
+    /// Resolve the project's git status from the daemon's snapshot.
+    ///
     /// Both the header badge and the CI-checks popover MUST go through this so
-    /// they agree on the source — otherwise the badge renders from the snapshot
-    /// while the popover reads an empty watcher and shows nothing (a pill you
-    /// can't open).
+    /// they agree on the source — otherwise one renders from the snapshot while
+    /// the other reads somewhere empty and shows nothing (a pill you can't open).
     fn resolve_git_status(&self, cx: &Context<Self>) -> Option<git::GitStatus> {
-        self.git_watcher
-            .as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                self.workspace
-                    .read(cx)
-                    .remote_snapshot(&self.project_id)
-                    .and_then(|snap| snap.git_status.as_ref())
-                    .map(|g| git::GitStatus {
-                        branch: g.branch.clone(),
-                        lines_added: g.lines_added,
-                        lines_removed: g.lines_removed,
-                        pr_info: g.pr_info.clone(),
-                        ci_checks: g.ci_checks.clone(),
-                        ahead: g.ahead,
-                        behind: g.behind,
-                        unpushed: g.unpushed,
-                        // Carried over the wire (ApiGitStatus.review_base /
-                        // .default_branch) so the "Review changes" chip renders
-                        // and the base label hides on the default branch for
-                        // daemon-backed projects too.
-                        review_base: g.review_base.clone(),
-                        default_branch: g.default_branch.clone(),
-                    })
+        self.workspace
+            .read(cx)
+            .remote_snapshot(&self.project_id)
+            .and_then(|snap| snap.git_status.as_ref())
+            .map(|g| git::GitStatus {
+                branch: g.branch.clone(),
+                lines_added: g.lines_added,
+                lines_removed: g.lines_removed,
+                pr_info: g.pr_info.clone(),
+                ci_checks: g.ci_checks.clone(),
+                ahead: g.ahead,
+                behind: g.behind,
+                unpushed: g.unpushed,
+                // Carried over the wire (ApiGitStatus.review_base /
+                // .default_branch) so the "Review changes" chip renders
+                // and the base label hides on the default branch for
+                // daemon-backed projects too.
+                review_base: g.review_base.clone(),
+                default_branch: g.default_branch.clone(),
             })
     }
 
@@ -590,7 +628,8 @@ impl ProjectColumn {
         let window_id_for_hide = self.window_id;
         let effective_color = self.workspace.read(cx).effective_folder_color(project);
         let folder_color = t.get_folder_color(effective_color);
-        let density = crate::settings::settings(cx).header_density;
+        let app_settings = crate::settings::settings(cx);
+        let density = app_settings.header_density;
         // In the rows layout each project is short, so vertical space is
         // precious: collapse the comfortable two-row header back to a single
         // row (git info still shows, just inline) when the grid is stacked.
@@ -602,9 +641,26 @@ impl ProjectColumn {
         let is_comfortable =
             density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
 
+        // Reading the focus state clones a String + Vec, so stay behind the
+        // opt-in rather than paying for it on every repaint by default.
+        let focused_terminal_target = app_settings
+            .auto_hide_single_terminal_header
+            .then(|| {
+                let focus_manager = self.focus_manager.read(cx);
+                let focused = focus_manager.focused_terminal_state();
+                focused_terminal_header_target(
+                    &self.project_id,
+                    project.layout.as_ref(),
+                    focused.as_ref(),
+                    true,
+                    focus_manager.has_fullscreen(),
+                )
+            })
+            .flatten();
+
         // Fetch git status once for both header badge and git status area.
         // Goes through resolve_git_status so the CI popover (below) sees the
-        // same source — watcher locally, remote snapshot in daemon-client mode.
+        // same source.
         let git_status = self.resolve_git_status(cx);
 
         // Worktree indicator: filled dot for normal project, ring for worktree.
@@ -799,14 +855,24 @@ impl ProjectColumn {
             gh.render_git_status(git_status.clone(), inline_reveal, &t, cx)
         });
 
+        let terminal_action_controls = focused_terminal_target.map(|target| {
+            okena_views_terminal::layout::layout_container::terminal_actions_button(
+                okena_ui::header_buttons::HeaderAction::TerminalActions,
+                &format!("terminal-actions-{:?}", target.layout_path),
+                self.project_id.clone(),
+                self.request_broker.clone(),
+                target.layout_path,
+                Some(target.terminal_id),
+                self.backend.supports_buffer_capture(),
+                true,
+                cx,
+            )
+            .into_any_element()
+        });
+
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
-            // The header buttons share one cluster with a single, uniform gap.
-            // Absent buttons (an empty hook/service indicator, or the
-            // hover-revealed pair once it has been handed to the git status
-            // row) leave the flex layout entirely, so a gap only ever appears
-            // between buttons that are actually visible.
             .child(
                 h_flex()
                     .gap(px(2.0))
@@ -818,6 +884,16 @@ impl ProjectColumn {
                     .child({
                         self.service_panel
                             .update(cx, |sp, cx| sp.render_service_indicator(&t, cx))
+                    })
+                    .when_some(terminal_action_controls, |d, controls| {
+                        d.child(
+                            h_flex()
+                                .ml(px(4.0))
+                                .pl(px(6.0))
+                                .border_l_1()
+                                .border_color(rgb(t.border))
+                                .child(controls),
+                        )
                     }),
             );
 
@@ -1231,8 +1307,8 @@ impl Render for ProjectColumn {
                 };
 
                 // Get current branch for commit log popover and update git header.
-                // Same source as the badge (resolve_git_status) so the branch is
-                // present in daemon-client mode too, where git_watcher is None.
+                // Same source as the badge (resolve_git_status) so the two can
+                // never disagree.
                 let current_branch = self.resolve_git_status(cx).and_then(|s| s.branch);
                 self.git_header.update(cx, |gh, _cx| {
                     gh.set_current_branch(current_branch.clone());
@@ -1272,10 +1348,8 @@ impl Render for ProjectColumn {
                             .update(cx, |gh, cx| gh.render_branch_picker(window, &t, cx))
                     })
                     // CI checks popover (delegated to GitHeader entity).
-                    // Resolve via the same path as the badge: in daemon-client
-                    // mode git_watcher is None, so the watcher-only fetch left
-                    // ci_checks empty and the popover rendered nothing (the pill
-                    // toggled but never opened). Fall back to the remote snapshot.
+                    // Resolve via the same path as the badge, or the pill
+                    // toggles without ever opening.
                     .child({
                         let git_status = self.resolve_git_status(cx);
                         let ci_checks = git_status.as_ref().and_then(|g| g.ci_checks.clone());
@@ -1306,9 +1380,14 @@ impl Render for ProjectColumn {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnContent, column_content, project_header_display_name};
+    use super::{
+        ColumnContent, FocusedTerminalHeaderTarget, column_content, focused_terminal_header_target,
+        project_header_display_name,
+    };
     use crate::workspace::settings::HooksConfig;
-    use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, WorktreeMetadata};
+    use crate::workspace::state::{
+        FocusedTerminalState, LayoutNode, ProjectData, SplitDirection, WorktreeMetadata,
+    };
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -1327,7 +1406,6 @@ mod tests {
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
@@ -1359,6 +1437,118 @@ mod tests {
             sizes: vec![0.5, 0.5],
             children,
         }
+    }
+
+    fn terminal_layout(terminal_id: &str) -> LayoutNode {
+        let mut node = LayoutNode::new_terminal();
+        if let LayoutNode::Terminal {
+            terminal_id: slot, ..
+        } = &mut node
+        {
+            *slot = Some(terminal_id.to_string());
+        }
+        node
+    }
+
+    #[test]
+    fn hidden_standalone_header_actions_target_the_focused_terminal() {
+        let layout = split_layout([Some("t1"), Some("t2")]);
+        let focused = FocusedTerminalState {
+            project_id: "p1".to_string(),
+            layout_path: vec![1],
+        };
+
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&layout), Some(&focused), true, false,),
+            Some(FocusedTerminalHeaderTarget {
+                terminal_id: "t2".to_string(),
+                layout_path: vec![1],
+            }),
+        );
+    }
+
+    #[test]
+    fn single_standalone_terminal_is_an_implicit_header_target() {
+        let layout = terminal_layout("t1");
+        let focused_other_project = FocusedTerminalState {
+            project_id: "p2".to_string(),
+            layout_path: vec![],
+        };
+        let expected = Some(FocusedTerminalHeaderTarget {
+            terminal_id: "t1".to_string(),
+            layout_path: vec![],
+        });
+
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&layout), None, true, false),
+            expected,
+        );
+        assert_eq!(
+            focused_terminal_header_target(
+                "p1",
+                Some(&layout),
+                Some(&focused_other_project),
+                true,
+                false,
+            ),
+            expected,
+        );
+    }
+
+    #[test]
+    fn implicit_header_target_does_not_duplicate_a_single_tab_header() {
+        let tabs = LayoutNode::Tabs {
+            children: vec![terminal_layout("t1")],
+            active_tab: 0,
+        };
+
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&tabs), None, true, false),
+            None,
+        );
+    }
+
+    #[test]
+    fn project_header_does_not_duplicate_visible_terminal_actions() {
+        let tabs = LayoutNode::Tabs {
+            children: vec![terminal_layout("t1"), terminal_layout("t2")],
+            active_tab: 1,
+        };
+        let focused_tab = FocusedTerminalState {
+            project_id: "p1".to_string(),
+            layout_path: vec![1],
+        };
+        let focused_other_project = FocusedTerminalState {
+            project_id: "p2".to_string(),
+            layout_path: vec![1],
+        };
+
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&tabs), Some(&focused_tab), false, false,),
+            None,
+            "the opt-in must remain off by default",
+        );
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&tabs), Some(&focused_tab), true, false,),
+            None,
+            "a tab group already has a visible action bar",
+        );
+        assert_eq!(
+            focused_terminal_header_target(
+                "p1",
+                Some(&tabs),
+                Some(&focused_other_project),
+                true,
+                false,
+            ),
+            None,
+            "one project's header must not control another project's terminal",
+        );
+        assert_eq!(
+            focused_terminal_header_target("p1", Some(&tabs), Some(&focused_tab), true, true,),
+            None,
+            "fullscreen has its own zoom header",
+        );
     }
 
     #[test]

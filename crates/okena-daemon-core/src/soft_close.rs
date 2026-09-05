@@ -157,7 +157,6 @@ mod tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,

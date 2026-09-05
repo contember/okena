@@ -6,7 +6,7 @@ use okena_core::shell::ShellType;
 use okena_core::theme::FolderColor;
 use okena_layout::LayoutNode;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A folder that groups projects in the sidebar
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,52 +95,6 @@ impl WorkspaceData {
             extra_windows: Vec::new(),
         }
     }
-
-    /// Return a copy with all remote projects, remote folders, and their
-    /// associated widths/heights stripped out (for saving to disk).
-    ///
-    /// Implementation note: clones `self` and uses `retain` to drop the
-    /// remote rows. This keeps the function automatically forward-compatible
-    /// with new `WorkspaceData` fields -- a field-by-field re-construction
-    /// would silently miss any field added after this function was last
-    /// touched.
-    pub fn without_remote_projects(&self) -> Self {
-        let remote_ids: HashSet<String> = self
-            .projects
-            .iter()
-            .filter(|p| p.is_remote)
-            .map(|p| p.id.clone())
-            .collect();
-        let remote_folder_ids: HashSet<String> = self
-            .folders
-            .iter()
-            .filter(|f| f.id.starts_with("remote:"))
-            .map(|f| f.id.clone())
-            .collect();
-
-        if remote_ids.is_empty() && remote_folder_ids.is_empty() {
-            return self.clone();
-        }
-
-        let mut data = self.clone();
-        data.projects.retain(|p| !p.is_remote);
-        data.project_order
-            .retain(|id| !id.starts_with("remote:") && !remote_ids.contains(id));
-        data.service_panel_heights
-            .retain(|id, _| !remote_ids.contains(id));
-        data.hook_panel_heights
-            .retain(|id, _| !remote_ids.contains(id));
-        data.folders.retain(|f| !f.id.starts_with("remote:"));
-
-        for project_id in &remote_ids {
-            data.delete_project_scrub_all_windows(project_id);
-        }
-        for folder_id in &remote_folder_ids {
-            data.delete_folder_scrub_all_windows(folder_id);
-        }
-
-        data
-    }
 }
 
 /// Metadata for worktree projects.
@@ -189,6 +143,21 @@ pub struct HookTerminalEntry {
     pub command: String,
     /// Working directory for the hook command.
     pub cwd: String,
+    /// Unix seconds at which the hook reached a terminal status, or `None`
+    /// while it is still running (and on entries written before this field
+    /// existed). Used to evict the oldest finished hooks — a finished hook
+    /// holds a full terminal grid in the daemon and in every client mirroring
+    /// it, and nothing else ever removes one.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+}
+
+/// Wall-clock seconds since the Unix epoch, for stamping `finished_at`.
+pub fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl HookTerminalStatus {
@@ -227,6 +196,7 @@ impl HookTerminalEntry {
             hook_type: self.hook_type.clone(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
+            finished_at: self.finished_at,
         }
     }
 
@@ -240,6 +210,7 @@ impl HookTerminalEntry {
                 hook_type: api.hook_type.clone(),
                 command: api.command.clone(),
                 cwd: api.cwd.clone(),
+                finished_at: api.finished_at,
             },
         )
     }
@@ -290,9 +261,6 @@ pub struct ProjectData {
     /// Per-project lifecycle hooks (overrides global settings)
     #[serde(default)]
     pub hooks: HooksConfig,
-    /// Whether this is a remote project (materialized from a remote connection)
-    #[serde(default)]
-    pub is_remote: bool,
     /// Connection ID for remote projects (links to RemoteConnectionManager)
     #[serde(default)]
     pub connection_id: Option<String>,
@@ -427,7 +395,6 @@ mod tests {
             spec_change: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
@@ -523,6 +490,67 @@ mod tests {
         assert!(!is_bash_prompt_title("my-app dev server"));
         assert!(!is_bash_prompt_title("Terminal 1"));
         assert!(!is_bash_prompt_title(""));
+    }
+
+    #[test]
+    fn project_data_ignores_the_retired_is_remote_flag() {
+        // `is_remote` was persisted until the desktop became a thin client of
+        // its daemon, at which point it could only ever be one value on each
+        // side of the wire. Every workspace.json written before then still
+        // carries it, so loading must not choke on it.
+        let json = r#"{
+            "id": "p1",
+            "name": "Test",
+            "path": "/tmp/test",
+            "layout": null,
+            "is_remote": true,
+            "connection_id": "c1"
+        }"#;
+
+        let project: ProjectData = serde_json::from_str(json).unwrap();
+
+        assert_eq!(project.id, "p1");
+        assert_eq!(project.connection_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn hook_terminal_entry_loads_without_a_finish_time() {
+        // Every workspace.json written before `finished_at` existed omits it.
+        // Such entries must load and simply sort oldest for eviction.
+        let json = r#"{
+            "label": "on_project_open",
+            "status": "Succeeded",
+            "hook_type": "on_project_open",
+            "command": "echo hi",
+            "cwd": "/tmp"
+        }"#;
+
+        let entry: HookTerminalEntry = serde_json::from_str(json).unwrap();
+
+        assert_eq!(entry.finished_at, None);
+        assert_eq!(entry.status, HookTerminalStatus::Succeeded);
+    }
+
+    #[test]
+    fn hook_terminal_entry_round_trips_its_finish_time() {
+        let entry = HookTerminalEntry {
+            label: "on_project_open".to_string(),
+            status: HookTerminalStatus::Failed { exit_code: 2 },
+            hook_type: "on_project_open".to_string(),
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+            finished_at: Some(1_700_000_000),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: HookTerminalEntry = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.finished_at, Some(1_700_000_000));
+
+        // And across the wire mirror, which carries the same field.
+        let (id, from_wire) = HookTerminalEntry::from_api(&entry.to_api("h1".to_string()));
+        assert_eq!(id, "h1");
+        assert_eq!(from_wire.finished_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -659,139 +687,6 @@ mod tests {
             !value.as_object().unwrap().contains_key("show_in_overview"),
             "ProjectData.show_in_overview must not appear in serialized form (field removed)"
         );
-    }
-
-    #[test]
-    fn without_remote_projects_scrubs_remote_window_state() {
-        let mut data = make_workspace();
-        let mut local = make_project("/tmp/local");
-        local.id = "local".to_string();
-        let mut remote = make_project("/tmp/remote");
-        remote.id = "remote:c1:p1".to_string();
-        remote.is_remote = true;
-        remote.connection_id = Some("c1".to_string());
-
-        data.projects = vec![local, remote];
-        data.project_order = vec![
-            "local".to_string(),
-            "remote:c1:p1".to_string(),
-            "remote:c1:f1".to_string(),
-        ];
-        data.folders = vec![
-            FolderData {
-                id: "local-folder".to_string(),
-                name: "Local".to_string(),
-                project_ids: vec!["local".to_string()],
-                folder_color: Default::default(),
-            },
-            FolderData {
-                id: "remote:c1:f1".to_string(),
-                name: "Remote".to_string(),
-                project_ids: vec!["remote:c1:p1".to_string()],
-                folder_color: Default::default(),
-            },
-        ];
-        data.service_panel_heights.insert("local".to_string(), 1.0);
-        data.service_panel_heights
-            .insert("remote:c1:p1".to_string(), 2.0);
-        data.hook_panel_heights.insert("local".to_string(), 3.0);
-        data.hook_panel_heights
-            .insert("remote:c1:p1".to_string(), 4.0);
-
-        data.main_window
-            .hidden_project_ids
-            .insert("local".to_string());
-        data.main_window
-            .hidden_project_ids
-            .insert("remote:c1:p1".to_string());
-        data.main_window
-            .project_widths
-            .insert("local".to_string(), 0.25);
-        data.main_window
-            .project_widths
-            .insert("remote:c1:p1".to_string(), 0.75);
-        data.main_window.folder_filter = Some("remote:c1:f1".to_string());
-        data.main_window
-            .folder_collapsed
-            .insert("local-folder".to_string(), true);
-        data.main_window
-            .folder_collapsed
-            .insert("remote:c1:f1".to_string(), true);
-
-        let mut extra = WindowState::default();
-        let extra_id = extra.id;
-        extra.hidden_project_ids.insert("remote:c1:p1".to_string());
-        extra
-            .project_widths
-            .insert("remote:c1:p1".to_string(), 0.50);
-        extra.folder_filter = Some("remote:c1:f1".to_string());
-        extra
-            .folder_collapsed
-            .insert("remote:c1:f1".to_string(), true);
-        data.extra_windows.push(extra);
-
-        let saved = data.without_remote_projects();
-
-        assert_eq!(
-            saved
-                .projects
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["local"]
-        );
-        assert_eq!(saved.project_order, vec!["local"]);
-        assert_eq!(
-            saved
-                .folders
-                .iter()
-                .map(|f| f.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["local-folder"]
-        );
-        assert_eq!(saved.service_panel_heights.get("local").copied(), Some(1.0));
-        assert!(!saved.service_panel_heights.contains_key("remote:c1:p1"));
-        assert_eq!(saved.hook_panel_heights.get("local").copied(), Some(3.0));
-        assert!(!saved.hook_panel_heights.contains_key("remote:c1:p1"));
-
-        assert!(saved.main_window.hidden_project_ids.contains("local"));
-        assert!(
-            !saved
-                .main_window
-                .hidden_project_ids
-                .contains("remote:c1:p1")
-        );
-        assert_eq!(
-            saved.main_window.project_widths.get("local").copied(),
-            Some(0.25)
-        );
-        assert!(
-            !saved
-                .main_window
-                .project_widths
-                .contains_key("remote:c1:p1")
-        );
-        assert!(saved.main_window.folder_filter.is_none());
-        assert_eq!(
-            saved
-                .main_window
-                .folder_collapsed
-                .get("local-folder")
-                .copied(),
-            Some(true)
-        );
-        assert!(
-            !saved
-                .main_window
-                .folder_collapsed
-                .contains_key("remote:c1:f1")
-        );
-
-        let saved_extra = saved.window(WindowId::Extra(extra_id)).unwrap();
-        assert!(!saved_extra.hidden_project_ids.contains("remote:c1:p1"));
-        assert!(!saved_extra.project_widths.contains_key("remote:c1:p1"));
-        assert!(saved_extra.folder_filter.is_none());
-        assert!(!saved_extra.folder_collapsed.contains_key("remote:c1:f1"));
     }
 
     #[test]
@@ -2109,7 +2004,6 @@ mod agent_session_tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,

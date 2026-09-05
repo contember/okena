@@ -350,6 +350,10 @@ pub struct AppSettings {
     /// Show shell selector in terminal header (default: false)
     #[serde(default)]
     pub show_shell_selector: bool,
+    /// Hide the terminal header for standalone, non-fullscreen terminals.
+    /// A real tab group always keeps its header visible (default: false).
+    #[serde(default)]
+    pub auto_hide_single_terminal_header: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -519,6 +523,7 @@ impl Default for AppSettings {
             terminal_close_grace_secs: default_terminal_close_grace_secs(),
             default_shell: ShellType::default(),
             show_shell_selector: false,
+            auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
@@ -1087,6 +1092,16 @@ mod tests {
     }
 
     #[test]
+    fn single_terminal_header_auto_hide_is_opt_in() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.auto_hide_single_terminal_header);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"auto_hide_single_terminal_header":true}"#).unwrap();
+        assert!(loaded.auto_hide_single_terminal_header);
+    }
+
+    #[test]
     fn recover_clamps_out_of_range_numeric_fields() {
         // Fast path: otherwise-valid JSON, but numeric fields exceed their
         // allowed ranges. Recovery must clamp them exactly as the old
@@ -1098,6 +1113,16 @@ mod tests {
         let recovered = recover_settings_from_json(json).unwrap();
         assert_eq!(recovered.font_size, 48.0);
         assert_eq!(recovered.scrollback_lines, 100_000);
+    }
+
+    #[test]
+    fn recover_clamps_scrollback_up_to_the_floor() {
+        // The lower bound matters now that `scrollback_lines` actually sizes
+        // the alacritty grid: a tiny value would leave the user unable to
+        // scroll back at all, and 0 would be indistinguishable from the
+        // "hidden project" state the client uses to free a mirror's history.
+        let recovered = recover_settings_from_json(r#"{"scrollback_lines": 10}"#).unwrap();
+        assert_eq!(recovered.scrollback_lines, 100);
     }
 
     #[test]

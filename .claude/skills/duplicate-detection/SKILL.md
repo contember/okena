@@ -17,7 +17,7 @@ Use this skill to turn clone reports into small, safe refactors. Prefer removing
 2. Generate duplicate reports.
    - Use at least one structural or token-based detector.
    - Exclude generated output, vendored dependencies, build artifacts, lockfiles, snapshots, and large fixtures unless the user explicitly wants them included.
-   - Save reports under `/tmp` or another disposable path; do not commit report output unless asked.
+   - Save reports under `.mine/` at the repo root — it is git-ignored, so report output can never be committed, and it survives a reboot alongside the repo it describes.
 
 3. Triage the reports before editing.
    - Prioritize logic that can drift: policy checks, wire protocol construction, persistence, filesystem/process/network behavior, lifecycle transitions, cache invalidation, notifications, and cross-entrypoint behavior.
@@ -47,7 +47,7 @@ cargo dupes --path . \
   --min-lines 8 \
   --min-nodes 20 \
   --threshold 0.85 \
-  --format json report > /tmp/duplicate-detection-cargo-dupes.json
+  --format json report > .mine/duplicate-detection-cargo-dupes.json
 ```
 
 If it is missing and installing tools is acceptable in the environment:
@@ -64,7 +64,7 @@ jq -s '.[0] | {
   exact_lines: .exact_duplicate_lines,
   near_groups: .near_duplicate_groups,
   near_lines: .near_duplicate_lines
-}' /tmp/duplicate-detection-cargo-dupes.json
+}' .mine/duplicate-detection-cargo-dupes.json
 ```
 
 Run normal Rust quality gates for changed behavior:
@@ -86,7 +86,7 @@ npx --yes jscpd@5 . \
   --min-tokens 80 \
   --ignore "**/target/**,**/.git/**,**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,**/Cargo.lock,**/package-lock.json,**/pnpm-lock.yaml,**/yarn.lock" \
   --reporters json,silent \
-  --output /tmp/duplicate-detection-jscpd
+  --output .mine/duplicate-detection-jscpd
 ```
 
 When the repo is mostly Rust, add `--format rust` to reduce noise. For mixed repos, let `jscpd` auto-detect formats or pass a comma-separated format list.
@@ -98,7 +98,7 @@ jq '.statistics.total | {
   clones: .clones,
   duplicated_lines: .duplicatedLines,
   duplicated_percentage: .percentage
-}' /tmp/duplicate-detection-jscpd/jscpd-report.json
+}' .mine/duplicate-detection-jscpd/jscpd-report.json
 ```
 
 ## Review Heuristics

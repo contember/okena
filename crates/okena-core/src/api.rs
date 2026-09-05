@@ -417,6 +417,10 @@ pub struct ApiHookTerminalEntry {
     pub hook_type: String,
     pub command: String,
     pub cwd: String,
+    /// Unix seconds at which the hook finished, `None` while running. Older
+    /// daemons omit it; the client only uses it to order eviction candidates.
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 
 /// Wire mirror of `okena_hooks::HookStatus`. Durations are carried as whole
@@ -856,6 +860,11 @@ pub enum ActionRequest {
         project_id: String,
         relative_path: String,
     },
+    GitFileHistory {
+        project_id: String,
+        relative_path: String,
+        count: usize,
+    },
     AddProject {
         name: String,
         path: String,
@@ -1213,6 +1222,15 @@ pub enum ActionRequest {
         project_id: String,
         new_name: String,
     },
+    /// Repoint a project at a directory that already exists on disk, without
+    /// moving anything. Unlike `RenameProjectDirectory` — which renames the
+    /// folder in place and therefore requires the target *not* to exist — this
+    /// adopts an existing directory, for when the folder was moved outside
+    /// okena and the recorded path went stale.
+    ChangeProjectPath {
+        project_id: String,
+        new_path: String,
+    },
     DeleteProject {
         project_id: String,
     },
@@ -1355,6 +1373,11 @@ pub enum ActionRequest {
     /// `custom:` prefix).
     SetTheme {
         id: String,
+    },
+    /// Report the local desktop's system appearance for Auto terminal colors.
+    /// Transient: does not change the persisted theme preference.
+    SetSystemAppearance {
+        is_dark: bool,
     },
     /// Write a custom theme JSON file (a full `CustomThemeConfig`) and,
     /// when `activate`, switch to it.
@@ -1523,6 +1546,7 @@ mod tests {
                     hook_type: "on_project_open".into(),
                     command: "echo hi".into(),
                     cwd: "/tmp".into(),
+                    finished_at: None,
                 }],
                 hooks: ApiHooksConfig {
                     project: ApiProjectHooks {
@@ -1851,6 +1875,11 @@ mod tests {
                 project_id: "p1".into(),
                 relative_path: "src/main.rs".into(),
             },
+            ActionRequest::GitFileHistory {
+                project_id: "p1".into(),
+                relative_path: "src/main.rs".into(),
+                count: 100,
+            },
             ActionRequest::AddProject {
                 name: "My Project".into(),
                 path: "/home/user/projects/my-project".into(),
@@ -1940,6 +1969,10 @@ mod tests {
             ActionRequest::RenameProjectDirectory {
                 project_id: "p1".into(),
                 new_name: "new-dir".into(),
+            },
+            ActionRequest::ChangeProjectPath {
+                project_id: "p1".into(),
+                new_path: "/tmp/moved".into(),
             },
             ActionRequest::DeleteProject {
                 project_id: "p1".into(),

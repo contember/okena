@@ -183,6 +183,32 @@ fn publish_committed_settings_change(
     }
 }
 
+/// Re-apply the scrollback depth after the user edits it.
+///
+/// The process-wide default only affects terminals built from here on, so live
+/// grids have to be resized explicitly. Shrinking frees the excess history
+/// immediately, which is the point: this is the daemon's half of the ~50 MB
+/// per fully-scrolled terminal that okena otherwise holds forever.
+fn apply_scrollback_after_committed_settings_change(
+    outcome: &SettingsUpdateOutcome,
+    settings: &Arc<Mutex<AppSettings>>,
+    terminals: &TerminalsRegistry,
+) {
+    if !outcome.committed {
+        return;
+    }
+    let lines = settings.lock().scrollback_lines;
+    okena_terminal::terminal::set_process_scrollback_lines(lines);
+
+    // Clone the handles out before touching any terminal: `set_scrollback_lines`
+    // takes the per-terminal locks, and holding the registry lock across that
+    // would serialize it against the PTY loop.
+    let live: Vec<_> = terminals.lock().values().cloned().collect();
+    for terminal in live {
+        terminal.set_scrollback_lines(lines);
+    }
+}
+
 fn refresh_claude_pty_env_after_committed_settings_change(
     outcome: &SettingsUpdateOutcome,
     settings: &Arc<Mutex<AppSettings>>,
@@ -279,7 +305,6 @@ fn with_unclaimed_worktree_root<R>(
     if workspace
         .projects()
         .iter()
-        .filter(|project| !project.is_remote)
         .map(|project| Workspace::physical_path_identity(std::path::Path::new(&project.path)))
         .any(|project_path| project_path.starts_with(&physical_root))
     {
@@ -778,9 +803,9 @@ fn snapshot_service_owner(
 ) -> Option<PreparedServiceOwner> {
     let (project_path, data_replacement_epoch) = {
         let workspace = workspace.lock();
-        workspace.project(project_id).and_then(|project| {
-            (!project.is_remote).then(|| (project.path.clone(), workspace.data_replacement_epoch()))
-        })
+        workspace
+            .project(project_id)
+            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
     }?;
     let service_state = service_manager.lock().project_state_token(project_id);
     Some(PreparedServiceOwner {
@@ -799,7 +824,7 @@ fn service_owner_is_current(
     workspace.data_replacement_epoch() == owner.data_replacement_epoch
         && workspace
             .project(project_id)
-            .is_some_and(|project| !project.is_remote && project.path == owner.project_path)
+            .is_some_and(|project| project.path == owner.project_path)
         && service_manager.is_project_state_token_current(project_id, &owner.service_state)
 }
 
@@ -2699,11 +2724,17 @@ pub async fn daemon_command_loop(
                             &settings,
                             backend.as_ref(),
                         );
+                        apply_scrollback_after_committed_settings_change(
+                            &outcome, &settings, &terminals,
+                        );
                         publish_committed_settings_change(&outcome, &state_version);
                         outcome.result
                     }
                     ActionRequest::GetThemes => daemon_config.get_themes(),
                     ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
+                    ActionRequest::SetSystemAppearance { is_dark } => {
+                        daemon_config.set_system_appearance(is_dark)
+                    }
                     ActionRequest::SetTheme { id } => {
                         let result = daemon_config.set_theme(id);
                         publish_config_change_after_success(&result, &state_version);
@@ -4580,6 +4611,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: path.to_string(),
+                finished_at: None,
             },
         );
         Workspace::new(data)
@@ -6102,7 +6134,6 @@ mod tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,
@@ -6463,7 +6494,6 @@ mod tests {
                 },
                 ..Default::default()
             },
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,
@@ -6656,6 +6686,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: tmp_path.to_string(),
+                finished_at: None,
             },
         );
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));
@@ -6751,6 +6782,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo old".to_string(),
                 cwd: "/tmp".to_string(),
+                finished_at: None,
             },
         );
         let workspace = Arc::new(Mutex::new(Workspace::new(data)));
@@ -7207,7 +7239,6 @@ mod tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,
@@ -7453,7 +7484,6 @@ mod tests {
                 agent: None,
                 folder_color: Default::default(),
                 hooks: Default::default(),
-                is_remote: false,
                 connection_id: None,
                 service_terminals: Default::default(),
                 default_shell: None,
@@ -7561,6 +7591,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo hook".to_string(),
                 cwd: worktree.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         data.projects[1]
@@ -7574,6 +7605,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo completed".to_string(),
                 cwd: worktree.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         let metadata = data.projects[1]
@@ -8057,6 +8089,7 @@ mod tests {
                 hook_type: "on_project_open".to_string(),
                 command: "echo completed".to_string(),
                 cwd: old_path.to_string_lossy().into_owned(),
+                finished_at: None,
             },
         );
         let mut nested = data.projects[0].clone();
@@ -8979,7 +9012,6 @@ mod tests {
                 },
                 ..Default::default()
             },
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,

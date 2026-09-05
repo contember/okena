@@ -63,6 +63,54 @@ fn older_revision_target(
 }
 
 impl DiffViewer {
+    pub(super) fn open_current_file(&self, cx: &mut Context<Self>) {
+        let Some(file) = self.raw_files.get(self.selected_file_index) else {
+            return;
+        };
+        if let Some(target) = Self::file_target(file, &self.diff_mode) {
+            cx.emit(super::DiffViewerEvent::OpenFile(target));
+        }
+    }
+
+    pub(super) fn file_target(
+        file: &okena_git::FileDiff,
+        mode: &okena_git::DiffMode,
+    ) -> Option<okena_files::file_viewer::FileTarget> {
+        use okena_files::file_viewer::{FilePosition, FileSource, FileTarget};
+
+        let (relative_path, source) = if let Some(path) = &file.new_path {
+            let source = match mode {
+                okena_git::DiffMode::WorkingTree => FileSource::WorkingTree,
+                okena_git::DiffMode::Staged => FileSource::Index,
+                okena_git::DiffMode::Commit(revision) => FileSource::GitRevision(revision.clone()),
+                okena_git::DiffMode::BranchCompare { head, .. } => {
+                    FileSource::GitRevision(head.clone())
+                }
+            };
+            (path.clone(), source)
+        } else {
+            let path = file.old_path.clone()?;
+            let source = match mode {
+                okena_git::DiffMode::WorkingTree => FileSource::Index,
+                okena_git::DiffMode::Staged => FileSource::GitRevision("HEAD".to_string()),
+                okena_git::DiffMode::Commit(revision) => {
+                    FileSource::GitRevision(format!("{revision}^"))
+                }
+                okena_git::DiffMode::BranchCompare { base, head } => FileSource::BranchMergeBase {
+                    base: base.clone(),
+                    head: head.clone(),
+                },
+            };
+            (path, source)
+        };
+
+        Some(FileTarget {
+            relative_path,
+            source,
+            position: FilePosition::default(),
+        })
+    }
+
     pub(super) fn file_tree_rows(&self, include_collapsed: bool) -> Vec<FileTreeRow<usize>> {
         indexed_file_tree_rows(&self.file_tree, &self.expanded_folders, include_collapsed)
     }
@@ -96,6 +144,11 @@ impl DiffViewer {
         cx.notify();
     }
 
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
     pub(super) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.ignore_whitespace = !self.ignore_whitespace;
         let mode = self.diff_mode.clone();
@@ -125,6 +178,18 @@ impl DiffViewer {
         if index == self.selected_file_index && self.current_file.is_some() {
             return;
         }
+        let mut ancestor = String::new();
+        let mut components = self.file_stats[index].path.split(['/', '\\']).peekable();
+        while let Some(component) = components.next() {
+            if components.peek().is_none() {
+                break;
+            }
+            if !ancestor.is_empty() {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            self.expanded_folders.insert(ancestor.clone());
+        }
         self.selected_file_index = index;
         self.selection.clear();
         self.selection_side = None;
@@ -141,13 +206,32 @@ impl DiffViewer {
         direction: FileTreeNavigationDirection,
         cx: &mut Context<Self>,
     ) {
-        let visible = self.file_tree_rows(false);
-        let all = self.file_tree_rows(true);
-        if let Some(index) =
-            adjacent_file_tree_item(&visible, &all, Some(&self.selected_file_index), direction)
-        {
+        if let Some(index) = self.adjacent_file_index(direction) {
             self.select_file(index, cx);
         }
+    }
+
+    pub(super) fn adjacent_file_index(
+        &self,
+        direction: FileTreeNavigationDirection,
+    ) -> Option<usize> {
+        let all = self.file_tree_rows(true);
+        adjacent_file_tree_item(&all, &all, Some(&self.selected_file_index), direction)
+    }
+
+    pub(super) fn file_navigation_position(&self) -> Option<(usize, usize)> {
+        let files: Vec<usize> = self
+            .file_tree_rows(true)
+            .into_iter()
+            .filter_map(|row| match row {
+                FileTreeRow::File { item, .. } => Some(item),
+                FileTreeRow::Folder { .. } | FileTreeRow::Loading { .. } => None,
+            })
+            .collect();
+        let position = files
+            .iter()
+            .position(|index| *index == self.selected_file_index)?;
+        Some((position + 1, files.len()))
     }
 
     pub(super) fn prev_file(&mut self, cx: &mut Context<Self>) {
@@ -160,6 +244,18 @@ impl DiffViewer {
 
     pub(super) fn close(&self, cx: &mut Context<Self>) {
         cx.emit(DiffViewerEvent::Close);
+    }
+
+    pub(super) fn back(&self, cx: &mut Context<Self>) {
+        cx.emit(DiffViewerEvent::Back);
+    }
+
+    pub(super) fn back_or_close(&self, cx: &mut Context<Self>) {
+        if self.can_go_back {
+            self.back(cx);
+        } else {
+            self.close(cx);
+        }
     }
 
     /// Mark the viewer as hosted inside a detached window.

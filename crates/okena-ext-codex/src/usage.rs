@@ -949,7 +949,7 @@ impl Render for CodexUsage {
                 h_flex()
                     .id("codex-usage-trigger")
                     .cursor_pointer()
-                    .gap(px(4.0))
+                    .gap(px(8.0))
                     .px(px(4.0))
                     .py(px(1.0))
                     .rounded(px(3.0))

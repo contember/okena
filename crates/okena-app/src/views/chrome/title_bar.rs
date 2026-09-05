@@ -1,13 +1,14 @@
-use crate::keybindings::{
-    CloseWindow, Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector,
-    ToggleSidebar,
-};
+use crate::app_menu::{AppMenuAction, AppMenuEntry, TITLE_BAR_MENU};
+use crate::keybindings::{CloseWindow, ToggleSidebar, shortcut_for_action};
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_xl};
-use crate::views::components::menu_item;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use okena_ui::menu::{context_menu_panel, menu_separator};
+use std::rc::Rc;
+
+type AppMenuHandler = Rc<dyn Fn(AppMenuAction, &mut Window, &mut App)>;
 
 /// Window control button types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub enum WindowControlType {
 /// Title bar with window controls and sidebar toggle
 pub struct TitleBar {
     title: SharedString,
+    app_menu_handler: AppMenuHandler,
     menu_open: bool,
     sidebar_open: bool,
     /// Flag for platform-driven window move (set on mouse-down, consumed on mouse-move).
@@ -29,9 +31,13 @@ pub struct TitleBar {
 }
 
 impl TitleBar {
-    pub fn new(title: impl Into<SharedString>) -> Self {
+    pub fn new(
+        title: impl Into<SharedString>,
+        app_menu_handler: impl Fn(AppMenuAction, &mut Window, &mut App) + 'static,
+    ) -> Self {
         Self {
             title: title.into(),
+            app_menu_handler: Rc::new(app_menu_handler),
             menu_open: false,
             sidebar_open: true,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -60,6 +66,42 @@ impl TitleBar {
         cx.notify();
     }
 
+    fn render_menu_action(&self, action: AppMenuAction, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
+        let shortcut = shortcut_for_action(action.action_name());
+        let app_menu_handler = self.app_menu_handler.clone();
+
+        div()
+            .id(ElementId::Name(
+                format!("app-menu-{}", action.action_name()).into(),
+            ))
+            .mx(px(6.0))
+            .px(px(10.0))
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(24.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .text_size(ui_text(13.0, cx))
+            .text_color(rgb(t.text_primary))
+            .hover(|style| style.bg(rgb(t.bg_hover)))
+            .child(action.label())
+            .when_some(shortcut, |item, shortcut| {
+                item.child(
+                    div()
+                        .text_color(rgb(t.text_muted))
+                        .text_size(ui_text_sm(cx))
+                        .child(shortcut),
+                )
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_menu(cx);
+                app_menu_handler(action, window, cx);
+            }))
+    }
+
     /// Render the app dropdown menu overlay (must be called from a parent with full window coverage).
     pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
@@ -85,76 +127,18 @@ impl TitleBar {
                 cx.stop_propagation();
             })
             .child(
-                // Menu panel
-                div()
+                context_menu_panel("app-menu-panel", &t)
                     .absolute()
                     .top(px(32.0))
                     .left(traffic_light_padding + px(40.0))
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(4.0))
-                    .shadow_xl()
-                    .min_w(px(200.0))
-                    .py(px(4.0))
-                    .id("app-menu-panel")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    // Settings
-                    .child(
-                        menu_item("app-menu-settings", "icons/edit.svg", "Open Settings", &t)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_menu(cx);
-                                window.dispatch_action(Box::new(ShowSettings), cx);
-                            })),
-                    )
-                    // Theme
-                    .child(
-                        menu_item("app-menu-theme", "icons/eye.svg", "Select Theme", &t).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.close_menu(cx);
-                                window.dispatch_action(Box::new(ShowThemeSelector), cx);
-                            }),
-                        ),
-                    )
-                    // Command Palette
-                    .child(
-                        menu_item(
-                            "app-menu-command-palette",
-                            "icons/search.svg",
-                            "Command Palette",
-                            &t,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_menu(cx);
-                            window.dispatch_action(Box::new(ShowCommandPalette), cx);
-                        })),
-                    )
-                    // Keyboard Shortcuts
-                    .child(
-                        menu_item(
-                            "app-menu-keybindings",
-                            "icons/keyboard.svg",
-                            "Keyboard Shortcuts",
-                            &t,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_menu(cx);
-                            window.dispatch_action(Box::new(ShowKeybindings), cx);
-                        })),
-                    )
-                    // Separator
-                    .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
-                    // Exit
-                    .child(
-                        menu_item("app-menu-exit", "icons/close.svg", "Exit", &t).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.close_menu(cx);
-                                window.dispatch_action(Box::new(Quit), cx);
-                            }),
-                        ),
-                    ),
+                    .min_w(px(260.0))
+                    .children(TITLE_BAR_MENU.iter().map(|entry| match entry {
+                        AppMenuEntry::Action(action) => {
+                            self.render_menu_action(*action, cx).into_any_element()
+                        }
+                        AppMenuEntry::Separator => menu_separator(&t).into_any_element(),
+                        AppMenuEntry::SystemServices => div().into_any_element(),
+                    })),
             )
     }
 
@@ -375,30 +359,38 @@ impl Render for TitleBar {
                     .when(!cfg!(target_os = "macos"), |d| {
                         d.child({
                             let menu_open = self.menu_open;
-                            let chevron = if menu_open { "▲" } else { "▼" };
+                            let chevron = if menu_open {
+                                "icons/chevron-up.svg"
+                            } else {
+                                "icons/chevron-down.svg"
+                            };
                             div()
                                 .id("app-menu-trigger")
                                 .cursor_pointer()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(px(4.0))
+                                .gap(px(2.0))
+                                .h(px(24.0))
+                                .px(px(6.0))
+                                .rounded(px(3.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                 .when(menu_open, |d| d.bg(rgb(t.bg_hover)))
                                 .child(
                                     div()
-                                        .text_size(ui_text(13.0, cx))
+                                        .text_size(ui_text(12.0, cx))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(t.text_primary))
+                                        .text_color(if menu_open {
+                                            rgb(t.text_primary)
+                                        } else {
+                                            rgb(t.text_secondary)
+                                        })
                                         .child(self.title.clone()),
                                 )
                                 .child(
-                                    div()
-                                        .text_size(ui_text(8.0, cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(chevron),
+                                    svg()
+                                        .path(chevron)
+                                        .size(px(11.0))
+                                        .text_color(rgb(t.text_muted)),
                                 )
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();

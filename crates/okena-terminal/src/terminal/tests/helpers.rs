@@ -52,6 +52,34 @@ impl MirrorTransport {
     }
 }
 
+/// A PTY-owning transport in a headless process: it answers terminal queries
+/// (it owns the PTY) but reaches no system clipboard. Matches `PtyManager`
+/// inside the daemon.
+pub(crate) struct HeadlessOwnerTransport {
+    pub(crate) inner: CapturingTransport,
+}
+
+impl HeadlessOwnerTransport {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: CapturingTransport::new(),
+        }
+    }
+}
+
+impl TerminalTransport for HeadlessOwnerTransport {
+    fn send_input(&self, terminal_id: &str, data: &[u8]) {
+        self.inner.send_input(terminal_id, data);
+    }
+    fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+    fn uses_mouse_backend(&self) -> bool {
+        false
+    }
+    fn handles_clipboard(&self) -> bool {
+        false
+    }
+}
+
 impl TerminalTransport for MirrorTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
         self.inner.send_input(terminal_id, data);

@@ -108,7 +108,6 @@ mod tests {
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: Default::default(),
             default_shell: None,
@@ -127,6 +126,7 @@ mod tests {
                 hook_type: "before_worktree_remove".into(),
                 command: "true".into(),
                 cwd: project.path.clone(),
+                finished_at: None,
             },
         );
         let mut workspace = Workspace::new(WorkspaceData {

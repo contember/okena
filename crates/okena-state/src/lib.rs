@@ -23,5 +23,5 @@ pub use window_id::WindowId;
 pub use window_state::{ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState};
 pub use workspace_data::{
     FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,
-    WorktreeMetadata, is_bash_prompt_title,
+    WorktreeMetadata, is_bash_prompt_title, now_unix_seconds,
 };

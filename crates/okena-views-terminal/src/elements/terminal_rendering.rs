@@ -80,6 +80,11 @@ impl BatchedTextLine {
     }
 }
 
+pub(crate) fn requires_independent_shaping(c: char) -> bool {
+    // U+2B1D's fallback advance is below half a cell, which GPUI mistakes for a combining mark.
+    c == '⬝'
+}
+
 fn same_style(left: &TextRun, right: &TextRun) -> bool {
     left.font == right.font
         && left.color == right.color
@@ -90,7 +95,7 @@ fn same_style(left: &TextRun, right: &TextRun) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::BatchedTextLine;
+    use super::{BatchedTextLine, requires_independent_shaping};
     use gpui::{StrikethroughStyle, TextRun, UnderlineStyle, px, rgb};
 
     fn style(color: u32) -> TextRun {
@@ -176,6 +181,12 @@ mod tests {
         assert_eq!(line.text, "界 x");
         assert_eq!(line.styles.iter().map(|run| run.len).sum::<usize>(), 5);
         assert_eq!(line.next_col, 3);
+    }
+
+    #[test]
+    fn half_cell_fallback_glyph_requires_independent_shaping() {
+        assert!(requires_independent_shaping('⬝'));
+        assert!(!requires_independent_shaping('■'));
     }
 }
 

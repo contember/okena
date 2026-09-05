@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// Steady-state gap between docker status polls for one project.
+const DOCKER_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 const DOCKER_DISCOVERY_RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(5),
     Duration::from_secs(10),
@@ -20,6 +23,15 @@ const DOCKER_DISCOVERY_RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(40),
     Duration::from_secs(60),
 ];
+
+/// Per-project offset within the poll interval, so pollers wake staggered
+/// instead of together. Stable for a given project id.
+fn poll_stagger(project_id: &str) -> Duration {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project_id.hash(&mut hasher);
+    Duration::from_millis(hasher.finish() % DOCKER_POLL_INTERVAL.as_millis() as u64)
+}
 
 fn reconcile_docker_statuses(
     instances: &mut HashMap<(String, String), ServiceInstance>,
@@ -413,8 +425,11 @@ impl ServiceManager {
         let file = compose_file.to_string();
 
         cx.spawn_main(async move |this, cx| {
-            // Small initial delay
-            cx.timer(Duration::from_secs(1)).await;
+            // Small initial delay, spread across the poll window so N projects
+            // don't all wake in the same instant and pile up on the shared
+            // `docker ps` snapshot. Derived from the project id so a given
+            // project keeps its slot across restarts.
+            cx.timer(Duration::from_secs(1) + poll_stagger(&pid)).await;
 
             let mut consecutive_failures: u32 = 0;
 
@@ -492,6 +507,11 @@ impl ServiceManager {
                             return;
                         }
                     }
+                    // Another project's poller is fetching the shared snapshot
+                    // and there is nothing cached yet. Not a docker failure —
+                    // keep the current statuses and retry on the normal cadence
+                    // rather than backing off.
+                    Err(crate::error::ServiceError::RefreshInFlight) => {}
                     Err(e) => {
                         consecutive_failures += 1;
                         log::warn!("Docker status poll failed for project {}: {}", pid, e);
@@ -500,11 +520,13 @@ impl ServiceManager {
 
                 // Back off on repeated failures: 5s → 10s → 20s → 40s → 60s (cap)
                 let delay = if consecutive_failures == 0 {
-                    5
+                    DOCKER_POLL_INTERVAL
                 } else {
-                    (5u64 << consecutive_failures.min(4)).min(60)
+                    Duration::from_secs(
+                        (DOCKER_POLL_INTERVAL.as_secs() << consecutive_failures.min(4)).min(60),
+                    )
                 };
-                cx.timer(Duration::from_secs(delay)).await;
+                cx.timer(delay).await;
             }
         });
     }
@@ -660,6 +682,34 @@ mod tests {
                 Duration::from_secs(40),
                 Duration::from_secs(60),
             ]
+        );
+    }
+
+    #[test]
+    fn poll_stagger_spreads_projects_across_the_interval() {
+        let ids = [
+            "project-a",
+            "project-b",
+            "project-c",
+            "project-d",
+            "project-e",
+            "project-f",
+        ];
+        let offsets: Vec<_> = ids.iter().map(|id| poll_stagger(id)).collect();
+
+        for offset in &offsets {
+            assert!(
+                *offset < DOCKER_POLL_INTERVAL,
+                "an offset past the interval would skip a whole poll cycle"
+            );
+        }
+        // Stable per id, so a project keeps its slot across restarts.
+        assert_eq!(poll_stagger("project-a"), offsets[0]);
+        // And genuinely spread, rather than every project landing together.
+        let distinct: std::collections::HashSet<_> = offsets.iter().collect();
+        assert!(
+            distinct.len() >= ids.len() - 1,
+            "expected distinct offsets, got {offsets:?}"
         );
     }
 }

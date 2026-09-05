@@ -913,7 +913,10 @@ impl FileViewer {
         let can_forward = self.history.can_go_forward();
 
         h_flex()
-            .gap(px(2.0))
+            .h(px(28.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
             .child(
                 div()
                     .id("fv-back")
@@ -927,8 +930,16 @@ impl FileViewer {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded_l(px(5.0))
                     .when(can_back, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if can_back {
+                            "Previous viewed file"
+                        } else {
+                            "No previously viewed file"
+                        })
+                        .build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.go_back(cx);
                     }))
@@ -954,11 +965,21 @@ impl FileViewer {
                     })
                     .w(px(28.0))
                     .h(px(28.0))
+                    .border_l_1()
+                    .border_color(rgb(t.border))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded_r(px(5.0))
                     .when(can_forward, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if can_forward {
+                            "Next viewed file"
+                        } else {
+                            "No next viewed file"
+                        })
+                        .build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.go_forward(cx);
                     }))
@@ -1502,6 +1523,7 @@ impl Render for FileViewer {
         let is_image = tab.is_image;
         let is_svg = tab.is_svg;
         let is_font = tab.is_font;
+        let has_revision = tab.revision.is_some();
         let font_data = tab.font_data.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
@@ -1519,6 +1541,9 @@ impl Render for FileViewer {
         // Whether the header should expose the Preview/Source toggle.
         let supports_view_toggle = is_markdown || is_svg;
         let sidebar_visible = self.sidebar_visible;
+        let history_available =
+            self.history_provider.is_some() && has_file && !is_image && !is_font;
+        let history_visible = self.history_visible && history_available;
         let show_tabs = self.tabs.len() > 1;
 
         let filename = if has_file {
@@ -1650,7 +1675,7 @@ impl Render for FileViewer {
                 } else if this.active_tab().selection.normalized_non_empty().is_some() {
                     this.clear_source_selection(cx);
                 } else {
-                    this.close(cx);
+                    this.back_or_close(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1780,7 +1805,7 @@ impl Render for FileViewer {
                 let is_maximized = window.is_maximized();
                 div()
                     .px(px(16.0))
-                    .py(if detached { px(6.0) } else { px(12.0) })
+                    .py(if detached { px(8.0) } else { px(10.0) })
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .flex()
@@ -1789,6 +1814,45 @@ impl Render for FileViewer {
                     .child(
                         h_flex()
                             .gap(px(10.0))
+                            .when(self.can_go_back, |d| {
+                                d.child(
+                                    div()
+                                        .id("back-button")
+                                        .cursor_pointer()
+                                        .h(px(28.0))
+                                        .px(px(8.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(6.0))
+                                        .flex_shrink_0()
+                                        .rounded(px(6.0))
+                                        .text_size(ui_text_md(cx))
+                                        .text_color(rgb(t.text_secondary))
+                                        .hover(|style| {
+                                            style
+                                                .bg(rgb(t.bg_hover))
+                                                .text_color(rgb(t.text_primary))
+                                        })
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("Back")
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|_this, _, _window, cx| {
+                                            cx.emit(super::FileViewerEvent::Back);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/arrow-left.svg")
+                                                .size(px(14.0))
+                                                .text_color(rgb(t.text_secondary)),
+                                        )
+                                        .child("Back"),
+                                )
+                            })
+                            .when(self.can_go_back, |d| {
+                                d.child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)))
+                            })
                             .child(
                                 div()
                                     .id("sidebar-toggle")
@@ -1799,20 +1863,38 @@ impl Render for FileViewer {
                                     .items_center()
                                     .justify_center()
                                     .rounded(px(6.0))
-                                    .bg(rgb(if sidebar_visible {
-                                        t.bg_selection
+                                    .border_1()
+                                    .border_color(rgb(if sidebar_visible {
+                                        t.border_active
                                     } else {
+                                        t.bg_primary
+                                    }))
+                                    .bg(rgb(if sidebar_visible {
                                         t.bg_secondary
+                                    } else {
+                                        t.bg_primary
                                     }))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(if sidebar_visible {
+                                            "Hide files"
+                                        } else {
+                                            "Show files"
+                                        })
+                                        .build(window, cx)
+                                    })
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.toggle_sidebar(cx);
                                     }))
                                     .child(
                                         svg()
-                                            .path("icons/chevron-right.svg")
+                                            .path("icons/panel-left.svg")
                                             .size(px(14.0))
-                                            .text_color(rgb(t.text_muted)),
+                                            .text_color(rgb(if sidebar_visible {
+                                                t.text_primary
+                                            } else {
+                                                t.text_secondary
+                                            })),
                                     ),
                             )
                             .child(self.render_nav_buttons(&t, cx))
@@ -1853,7 +1935,7 @@ impl Render for FileViewer {
                     .child(window_drag_spacer(detached))
                     .child(
                         h_flex()
-                            .gap(px(12.0))
+                            .gap(px(8.0))
                             .when_some(transfer_status, |d, status| {
                                 d.child(
                                     div()
@@ -1866,7 +1948,7 @@ impl Render for FileViewer {
                                         .child(status),
                                 )
                             })
-                            .when(has_file, |d| d.child(
+                            .when(has_file && !has_revision, |d| d.child(
                                 div()
                                     .id("file-source-action")
                                     .cursor_pointer()
@@ -1888,7 +1970,7 @@ impl Render for FileViewer {
                                             .child(source_action_label),
                                     ),
                             ))
-                            .when(self.blame_provider.is_some() && !is_image && !is_font, |d| {
+                            .when(self.blame_provider.is_some() && !is_image && !is_font && !has_revision, |d| {
                                 let on = self.blame_visible;
                                 d.child(
                                     div()
@@ -1897,7 +1979,13 @@ impl Render for FileViewer {
                                         .px(px(8.0))
                                         .py(px(4.0))
                                         .rounded(px(4.0))
-                                        .bg(rgb(if on { t.bg_selection } else { t.bg_secondary }))
+                                        .border_1()
+                                        .border_color(rgb(if on {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if on { t.bg_secondary } else { t.bg_primary }))
                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                         .tooltip(|window, cx| {
                                             gpui_component::tooltip::Tooltip::new("Toggle git blame").build(window, cx)
@@ -1913,9 +2001,64 @@ impl Render for FileViewer {
                                                 .text_color(rgb(if on {
                                                     t.text_primary
                                                 } else {
-                                                    t.text_muted
+                                                    t.text_secondary
                                                 }))
                                                 .child("Blame"),
+                                        ),
+                                )
+                            })
+                            .when(history_available, |d| {
+                                d.child(
+                                    div()
+                                        .id("history-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(rgb(if history_visible {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if history_visible {
+                                            t.bg_secondary
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle file history",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_history(cx);
+                                        }))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(5.0))
+                                                .child(
+                                                    svg()
+                                                        .path("icons/git-commit.svg")
+                                                        .size(px(11.0))
+                                                        .text_color(rgb(if history_visible {
+                                                            t.text_primary
+                                                        } else {
+                                                            t.text_secondary
+                                                        })),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(ui_text_sm(cx))
+                                                        .text_color(rgb(if history_visible {
+                                                            t.text_primary
+                                                        } else {
+                                                            t.text_secondary
+                                                        }))
+                                                        .child("History"),
+                                                ),
                                         ),
                                 )
                             })
@@ -1947,6 +2090,7 @@ impl Render for FileViewer {
                                 d.child(image_zoom_controls(zoom_label, &t, cx))
                                     .child(image_background_toggle(bg, &t, cx))
                             })
+                            .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                             .when(!self.is_detached, |d| {
                                 d.child(
                                     div()
@@ -1957,8 +2101,8 @@ impl Render for FileViewer {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(px(4.0))
-                                        .hover(|s| s.bg(rgb(t.bg_secondary)))
+                                        .rounded(px(6.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
                                         .tooltip(|window, cx| {
                                             gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
                                         })
@@ -1969,7 +2113,7 @@ impl Render for FileViewer {
                                             svg()
                                                 .path("icons/external-link.svg")
                                                 .size(px(14.0))
-                                                .text_color(rgb(t.text_muted)),
+                                                .text_color(rgb(t.text_secondary)),
                                         ),
                                 )
                             })
@@ -1980,16 +2124,23 @@ impl Render for FileViewer {
                                 div()
                                     .id("close-button")
                                     .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_secondary)))
+                                    .w(px(28.0))
+                                    .h(px(28.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new("Close")
+                                            .build(window, cx)
+                                    })
                                     .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                                     .child(
-                                        div()
-                                            .text_size(ui_text(18.0, cx))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("\u{00d7}"),
+                                        svg()
+                                            .path("icons/close.svg")
+                                            .size(px(14.0))
+                                            .text_color(rgb(t.text_secondary)),
                                     ),
                             ),
                     )
@@ -2010,6 +2161,9 @@ impl Render for FileViewer {
                             .min_w_0()
                             // Tab bar (above editor, not above sidebar)
                             .when_some(tab_bar, |d, tab_bar| d.child(tab_bar))
+                            .when(history_visible, |d| {
+                                d.child(self.render_revision_bar(&t, cx))
+                            })
                             // In-file search bar
                             .when(self.search_state.is_some(), |d| {
                                 d.child(self.render_search_bar(&t, cx))
@@ -2184,6 +2338,11 @@ impl Render for FileViewer {
                                                     format!("md-codeblock-{node_idx}").into(),
                                                 ))
                                                 .overflow_x_scroll()
+                                                .map(|mut block| {
+                                                    block.style().restrict_scroll_to_axis =
+                                                        Some(true);
+                                                    block
+                                                })
                                                 .child(
                                                     div()
                                                         .px(px(14.0))
@@ -2264,6 +2423,13 @@ impl Render for FileViewer {
                                                                 ),
                                                             ))
                                                             .overflow_x_scroll()
+                                                            .map(|mut table| {
+                                                                table
+                                                                    .style()
+                                                                    .restrict_scroll_to_axis =
+                                                                    Some(true);
+                                                                table
+                                                            })
                                                             .track_scroll(&scroll_handle)
                                                             .children(table_rows),
                                                     )
@@ -2330,7 +2496,10 @@ impl Render for FileViewer {
                                                 },
                                             ),
                                         )
-                                        .child(md_list.w_full().h_full())
+                                        .child(md_list.w_full().h_full().map(|mut list| {
+                                            list.style().restrict_scroll_to_axis = Some(true);
+                                            list
+                                        }))
                                         .vertical_scrollbar(&list_state),
                                 )
                             })
@@ -2406,7 +2575,10 @@ impl Render for FileViewer {
                                             }),
                                     ),
                             ),
-                    ),
+                    )
+                    .when(history_visible, |d| {
+                        d.child(self.render_history_panel(&t, cx))
+                    }),
             )
             // Filter popover backdrop + overlay (at fullscreen overlay level)
             .when(self.filter_popover_open, |d| {
@@ -2658,6 +2830,10 @@ mod markdown_selection_tests {
                             .items_start()
                             .pb(MARKDOWN_TABLE_SCROLLBAR_GUTTER)
                             .overflow_x_scroll()
+                            .map(|mut table| {
+                                table.style().restrict_scroll_to_axis = Some(true);
+                                table
+                            })
                             .track_scroll(&self.scroll_handle)
                             .children(table_rows),
                     )
@@ -2690,7 +2866,7 @@ mod markdown_selection_tests {
     }
 
     #[gpui::test]
-    fn markdown_table_scroll_container_measures_wide_rows(cx: &mut TestAppContext) {
+    fn markdown_table_scrollbar_layout_and_wheel_axes(cx: &mut TestAppContext) {
         let scroll_handle = ScrollHandle::new();
         let handle_for_view = scroll_handle.clone();
         cx.update(gpui_component::init);
@@ -2722,6 +2898,34 @@ mod markdown_selection_tests {
         assert!(
             table_bounds.bottom() - last_row_bounds.bottom() >= MARKDOWN_TABLE_SCROLLBAR_GUTTER,
             "scrollbar gutter must not overlap the last table row"
+        );
+
+        let scroll_area_bounds = vcx
+            .debug_bounds("test-markdown-table-container")
+            .expect("table scroll area should be rendered");
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_area_bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-20.0))),
+            ..Default::default()
+        });
+        assert_eq!(
+            scroll_handle.offset().x,
+            px(0.0),
+            "vertical wheel input must not move the horizontal scrollbar"
+        );
+
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_area_bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.0), px(0.0))),
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(
+            scroll_handle.offset().x < px(0.0),
+            "horizontal wheel input must move the horizontal scrollbar"
         );
     }
 }
