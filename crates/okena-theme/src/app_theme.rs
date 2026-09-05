@@ -60,6 +60,10 @@ impl AppTheme {
         }
     }
 
+    pub fn system_is_dark(&self) -> bool {
+        self.system_is_dark
+    }
+
     /// Set custom theme colors
     pub fn set_custom_colors(&mut self, colors: ThemeColors) {
         self.custom_colors = Some(colors);

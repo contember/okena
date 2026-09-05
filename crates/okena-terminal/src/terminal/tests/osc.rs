@@ -1252,6 +1252,35 @@ fn test_process_palette_answers_color_query_without_per_terminal_palette() {
     );
 }
 
+#[test]
+fn test_color_queries_report_active_light_and_dark_palette() {
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "theme-query".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+    for palette in [
+        okena_core::theme::LIGHT_THEME,
+        okena_core::theme::DARK_THEME,
+    ] {
+        terminal.set_palette(palette);
+        for (code, color) in [(10, palette.term_foreground), (11, palette.term_background)] {
+            terminal.process_output(format!("\x1b]{code};?\x07").as_bytes());
+            let writes = transport.writes();
+            let reply = String::from_utf8_lossy(writes.last().expect("color query reply"));
+            let r = ((color >> 16) & 255) * 257;
+            let g = ((color >> 8) & 255) * 257;
+            let b = (color & 255) * 257;
+            assert_eq!(
+                reply,
+                format!("\x1b]{code};rgb:{r:04x}/{g:04x}/{b:04x}\x07")
+            );
+        }
+    }
+}
+
 // ── OSC 52 queue bounds ────────────────────────────────────────────────────
 //
 // The daemon parses the same byte stream as the UI but has no clipboard and no

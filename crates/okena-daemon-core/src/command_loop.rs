@@ -2732,6 +2732,9 @@ pub async fn daemon_command_loop(
                     }
                     ActionRequest::GetThemes => daemon_config.get_themes(),
                     ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
+                    ActionRequest::SetSystemAppearance { is_dark } => {
+                        daemon_config.set_system_appearance(is_dark)
+                    }
                     ActionRequest::SetTheme { id } => {
                         let result = daemon_config.set_theme(id);
                         publish_config_change_after_success(&result, &state_version);
