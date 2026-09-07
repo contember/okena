@@ -6,28 +6,32 @@ import { useIsMobile } from "../hooks/useIsMobile";
 import { collectTerminalIds } from "../utils/layout";
 import { Sidebar } from "./Sidebar";
 import { TerminalArea } from "./TerminalArea";
-import { TerminalPane } from "./TerminalPane";
+import { MobileWorkspace } from "./MobileWorkspace";
 import { StatusBar } from "./StatusBar";
 import { GitPanel } from "./GitPanel";
 import { FileViewerModal } from "./FileViewerModal";
 
 export function WorkspaceLayout() {
   const isMobile = useIsMobile();
-  return isMobile ? <MobileLayout /> : <DesktopLayout />;
+  return isMobile ? <MobileWorkspace /> : <DesktopLayout />;
 }
 
 function DesktopLayout() {
   const { state } = useApp();
-  const [fileViewerProjectId, setFileViewerProjectId] = useState<string | null>(null);
+  const [fileViewerProjectId, setFileViewerProjectId] = useState<string | null>(
+    null,
+  );
   const projects = resolveOverviewProjects(
     state.workspace?.projects ?? [],
     state.selectedProjectId,
   );
-  const fileViewerProject = state.workspace?.projects.find((project) => project.id === fileViewerProjectId);
+  const fileViewerProject = state.workspace?.projects.find(
+    (project) => project.id === fileViewerProjectId,
+  );
   useRequestGitPollForVisibleProjects(projects, state.selectedProjectId);
 
   return (
-    <div className="app-shell flex h-screen flex-col">
+    <div className="app-shell flex h-full overflow-hidden flex-col">
       <div className="flex flex-1 min-h-0">
         <aside className="app-sidebar w-64 flex-shrink-0 border-r">
           <Sidebar />
@@ -71,7 +75,9 @@ function useRequestGitPollForVisibleProjects(
   const previousVisibleProjectIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const nextVisibleProjectIds = new Set(projects.map((project) => project.id));
+    const nextVisibleProjectIds = new Set(
+      projects.map((project) => project.id),
+    );
     for (const project of projects) {
       if (previousVisibleProjectIds.current.has(project.id)) {
         continue;
@@ -109,7 +115,9 @@ function ProjectColumn({
     <section
       className="project-column flex min-h-0 flex-col"
       data-selected={selected}
-      onMouseDown={() => dispatch({ type: "select_project", projectId: project.id })}
+      onMouseDown={() =>
+        dispatch({ type: "select_project", projectId: project.id })
+      }
     >
       <div className="h-px flex-shrink-0" style={{ backgroundColor: accent }} />
       <header className="project-header flex min-h-[44px] flex-shrink-0 items-center gap-3 border-b px-3 py-2">
@@ -130,7 +138,9 @@ function ProjectColumn({
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-[var(--ok-text-muted)]">
             <span className="truncate">{compactPath(project.path)}</span>
-            <span>{terminalCount} term{terminalCount === 1 ? "" : "s"}</span>
+            <span>
+              {terminalCount} term{terminalCount === 1 ? "" : "s"}
+            </span>
           </div>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1">
@@ -147,14 +157,27 @@ function ProjectColumn({
             title="New terminal"
             aria-label="New terminal"
             onMouseDown={(event) => event.stopPropagation()}
-            onClick={() => postAction({ action: "create_terminal", project_id: project.id }).catch(() => {})}
+            onClick={() =>
+              postAction({
+                action: "create_terminal",
+                project_id: project.id,
+              }).catch(() => {})
+            }
           >
             +
           </button>
           <button
             className="icon-button"
-            title={project.show_in_overview ? "Hide from overview" : "Show in overview"}
-            aria-label={project.show_in_overview ? "Hide from overview" : "Show in overview"}
+            title={
+              project.show_in_overview
+                ? "Hide from overview"
+                : "Show in overview"
+            }
+            aria-label={
+              project.show_in_overview
+                ? "Hide from overview"
+                : "Show in overview"
+            }
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() =>
               postAction({
@@ -184,10 +207,17 @@ function ProjectEmptyState({ project }: { project: ApiProject }) {
   return (
     <div className="flex h-full items-center justify-center bg-[var(--ok-panel)] px-4 text-center">
       <div className="max-w-72">
-        <div className="mb-2 text-[11px] text-[var(--ok-text-muted)]">empty project</div>
+        <div className="mb-2 text-[11px] text-[var(--ok-text-muted)]">
+          empty project
+        </div>
         <button
           className="border border-[var(--ok-border)] bg-[var(--ok-header)] px-3 py-2 text-[12px] text-[var(--ok-text)] hover:bg-[var(--ok-hover)]"
-          onClick={() => postAction({ action: "create_terminal", project_id: project.id }).catch(() => {})}
+          onClick={() =>
+            postAction({
+              action: "create_terminal",
+              project_id: project.id,
+            }).catch(() => {})
+          }
         >
           New Terminal
         </button>
@@ -204,7 +234,10 @@ function OverviewEmptyState({ label }: { label: string }) {
   );
 }
 
-function resolveOverviewProjects(projects: ApiProject[], selectedProjectId: string | null): ApiProject[] {
+function resolveOverviewProjects(
+  projects: ApiProject[],
+  selectedProjectId: string | null,
+): ApiProject[] {
   const visible = projects.filter((project) => project.show_in_overview);
   if (!selectedProjectId) {
     return visible.length > 0 ? visible : projects.slice(0, 1);
@@ -255,96 +288,4 @@ function folderAccent(color: string | undefined): string {
     default:
       return "#8a9199";
   }
-}
-
-function MobileLayout() {
-  const { state, dispatch } = useApp();
-  const project = state.workspace?.projects.find(
-    (p) => p.id === state.selectedProjectId,
-  );
-  useRequestGitPollForVisibleProjects(project ? [project] : [], state.selectedProjectId);
-
-  const terminalIds = project ? collectTerminalIds(project.layout) : [];
-
-  // Auto-select first terminal when project changes or selected terminal disappears
-  useEffect(() => {
-    if (!project) return;
-    const ids = collectTerminalIds(project.layout);
-    if (ids.length === 0) {
-      dispatch({ type: "select_terminal", terminalId: null });
-      return;
-    }
-    if (!state.selectedTerminalId || !ids.includes(state.selectedTerminalId)) {
-      dispatch({ type: "select_terminal", terminalId: ids[0] });
-    }
-  }, [project, state.selectedTerminalId, dispatch]);
-
-  const selectedTerminalId = state.selectedTerminalId;
-  const terminalName = selectedTerminalId && project
-    ? project.terminal_names[selectedTerminalId] ?? "Terminal"
-    : undefined;
-
-  return (
-    <div className="flex flex-col h-screen">
-      {/* Hamburger button */}
-      <button
-        className="absolute top-2 left-2 z-30 p-2 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-        onClick={() => dispatch({ type: "set_sidebar_open", open: true })}
-      >
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <line x1="3" y1="5" x2="17" y2="5" />
-          <line x1="3" y1="10" x2="17" y2="10" />
-          <line x1="3" y1="15" x2="17" y2="15" />
-        </svg>
-      </button>
-
-      {/* Drawer overlay */}
-      {state.sidebarOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-40 bg-black/50"
-            onClick={() => dispatch({ type: "set_sidebar_open", open: false })}
-          />
-          <div className="fixed inset-y-0 left-0 z-50 w-72 border-r border-zinc-800 animate-slide-in-left">
-            <Sidebar isMobile />
-          </div>
-        </>
-      )}
-
-      {/* Main terminal area */}
-      <main className="flex-1 min-h-0">
-        {selectedTerminalId && project ? (
-          <TerminalPane
-            terminalId={selectedTerminalId}
-            name={terminalName}
-            projectId={project.id}
-            path={[]}
-            hideSplitActions
-          />
-        ) : (
-          <div className="flex items-center justify-center h-full text-zinc-500">
-            {state.workspace ? (
-              project ? (
-                terminalIds.length === 0 ? (
-                  <button
-                    className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
-                    onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
-                  >
-                    New Terminal
-                  </button>
-                ) : (
-                  "Select a terminal"
-                )
-              ) : (
-                "Open the menu to select a project"
-              )
-            ) : (
-              "Loading..."
-            )}
-          </div>
-        )}
-      </main>
-      <StatusBar />
-    </div>
-  );
 }

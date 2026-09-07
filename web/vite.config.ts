@@ -7,10 +7,10 @@ export default defineConfig({
   server: {
     proxy: {
       "/v1": {
-        target: "http://localhost:19100",
+        target: "http://127.0.0.1:19100",
         ws: true,
       },
-      "/health": "http://localhost:19100",
+      "/health": "http://127.0.0.1:19100",
     },
   },
 });

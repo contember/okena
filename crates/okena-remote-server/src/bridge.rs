@@ -23,12 +23,14 @@ pub enum RemoteCommand {
         action: ActionRequest,
         connection_id: String,
     },
-    /// Resize from a WebSocket client. Only the current owner may resize.
+    /// Resize from a WebSocket client. Only the current owner may resize unless
+    /// the client explicitly claims authority (for example, a mobile viewport).
     ResizeFromConnection {
         terminal_id: String,
         cols: u16,
         rows: u16,
         connection_id: String,
+        claim: bool,
     },
     /// Get the full workspace state snapshot.
     GetState,
