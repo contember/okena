@@ -13,6 +13,7 @@ Git status, diff parsing, and worktree operations for project directories.
 | `repository/clone.rs` | Clone ops — `clone_repository` (runs on `Lane::Long`; a clone is network-bound and unbounded), `clone_dir_name` (the directory `git clone` would create, for prefilling), `validate_clone_url`. |
 | `repository/branch.rs` | Branch ops — list/classify (`BranchList`), checkout/create/delete/push, `get_default_branch`, rebase, merge, stash, per-file stage/unstage/discard. |
 | `repository/status.rs` | Working-tree status & diff stats — `StatusFetch`, `get_status`, `has_uncommitted_changes`, `get_current_branch`, `get_head_sha`, diff-stats, ahead/behind & unpushed counts. |
+| `repository/diff_memo.rs` | Private memo behind `worktree_diff` / `untracked_line_count`: per-file `(added, removed)` remembered across status walks of the same path, keyed by HEAD blob id + worktree stat, with a racy-mtime guard. |
 | `repository/ci.rs` | CI/PR integration — `fetch_pr_info`, `fetch_ci_checks`, and the pure, unit-tested parsers `parse_ci_checks` / `parse_branch_ci`. Both return `PrFetch`/`CiFetch` so callers can tell "no PR / no checks" from a rate-limit refusal; `fetch_ci_checks` skips the request entirely while the upstream commit still matches a settled cached result. |
 | `repository/paths.rs` | Path utilities — `get_repo_root`, `normalize_path`, `resolve_git_root_and_subdir`, `project_path_in_worktree`, `compute_target_paths`. |
 | `branch_names.rs` | Branch name utilities and validation. |

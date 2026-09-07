@@ -1,7 +1,9 @@
 //! Working-tree status, diff stats, HEAD/branch reads, and ahead/behind counts.
 
 use std::path::Path;
+use std::time::SystemTime;
 
+use super::diff_memo;
 use crate::GitStatus;
 
 /// Cheap identity of the commit currently checked out in a worktree.
@@ -188,6 +190,10 @@ pub(crate) struct WorktreeDiff {
 /// Returns `None` on a transient failure (couldn't open the repo, init the
 /// status walk, or an iteration step errored) so the polling watcher can keep
 /// the last known counts — see `StatusFetch::Transient`.
+///
+/// Per-file counts are memoized across walks of the same `path` (see
+/// [`diff_memo`]): a changed file whose HEAD blob id and worktree stat match
+/// the previous walk reuses its counts instead of re-reading and re-diffing.
 pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     let repo = crate::gix_helpers::open(path)?;
     let workdir = repo.workdir()?.to_path_buf();
@@ -251,25 +257,82 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         changed.insert(item.location().to_owned());
     }
 
+    // The walk is complete, so nothing below can fail: the memo is only touched
+    // by walks that finished, and a transient failure above leaves it as it was.
+    let now = SystemTime::now();
+    let mut memo = diff_memo::take(path);
+    memo.retain_walk(&changed, &untracked);
+
     let mut tracked = Vec::with_capacity(changed.len());
     for rela in &changed {
         let rela_bstr = gix::bstr::BStr::new(rela);
         let rela_path = gix::path::from_bstr(rela_bstr);
         let name = String::from_utf8_lossy(rela_bstr).into_owned();
-        let head_blob = head_blob_bytes(head_tree.as_ref(), rela_bstr);
-        let wt_bytes = std::fs::read(workdir.join(&rela_path)).unwrap_or_default();
-
-        // Binary files report `-`/`-` (i.e. 0/0) in numstat. Record them with
-        // zero counts rather than diffing — they still belong in per-file lists.
-        if is_binary(&head_blob) || is_binary(&wt_bytes) {
-            tracked.push((name, 0, 0));
+        let full_path = workdir.join(&rela_path);
+        let head_entry = head_blob_entry(head_tree.as_ref(), rela_bstr);
+        let observed = diff_memo::observe(&full_path, now);
+        let inputs = observed.map(|observed| diff_memo::TrackedInputs {
+            head: head_entry.as_ref().map(|entry| entry.object_id()),
+            worktree: observed.input,
+        });
+        if let Some(inputs) = &inputs
+            && let Some((added, removed)) = memo.tracked_counts(rela_bstr, inputs)
+        {
+            tracked.push((name, added, removed));
             continue;
         }
-        let (added, removed) = diff_line_counts(&head_blob, &wt_bytes);
+
+        let head_blob = head_blob_bytes(head_entry.as_ref());
+        let worktree_blob = std::fs::read(&full_path);
+        let (added, removed) = tracked_line_counts(
+            head_blob.as_deref().unwrap_or_default(),
+            worktree_blob.as_deref().unwrap_or_default(),
+        );
+        memo.note_computed_tracked();
+        let settled = observed.is_some_and(|observed| {
+            observed.trusted && diff_memo::read_settled(&observed.input, &worktree_blob)
+        });
+        if let Some(inputs) = inputs
+            && settled
+            && head_blob.is_some()
+        {
+            memo.remember_tracked(rela.clone(), inputs, (added, removed));
+        }
         tracked.push((name, added, removed));
     }
+    diff_memo::store(path, memo);
 
     Some(WorktreeDiff { tracked, untracked })
+}
+
+/// Line count of an untracked file listed in [`WorktreeDiff::untracked`]
+/// (relative to the queried `path`), each line counting as an addition.
+/// Unreadable or non-UTF-8 files count as zero. Memoized like tracked files.
+pub(crate) fn untracked_line_count(path: &Path, file: &str) -> usize {
+    let full_path = path.join(file);
+    let observed = diff_memo::observe(&full_path, SystemTime::now());
+    if let Some(observed) = &observed
+        && let Some(lines) =
+            diff_memo::with(path, |memo| memo.untracked_lines(file, &observed.input)).flatten()
+    {
+        return lines;
+    }
+
+    let read = std::fs::read_to_string(&full_path);
+    let lines = read
+        .as_ref()
+        .map(|content| content.lines().count())
+        .unwrap_or(0);
+    diff_memo::with(path, |memo| {
+        memo.note_computed_untracked();
+        if let Some(observed) = observed
+            && observed.trusted
+            && diff_memo::read_settled(&observed.input, &read)
+        {
+            memo.remember_untracked(file.to_owned(), observed.input, lines);
+        }
+    });
+    lines
 }
 
 /// Get diff statistics (total lines added, lines removed) for the working
@@ -290,29 +353,43 @@ fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
 
     // Untracked files: count each line as an addition.
     for file in &diff.untracked {
-        let file_path = path.join(file);
-        if let Ok(content) = std::fs::read_to_string(&file_path) {
-            added += content.lines().count();
-        }
+        added += untracked_line_count(path, file);
     }
 
     Some((added, removed))
 }
 
-/// Read the bytes of `rela_path`'s blob in the HEAD tree. Returns empty when
-/// HEAD is unborn, the path isn't in HEAD (freshly added), or it isn't a
-/// regular blob (submodule/gitlink) — all of which diff as "no prior content".
-fn head_blob_bytes(head_tree: Option<&gix::Tree<'_>>, rela_path: &gix::bstr::BStr) -> Vec<u8> {
-    let Some(tree) = head_tree else {
-        return Vec::new();
-    };
+/// The regular-blob entry at `rela_path` in the HEAD tree. `None` when HEAD
+/// is unborn, the path isn't in HEAD (freshly added), or it isn't a regular
+/// blob (submodule/gitlink) — all of which diff as "no prior content".
+fn head_blob_entry<'repo>(
+    head_tree: Option<&gix::Tree<'repo>>,
+    rela_path: &gix::bstr::BStr,
+) -> Option<gix::object::tree::Entry<'repo>> {
     let path = gix::path::from_bstr(rela_path);
-    match tree.lookup_entry_by_path(path.as_ref()) {
-        Ok(Some(entry)) if entry.mode().is_blob() => {
-            entry.object().map(|o| o.data.clone()).unwrap_or_default()
-        }
-        _ => Vec::new(),
+    match head_tree?.lookup_entry_by_path(path.as_ref()) {
+        Ok(Some(entry)) if entry.mode().is_blob() => Some(entry),
+        _ => None,
     }
+}
+
+/// Bytes of a HEAD blob entry, or empty when there is none. `None` only when
+/// the object store failed to serve an existing entry, so the result must not
+/// be remembered — the next walk may succeed.
+fn head_blob_bytes(entry: Option<&gix::object::tree::Entry<'_>>) -> Option<Vec<u8>> {
+    match entry {
+        None => Some(Vec::new()),
+        Some(entry) => entry.object().ok().map(|o| o.data.clone()),
+    }
+}
+
+/// Numstat-style counts for one tracked path. Binary files report `-`/`-`
+/// (i.e. 0/0) in numstat; record them with zero counts rather than diffing.
+fn tracked_line_counts(head: &[u8], worktree: &[u8]) -> (usize, usize) {
+    if is_binary(head) || is_binary(worktree) {
+        return (0, 0);
+    }
+    diff_line_counts(head, worktree)
 }
 
 /// Count added/removed lines between two blob versions using imara-diff (pulled
@@ -845,6 +922,104 @@ mod tests {
         // contributes nothing to the +/- totals.
         std::fs::write(repo.join("file.txt"), [0u8, 1, 2, 0, 5]).unwrap();
         assert_eq!(get_diff_stats(&repo), Some((0, 0)));
+    }
+
+    /// Push a file's mtime `secs` into the past so the memo may trust it.
+    fn age_file(path: &Path, secs: u64) {
+        let past = SystemTime::now() - std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+
+    #[test]
+    fn diff_memo_reuses_counts_when_nothing_changed() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "u1\nu2\nu3\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+        age_file(&repo.join("new.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        let after_first = diff_memo::computed(&repo);
+        assert_eq!((after_first.tracked, after_first.untracked), (1, 1));
+
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        assert_eq!(diff_memo::computed(&repo), after_first);
+    }
+
+    #[test]
+    fn diff_memo_invalidates_only_the_edited_file() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("other.txt"), "1\n2\n").unwrap();
+        git_in(&repo, &["add", "other.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "other"],
+        );
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("other.txt"), "1\n2\n3\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+        age_file(&repo.join("other.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 2);
+
+        std::fs::write(repo.join("other.txt"), "1\n2\n3\n4\n5\n").unwrap();
+        age_file(&repo.join("other.txt"), 8);
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 3);
+    }
+
+    #[test]
+    fn diff_memo_invalidates_when_head_blob_changes() {
+        let (_tmp, repo) = init_temp_repo();
+        // Stage one version, then leave a different one in the worktree.
+        std::fs::write(repo.join("file.txt"), "a\nb\n").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((3, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 1);
+
+        // Committing the staged version moves HEAD's blob without touching the
+        // worktree file: same stat, different HEAD side.
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "staged"],
+        );
+        assert_eq!(get_diff_stats(&repo), Some((1, 0)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 2);
+    }
+
+    #[test]
+    fn diff_memo_recounts_untracked_file_rewritten_with_same_size() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("new.txt"), "aaa\n").unwrap();
+        age_file(&repo.join("new.txt"), 10);
+        assert_eq!(get_diff_stats(&repo), Some((1, 0)));
+        assert_eq!(diff_memo::computed(&repo).untracked, 1);
+
+        std::fs::write(repo.join("new.txt"), "a\na\n").unwrap();
+        age_file(&repo.join("new.txt"), 8);
+        assert_eq!(get_diff_stats(&repo), Some((2, 0)));
+        assert_eq!(diff_memo::computed(&repo).untracked, 2);
+    }
+
+    #[test]
+    fn diff_memo_recomputes_files_inside_the_racy_window() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "u1\n").unwrap();
+
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        let computed = diff_memo::computed(&repo);
+        assert_eq!((computed.tracked, computed.untracked), (2, 2));
     }
 
     #[test]
