@@ -16,10 +16,14 @@ pub struct TerminalPaintStats {
     /// Whether grid layout was reused instead of scanning the terminal model.
     pub grid_cache_hit: bool,
     pub cells_scanned: usize,
-    /// Model cells reported as changed when a safe damage source is available.
-    /// `None` means the current renderer cannot measure this without consuming
-    /// shared multi-view state.
+    /// Cells whose row content differs from the previously built layout.
+    /// `None` when the paint reused a cached layout and rebuilt nothing.
     pub cells_changed: Option<usize>,
+    /// The same count once the best whole-screen vertical shift is applied —
+    /// what a renderer that recognised scrolling would still have to redo.
+    /// A large gap between the two means the screen scrolled rather than
+    /// changed, and line-damage tracking alone would not help.
+    pub cells_changed_scroll_aware: Option<usize>,
     pub text_runs: usize,
     pub background_rects: usize,
 }
@@ -98,10 +102,14 @@ mod imp {
         cells_scanned: u64,
         changed_cell_samples: u64,
         cells_changed: u64,
+        cells_changed_scroll_aware: u64,
         text_runs: u64,
         background_rects: u64,
         sidebar_activity_invalidations: u64,
         sidebar_renders: TimingSamples,
+        grid_renders: u64,
+        grid_columns_total: u64,
+        grid_columns_max: u64,
     }
 
     impl MetricsWindow {
@@ -123,11 +131,22 @@ mod imp {
                 cells_scanned: 0,
                 changed_cell_samples: 0,
                 cells_changed: 0,
+                cells_changed_scroll_aware: 0,
                 text_runs: 0,
                 background_rects: 0,
                 sidebar_activity_invalidations: 0,
                 sidebar_renders: TimingSamples::default(),
+                grid_renders: 0,
+                grid_columns_total: 0,
+                grid_columns_max: 0,
             }
+        }
+
+        fn record_grid_render(&mut self, columns: usize) {
+            let columns = as_u64(columns);
+            self.grid_renders = self.grid_renders.saturating_add(1);
+            self.grid_columns_total = self.grid_columns_total.saturating_add(columns);
+            self.grid_columns_max = self.grid_columns_max.max(columns);
         }
 
         fn record_activity_frame(
@@ -170,6 +189,11 @@ mod imp {
             if let Some(changed) = stats.cells_changed {
                 self.changed_cell_samples = self.changed_cell_samples.saturating_add(1);
                 self.cells_changed = self.cells_changed.saturating_add(as_u64(changed));
+            }
+            if let Some(changed) = stats.cells_changed_scroll_aware {
+                self.cells_changed_scroll_aware = self
+                    .cells_changed_scroll_aware
+                    .saturating_add(as_u64(changed));
             }
             self.text_runs = self.text_runs.saturating_add(as_u64(stats.text_runs));
             self.background_rects = self
@@ -226,10 +250,14 @@ mod imp {
                 cells_scanned: self.cells_scanned,
                 changed_cell_samples: self.changed_cell_samples,
                 cells_changed: self.cells_changed,
+                cells_changed_scroll_aware: self.cells_changed_scroll_aware,
                 text_runs: self.text_runs,
                 background_rects: self.background_rects,
                 sidebar_activity_invalidations: self.sidebar_activity_invalidations,
                 sidebar_renders,
+                grid_renders: self.grid_renders,
+                grid_columns_total: self.grid_columns_total,
+                grid_columns_max: self.grid_columns_max,
             }
         }
     }
@@ -252,10 +280,14 @@ mod imp {
         cells_scanned: u64,
         changed_cell_samples: u64,
         cells_changed: u64,
+        cells_changed_scroll_aware: u64,
         text_runs: u64,
         background_rects: u64,
         sidebar_activity_invalidations: u64,
         sidebar_renders: TimingSummary,
+        grid_renders: u64,
+        grid_columns_total: u64,
+        grid_columns_max: u64,
     }
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -281,6 +313,12 @@ mod imp {
 
     pub fn sidebar_activity_invalidation() {
         record(MetricsWindow::record_sidebar_activity_invalidation);
+    }
+
+    /// One render of the projects grid: the window-level frame the terminal
+    /// panes ride on. Its rate is the frame rate everything else is multiplied by.
+    pub fn grid_render(columns: usize) {
+        record(|metrics| metrics.record_grid_render(columns));
     }
 
     pub struct TerminalPaintGuard {
@@ -340,7 +378,7 @@ mod imp {
 
     fn format_summary(summary: Summary) -> String {
         format!(
-            "render_perf window_ms={} activity_frames={} repaint_terminal_total={} repaint_terminal_max={} registered_terminal_total={} registered_terminal_max={} repaint_pane_total={} repaint_pane_max={} terminal_paints={} terminal_timing_retained={} terminal_paint_us_p50={} terminal_paint_us_p95={} terminal_paint_us_max={} terminal_live_viewers_total={} terminal_live_viewers_max={} terminal_grid_cache_hits={} terminal_grid_cache_misses={} cells_scanned={} changed_cell_samples={} cells_changed={} text_runs={} background_rects={} sidebar_activity_invalidations={} sidebar_renders={} sidebar_timing_retained={} sidebar_render_us_p50={} sidebar_render_us_p95={} sidebar_render_us_max={} terminal_timing_overwritten={} sidebar_timing_overwritten={}",
+            "render_perf window_ms={} activity_frames={} repaint_terminal_total={} repaint_terminal_max={} registered_terminal_total={} registered_terminal_max={} repaint_pane_total={} repaint_pane_max={} terminal_paints={} terminal_timing_retained={} terminal_paint_us_p50={} terminal_paint_us_p95={} terminal_paint_us_max={} terminal_live_viewers_total={} terminal_live_viewers_max={} terminal_grid_cache_hits={} terminal_grid_cache_misses={} cells_scanned={} changed_cell_samples={} cells_changed={} cells_changed_scroll_aware={} text_runs={} background_rects={} sidebar_activity_invalidations={} sidebar_renders={} sidebar_timing_retained={} sidebar_render_us_p50={} sidebar_render_us_p95={} sidebar_render_us_max={} terminal_timing_overwritten={} sidebar_timing_overwritten={} grid_renders={} grid_columns_total={} grid_columns_max={}",
             summary.window_ms,
             summary.activity_frames,
             summary.repaint_terminal_total,
@@ -361,6 +399,7 @@ mod imp {
             summary.cells_scanned,
             summary.changed_cell_samples,
             summary.cells_changed,
+            summary.cells_changed_scroll_aware,
             summary.text_runs,
             summary.background_rects,
             summary.sidebar_activity_invalidations,
@@ -371,6 +410,9 @@ mod imp {
             summary.sidebar_renders.max_us,
             summary.terminal_paints.overwritten,
             summary.sidebar_renders.overwritten,
+            summary.grid_renders,
+            summary.grid_columns_total,
+            summary.grid_columns_max,
         )
     }
 
@@ -404,6 +446,7 @@ mod imp {
                 grid_cache_hit,
                 cells_scanned: 2_000,
                 cells_changed,
+                cells_changed_scroll_aware: cells_changed,
                 text_runs: 40,
                 background_rects: 8,
             }
@@ -451,6 +494,7 @@ mod imp {
             assert_eq!(summary.cells_scanned, 4_000);
             assert_eq!(summary.changed_cell_samples, 1);
             assert_eq!(summary.cells_changed, 12);
+            assert_eq!(summary.cells_changed_scroll_aware, 12);
             assert_eq!(summary.text_runs, 80);
             assert_eq!(summary.background_rects, 16);
             assert_eq!(summary.sidebar_activity_invalidations, 1);
@@ -559,6 +603,7 @@ mod imp {
                     "cells_scanned",
                     "changed_cell_samples",
                     "cells_changed",
+                    "cells_changed_scroll_aware",
                     "text_runs",
                     "background_rects",
                     "sidebar_activity_invalidations",
@@ -569,6 +614,9 @@ mod imp {
                     "sidebar_render_us_max",
                     "terminal_timing_overwritten",
                     "sidebar_timing_overwritten",
+                    "grid_renders",
+                    "grid_columns_total",
+                    "grid_columns_max",
                 ]
             );
         }
@@ -594,6 +642,9 @@ mod imp {
 
     #[inline(always)]
     pub fn sidebar_activity_invalidation() {}
+
+    #[inline(always)]
+    pub fn grid_render(_columns: usize) {}
 
     pub struct TerminalPaintGuard;
 
@@ -623,6 +674,7 @@ mod imp {
             assert!(!enabled());
             terminal_activity_frame(3, 2, 4);
             sidebar_activity_invalidation();
+            grid_render(46);
             terminal_paint().finish(TerminalPaintStats::default());
             let _sidebar_render = sidebar_render();
         }

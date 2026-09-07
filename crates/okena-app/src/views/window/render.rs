@@ -389,6 +389,8 @@ impl WindowView {
         let hovered_project = crate::views::project_hover::hovered_project(cx);
         let ring_color = theme(cx).border_active;
 
+        okena_core::render_probe::grid_render(num_projects);
+
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 

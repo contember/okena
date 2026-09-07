@@ -36,10 +36,12 @@ pub(crate) fn next_resize_viewer_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terminal_rendering::BatchedTextLine;
     use super::{
-        TerminalGridLayout, TerminalRenderCache, TerminalRenderCacheKey, deregister_resize_viewer,
-        shared_resize_target,
+        TerminalGridLayout, TerminalRenderCache, TerminalRenderCacheKey, changed_cells,
+        deregister_resize_viewer, shared_resize_target,
     };
+    use gpui::TextRun;
     use gpui::{Font, FontFeatures, FontStyle, FontWeight};
     use okena_core::theme::{DARK_THEME, LIGHT_THEME};
     use okena_terminal::terminal::TerminalSize;
@@ -124,6 +126,85 @@ mod tests {
             cursor_visual_line: 0,
             cells_scanned: 0,
         }
+    }
+
+    /// A layout of `rows` rows, `cols` wide, whose row `i` renders `texts[i]`.
+    /// An empty string means the row painted nothing.
+    fn layout_of(rows: usize, cols: usize, texts: &[&str]) -> TerminalGridLayout {
+        let style = TextRun {
+            len: 0,
+            font: Font {
+                family: "test".into(),
+                features: FontFeatures::default(),
+                fallbacks: None,
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Normal,
+            },
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let text_lines = texts
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(row, text)| {
+                let mut chars = text.chars();
+                let mut line =
+                    BatchedTextLine::new(row as i32, 0, chars.next().unwrap(), style.clone());
+                for (offset, c) in chars.enumerate() {
+                    line.append(offset as i32 + 1, c, style.clone());
+                }
+                line
+            })
+            .collect();
+        TerminalGridLayout {
+            text_lines,
+            rects: Vec::new(),
+            screen_lines: rows,
+            display_offset: 0,
+            cursor_col: 0,
+            cursor_visual_line: 0,
+            cells_scanned: rows * cols,
+        }
+    }
+
+    #[test]
+    fn a_first_build_counts_the_whole_screen_as_changed() {
+        let next = layout_of(3, 10, &["a", "b", "c"]);
+        assert_eq!(changed_cells(None, &next), (30, 30));
+    }
+
+    #[test]
+    fn an_identical_rebuild_counts_nothing() {
+        let previous = layout_of(3, 10, &["a", "b", "c"]);
+        let next = layout_of(3, 10, &["a", "b", "c"]);
+        assert_eq!(changed_cells(Some(&previous), &next), (0, 0));
+    }
+
+    #[test]
+    fn one_edited_row_counts_only_that_row() {
+        let previous = layout_of(4, 10, &["a", "b", "c", "d"]);
+        let next = layout_of(4, 10, &["a", "b", "CHANGED", "d"]);
+        assert_eq!(changed_cells(Some(&previous), &next), (10, 10));
+    }
+
+    #[test]
+    fn a_scrolled_screen_is_fully_changed_per_row_but_cheap_once_shifted() {
+        // Every row moved up one and a new row arrived at the bottom.
+        let previous = layout_of(4, 10, &["a", "b", "c", "d"]);
+        let next = layout_of(4, 10, &["b", "c", "d", "e"]);
+        let (per_row, scroll_aware) = changed_cells(Some(&previous), &next);
+        assert_eq!(per_row, 40, "a naive row diff sees the whole screen move");
+        assert_eq!(scroll_aware, 10, "only the newly arrived row is really new");
+    }
+
+    #[test]
+    fn a_resize_counts_the_whole_screen() {
+        let previous = layout_of(3, 10, &["a", "b", "c"]);
+        let next = layout_of(4, 10, &["a", "b", "c", "d"]);
+        assert_eq!(changed_cells(Some(&previous), &next), (40, 40));
     }
 
     #[test]
@@ -457,6 +538,11 @@ impl TerminalRenderCache {
         layout
     }
 
+    /// The layout still held from the last build, before this one replaces it.
+    fn previous_layout(&self) -> Option<Arc<TerminalGridLayout>> {
+        self.layout.clone()
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.key = None;
         self.layout = None;
@@ -696,6 +782,60 @@ fn build_terminal_grid_layout(
     };
     (content_generation, layout)
 }
+
+/// How much of the screen a rebuild actually changed: `(per row, after the
+/// best whole-screen vertical shift)`.
+///
+/// The second number is what a renderer that recognised scrolling would still
+/// have to redo. When output streams into a full screen every row shifts up, so
+/// the first number reads as "everything changed" while the second stays small
+/// — the difference decides whether line damage or scroll reuse is the fix.
+///
+/// Diagnostic only, and deliberately cheap: rows are compared by their shaped
+/// text, so a row that changed colour but not characters reads as unchanged.
+fn changed_cells(
+    previous: Option<&TerminalGridLayout>,
+    next: &TerminalGridLayout,
+) -> (usize, usize) {
+    let Some(previous) = previous else {
+        return (next.cells_scanned, next.cells_scanned);
+    };
+    if previous.screen_lines != next.screen_lines {
+        return (next.cells_scanned, next.cells_scanned);
+    }
+
+    fn row_text(layout: &TerminalGridLayout) -> HashMap<i32, (i32, &str)> {
+        layout
+            .text_lines
+            .iter()
+            .map(|line| (line.line, (line.start_col, line.text.as_str())))
+            .collect()
+    }
+    let before = row_text(previous);
+    let after = row_text(next);
+
+    let rows = next.screen_lines as i32;
+    let changed_rows = |shift: i32| {
+        (0..rows)
+            .filter(|row| before.get(&(row + shift)) != after.get(row))
+            .count()
+    };
+
+    let per_row = changed_rows(0);
+    let best = (-MAX_TRACKED_SCROLL..=MAX_TRACKED_SCROLL)
+        .map(changed_rows)
+        .min()
+        .unwrap_or(per_row);
+    let cols = next
+        .cells_scanned
+        .checked_div(next.screen_lines)
+        .unwrap_or(0);
+    (per_row.saturating_mul(cols), best.saturating_mul(cols))
+}
+
+/// Vertical shift the scroll-aware measurement searches. Wide enough for the
+/// usual streaming case (a few lines at a time), cheap enough to run per paint.
+const MAX_TRACKED_SCROLL: i32 = 8;
 
 impl Element for TerminalElement {
     type RequestLayoutState = TerminalElementState;
@@ -949,11 +1089,16 @@ impl Element for TerminalElement {
         let mut render_cache = self.render_cache.lock();
         let cached_layout = render_cache.get(&cache_key);
         let grid_cache_hit = cached_layout.is_some();
+        let mut cells_changed: Option<(usize, usize)> = None;
         let layout = match cached_layout {
             Some(layout) => layout,
             None => {
                 let (content_generation, layout) =
                     build_terminal_grid_layout(&self.terminal, selection, &t, state);
+                if okena_core::render_probe::enabled() {
+                    let previous = render_cache.previous_layout();
+                    cells_changed = Some(changed_cells(previous.as_deref(), &layout));
+                }
                 // File the layout under the generation observed while building it:
                 // `with_content` drains pending remote output first, so the value
                 // sampled before the call can already be one behind.
@@ -1128,7 +1273,8 @@ impl Element for TerminalElement {
             live_viewers: n_viewers,
             grid_cache_hit,
             cells_scanned,
-            cells_changed: None,
+            cells_changed: cells_changed.map(|(per_row, _)| per_row),
+            cells_changed_scroll_aware: cells_changed.map(|(_, shifted)| shifted),
             text_runs,
             background_rects,
         });
