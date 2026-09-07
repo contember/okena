@@ -146,6 +146,26 @@ impl HttpRequest {
         self
     }
 
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Case-insensitive lookup of a header set on this request.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The body set via [`json`](Self::json), so a test mock can route on it.
+    pub fn json_body(&self) -> Option<&serde_json::Value> {
+        match &self.body {
+            Body::Json(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Client-side rate floor: the bus admits this call site to the network at
     /// most once per `interval`, keyed by [`label`](Self::label) (or the URL if
     /// unset). A call arriving sooner is short-circuited with
@@ -282,6 +302,12 @@ impl HttpResponse {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Target of the `rel="next"` entry in the `Link` header (RFC 8288
+    /// pagination, as GitHub emits it), if there is a next page.
+    pub fn next_link(&self) -> Option<&str> {
+        self.header("link").and_then(link_next)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.body
     }
@@ -295,6 +321,23 @@ impl HttpResponse {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, HttpError> {
         serde_json::from_slice(&self.body).map_err(|e| HttpError::Decode(e.to_string()))
     }
+}
+
+/// Pull the `rel="next"` target out of a `Link` header value.
+fn link_next(header: &str) -> Option<&str> {
+    header.split(',').find_map(|link| {
+        let (target, params) = link.split_once(';')?;
+        let is_next = params.split(';').any(|param| {
+            param
+                .trim()
+                .strip_prefix("rel=")
+                .is_some_and(|rel| rel.trim().trim_matches('"') == "next")
+        });
+        if !is_next {
+            return None;
+        }
+        target.trim().strip_prefix('<')?.strip_suffix('>')
+    })
 }
 
 /// A streaming response. Implements [`Read`](std::io::Read) so the body can be
@@ -624,5 +667,26 @@ mod tests {
             resp.error_for_status(),
             Err(HttpError::Status(429))
         ));
+    }
+
+    #[test]
+    fn link_header_yields_the_next_page() {
+        let header = r#"<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=5>; rel="last""#;
+        assert_eq!(link_next(header), Some("https://api.github.com/x?page=2"));
+        // `next` need not come first, and the rel value may be unquoted.
+        let header = r#"<https://h/x?page=1>; rel="prev", <https://h/x?page=3>; rel=next"#;
+        assert_eq!(link_next(header), Some("https://h/x?page=3"));
+        // Last page: only prev/first left.
+        let header = r#"<https://h/x?page=1>; rel="prev", <https://h/x?page=1>; rel="first""#;
+        assert_eq!(link_next(header), None);
+        assert_eq!(link_next(""), None);
+
+        let resp = HttpResponse::new(
+            200,
+            vec![("Link".into(), r#"<https://h/x?page=2>; rel="next""#.into())],
+            Vec::new(),
+        );
+        assert_eq!(resp.next_link(), Some("https://h/x?page=2"));
+        assert_eq!(HttpResponse::new(200, vec![], Vec::new()).next_link(), None);
     }
 }

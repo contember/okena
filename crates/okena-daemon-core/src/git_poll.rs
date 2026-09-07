@@ -10,7 +10,7 @@
 //! immediate targeted refresh. Cached statuses for projects not selected in a
 //! cycle remain published, so tiering changes freshness rather than visibility.
 //!
-//! The `gh` PR/CI fan-out is deliberately *narrower* than the local tier: it
+//! The GitHub PR/CI fan-out is deliberately *narrower* than the local tier: it
 //! covers only projects visible in a window (plus explicitly requested ones),
 //! is scheduled per project by [`GithubPollSchedule`], skips any project whose
 //! upstream commit hasn't moved since its last settled result, and parks itself
@@ -38,10 +38,10 @@ const HIDDEN_GIT_POLL_EVERY_N_CYCLES: u64 = 6;
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Hidden projects receive a cheap HEAD fallback scan every 8 ticks (2s).
 const HIDDEN_HEAD_POLL_EVERY_N_TICKS: u64 = 8;
-/// How many projects the `gh` fan-out talks to at once. Matches the process
-/// bus's `Lane::Poll` worker count — going wider just queues on the bus, going
-/// narrower (the previous strictly sequential loop) made a full pass outlast
-/// its own cadence and let passes pile up on top of each other.
+/// How many projects the GitHub fan-out talks to at once. Going wider only
+/// parks more blocking-pool threads on the network; going narrower (the
+/// previous strictly sequential loop) made a full pass outlast its own cadence
+/// and let passes pile up on top of each other.
 const GH_FANOUT_CONCURRENCY: usize = 4;
 
 /// Project the local [`GitStatus`] onto the slimmer wire type pushed to remote
@@ -65,7 +65,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 struct TriggerAccumulator {
     /// HEAD changed locally; invalidates in-flight results from the old commit.
     head_change_ids: HashSet<String>,
-    /// Unconditional `gh` refreshes. Used when existing PR/CI cache is invalid.
+    /// Unconditional GitHub refreshes. Used when existing PR/CI cache is invalid.
     force_gh_ids: HashSet<String>,
     /// Conditional refreshes. These become forced only if PR/CI cache is absent.
     candidate_gh_ids: HashSet<String>,
@@ -105,11 +105,11 @@ impl TriggerAccumulator {
     }
 }
 
-/// A message from a running `gh` pass back to the poll loop.
+/// A message from a running GitHub pass back to the poll loop.
 enum GithubPassMessage {
     /// One project's outcome, sent the moment that project finishes. A pass
     /// used to publish nothing until its slowest repo returned, so a 0.4s PR
-    /// lookup could sit behind another project's 15s `gh` timeout.
+    /// lookup could sit behind another project's 15s request timeout.
     Project(GithubPollResult),
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
@@ -127,7 +127,7 @@ struct GithubPollResult {
     reached_github: bool,
 }
 
-/// One project's slot in a `gh` pass.
+/// One project's slot in a GitHub pass.
 struct ProjectPoll {
     id: String,
     path: String,
@@ -140,7 +140,7 @@ struct ProjectPoll {
     cached_pr_number: Option<u32>,
 }
 
-/// Projects the user can currently see. The `gh` fan-out is scoped to these:
+/// Projects the user can currently see. The GitHub fan-out is scoped to these:
 /// a badge nobody is looking at is not worth GitHub API budget.
 ///
 /// Two sources, unioned. The workspace's own hidden set covers a daemon driving
@@ -319,7 +319,7 @@ fn update_head_snapshots<T: PartialEq>(
         .collect()
 }
 
-/// Pick this cycle's `gh` slots.
+/// Pick this cycle's GitHub slots.
 ///
 /// Rules: a project earns a slot only if it is *visible* (or explicitly asked
 /// for), only when its own schedule says it is due — one repo with running CI
@@ -364,7 +364,7 @@ fn select_github_polls(
         .collect()
 }
 
-/// What one project's `gh` slot produced.
+/// What one project's GitHub slot produced.
 struct ProjectOutcome {
     pr: Option<PrFetch>,
     ci: Option<CiFetch>,
@@ -379,7 +379,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
     with_lane(Lane::Poll, || {
         let path = Path::new(&poll.path);
         // Repos with no GitHub remote can never have PRs or checks; skipping
-        // them here keeps the whole `gh` machinery off non-GitHub projects.
+        // them here keeps the whole GitHub machinery off non-GitHub projects.
         if !git::repository::has_github_remote(path) {
             return ProjectOutcome {
                 pr: poll.want_pr.then_some(PrFetch::Fetched(None)),
@@ -409,11 +409,11 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
     })
 }
 
-/// Run one `gh` pass, emitting each project's outcome on `result_tx` as soon as
+/// Run one GitHub pass, emitting each project's outcome on `result_tx` as soon as
 /// that project returns and a [`GithubPassMessage::Finished`] when all have.
 ///
-/// Streaming rather than returning one aggregate is deliberate: `gh` per repo
-/// ranges from ~0.4s to the 15s [`GH_TIMEOUT`](okena_git::repository) cap, and
+/// Streaming rather than returning one aggregate is deliberate: a GitHub round
+/// trip per repo ranges from well under a second to the 15s request cap, and
 /// an aggregate held every badge in the pass hostage to its slowest repo.
 async fn poll_github(
     polls: Vec<ProjectPoll>,
@@ -444,7 +444,7 @@ async fn poll_github(
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                log::warn!("gh poll task failed for {id}: {error}");
+                log::warn!("GitHub poll task failed for {id}: {error}");
                 continue;
             }
         };
@@ -600,17 +600,17 @@ pub async fn run_git_poll(
     let mut last: HashMap<String, GitStatus> = HashMap::new();
 
     // Across-cycle PR/CI caches keyed by project ID, mirroring the GUI watcher's
-    // `pr_infos` / `ci_checks`. The expensive `gh` fan-out only runs on the
+    // `pr_infos` / `ci_checks`. The expensive GitHub fan-out only runs on the
     // cadence below; between those cycles the cached values are merged into every
     // status so the badges don't blank. Merge (not replace) on update so a
     // project that drops out of the visible set keeps its last-known PR/CI.
     let mut pr_infos: HashMap<String, Option<git::PrInfo>> = HashMap::new();
     let mut ci_checks: HashMap<String, Option<git::CiCheckSummary>> = HashMap::new();
-    // Per-project `gh` cadence, commit-level result caching and the rate-limit
+    // Per-project GitHub cadence, commit-level result caching and the rate-limit
     // gate. Replaces the old global "is anything pending?" flag, which put every
     // project on the fast cadence as soon as one repo had CI running.
     let mut schedule = GithubPollSchedule::default();
-    // Projects a running `gh` pass currently holds. Passes used to be spawned
+    // Projects a running GitHub pass currently holds. Passes used to be spawned
     // unconditionally, so a fan-out slower than its own cadence stacked copies
     // of itself; tracking the ids (rather than a bare flag) keeps that
     // protection while letting an explicitly forced project start its own pass
@@ -685,7 +685,7 @@ pub async fn run_git_poll(
             poll_hidden,
         );
 
-        // Explicit actions steer the `gh` schedule: a branch switch invalidates
+        // Explicit actions steer the GitHub schedule: a branch switch invalidates
         // what we hold, while merely showing a project is only worth a fetch
         // when we hold no PR/CI result for it yet.
         for id in &trigger_acc.invalidate_gh_ids {
@@ -711,7 +711,7 @@ pub async fn run_git_poll(
             match status {
                 Ok(Some(mut status)) => {
                     // Inject whatever PR/CI we already have cached so a still-fresh
-                    // badge doesn't blank between `gh` cadence cycles.
+                    // badge doesn't blank between GitHub cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
                     status.ci_checks = ci_checks.get(&id).cloned().flatten();
                     attempted.insert(id, Some(status));
@@ -746,10 +746,10 @@ pub async fn run_git_poll(
             }
         }
 
-        // ── 3. Publish the basic status map on change — BEFORE the slow `gh` ──
-        // git status comes from gix (fast, in-process); PR/CI come from `gh`
-        // (network, and can hang). Publishing here means a stuck `gh` can never
-        // block the branch/diff badge from appearing.
+        // ── 3. Publish the basic status map on change — BEFORE the slow GitHub calls
+        // git status comes from gix (fast, in-process); PR/CI come from the GitHub
+        // API (network, and can stall). Publishing here means a stuck request can
+        // never block the branch/diff badge from appearing.
         publish(&mut last, &new_statuses, &git_status_tx, &state_version);
 
         // Stop once every external `watch` receiver is gone (the server is down).
@@ -758,7 +758,7 @@ pub async fn run_git_poll(
             return;
         }
 
-        // ── 4. Start `gh` PR/CI fan-out without blocking local git refreshes ─
+        // ── 4. Start GitHub PR/CI fan-out without blocking local git refreshes ─
         // Only visible projects (plus anything explicitly asked for) and only
         // while no pass is already running and GitHub isn't refusing us.
         if !schedule.is_rate_limited(cycle) {
@@ -778,7 +778,7 @@ pub async fn run_git_poll(
             );
 
             log::trace!(
-                "gh poll cycle={cycle}: {} projects, {} visible, {} due",
+                "GitHub poll cycle={cycle}: {} projects, {} visible, {} due",
                 projects.len(),
                 visible_ids.len(),
                 polls.len()
