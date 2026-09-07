@@ -253,9 +253,15 @@ pub struct AppSettings {
     /// UI font size for panels/dialogs (default: 13.0)
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
+    /// UI font family (default: system UI font)
+    #[serde(default = "default_ui_font_family")]
+    pub ui_font_family: String,
     /// File viewer/diff viewer font size (default: 12.0)
     #[serde(default = "default_file_font_size")]
     pub file_font_size: f32,
+    /// File viewer/diff viewer font family (default: "JetBrains Mono")
+    #[serde(default = "default_file_font_family")]
+    pub file_font_family: String,
 
     // Terminal settings
     /// Cursor shape: Block, Bar, or Underline (default: Block)
@@ -442,7 +448,9 @@ impl Default for AppSettings {
             font_family: default_font_family(),
             line_height: default_line_height(),
             ui_font_size: default_ui_font_size(),
+            ui_font_family: default_ui_font_family(),
             file_font_size: default_file_font_size(),
+            file_font_family: default_file_font_family(),
             cursor_style: CursorShape::default(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
@@ -515,8 +523,16 @@ fn default_ui_font_size() -> f32 {
     13.0
 }
 
+fn default_ui_font_family() -> String {
+    ".SystemUIFont".to_string()
+}
+
 fn default_file_font_size() -> f32 {
     12.0
+}
+
+fn default_file_font_family() -> String {
+    default_font_family()
 }
 
 fn default_cursor_blink() -> bool {

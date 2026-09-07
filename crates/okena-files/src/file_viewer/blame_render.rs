@@ -173,7 +173,7 @@ fn render_committed_cell(
             div()
                 .w(px(7.0 * 7.0))
                 .text_color(rgb(hash_color))
-                .font_family("monospace")
+                .font(okena_ui::tokens::file_font(cx))
                 .child(hash),
         )
         .child(div().text_color(author_color).child(author))

@@ -33,16 +33,6 @@ use super::{DisplayMode, FileViewer, SourceRow};
 
 const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
 
-fn source_font() -> Font {
-    Font {
-        family: "monospace".into(),
-        features: FontFeatures::disable_ligatures(),
-        weight: FontWeight::NORMAL,
-        style: FontStyle::Normal,
-        ..Default::default()
-    }
-}
-
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
     let r = ((color >> 16) & 0xFF) as f32 / 255.0;
@@ -383,7 +373,7 @@ impl FileViewer {
                 d.bg(rgba(t.bg_selection, 0.55))
             })
             .text_size(ui_text(font_size, cx))
-            .font(source_font())
+            .font(self.file_font.clone())
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
                 let plain_text = plain_text.clone();
@@ -1401,7 +1391,7 @@ impl Render for FileViewer {
         let transfer_status = self.transfer_status.clone();
 
         // Measure actual monospace character width from font metrics
-        let font = source_font();
+        let font = self.file_font.clone();
         let font_size = self.file_font_size;
         let rendered_font_size = ui_text(font_size, cx);
         let text_system = window.text_system();
@@ -2272,7 +2262,7 @@ impl Render for FileViewer {
                                                     div()
                                                         .px(px(14.0))
                                                         .py(px(10.0))
-                                                        .font_family("monospace")
+                                                        .font(this.file_font.clone())
                                                         .text_size(ui_text(
                                                             this.file_font_size,
                                                             cx,

@@ -322,7 +322,7 @@ impl ContentSearchDialog {
                                     .px(px(8.0))
                                     .h(px(24.0))
                                     .text_size(ui_text(13.0, cx))
-                                    .font_family("monospace")
+                                    .font(okena_ui::tokens::file_font(cx))
                                     .when_some(row_bg, |d, bg| d.bg(bg))
                                     .on_mouse_down(MouseButton::Left, {
                                         let text_layout = text_layout.clone();

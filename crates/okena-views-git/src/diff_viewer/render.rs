@@ -517,7 +517,7 @@ impl DiffViewer {
                             .id("revision-hash")
                             .flex_shrink_0()
                             .text_size(ui_text_ms(cx))
-                            .font_family("monospace")
+                            .font(self.file_font.clone())
                             .text_color(rgb(t.term_yellow))
                             .cursor_pointer()
                             .px(px(4.0))
@@ -789,7 +789,7 @@ impl DiffViewer {
                                     .min_w_0()
                                     .gap(px(5.0))
                                     .text_size(ui_text_md(cx))
-                                    .font_family("monospace")
+                                    .font(self.file_font.clone())
                                     .text_color(rgb(t.text_secondary))
                                     .cursor_pointer()
                                     .hover(|style| style.text_color(rgb(t.text_primary)))
@@ -937,7 +937,7 @@ impl DiffViewer {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .font_family("monospace")
+                            .font(self.file_font.clone())
                             .text_size(ui_text_sm(cx))
                             .text_color(rgb(t.text_muted))
                             .child(side.path.clone()),
@@ -1324,12 +1324,7 @@ fn file_nav_button(
 impl Render for DiffViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Measure actual monospace character width from font metrics
-        let font = Font {
-            family: "monospace".into(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            ..Default::default()
-        };
+        let font = self.file_font.clone();
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&font);
         self.measured_char_width = text_system

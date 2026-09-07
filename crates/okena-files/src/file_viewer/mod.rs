@@ -391,6 +391,8 @@ pub struct FileViewer {
     syntax_set: std::sync::Arc<SyntaxSet>,
     /// File font size from settings
     file_font_size: f32,
+    /// Monospace font used for source measurement and rendering.
+    file_font: Font,
     /// Measured monospace character width (from font metrics)
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting)
@@ -494,9 +496,10 @@ impl FileViewerScope {
 }
 
 /// Presentation state, read from the user's settings and the active theme.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct FileViewerConfig {
     pub font_size: f32,
+    pub font_family: SharedString,
     pub is_dark: bool,
     pub blame_visible: bool,
 }
@@ -638,6 +641,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            font_family,
             is_dark,
             blame_visible,
         } = config;
@@ -658,6 +662,7 @@ impl FileViewer {
             project_fs,
             syntax_set,
             file_font_size: font_size,
+            file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
@@ -725,6 +730,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            font_family,
             is_dark,
             blame_visible,
         } = config;
@@ -735,6 +741,7 @@ impl FileViewer {
             project_fs,
             syntax_set: load_syntax_set(),
             file_font_size: font_size,
+            file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
@@ -896,11 +903,18 @@ impl FileViewer {
         }
     }
 
-    /// Update configuration (font size and dark mode) from the host app.
+    /// Update configuration (font and dark mode) from the host app.
     /// Also refreshes the daemon-backed file tree.
-    pub fn update_config(&mut self, font_size: f32, is_dark: bool, cx: &mut Context<Self>) {
+    pub fn update_config(
+        &mut self,
+        font_size: f32,
+        font_family: SharedString,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
+        self.file_font = okena_ui::tokens::file_font_for_family(font_family, cx);
         self.is_dark = is_dark;
 
         // Re-fetch directory listings so the sidebar reflects added/removed files

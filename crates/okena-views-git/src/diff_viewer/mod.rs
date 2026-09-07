@@ -95,6 +95,7 @@ pub struct DiffViewer {
     pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
     pub(super) file_font_size: f32,
+    pub(super) file_font: Font,
     /// Cached side-by-side lines for current file.
     pub(super) side_by_side_lines: Vec<SideBySideLine>,
     /// Horizontal scroll offset in pixels.
@@ -190,6 +191,7 @@ impl DiffViewer {
         let focus_handle = cx.focus_handle();
         let gs = git_settings(cx);
         let font_size = gs.file_font_size;
+        let file_font = okena_ui::tokens::file_font_for_family(gs.file_font_family, cx);
         let view_mode = gs.diff_view_mode;
         let ignore_whitespace = gs.diff_ignore_whitespace;
         let is_dark = gs.is_dark;
@@ -230,6 +232,7 @@ impl DiffViewer {
             syntax_set: load_syntax_set(),
             scrollbar_drag: None,
             file_font_size: font_size,
+            file_font,
             side_by_side_lines: Vec::new(),
             scroll_x: 0.0,
             max_line_chars: 0,
@@ -279,9 +282,16 @@ impl DiffViewer {
         self.ignore_whitespace
     }
 
-    /// Update configuration (font size, theme) from outside.
-    pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
+    /// Update configuration (font, theme) from outside.
+    pub fn update_config(
+        &mut self,
+        font_size: f32,
+        font_family: SharedString,
+        is_dark: bool,
+        cx: &App,
+    ) {
         self.file_font_size = font_size;
+        self.file_font = okena_ui::tokens::file_font_for_family(font_family, cx);
         if is_dark != self.is_dark {
             self.is_dark = is_dark;
             self.rehighlight_current_file();

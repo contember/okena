@@ -699,6 +699,7 @@ impl Render for WindowView {
         div()
             .id("root")
             .size_full()
+            .font_family(okena_ui::tokens::ui_font_family(cx))
             .relative()
             .flex()
             .flex_col()

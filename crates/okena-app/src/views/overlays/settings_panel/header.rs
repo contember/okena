@@ -119,7 +119,7 @@ impl SettingsPanel {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
                         this.project_dropdown_open = !this.project_dropdown_open;
-                        this.font_dropdown_open = false;
+                        this.font_dropdown_open = None;
                         this.shell_dropdown_open = false;
                         this.session_backend_dropdown_open = false;
                         cx.notify();

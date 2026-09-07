@@ -391,7 +391,7 @@ impl FileViewer {
                     )
                     .child(
                         div()
-                            .font_family("monospace")
+                            .font(okena_ui::tokens::file_font(cx))
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.term_yellow))
                             .child(revision.short_hash),
@@ -654,7 +654,7 @@ impl FileViewer {
                             .min_w_0()
                             .child(
                                 div()
-                                    .font_family("monospace")
+                                    .font(okena_ui::tokens::file_font(cx))
                                     .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.term_yellow))
                                     .child(entry.short_hash.clone()),

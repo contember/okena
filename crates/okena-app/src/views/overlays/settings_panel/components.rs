@@ -10,8 +10,7 @@ pub use okena_ui::settings::{
 };
 pub use okena_ui::toggle::{Segment, segmented_control, toggle_switch};
 
-/// Available monospace font families
-pub(super) const FONT_FAMILIES: &[&str] = &[
+pub(super) const MONOSPACE_FONT_FAMILIES: &[&str] = &[
     "JetBrains Mono",
     "Menlo",
     "SF Mono",
@@ -23,6 +22,14 @@ pub(super) const FONT_FAMILIES: &[&str] = &[
     "Ubuntu Mono",
     "Hack",
 ];
+
+pub(super) fn font_family_label(family: &str) -> &str {
+    if family == ".SystemUIFont" {
+        "System UI"
+    } else {
+        family
+    }
+}
 
 /// Render a stacked row with label, description and a full-width text input.
 pub(super) fn hook_input_row(
