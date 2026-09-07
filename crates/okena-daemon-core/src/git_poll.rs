@@ -1,9 +1,12 @@
 //! GPUI-free git-status polling for the headless daemon.
 //!
-//! Projects visible in any window, or owning a terminal subscribed by a remote
-//! client, stay on the responsive tier: HEAD every 250ms and full status every
-//! 5s. Hidden, unsubscribed repositories use bounded fallback cadences (2s HEAD,
-//! 30s full status). Explicit actions and detected HEAD changes still trigger an
+//! Projects visible in any window, or owning a terminal streamed by a client
+//! that never declared a viewport, stay on the responsive tier: HEAD every
+//! 250ms and full status every 5s. A client that declares its viewport
+//! (`SetVisibleProjects`) counts only that set — the desktop subscribes to
+//! every terminal it mirrors, so its subscriptions say nothing about what is
+//! on screen. Everything else uses bounded fallback cadences (2s HEAD, 30s full
+//! status). Explicit actions and detected HEAD changes still trigger an
 //! immediate targeted refresh. Cached statuses for projects not selected in a
 //! cycle remain published, so tiering changes freshness rather than visibility.
 //!
@@ -27,11 +30,11 @@ use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc, watch};
 
-/// Responsive full-status cadence for visible or remotely subscribed projects.
+/// Responsive full-status cadence for projects on the responsive tier.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Hidden projects receive a full fallback scan every 6 responsive cycles (30s).
 const HIDDEN_GIT_POLL_EVERY_N_CYCLES: u64 = 6;
-/// Responsive HEAD cadence for visible or remotely subscribed projects.
+/// Responsive HEAD cadence for projects on the responsive tier.
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Hidden projects receive a cheap HEAD fallback scan every 8 ticks (2s).
 const HIDDEN_HEAD_POLL_EVERY_N_TICKS: u64 = 8;
@@ -160,25 +163,28 @@ fn visible_project_ids(
     visible
 }
 
-/// Visible projects plus any owning a terminal a remote client is streaming.
-///
-/// This is the *local* status tier only. Clients subscribe to every terminal in
-/// the daemon's state — not just the ones they render — so folding subscriptions
-/// into the `gh` set would put every project that merely owns a terminal on the
-/// responsive GitHub cadence, which is how a machine with a few dozen projects
-/// burns an hourly API budget without displaying a single extra badge.
+/// Visible projects plus any owning a terminal streamed by a connection that
+/// has not declared a viewport. A declared viewport is the whole truth for that
+/// connection, so its subscriptions are ignored (see the module docs).
 fn streaming_project_ids(
     workspace: &Workspace,
     remote_subscribed_terminals: &RwLock<HashMap<u64, HashSet<String>>>,
     remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
 ) -> HashSet<String> {
     let mut relevant = visible_project_ids(workspace, remote_visible_projects);
-    if let Ok(subscribed) = remote_subscribed_terminals.read() {
-        for terminal_ids in subscribed.values() {
-            for terminal_id in terminal_ids {
-                if let Some(project) = workspace.find_project_for_terminal(terminal_id) {
-                    relevant.insert(project.id.clone());
-                }
+    let (Ok(subscribed), Ok(declared)) = (
+        remote_subscribed_terminals.read(),
+        remote_visible_projects.read(),
+    ) else {
+        return relevant;
+    };
+    let undeclared = subscribed
+        .iter()
+        .filter(|(connection_id, _)| !declared.contains_key(connection_id));
+    for (_, terminal_ids) in undeclared {
+        for terminal_id in terminal_ids {
+            if let Some(project) = workspace.find_project_for_terminal(terminal_id) {
+                relevant.insert(project.id.clone());
             }
         }
     }
@@ -1166,13 +1172,18 @@ mod tests {
         assert_eq!(changed, vec!["hidden".to_string()]);
     }
 
-    fn workspace_with_hidden_project(id: &str) -> Workspace {
-        let mut data = empty_workspace_data();
-        data.projects.push(okena_state::ProjectData {
+    fn hidden_project(id: &str, terminal_id: &str) -> okena_state::ProjectData {
+        okena_state::ProjectData {
             id: id.to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),
-            layout: None,
+            layout: Some(okena_state::LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -1188,9 +1199,18 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
-        });
-        data.project_order.push(id.to_string());
-        data.main_window.hidden_project_ids.insert(id.to_string());
+        }
+    }
+
+    /// Every project is hidden in the daemon's own window, so relevance comes
+    /// only from what connected clients declare or subscribe to.
+    fn workspace_with_hidden_projects(projects: &[(&str, &str)]) -> Workspace {
+        let mut data = empty_workspace_data();
+        for (id, terminal_id) in projects {
+            data.projects.push(hidden_project(id, terminal_id));
+            data.project_order.push(id.to_string());
+            data.main_window.hidden_project_ids.insert(id.to_string());
+        }
         Workspace::new(data)
     }
 
@@ -1200,7 +1220,7 @@ mod tests {
     /// one on screen. The client's declaration has to win.
     #[test]
     fn client_declared_projects_enter_the_gh_scope() {
-        let workspace = workspace_with_hidden_project("on-screen");
+        let workspace = workspace_with_hidden_projects(&[("on-screen", "t-on-screen")]);
 
         let nothing_declared = RwLock::new(HashMap::new());
         assert!(!visible_project_ids(&workspace, &nothing_declared).contains("on-screen"));
@@ -1221,6 +1241,88 @@ mod tests {
         ]));
         let visible = visible_project_ids(&workspace, &declared);
         assert!(visible.contains("desktop") && visible.contains("phone"));
+    }
+
+    /// The desktop subscribes to every terminal it mirrors, so its
+    /// subscriptions must not drag hidden projects onto the responsive tier.
+    #[test]
+    fn a_declared_viewport_silences_that_connections_subscriptions() {
+        let workspace =
+            workspace_with_hidden_projects(&[("shown", "t-shown"), ("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-shown".to_string(), "t-background".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert_eq!(relevant, HashSet::from(["shown".to_string()]));
+    }
+
+    #[test]
+    fn an_empty_declared_viewport_still_counts_as_declared() {
+        let workspace = workspace_with_hidden_projects(&[("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-background".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(1u64, HashSet::new())]));
+
+        assert!(streaming_project_ids(&workspace, &subscribed, &declared).is_empty());
+    }
+
+    /// TUI/CLI streaming clients have no viewport to declare; what they stream
+    /// is what they show.
+    #[test]
+    fn subscriptions_promote_projects_for_undeclared_connections() {
+        let workspace =
+            workspace_with_hidden_projects(&[("shown", "t-shown"), ("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([
+            (
+                1u64,
+                HashSet::from(["t-shown".to_string(), "t-background".to_string()]),
+            ),
+            (2u64, HashSet::from(["t-background".to_string()])),
+        ]));
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert_eq!(
+            relevant,
+            HashSet::from(["shown".to_string(), "background".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_project_entering_a_viewport_is_fetched_off_cadence() {
+        let workspace = workspace_with_hidden_projects(&[("shown", "t-shown")]);
+        let active = HashSet::from(["shown".to_string()]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-shown".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(1u64, HashSet::new())]));
+
+        let known = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert!(known.is_empty());
+
+        declared
+            .write()
+            .unwrap()
+            .insert(1, HashSet::from(["shown".to_string()]));
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        let newly_relevant: HashSet<String> = relevant.difference(&known).cloned().collect();
+        let empty = HashSet::new();
+        assert_eq!(
+            select_status_poll_ids(&active, &relevant, &empty, &newly_relevant, false, false),
+            HashSet::from(["shown".to_string()])
+        );
     }
 
     /// Build an `apply_github_result` fixture: one project, one CI outcome.
