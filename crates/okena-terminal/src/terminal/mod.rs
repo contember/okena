@@ -37,6 +37,7 @@ mod tests;
 pub use app_version::set_app_version;
 pub use child_processes::{foreground_command, has_child_processes};
 pub use event_listener::set_process_palette;
+pub use links::UrlScanCache;
 pub use modes::TerminalModeState;
 pub use resize_authority::{
     claim_remote_resize_if_allowed, claim_resize_authority_local, claim_resize_authority_remote,

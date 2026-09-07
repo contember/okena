@@ -3,7 +3,7 @@
 //! Pure logic component - no UI, no Entity.
 
 use crate::elements::terminal_element::{LinkKind, URLMatch};
-use okena_terminal::terminal::Terminal;
+use okena_terminal::terminal::{Terminal, UrlScanCache};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,8 @@ pub struct UrlDetector {
     hovered_group: Option<usize>,
     /// Cache of path existence checks to avoid repeated syscalls
     path_exists_cache: HashMap<String, bool>,
+    /// Rows and matches of the last scan, so only changed lines are rescanned
+    scan_cache: UrlScanCache,
     /// Last terminal content generation we processed (skip if unchanged)
     last_generation: u64,
     /// Whether the current project shares the client's filesystem.
@@ -41,6 +43,7 @@ impl UrlDetector {
             matches_cache: Arc::new(Vec::new()),
             hovered_group: None,
             path_exists_cache: HashMap::new(),
+            scan_cache: UrlScanCache::default(),
             last_generation: u64::MAX, // force first update
             last_validate_paths_locally: true,
             last_cwd: String::new(),
@@ -104,7 +107,7 @@ impl UrlDetector {
                 self.last_validate_paths_locally = validate_paths_locally;
             }
 
-            let detected = terminal.detect_urls();
+            let detected = terminal.detect_urls_with(&mut self.scan_cache);
             let cwd = terminal.current_cwd();
             if cwd != self.last_cwd {
                 self.path_exists_cache.clear();
