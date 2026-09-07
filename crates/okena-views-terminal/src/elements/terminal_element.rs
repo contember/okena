@@ -1108,110 +1108,118 @@ impl Element for TerminalElement {
         };
         drop(render_cache);
 
-        // Phase 2: Paint backgrounds
-        for rect in &layout.rects {
-            rect.paint(bounds.origin, cell_width, line_height, window);
-        }
-
-        // Phase 2.5: Paint search highlights
-        // search_match.line is an absolute grid line; convert to visual row
-        for (idx, search_match) in self.search_matches.iter().enumerate() {
-            let visual_line = search_match.line + layout.display_offset;
-            if visual_line < 0 || visual_line >= layout.screen_lines as i32 {
-                continue;
+        // One layer for the grid: every quad shares its draw order instead of
+        // paying a BoundsTree insert each; stable sorting keeps their paint order.
+        window.paint_layer(bounds, |window| {
+            // Phase 2: Paint backgrounds
+            for rect in &layout.rects {
+                rect.paint(bounds.origin, cell_width, line_height, window);
             }
 
-            let is_current = self.current_match_index == Some(idx);
-            let highlight_color = if is_current {
-                let c = rgb(t.search_current_bg);
-                Hsla::from(Rgba {
-                    r: c.r,
-                    g: c.g,
-                    b: c.b,
-                    a: 0.7,
-                })
-            } else {
-                let c = rgb(t.search_match_bg);
-                Hsla::from(Rgba {
-                    r: c.r,
-                    g: c.g,
-                    b: c.b,
-                    a: 0.5,
-                })
-            };
+            // Phase 2.5: Paint search highlights
+            // search_match.line is an absolute grid line; convert to visual row
+            for (idx, search_match) in self.search_matches.iter().enumerate() {
+                let visual_line = search_match.line + layout.display_offset;
+                if visual_line < 0 || visual_line >= layout.screen_lines as i32 {
+                    continue;
+                }
 
-            let position = point(
-                px((f32::from(bounds.origin.x) + search_match.col as f32 * cell_width_f).floor()),
-                bounds.origin.y + line_height * visual_line as f32,
-            );
-            let size = size(
-                px((cell_width_f * search_match.len as f32).ceil()),
-                line_height,
-            );
+                let is_current = self.current_match_index == Some(idx);
+                let highlight_color = if is_current {
+                    let c = rgb(t.search_current_bg);
+                    Hsla::from(Rgba {
+                        r: c.r,
+                        g: c.g,
+                        b: c.b,
+                        a: 0.7,
+                    })
+                } else {
+                    let c = rgb(t.search_match_bg);
+                    Hsla::from(Rgba {
+                        r: c.r,
+                        g: c.g,
+                        b: c.b,
+                        a: 0.5,
+                    })
+                };
 
-            window.paint_quad(fill(Bounds::new(position, size), highlight_color));
-        }
+                let position = point(
+                    px(
+                        (f32::from(bounds.origin.x) + search_match.col as f32 * cell_width_f)
+                            .floor(),
+                    ),
+                    bounds.origin.y + line_height * visual_line as f32,
+                );
+                let size = size(
+                    px((cell_width_f * search_match.len as f32).ceil()),
+                    line_height,
+                );
 
-        // Phase 2.6: Paint URL underlines
-        for url_match in self.url_matches.iter() {
-            let is_hovered = self.hovered_url_group == Some(url_match.link_group);
-
-            if url_match.line < 0 || url_match.line >= layout.screen_lines as i32 {
-                continue;
+                window.paint_quad(fill(Bounds::new(position, size), highlight_color));
             }
 
-            let url_x =
-                px((f32::from(bounds.origin.x) + url_match.col as f32 * cell_width_f).floor());
-            let url_y = bounds.origin.y + line_height * url_match.line as f32;
-            let url_width = px((cell_width_f * url_match.len as f32).ceil());
+            // Phase 2.6: Paint URL underlines
+            for url_match in self.url_matches.iter() {
+                let is_hovered = self.hovered_url_group == Some(url_match.link_group);
 
-            if is_hovered {
-                let hover_bg = Hsla::from(Rgba {
-                    r: 0.0,
-                    g: 0.48,
-                    b: 0.8,
-                    a: 0.2,
-                });
-                let hover_bounds = Bounds {
-                    origin: point(url_x, url_y),
-                    size: size(url_width, line_height),
-                };
-                window.paint_quad(fill(hover_bounds, hover_bg));
+                if url_match.line < 0 || url_match.line >= layout.screen_lines as i32 {
+                    continue;
+                }
 
-                let underline_color = rgb(t.border_active);
-                let underline_y = url_y + line_height - px(2.0);
-                let underline_bounds = Bounds {
-                    origin: point(url_x, underline_y),
-                    size: size(url_width, px(1.0)),
-                };
-                window.paint_quad(fill(underline_bounds, underline_color));
-            } else {
-                let underline_color = Hsla::from(Rgba {
-                    r: 0.5,
-                    g: 0.5,
-                    b: 0.5,
-                    a: 0.5,
-                });
-                let underline_y = url_y + line_height - px(2.0);
-                let underline_bounds = Bounds {
-                    origin: point(url_x, underline_y),
-                    size: size(url_width, px(1.0)),
-                };
-                window.paint_quad(fill(underline_bounds, underline_color));
+                let url_x =
+                    px((f32::from(bounds.origin.x) + url_match.col as f32 * cell_width_f).floor());
+                let url_y = bounds.origin.y + line_height * url_match.line as f32;
+                let url_width = px((cell_width_f * url_match.len as f32).ceil());
+
+                if is_hovered {
+                    let hover_bg = Hsla::from(Rgba {
+                        r: 0.0,
+                        g: 0.48,
+                        b: 0.8,
+                        a: 0.2,
+                    });
+                    let hover_bounds = Bounds {
+                        origin: point(url_x, url_y),
+                        size: size(url_width, line_height),
+                    };
+                    window.paint_quad(fill(hover_bounds, hover_bg));
+
+                    let underline_color = rgb(t.border_active);
+                    let underline_y = url_y + line_height - px(2.0);
+                    let underline_bounds = Bounds {
+                        origin: point(url_x, underline_y),
+                        size: size(url_width, px(1.0)),
+                    };
+                    window.paint_quad(fill(underline_bounds, underline_color));
+                } else {
+                    let underline_color = Hsla::from(Rgba {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 0.5,
+                    });
+                    let underline_y = url_y + line_height - px(2.0);
+                    let underline_bounds = Bounds {
+                        origin: point(url_x, underline_y),
+                        size: size(url_width, px(1.0)),
+                    };
+                    window.paint_quad(fill(underline_bounds, underline_color));
+                }
             }
-        }
 
-        // Phase 3: Paint text runs
-        for line in &layout.text_lines {
-            line.paint(
-                bounds.origin,
-                cell_width,
-                line_height,
-                font_size,
-                window,
-                cx,
-            );
-        }
+            // Phase 3: Paint text runs. Each shaped line opens its own nested layer
+            // (GPUI `paint_line`), which keeps its decorations below its glyphs as before.
+            for line in &layout.text_lines {
+                line.paint(
+                    bounds.origin,
+                    cell_width,
+                    line_height,
+                    font_size,
+                    window,
+                    cx,
+                );
+            }
+        });
 
         // Phase 4: Paint cursor
         if cursor_visible
