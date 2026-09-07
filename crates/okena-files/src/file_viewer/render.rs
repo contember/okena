@@ -33,6 +33,16 @@ use super::{DisplayMode, FileViewer, FontData, PreviewBackground, SourceRow};
 
 const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
 
+fn source_font() -> Font {
+    Font {
+        family: "monospace".into(),
+        features: FontFeatures::disable_ligatures(),
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+        ..Default::default()
+    }
+}
+
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
     let r = ((color >> 16) & 0xFF) as f32 / 255.0;
@@ -295,6 +305,7 @@ impl FileViewer {
         &self,
         row_number: usize,
         row: &SourceRow,
+        window_width: Pixels,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -320,7 +331,8 @@ impl FileViewer {
         let viewport_width = scroll_state
             .last_item_size
             .map(|size| f32::from(size.item.width))
-            .unwrap_or(1920.0);
+            .unwrap_or_default()
+            .max(f32::from(window_width));
         drop(scroll_state);
         let visible_range = visible_source_range(
             &line.plain_text,
@@ -371,7 +383,7 @@ impl FileViewer {
                 d.bg(rgba(t.bg_selection, 0.55))
             })
             .text_size(ui_text(font_size, cx))
-            .font_family("monospace")
+            .font(source_font())
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
                 let plain_text = plain_text.clone();
@@ -481,15 +493,17 @@ impl FileViewer {
     pub(super) fn render_visible_lines(
         &self,
         range: std::ops::Range<usize>,
+        window_width: Pixels,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let tab = self.active_tab();
         range
             .filter_map(|i| {
-                tab.source_rows
-                    .get(i)
-                    .map(|row| self.render_line(i, row, t, cx).into_any_element())
+                tab.source_rows.get(i).map(|row| {
+                    self.render_line(i, row, window_width, t, cx)
+                        .into_any_element()
+                })
             })
             .collect()
     }
@@ -1746,19 +1760,15 @@ impl Render for FileViewer {
         let transfer_status = self.transfer_status.clone();
 
         // Measure actual monospace character width from font metrics
-        let font = Font {
-            family: "monospace".into(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            ..Default::default()
-        };
+        let font = source_font();
         let font_size = self.file_font_size;
+        let rendered_font_size = ui_text(font_size, cx);
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&font);
         self.measured_char_width = text_system
-            .advance(font_id, px(font_size), 'm')
+            .advance(font_id, rendered_font_size, 'm')
             .map(|size| f32::from(size.width))
-            .unwrap_or(font_size * 0.6);
+            .unwrap_or(f32::from(rendered_font_size) * 0.6);
         self.update_source_wrap_columns(cx);
 
         // Virtualization setup
@@ -2504,10 +2514,16 @@ impl Render for FileViewer {
                                             uniform_list(
                                                 "file-lines",
                                                 line_count,
-                                                move |range, _window, cx| {
+                                                move |range, window, cx| {
                                                     let tc = tc.clone();
+                                                    let window_width = window.viewport_size().width;
                                                     view_clone.update(cx, |this, cx| {
-                                                        this.render_visible_lines(range, &tc, cx)
+                                                        this.render_visible_lines(
+                                                            range,
+                                                            window_width,
+                                                            &tc,
+                                                            cx,
+                                                        )
                                                     })
                                                 },
                                             )
