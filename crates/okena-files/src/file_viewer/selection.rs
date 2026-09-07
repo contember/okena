@@ -1,12 +1,12 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
-use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
+use crate::code_view::{start_scrollbar_drag, update_scrollbar_drag};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty, copy_to_clipboard};
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
 use std::path::PathBuf;
 
-use super::{DisplayMode, FileViewer, FileViewerEvent, PreviewBackground};
+use super::{DisplayMode, FileViewer, FileViewerEvent, FileViewerTab, PreviewBackground};
 
 impl FileViewer {
     /// Toggle between source and preview display modes. Only meaningful for
@@ -21,6 +21,54 @@ impl FileViewer {
             DisplayMode::Source => DisplayMode::Preview,
             DisplayMode::Preview => DisplayMode::Source,
         };
+        cx.notify();
+    }
+
+    pub(super) fn toggle_line_wrap(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        tab.wrap_lines = !tab.wrap_lines;
+        tab.selection.clear();
+        tab.source_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(0.0)));
+        tab.rebuild_source_rows();
+        self.perform_file_search(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_json_pretty(&mut self, cx: &mut Context<Self>) {
+        let path = self.active_tab().file_path.clone();
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
+        let tab = self.active_tab_mut();
+        let Some(mut alternate) = tab.json_alternate.take() else {
+            return;
+        };
+
+        std::mem::swap(&mut tab.content, &mut alternate.content);
+        let next_lines = alternate.highlighted_lines.take().unwrap_or_else(|| {
+            crate::syntax::highlight_content(
+                &tab.content,
+                &path,
+                &syntax_set,
+                super::MAX_LINES,
+                is_dark,
+            )
+        });
+        alternate.highlighted_lines =
+            Some(std::mem::replace(&mut tab.highlighted_lines, next_lines));
+        tab.json_alternate = Some(alternate);
+        tab.json_pretty = !tab.json_pretty;
+        tab.selection.clear();
+        tab.rebuild_source_rows();
+        tab.source_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(0.0)));
+        self.perform_file_search(cx);
         cx.notify();
     }
 
@@ -40,7 +88,7 @@ impl FileViewer {
     /// Get selected text using the shared utility.
     pub(super) fn get_selected_text(&self) -> Option<String> {
         let tab = self.active_tab();
-        get_selected_text(&tab.highlighted_lines, &tab.selection)
+        extract_selected_source_text(tab)
     }
 
     /// Copy selected text to clipboard.
@@ -60,15 +108,16 @@ impl FileViewer {
         let ((start_line, _), (end_line, _)) = tab.selection.normalized_non_empty()?;
 
         // Convert from 0-based line index to 1-based, clamp to file length.
-        let last_line_idx = tab.line_count.checked_sub(1)?;
-        let first_idx = start_line.min(last_line_idx);
-        let last_idx = end_line.min(last_line_idx);
-
-        let text: String = tab
+        let last_row_idx = tab.source_rows.len().checked_sub(1)?;
+        let first_idx = start_line.min(last_row_idx);
+        let last_idx = end_line.min(last_row_idx);
+        let first_source_line = tab.source_rows.get(first_idx)?.logical_line;
+        let last_source_line = tab.source_rows.get(last_idx)?.logical_line;
+        let text = tab
             .highlighted_lines
-            .get(first_idx..=last_idx)?
+            .get(first_source_line..=last_source_line)?
             .iter()
-            .map(|l| l.plain_text.as_str())
+            .map(|line| line.plain_text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -78,8 +127,8 @@ impl FileViewer {
                 .absolute_path(&tab.relative_path)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| tab.file_path.clone()),
-            first: first_idx + 1,
-            last: last_idx + 1,
+            first: first_source_line + 1,
+            last: last_source_line + 1,
             text,
         }]))
     }
@@ -101,11 +150,11 @@ impl FileViewer {
     /// Select all text.
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
-        if tab.highlighted_lines.is_empty() {
+        if tab.source_rows.is_empty() {
             return;
         }
-        let last_line = tab.highlighted_lines.len() - 1;
-        let last_col = tab.highlighted_lines[last_line].plain_text.len();
+        let last_line = tab.source_rows.len() - 1;
+        let last_col = tab.source_rows[last_line].byte_range.len();
         tab.selection.start = Some((0, 0));
         tab.selection.end = Some((last_line, last_col));
         cx.notify();
@@ -389,4 +438,34 @@ impl FileViewer {
         tab.image_view.background = background;
         cx.notify();
     }
+}
+
+fn extract_selected_source_text(tab: &FileViewerTab) -> Option<String> {
+    let ((start_row, start_col), (end_row, end_col)) = tab.selection.normalized_non_empty()?;
+    let mut output = String::new();
+    let mut previous_logical_line = None;
+
+    for row_index in start_row..=end_row.min(tab.source_rows.len().saturating_sub(1)) {
+        let row = tab.source_rows.get(row_index)?;
+        let line = tab.highlighted_lines.get(row.logical_line)?;
+        let row_text = &line.plain_text[row.byte_range.clone()];
+        if previous_logical_line.is_some_and(|previous| previous != row.logical_line) {
+            output.push('\n');
+        }
+
+        let start = if row_index == start_row {
+            start_col.min(row_text.len())
+        } else {
+            0
+        };
+        let end = if row_index == end_row {
+            end_col.min(row_text.len())
+        } else {
+            row_text.len()
+        };
+        output.push_str(&row_text[start..end]);
+        previous_logical_line = Some(row.logical_line);
+    }
+
+    (!output.is_empty()).then_some(output)
 }

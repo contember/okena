@@ -26,6 +26,7 @@ use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
@@ -185,8 +186,14 @@ pub(super) struct FileViewerTab {
     pub relative_path: String,
     pub content: String,
     pub highlighted_lines: Vec<HighlightedLine>,
+    pub source_rows: Vec<SourceRow>,
     pub line_count: usize,
     pub line_num_width: usize,
+    pub longest_source_row: usize,
+    pub wrap_lines: bool,
+    pub wrap_columns: usize,
+    pub json_pretty: bool,
+    pub json_alternate: Option<JsonAlternateView>,
     pub error_message: Option<String>,
     pub selection: Selection,
     pub display_mode: DisplayMode,
@@ -256,6 +263,17 @@ pub(super) struct FileViewerTab {
     /// One-based source position requested by the link that opened this tab.
     pub target_line: Option<usize>,
     pub target_column: Option<usize>,
+}
+
+pub(super) struct SourceRow {
+    pub logical_line: usize,
+    pub byte_range: Range<usize>,
+    pub columns: usize,
+}
+
+pub(super) struct JsonAlternateView {
+    pub content: String,
+    pub highlighted_lines: Option<Vec<HighlightedLine>>,
 }
 
 /// Decoded image payload. Raster formats let GPUI's asset cache handle the
@@ -391,6 +409,13 @@ pub struct FontData {
 }
 
 impl FileViewerTab {
+    fn source_row_for_line(&self, line: usize) -> usize {
+        let logical_line = line.saturating_sub(1);
+        self.source_rows
+            .partition_point(|row| row.logical_line < logical_line)
+            .min(self.source_rows.len().saturating_sub(1))
+    }
+
     /// Create a new tab for browsing (no file loaded).
     pub(super) fn new_empty() -> Self {
         Self {
@@ -398,8 +423,14 @@ impl FileViewerTab {
             relative_path: String::new(),
             content: String::new(),
             highlighted_lines: Vec::new(),
+            source_rows: Vec::new(),
             line_count: 0,
             line_num_width: 3,
+            longest_source_row: 0,
+            wrap_lines: false,
+            wrap_columns: 120,
+            json_pretty: false,
+            json_alternate: None,
             error_message: None,
             selection: Selection::default(),
             display_mode: DisplayMode::Source,
@@ -443,8 +474,14 @@ impl FileViewerTab {
             relative_path,
             content: String::new(),
             highlighted_lines: Vec::new(),
+            source_rows: Vec::new(),
             line_count: 0,
             line_num_width: 3,
+            longest_source_row: 0,
+            wrap_lines: false,
+            wrap_columns: 120,
+            json_pretty: false,
+            json_alternate: None,
             error_message: None,
             selection: Selection::default(),
             display_mode: if is_markdown || is_svg {
@@ -1097,6 +1134,9 @@ impl FileViewer {
             // source-view XML), so they need the rehighlight too.
             if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
                 tab.do_highlight_content(&tab.file_path.clone(), &self.syntax_set, self.is_dark);
+                if let Some(alternate) = tab.json_alternate.as_mut() {
+                    alternate.highlighted_lines = None;
+                }
                 // The rendered markdown view carries its own highlighted code
                 // blocks, separate from the source view's lines.
                 if let Some(doc) = tab.markdown_doc.as_mut() {
@@ -1686,8 +1726,9 @@ impl FileViewer {
         tab.target_column = position.column;
         if let Some(line) = position.line {
             tab.display_mode = DisplayMode::Source;
+            let row = tab.source_row_for_line(line);
             tab.source_scroll_handle
-                .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+                .scroll_to_item(row, ScrollStrategy::Center);
         }
         cx.notify();
     }
@@ -1917,6 +1958,8 @@ impl FileViewer {
         let is_image = image_format_for_path(&asset_path).is_some();
         let is_font = !is_image && font_format_for_path(&asset_path).is_some();
         let svg_renderer = cx.svg_renderer();
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result: Result<(loading::LoadedContent, Option<u64>), String> = cx
                 .background_executor()
@@ -1959,14 +2002,19 @@ impl FileViewer {
                                 metadata.size
                             ));
                         }
-                        loading::LoadedContent::Text(fs.read_file(&rel)?)
+                        loading::build_text_content(
+                            &asset_path,
+                            fs.read_file(&rel)?,
+                            &syntax_set,
+                            is_dark,
+                        )
                     };
                     Ok((content, metadata.modified_at_millis))
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 let mut old_image: Option<DecodedImage> = None;
-                let mut target_line: Option<usize> = None;
+                let mut target_row: Option<usize> = None;
                 if let Some(tab) = this
                     .tabs
                     .iter_mut()
@@ -2003,14 +2051,14 @@ impl FileViewer {
                         &this.syntax_set,
                         this.is_dark,
                     );
-                    target_line = tab.target_line;
+                    target_row = tab.target_line.map(|line| tab.source_row_for_line(line));
                     tab.blame = BlameLoadState::NotLoaded;
                     cx.notify();
                 }
-                if let Some(line) = target_line {
+                if let Some(row) = target_row {
                     this.active_tab()
                         .source_scroll_handle
-                        .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+                        .scroll_to_item(row, ScrollStrategy::Center);
                 }
                 if let Some(decoded) = old_image {
                     release_image_assets(decoded, cx);

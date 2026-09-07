@@ -7,7 +7,7 @@ use crate::code_view::{
 use crate::file_search::Cancel;
 use crate::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
-use crate::syntax::HighlightedLine;
+use crate::syntax::HighlightedSpan;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, FontData, PreviewBackground};
+use super::{DisplayMode, FileViewer, FontData, PreviewBackground, SourceRow};
 
 const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
 
@@ -47,6 +47,91 @@ fn markdown_table_scrollbar(id: impl Into<ElementId>, scroll_handle: &ScrollHand
             .id(id)
             .scrollbar_show(ScrollbarShow::Always),
     )
+}
+
+fn source_horizontal_scrollbar(
+    id: impl Into<ElementId>,
+    scroll_handle: &UniformListScrollHandle,
+) -> Div {
+    div().absolute().inset_0().child(
+        Scrollbar::horizontal(scroll_handle)
+            .id(id)
+            .scrollbar_show(ScrollbarShow::Always),
+    )
+}
+
+fn byte_range_for_char_window(text: &str, start: usize, count: usize) -> std::ops::Range<usize> {
+    if text.is_ascii() {
+        let start = start.min(text.len());
+        return start..(start + count).min(text.len());
+    }
+    let start_byte = text
+        .char_indices()
+        .nth(start)
+        .map_or(text.len(), |(byte, _)| byte);
+    let end_byte = text[start_byte..]
+        .char_indices()
+        .nth(count)
+        .map_or(text.len(), |(byte, _)| start_byte + byte);
+    start_byte..end_byte
+}
+
+fn visible_source_range(
+    text: &str,
+    row: &SourceRow,
+    horizontal_offset: f32,
+    viewport_width: f32,
+    char_width: f32,
+    fixed_width: f32,
+    wrap_lines: bool,
+) -> std::ops::Range<usize> {
+    if wrap_lines || row.columns <= 4096 {
+        return row.byte_range.clone();
+    }
+    const OVERSCAN_COLUMNS: usize = 64;
+    let first_visible = ((horizontal_offset - fixed_width).max(0.0) / char_width.max(1.0)) as usize;
+    let start = first_visible.saturating_sub(OVERSCAN_COLUMNS);
+    let count = (viewport_width / char_width.max(1.0)).ceil() as usize + OVERSCAN_COLUMNS * 2;
+    let local = byte_range_for_char_window(&text[row.byte_range.clone()], start, count);
+    row.byte_range.start + local.start..row.byte_range.start + local.end
+}
+
+fn slice_highlighted_spans(
+    spans: &[HighlightedSpan],
+    range: std::ops::Range<usize>,
+) -> Vec<HighlightedSpan> {
+    let mut result = Vec::new();
+    let mut span_start = 0;
+    for span in spans {
+        let span_end = span_start + span.text.len();
+        let start = span_start.max(range.start);
+        let end = span_end.min(range.end);
+        if start < end {
+            result.push(HighlightedSpan {
+                color: span.color,
+                text: span.text[start - span_start..end - span_start].to_string(),
+            });
+        }
+        span_start = span_end;
+        if span_start >= range.end {
+            break;
+        }
+    }
+    result
+}
+
+fn clip_background_ranges(
+    ranges: Vec<(std::ops::Range<usize>, Hsla)>,
+    visible: std::ops::Range<usize>,
+) -> Vec<(std::ops::Range<usize>, Hsla)> {
+    ranges
+        .into_iter()
+        .filter_map(|(range, color)| {
+            let start = range.start.max(visible.start);
+            let end = range.end.min(visible.end);
+            (start < end).then_some((start - visible.start..end - visible.start, color))
+        })
+        .collect()
 }
 
 fn distance_squared_to_bounds(position: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
@@ -208,43 +293,81 @@ impl FileViewer {
     /// Render a single highlighted line with selection support.
     pub(super) fn render_line(
         &self,
-        line_number: usize,
-        line: &HighlightedLine,
+        row_number: usize,
+        row: &SourceRow,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let tab = self.active_tab();
-        let line_num_str = format!("{:>width$}", line_number + 1, width = tab.line_num_width);
+        let line = &tab.highlighted_lines[row.logical_line];
+        let row_text = &line.plain_text[row.byte_range.clone()];
+        let line_num_str = if row.byte_range.start == 0 {
+            format!(
+                "{:>width$}",
+                row.logical_line + 1,
+                width = tab.line_num_width
+            )
+        } else {
+            " ".repeat(tab.line_num_width)
+        };
 
         let font_size = self.file_font_size;
         let line_height = font_size * 1.8;
         let char_width = self.measured_char_width;
         let gutter_width = (tab.line_num_width as f32) * char_width + 16.0;
+        let scroll_state = tab.source_scroll_handle.0.borrow();
+        let horizontal_offset = -f32::from(scroll_state.base_handle.offset().x);
+        let viewport_width = scroll_state
+            .last_item_size
+            .map(|size| f32::from(size.item.width))
+            .unwrap_or(1920.0);
+        drop(scroll_state);
+        let visible_range = visible_source_range(
+            &line.plain_text,
+            row,
+            horizontal_offset,
+            viewport_width,
+            char_width,
+            gutter_width,
+            tab.wrap_lines,
+        );
+        let visible_local =
+            visible_range.start - row.byte_range.start..visible_range.end - row.byte_range.start;
 
-        let mut bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
-        bg_ranges.extend(self.search_bg_ranges_for_line(line_number, t));
-        if tab.target_line == Some(line_number + 1)
+        let mut bg_ranges = selection_bg_ranges(&tab.selection, row_number, row_text.len());
+        bg_ranges.extend(self.search_bg_ranges_for_line(row_number, t));
+        if tab.target_line == Some(row.logical_line + 1)
             && let Some(column) = tab.target_column
         {
             let char_index = column.saturating_sub(1);
             if let Some((start, character)) = line.plain_text.char_indices().nth(char_index) {
                 let end = start + character.len_utf8();
-                bg_ranges.push((start..end, rgba(t.selection_bg, 0.8).into()));
+                if start >= row.byte_range.start && end <= row.byte_range.end {
+                    bg_ranges.push((
+                        start - row.byte_range.start..end - row.byte_range.start,
+                        rgba(t.selection_bg, 0.8).into(),
+                    ));
+                }
             }
         }
 
-        let plain_text = line.plain_text.clone();
-        let line_len = line.plain_text.len();
+        let plain_text = row_text.to_string();
+        let line_len = row_text.len();
+        let hidden_columns = line.plain_text[row.byte_range.start..visible_range.start]
+            .chars()
+            .count();
 
-        let styled_text = build_styled_text_with_backgrounds(&line.spans, &bg_ranges);
+        let visible_spans = slice_highlighted_spans(&line.spans, visible_range.clone());
+        let bg_ranges = clip_background_ranges(bg_ranges, visible_local.clone());
+        let styled_text = build_styled_text_with_backgrounds(&visible_spans, &bg_ranges);
         let text_layout = styled_text.layout().clone();
 
         div()
-            .id(ElementId::Name(format!("line-{}", line_number).into()))
-            .w_full()
+            .id(ElementId::Name(format!("line-{}", row_number).into()))
+            .when(tab.wrap_lines, |d| d.w_full())
             .flex()
             .h(px(line_height))
-            .when(tab.target_line == Some(line_number + 1), |d| {
+            .when(tab.target_line == Some(row.logical_line + 1), |d| {
                 d.bg(rgba(t.bg_selection, 0.55))
             })
             .text_size(ui_text(font_size, cx))
@@ -257,19 +380,20 @@ impl FileViewer {
                     let col = text_layout
                         .index_for_position(event.position)
                         .unwrap_or_else(|ix| ix)
-                        .min(line_len);
+                        + visible_local.start;
+                    let col = col.min(line_len);
                     if event.click_count >= 3 {
-                        tab.selection.start = Some((line_number, 0));
-                        tab.selection.end = Some((line_number, line_len));
+                        tab.selection.start = Some((row_number, 0));
+                        tab.selection.end = Some((row_number, line_len));
                         tab.selection.finish();
                     } else if event.click_count == 2 {
                         let (start, end) = find_word_boundaries(&plain_text, col);
-                        tab.selection.start = Some((line_number, start));
-                        tab.selection.end = Some((line_number, end));
+                        tab.selection.start = Some((row_number, start));
+                        tab.selection.end = Some((row_number, end));
                         tab.selection.finish();
                     } else {
-                        tab.selection.start = Some((line_number, col));
-                        tab.selection.end = Some((line_number, col));
+                        tab.selection.start = Some((row_number, col));
+                        tab.selection.end = Some((row_number, col));
                         tab.selection.is_selecting = true;
                     }
                     cx.notify();
@@ -283,8 +407,9 @@ impl FileViewer {
                         let col = text_layout
                             .index_for_position(event.position)
                             .unwrap_or_else(|ix| ix)
-                            .min(line_len);
-                        tab.selection.end = Some((line_number, col));
+                            + visible_local.start;
+                        let col = col.min(line_len);
+                        tab.selection.end = Some((row_number, col));
                         cx.notify();
                     }
                 })
@@ -325,16 +450,29 @@ impl FileViewer {
                     ),
             )
             .when_some(
-                self.render_blame_cell(line_number, line_height, char_width, t, cx),
+                self.render_blame_cell(
+                    row.logical_line,
+                    row.byte_range.start == 0,
+                    line_height,
+                    char_width,
+                    t,
+                    cx,
+                ),
                 |d, cell| d.child(cell),
             )
             .child(
                 div()
-                    .flex_1()
-                    .pl(px(10.0))
-                    .overflow_hidden()
+                    .w(px(row.columns as f32 * char_width + 20.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
                     .whitespace_nowrap()
                     .line_height(px(line_height))
+                    .child(
+                        div()
+                            .w(px(hidden_columns as f32 * char_width + 10.0))
+                            .flex_shrink_0(),
+                    )
                     .child(styled_text),
             )
     }
@@ -349,9 +487,9 @@ impl FileViewer {
         let tab = self.active_tab();
         range
             .filter_map(|i| {
-                tab.highlighted_lines
+                tab.source_rows
                     .get(i)
-                    .map(|line| self.render_line(i, line, t, cx).into_any_element())
+                    .map(|row| self.render_line(i, row, t, cx).into_any_element())
             })
             .collect()
     }
@@ -1113,6 +1251,43 @@ impl FileViewer {
 }
 
 impl FileViewer {
+    fn update_source_wrap_columns(&mut self, cx: &mut Context<Self>) {
+        let (wrap_lines, current_columns, line_num_width, viewport_width) = {
+            let tab = self.active_tab();
+            let viewport_width = tab
+                .source_scroll_handle
+                .0
+                .borrow()
+                .last_item_size
+                .map(|size| f32::from(size.item.width));
+            (
+                tab.wrap_lines,
+                tab.wrap_columns,
+                tab.line_num_width,
+                viewport_width,
+            )
+        };
+        let Some(viewport_width) = viewport_width.filter(|width| *width > 0.0) else {
+            return;
+        };
+        if !wrap_lines {
+            return;
+        }
+
+        let blame_columns = if self.blame_visible { 24.0 } else { 0.0 };
+        let fixed_width = (line_num_width as f32 + blame_columns) * self.measured_char_width + 42.0;
+        let columns = ((viewport_width - fixed_width) / self.measured_char_width.max(1.0))
+            .floor()
+            .max(20.0) as usize;
+        if columns != current_columns {
+            let tab = self.active_tab_mut();
+            tab.wrap_columns = columns;
+            tab.selection.clear();
+            tab.rebuild_source_rows();
+            self.perform_file_search(cx);
+        }
+    }
+
     /// Ensure the active tab has a `ListState` matching its markdown document,
     /// returning a clone for the render to drive the virtualized preview.
     ///
@@ -1527,6 +1702,9 @@ impl Render for FileViewer {
         let font_data = tab.font_data.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
+        let wrap_lines = tab.wrap_lines;
+        let json_pretty = tab.json_pretty;
+        let can_pretty_print = tab.json_alternate.is_some();
         // Body view selectors. Each tab renders exactly one of these branches:
         //   * show_image   — raster image, or SVG in Preview mode
         //   * show_font    — font preview (sample text + metadata)
@@ -1581,6 +1759,7 @@ impl Render for FileViewer {
             .advance(font_id, px(font_size), 'm')
             .map(|size| f32::from(size.width))
             .unwrap_or(font_size * 0.6);
+        self.update_source_wrap_columns(cx);
 
         // Virtualization setup
         let tab = self.active_tab();
@@ -1589,6 +1768,7 @@ impl Render for FileViewer {
         let view = cx.entity().clone();
         let scrollbar_geometry = get_scrollbar_geometry(&tab.source_scroll_handle);
         let is_dragging_scrollbar = tab.scrollbar_drag.is_some();
+        let longest_source_row = tab.longest_source_row;
 
         // Flatten the tree only when its structure changes. The sidebar list
         // renders just the visible range from these cached rows.
@@ -1728,6 +1908,9 @@ impl Render for FileViewer {
                         }
                     "b" if !modifiers.platform && !modifiers.control => {
                         this.toggle_sidebar(cx);
+                    }
+                    "z" if modifiers.alt && !is_preview && !is_img_view && !is_font_tab => {
+                        this.toggle_line_wrap(cx);
                     }
                     "c" if modifiers.platform || modifiers.control => {
                         if is_img_view || is_font_tab {
@@ -2079,6 +2262,88 @@ impl Render for FileViewer {
                                         )),
                                 )
                             })
+                            .when(show_source && has_file, |d| {
+                                d.child(
+                                    div()
+                                        .id("line-wrap-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(rgb(if wrap_lines {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if wrap_lines {
+                                            t.bg_secondary
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle line wrapping (Alt+Z)",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_line_wrap(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(if wrap_lines {
+                                                    t.text_primary
+                                                } else {
+                                                    t.text_secondary
+                                                }))
+                                                .child("Wrap"),
+                                        ),
+                                )
+                            })
+                            .when(show_source && can_pretty_print, |d| {
+                                d.child(
+                                    div()
+                                        .id("json-pretty-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(rgb(if json_pretty {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if json_pretty {
+                                            t.bg_secondary
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle pretty-printed JSON",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_json_pretty(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(if json_pretty {
+                                                    t.text_primary
+                                                } else {
+                                                    t.text_secondary
+                                                }))
+                                                .child("Pretty"),
+                                        ),
+                                )
+                            })
                             .when(show_image, |d| {
                                 let view = self.active_tab().image_view.clone();
                                 let zoom_label = if view.auto_fit {
@@ -2249,10 +2514,22 @@ impl Render for FileViewer {
                                             .size_full()
                                             .bg(rgb(t.bg_secondary))
                                             .cursor(CursorStyle::IBeam)
+                                            .with_width_from_item(Some(longest_source_row))
+                                            .with_horizontal_sizing_behavior(if wrap_lines {
+                                                ListHorizontalSizingBehavior::FitList
+                                            } else {
+                                                ListHorizontalSizingBehavior::Unconstrained
+                                            })
                                             .track_scroll(
                                                 &self.active_tab().source_scroll_handle,
                                             ),
                                         )
+                                        .when(!wrap_lines, |d| {
+                                            d.child(source_horizontal_scrollbar(
+                                                "file-source-horizontal-scrollbar",
+                                                &self.active_tab().source_scroll_handle,
+                                            ))
+                                        })
                                         .when_some(
                                             scrollbar_geometry,
                                             |d, (_, _, thumb_y, thumb_height)| {
@@ -2567,7 +2844,7 @@ impl Render for FileViewer {
                                             .when(!is_preview_mode, |d| {
                                                 d.child(format!(
                                                     "{} lines",
-                                                    self.active_tab().line_count
+                                                    self.active_tab().highlighted_lines.len()
                                                 ))
                                             })
                                             .when(is_preview_mode, |d| {
@@ -2779,18 +3056,47 @@ fn render_font_preview(
 mod markdown_selection_tests {
     use super::{
         MARKDOWN_TABLE_SCROLLBAR_GUTTER, byte_offset_for_char, char_offset_for_byte,
-        markdown_table_scrollbar, markdown_word_boundaries,
+        markdown_table_scrollbar, markdown_word_boundaries, source_horizontal_scrollbar,
     };
     use gpui::prelude::*;
     use gpui::{
-        Context, Render, ScrollHandle, StatefulInteractiveElement, TestAppContext,
-        VisualTestContext, Window, div, px,
+        Context, ListHorizontalSizingBehavior, Render, ScrollHandle, StatefulInteractiveElement,
+        TestAppContext, UniformListScrollHandle, VisualTestContext, Window, div, px, uniform_list,
     };
     use okena_core::theme::DARK_THEME;
     use okena_markdown::{MarkdownDocument, RenderedNode};
 
     struct MarkdownTableScrollTest {
         scroll_handle: ScrollHandle,
+    }
+
+    struct SourceHorizontalScrollTest {
+        scroll_handle: UniformListScrollHandle,
+    }
+
+    impl Render for SourceHorizontalScrollTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(360.0)).h(px(200.0)).child(
+                div()
+                    .relative()
+                    .size_full()
+                    .debug_selector(|| "test-source-container".to_string())
+                    .child(
+                        uniform_list("test-source-list", 1, |_, _, _| {
+                            vec![div().w(px(4000.0)).h(px(20.0))]
+                        })
+                        .size_full()
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .track_scroll(&self.scroll_handle),
+                    )
+                    .child(
+                        source_horizontal_scrollbar("test-source-scrollbar", &self.scroll_handle)
+                            .debug_selector(|| "test-source-scrollbar-layer".to_string()),
+                    ),
+            )
+        }
     }
 
     impl Render for MarkdownTableScrollTest {
@@ -2927,5 +3233,31 @@ mod markdown_selection_tests {
             scroll_handle.offset().x < px(0.0),
             "horizontal wheel input must move the horizontal scrollbar"
         );
+    }
+
+    #[gpui::test]
+    fn source_list_exposes_horizontal_overflow_and_scrollbar(cx: &mut TestAppContext) {
+        let scroll_handle = UniformListScrollHandle::new();
+        let handle_for_view = scroll_handle.clone();
+        cx.update(gpui_component::init);
+        let (_, vcx) = cx.add_window_view(move |_, _| SourceHorizontalScrollTest {
+            scroll_handle: handle_for_view,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.run_until_parked();
+        vcx.update(|window, cx| _ = window.draw(cx));
+
+        let container_bounds = vcx
+            .debug_bounds("test-source-container")
+            .expect("source container should be rendered");
+        let scrollbar_bounds = vcx
+            .debug_bounds("test-source-scrollbar-layer")
+            .expect("source scrollbar should be rendered");
+
+        assert!(
+            scroll_handle.0.borrow().base_handle.max_offset().x > px(0.0),
+            "wide source rows must produce horizontal overflow"
+        );
+        assert_eq!(scrollbar_bounds, container_bounds);
     }
 }

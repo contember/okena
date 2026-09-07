@@ -1,15 +1,35 @@
 //! In-file search for the file viewer — thin glue over the shared
-//! [`crate::in_page_search`] engine. Each cell is a source line; the cell id is
-//! the line index, which is also the `source_scroll_handle` item index.
+//! [`crate::in_page_search`] engine. Each cell is a rendered source row; the cell
+//! id is also the `source_scroll_handle` item index.
 
-use crate::in_page_search::{self, InPageSearch, SearchBarCallbacks};
+use crate::in_page_search::{self, InPageSearch, SearchBarCallbacks, SearchMatch};
 use gpui::*;
 use okena_core::theme::ThemeColors;
 use okena_ui::simple_input::InputChangedEvent;
 use std::ops::Range;
 use std::rc::Rc;
 
-use super::FileViewer;
+use super::{FileViewer, SourceRow};
+
+fn map_matches_to_source_rows(matches: Vec<SearchMatch>, rows: &[SourceRow]) -> Vec<SearchMatch> {
+    matches
+        .into_iter()
+        .filter_map(|match_| {
+            let first = rows.partition_point(|row| row.logical_line < match_.cell);
+            let end = rows.partition_point(|row| row.logical_line <= match_.cell);
+            let matching_rows = rows.get(first..end)?;
+            let local_row = matching_rows
+                .partition_point(|row| row.byte_range.start <= match_.start)
+                .saturating_sub(1);
+            let row = matching_rows.get(local_row)?;
+            Some(SearchMatch {
+                cell: first + local_row,
+                start: match_.start - row.byte_range.start,
+                end: match_.end - row.byte_range.start,
+            })
+        })
+        .collect()
+}
 
 impl FileViewer {
     /// Open the in-file search bar. If already open, refocus and select all.
@@ -61,14 +81,15 @@ impl FileViewer {
 
         // Compute into a local Vec so the `search` borrow is released before the
         // `active_tab` borrow.
-        let matches = in_page_search::compute_matches(
+        let logical_matches = in_page_search::compute_matches(
             &query,
             case_sensitive,
             self.active_tab()
                 .highlighted_lines
                 .iter()
-                .map(|l| l.plain_text.as_str()),
+                .map(|line| line.plain_text.as_str()),
         );
+        let matches = map_matches_to_source_rows(logical_matches, &self.active_tab().source_rows);
 
         if let Some(search) = self.search_state.as_mut() {
             search.set_matches(matches);
@@ -144,5 +165,67 @@ impl FileViewer {
                 on_close: Rc::new(|this: &mut Self, window, cx| this.close_search(window, cx)),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_matches_to_source_rows;
+    use crate::file_viewer::SourceRow;
+    use crate::in_page_search::SearchMatch;
+
+    #[test]
+    fn maps_matches_to_wrapped_rows_without_splitting_the_match() {
+        let rows = vec![
+            SourceRow {
+                logical_line: 0,
+                byte_range: 0..4,
+                columns: 4,
+            },
+            SourceRow {
+                logical_line: 0,
+                byte_range: 4..8,
+                columns: 4,
+            },
+            SourceRow {
+                logical_line: 1,
+                byte_range: 0..3,
+                columns: 3,
+            },
+        ];
+        let matches = map_matches_to_source_rows(
+            vec![
+                SearchMatch {
+                    cell: 0,
+                    start: 5,
+                    end: 7,
+                },
+                SearchMatch {
+                    cell: 0,
+                    start: 3,
+                    end: 6,
+                },
+                SearchMatch {
+                    cell: 1,
+                    start: 1,
+                    end: 2,
+                },
+            ],
+            &rows,
+        );
+
+        assert_eq!(matches.len(), 3);
+        assert_eq!(
+            (matches[0].cell, matches[0].start, matches[0].end),
+            (1, 1, 3)
+        );
+        assert_eq!(
+            (matches[1].cell, matches[1].start, matches[1].end),
+            (0, 3, 6)
+        );
+        assert_eq!(
+            (matches[2].cell, matches[2].start, matches[2].end),
+            (2, 1, 2)
+        );
     }
 }

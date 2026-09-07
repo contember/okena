@@ -8,7 +8,6 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 
-use super::loading::LoadedContent;
 use super::{BlameLoadState, FileHistoryLoadState, FileSource, FileViewer, FileViewerEvent};
 use crate::history::FileHistoryEntry;
 
@@ -154,6 +153,9 @@ impl FileViewer {
         let scope_generation = self.scope_generation;
         let relative_path = self.active_tab().relative_path.clone();
         let source_for_request = source.clone();
+        let highlight_path = self.active_tab().file_path.clone();
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
         let tab = self.active_tab_mut();
         tab.load_generation = request_generation;
         tab.revision = Some(entry);
@@ -168,9 +170,20 @@ impl FileViewer {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { provider.get_file_at_source(&revision_path, &source_for_request) },
-                )
+                .spawn(async move {
+                    provider
+                        .get_file_at_source(&revision_path, &source_for_request)
+                        .map(|content| {
+                            content.map(|content| {
+                                super::loading::build_text_content(
+                                    &highlight_path,
+                                    content,
+                                    &syntax_set,
+                                    is_dark,
+                                )
+                            })
+                        })
+                })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 if this.scope_generation != scope_generation {
@@ -189,7 +202,7 @@ impl FileViewer {
                     return;
                 }
                 let content = match result {
-                    Ok(Some(content)) => Ok(LoadedContent::Text(content)),
+                    Ok(Some(content)) => Ok(content),
                     Ok(None) => Err("File does not exist in this revision".to_string()),
                     Err(error) => Err(error),
                 };
