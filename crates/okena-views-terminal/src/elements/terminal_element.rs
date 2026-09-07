@@ -1,7 +1,7 @@
 use crate::terminal_view_settings;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
 use okena_core::theme::ThemeColors;
@@ -12,6 +12,7 @@ use okena_ui::theme::ansi_to_hsla;
 use okena_workspace::settings::CursorShape;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,13 +39,14 @@ pub(crate) fn next_resize_viewer_id() -> u64 {
 mod tests {
     use super::super::terminal_rendering::BatchedTextLine;
     use super::{
-        TerminalGridLayout, TerminalRenderCache, TerminalRenderCacheKey, changed_cells,
-        deregister_resize_viewer, shared_resize_target,
+        RowHasher, RowLayout, TerminalElementState, TerminalGridLayout, TerminalRenderCache,
+        TerminalRenderCacheKey, build_terminal_grid_layout, changed_cells,
+        deregister_resize_viewer, selected_columns, shared_resize_target,
     };
-    use gpui::TextRun;
-    use gpui::{Font, FontFeatures, FontStyle, FontWeight};
+    use gpui::{Font, FontFeatures, FontStyle, FontWeight, TextRun, px};
     use okena_core::theme::{DARK_THEME, LIGHT_THEME};
-    use okena_terminal::terminal::TerminalSize;
+    use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
+    use std::hash::Hasher;
     use std::sync::Arc;
 
     fn size(cols: u16, rows: u16) -> TerminalSize {
@@ -101,26 +103,30 @@ mod tests {
         deregister_resize_viewer(terminal_id, 2);
     }
 
+    fn test_font() -> Font {
+        Font {
+            family: "Test Mono".into(),
+            features: FontFeatures::disable_ligatures(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        }
+    }
+
     fn cache_key() -> TerminalRenderCacheKey {
         TerminalRenderCacheKey {
             content_generation: 7,
             selection: None,
-            font: Font {
-                family: "Test Mono".into(),
-                features: FontFeatures::disable_ligatures(),
-                fallbacks: None,
-                weight: FontWeight::NORMAL,
-                style: FontStyle::Normal,
-            },
+            font: test_font(),
+            font_size: px(13.0),
             theme: DARK_THEME,
         }
     }
 
     fn empty_layout() -> TerminalGridLayout {
         TerminalGridLayout {
-            text_lines: Vec::new(),
-            rects: Vec::new(),
-            screen_lines: 0,
+            rows: Vec::new(),
+            cols: 0,
             display_offset: 0,
             cursor_col: 0,
             cursor_visual_line: 0,
@@ -128,45 +134,50 @@ mod tests {
         }
     }
 
-    /// A layout of `rows` rows, `cols` wide, whose row `i` renders `texts[i]`.
-    /// An empty string means the row painted nothing.
+    /// A layout `cols` wide whose row `i` renders `texts[i]` and is hashed by
+    /// that text alone. An empty string means the row painted nothing.
     fn layout_of(rows: usize, cols: usize, texts: &[&str]) -> TerminalGridLayout {
+        assert_eq!(texts.len(), rows);
         let style = TextRun {
             len: 0,
-            font: Font {
-                family: "test".into(),
-                features: FontFeatures::default(),
-                fallbacks: None,
-                weight: FontWeight::NORMAL,
-                style: FontStyle::Normal,
-            },
+            font: test_font(),
             color: gpui::black(),
             background_color: None,
             underline: None,
             strikethrough: None,
         };
-        let text_lines = texts
+        let rows = texts
             .iter()
             .enumerate()
-            .filter(|(_, text)| !text.is_empty())
             .map(|(row, text)| {
-                let mut chars = text.chars();
-                let mut line =
-                    BatchedTextLine::new(row as i32, 0, chars.next().unwrap(), style.clone());
-                for (offset, c) in chars.enumerate() {
-                    line.append(offset as i32 + 1, c, style.clone());
-                }
-                line
+                let mut hasher = RowHasher::default();
+                hasher.write(text.as_bytes());
+                let text_lines = text
+                    .chars()
+                    .next()
+                    .map(|first| {
+                        let mut line = BatchedTextLine::new(row as i32, 0, first, style.clone());
+                        for (offset, c) in text.chars().skip(1).enumerate() {
+                            line.append(offset as i32 + 1, c, style.clone());
+                        }
+                        line
+                    })
+                    .into_iter()
+                    .collect();
+                Arc::new(RowLayout {
+                    hash: hasher.finish(),
+                    text_lines,
+                    rects: Vec::new(),
+                })
             })
             .collect();
         TerminalGridLayout {
-            text_lines,
-            rects: Vec::new(),
-            screen_lines: rows,
+            rows,
+            cols,
             display_offset: 0,
             cursor_col: 0,
             cursor_visual_line: 0,
-            cells_scanned: rows * cols,
+            cells_scanned: texts.len() * cols,
         }
     }
 
@@ -232,6 +243,10 @@ mod tests {
         changed_font.font.weight = FontWeight::BOLD;
         assert!(cache.get(&changed_font).is_none());
 
+        let mut changed_font_size = key.clone();
+        changed_font_size.font_size = px(20.0);
+        assert!(cache.get(&changed_font_size).is_none());
+
         let mut changed_theme = key;
         changed_theme.theme = LIGHT_THEME;
         assert!(cache.get(&changed_theme).is_none());
@@ -251,6 +266,198 @@ mod tests {
         assert!(cache.get(&key).is_none());
         assert!(cache.key.is_none());
         assert!(cache.layout.is_none());
+    }
+
+    #[test]
+    fn rows_are_offered_for_reuse_only_under_the_same_font_size_and_theme() {
+        let key = cache_key();
+        let mut cache = TerminalRenderCache::default();
+        assert!(cache.reusable_rows(&key).is_none(), "nothing stored yet");
+        cache.store(key.clone(), empty_layout());
+
+        let mut new_content = key.clone();
+        new_content.content_generation += 1;
+        new_content.selection = Some(((1, 2), (3, 4)));
+        assert!(cache.reusable_rows(&new_content).is_some());
+
+        let mut changed_theme = key.clone();
+        changed_theme.theme = LIGHT_THEME;
+        assert!(cache.reusable_rows(&changed_theme).is_none());
+
+        let mut changed_font = key.clone();
+        changed_font.font.weight = FontWeight::BOLD;
+        assert!(cache.reusable_rows(&changed_font).is_none());
+
+        let mut changed_font_size = key;
+        changed_font_size.font_size = px(20.0);
+        assert!(cache.reusable_rows(&changed_font_size).is_none());
+    }
+
+    #[test]
+    fn selected_columns_follow_the_selection_shape() {
+        let selection = Some(((2, 1), (5, 3)));
+        assert_eq!(selected_columns(selection, 0), None);
+        assert_eq!(selected_columns(selection, 1), Some((2, usize::MAX)));
+        assert_eq!(selected_columns(selection, 2), Some((0, usize::MAX)));
+        assert_eq!(selected_columns(selection, 3), Some((0, 5)));
+        assert_eq!(selected_columns(selection, 4), None);
+        assert_eq!(selected_columns(Some(((2, 1), (5, 1))), 1), Some((2, 5)));
+        assert_eq!(selected_columns(None, 1), None);
+    }
+
+    #[test]
+    fn selected_columns_normalise_a_backwards_selection() {
+        let backwards = Some(((5, 3), (2, 1)));
+        assert_eq!(selected_columns(backwards, 1), Some((2, usize::MAX)));
+        assert_eq!(selected_columns(backwards, 3), Some((0, 5)));
+        assert_eq!(selected_columns(Some(((5, 1), (2, 1))), 1), Some((2, 5)));
+    }
+
+    struct NullTransport;
+
+    impl TerminalTransport for NullTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    fn terminal_showing(cols: u16, rows: u16, output: &[u8]) -> Terminal {
+        let terminal = Terminal::new(
+            "grid".into(),
+            size(cols, rows),
+            Arc::new(NullTransport),
+            String::new(),
+        );
+        terminal.process_output(output);
+        terminal
+    }
+
+    fn element_state() -> TerminalElementState {
+        let font = test_font();
+        TerminalElementState {
+            cell_width: px(8.0),
+            line_height: px(16.0),
+            font_size: px(13.0),
+            font_bold: Font {
+                weight: FontWeight::BOLD,
+                ..font.clone()
+            },
+            font_italic: Font {
+                style: FontStyle::Italic,
+                ..font.clone()
+            },
+            font_bold_italic: Font {
+                weight: FontWeight::BOLD,
+                style: FontStyle::Italic,
+                ..font.clone()
+            },
+            font,
+        }
+    }
+
+    fn build(
+        terminal: &Terminal,
+        selection: Option<((usize, i32), (usize, i32))>,
+        previous: Option<&TerminalGridLayout>,
+    ) -> TerminalGridLayout {
+        build_terminal_grid_layout(terminal, selection, &DARK_THEME, &element_state(), previous).1
+    }
+
+    /// Per row, whether `next` shares `previous`'s `RowLayout` instead of a rebuilt one.
+    fn reused_rows(previous: &TerminalGridLayout, next: &TerminalGridLayout) -> Vec<bool> {
+        assert_eq!(previous.rows.len(), next.rows.len());
+        previous
+            .rows
+            .iter()
+            .zip(&next.rows)
+            .map(|(before, after)| Arc::ptr_eq(before, after))
+            .collect()
+    }
+
+    #[test]
+    fn an_identical_rebuild_shares_every_row() {
+        let terminal = terminal_showing(10, 3, b"one\r\ntwo\r\nthree");
+        let first = build(&terminal, None, None);
+        assert_eq!(
+            first.cells_scanned, 30,
+            "a first build scans the whole screen"
+        );
+
+        let second = build(&terminal, None, Some(&first));
+
+        assert_eq!(reused_rows(&first, &second), vec![true, true, true]);
+        assert_eq!(second.cells_scanned, 0);
+    }
+
+    #[test]
+    fn editing_one_row_rebuilds_only_that_row() {
+        let terminal = terminal_showing(10, 3, b"one\r\ntwo\r\nthree");
+        let first = build(&terminal, None, None);
+
+        terminal.process_output(b"\x1b[2;1HTWO");
+        let second = build(&terminal, None, Some(&first));
+
+        assert_eq!(reused_rows(&first, &second), vec![true, false, true]);
+        assert_eq!(second.cells_scanned, 10);
+        assert_eq!(second.rows[1].text_lines[0].text, "TWO");
+    }
+
+    #[test]
+    fn a_selection_change_rebuilds_only_the_rows_it_touches() {
+        let terminal = terminal_showing(10, 5, b"a\r\nb\r\nc\r\nd\r\ne");
+        let unselected = build(&terminal, None, None);
+
+        let selected = build(&terminal, Some(((0, 1), (3, 2))), Some(&unselected));
+        assert_eq!(
+            reused_rows(&unselected, &selected),
+            vec![true, false, false, true, true]
+        );
+
+        // Row 2 stays selected but its span changes from an end row to a start row.
+        let moved = build(&terminal, Some(((0, 2), (3, 3))), Some(&selected));
+        assert_eq!(
+            reused_rows(&selected, &moved),
+            vec![true, false, false, false, true]
+        );
+    }
+
+    #[test]
+    fn a_resize_rebuilds_every_row() {
+        let terminal = terminal_showing(10, 3, b"one\r\ntwo\r\nthree");
+        let first = build(&terminal, None, None);
+
+        let wider = terminal_showing(12, 3, b"one\r\ntwo\r\nthree");
+        let second = build(&wider, None, Some(&first));
+        assert_eq!(reused_rows(&first, &second), vec![false, false, false]);
+        assert_eq!(second.cells_scanned, 36);
+
+        let taller = terminal_showing(10, 4, b"one\r\ntwo\r\nthree");
+        let third = build(&taller, None, Some(&first));
+        assert!(third.rows.iter().all(|row| {
+            first
+                .rows
+                .iter()
+                .all(|previous| !Arc::ptr_eq(previous, row))
+        }));
+        assert_eq!(third.cells_scanned, 40);
+    }
+
+    #[test]
+    fn an_underline_colour_change_alone_rebuilds_the_row() {
+        let terminal = terminal_showing(10, 2, b"\x1b[4mab\x1b[0m\r\nx");
+        let first = build(&terminal, None, None);
+
+        terminal.process_output(b"\x1b[1;1H\x1b[4m\x1b[58;2;255;0;0mab\x1b[0m");
+        let second = build(&terminal, None, Some(&first));
+
+        assert_eq!(reused_rows(&first, &second), vec![false, true]);
+        assert_ne!(
+            first.rows[0].text_lines[0].styles[0].underline,
+            second.rows[0].text_lines[0].styles[0].underline,
+            "the rebuilt row carries the new underline colour"
+        );
     }
 }
 
@@ -499,18 +706,54 @@ struct TerminalRenderCacheKey {
     /// derived from it by overriding weight and style, so it alone pins all four.
     /// A separately configurable bold face would have to be added here too.
     font: Font,
+    /// Rows keep their shaped lines, so the size they were shaped at pins them.
+    font_size: Pixels,
     theme: ThemeColors,
+}
+
+impl TerminalRenderCacheKey {
+    /// Whether rows built under `other` still paint the same under `self`.
+    fn same_row_inputs(&self, other: &Self) -> bool {
+        self.font == other.font && self.font_size == other.font_size && self.theme == other.theme
+    }
+}
+
+/// One visual row, shared between consecutive layouts while `hash` holds.
+#[derive(Debug)]
+struct RowLayout {
+    /// See `row_hash`.
+    hash: u64,
+    text_lines: Vec<BatchedTextLine>,
+    rects: Vec<LayoutRect>,
 }
 
 #[derive(Debug)]
 struct TerminalGridLayout {
-    text_lines: Vec<BatchedTextLine>,
-    rects: Vec<LayoutRect>,
-    screen_lines: usize,
+    rows: Vec<Arc<RowLayout>>,
+    cols: usize,
     display_offset: i32,
     cursor_col: usize,
     cursor_visual_line: i32,
+    /// Cells of the rows this build actually rebuilt; reused rows cost none.
     cells_scanned: usize,
+}
+
+impl TerminalGridLayout {
+    fn screen_lines(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn cells(&self) -> usize {
+        self.rows.len().saturating_mul(self.cols)
+    }
+
+    fn rects(&self) -> impl Iterator<Item = &LayoutRect> {
+        self.rows.iter().flat_map(|row| row.rects.iter())
+    }
+
+    fn text_lines(&self) -> impl Iterator<Item = &BatchedTextLine> {
+        self.rows.iter().flat_map(|row| row.text_lines.iter())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -543,6 +786,16 @@ impl TerminalRenderCache {
         self.layout.clone()
     }
 
+    /// The last layout's rows, when a build under `key` may reuse them: a font,
+    /// size or theme change repaints every row and must not be served old ones.
+    fn reusable_rows(&self, key: &TerminalRenderCacheKey) -> Option<Arc<TerminalGridLayout>> {
+        let previous_key = self.key.as_ref()?;
+        if !previous_key.same_row_inputs(key) {
+            return None;
+        }
+        self.layout.clone()
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.key = None;
         self.layout = None;
@@ -559,228 +812,314 @@ fn build_terminal_grid_layout(
     selection: Option<((usize, i32), (usize, i32))>,
     t: &ThemeColors,
     state: &TerminalElementState,
+    previous: Option<&TerminalGridLayout>,
 ) -> (u64, TerminalGridLayout) {
-    let (content_generation, text_lines, rects, screen_lines, display_offset, cursor_point, cols) =
-        terminal.with_content(|term| {
-            let content_generation = terminal.content_generation();
-            let grid = term.grid();
-            let screen_lines = grid.screen_lines();
-            let cols = grid.columns();
-            let display_offset = grid.display_offset() as i32;
-            let cursor_point = grid.cursor.point;
+    terminal.with_content(|term| {
+        let content_generation = terminal.content_generation();
+        let grid = term.grid();
+        let screen_lines = grid.screen_lines();
+        let cols = grid.columns();
+        let display_offset = grid.display_offset() as i32;
+        let cursor_point = grid.cursor.point;
+        let previous_rows = previous
+            .filter(|previous| previous.rows.len() == screen_lines && previous.cols == cols)
+            .map(|previous| previous.rows.as_slice());
 
-            let mut text_lines: Vec<BatchedTextLine> = Vec::new();
-            let mut rects: Vec<LayoutRect> = Vec::new();
-            let mut current_rect: Option<LayoutRect> = None;
-
-            for row in 0..screen_lines {
-                let visual_line = row as i32;
-                let buffer_line = visual_line - display_offset;
-                let mut current_line: Option<BatchedTextLine> = None;
-
-                if let Some(rect) = current_rect.take() {
-                    rects.push(rect);
-                }
-
-                for col in 0..cols {
-                    let cell_point = alacritty_terminal::index::Point {
-                        line: Line(buffer_line),
-                        column: Column(col),
-                    };
-                    let cell = &grid[cell_point];
-                    let col_i32 = col as i32;
-
-                    let mut fg = cell.fg;
-                    let mut bg = cell.bg;
-
-                    if cell.flags.contains(Flags::BOLD) {
-                        fg = match fg {
-                            Color::Named(NamedColor::Black) => {
-                                Color::Named(NamedColor::BrightBlack)
-                            }
-                            Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
-                            Color::Named(NamedColor::Green) => {
-                                Color::Named(NamedColor::BrightGreen)
-                            }
-                            Color::Named(NamedColor::Yellow) => {
-                                Color::Named(NamedColor::BrightYellow)
-                            }
-                            Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
-                            Color::Named(NamedColor::Magenta) => {
-                                Color::Named(NamedColor::BrightMagenta)
-                            }
-                            Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
-                            Color::Named(NamedColor::White) => {
-                                Color::Named(NamedColor::BrightWhite)
-                            }
-                            Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
-                            other => other,
-                        };
-                    }
-
-                    if cell.flags.contains(Flags::INVERSE) {
-                        std::mem::swap(&mut fg, &mut bg);
-                    }
-
-                    let is_selected =
-                        if let Some(((start_col, start_row), (end_col, end_row))) = selection {
-                            let (start_row, start_col, end_row, end_col) = if start_row < end_row
-                                || (start_row == end_row && start_col <= end_col)
-                            {
-                                (start_row, start_col, end_row, end_col)
-                            } else {
-                                (end_row, end_col, start_row, start_col)
-                            };
-                            if buffer_line >= start_row && buffer_line <= end_row {
-                                if start_row == end_row {
-                                    col >= start_col && col <= end_col
-                                } else if buffer_line == start_row {
-                                    col >= start_col
-                                } else if buffer_line == end_row {
-                                    col <= end_col
-                                } else {
-                                    true
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                    let bg_color = if is_selected {
-                        Some(rgb(t.selection_bg).into())
-                    } else if !is_default_bg(&bg, t) {
-                        Some(ansi_to_hsla(t, &bg))
-                    } else {
-                        None
-                    };
-
-                    if let Some(color) = bg_color {
-                        let can_extend = current_rect.as_ref().is_some_and(|rect| {
-                            rect.line == visual_line
-                                && rect.start_col + rect.num_cells as i32 == col_i32
-                                && rect.color == color
-                        });
-                        if can_extend {
-                            if let Some(rect) = current_rect.as_mut() {
-                                rect.extend();
-                            }
-                        } else {
-                            if let Some(previous) = current_rect.take() {
-                                rects.push(previous);
-                            }
-                            current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
-                        }
-                    } else if let Some(rect) = current_rect.take() {
-                        rects.push(rect);
-                    }
-
-                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                        continue;
-                    }
-                    if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT)
-                    {
-                        continue;
-                    }
-
-                    let mut fg_color = if is_selected {
-                        rgb(t.selection_fg).into()
-                    } else {
-                        ansi_to_hsla(t, &fg)
-                    };
-
-                    if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
-                        fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
-                    }
-
-                    let is_bold = cell.flags.contains(Flags::BOLD);
-                    let is_italic = cell.flags.contains(Flags::ITALIC);
-                    let font = match (is_bold, is_italic) {
-                        (true, true) => state.font_bold_italic.clone(),
-                        (true, false) => state.font_bold.clone(),
-                        (false, true) => state.font_italic.clone(),
-                        (false, false) => state.font.clone(),
-                    };
-
-                    let text_style = TextRun {
-                        len: cell.c.len_utf8(),
-                        font,
-                        color: fg_color,
-                        background_color: None,
-                        underline: if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                            let line_color = cell
-                                .underline_color()
-                                .map(|color| ansi_to_hsla(t, &color))
-                                .unwrap_or(fg_color);
-                            Some(UnderlineStyle {
-                                color: Some(line_color),
-                                thickness: px(1.0),
-                                wavy: cell.flags.contains(Flags::UNDERCURL),
-                            })
-                        } else {
-                            None
-                        },
-                        strikethrough: if cell.flags.contains(Flags::STRIKEOUT) {
-                            Some(StrikethroughStyle {
-                                color: Some(fg_color),
-                                thickness: px(1.0),
-                            })
-                        } else {
-                            None
-                        },
-                    };
-
-                    if requires_independent_shaping(cell.c) {
-                        if let Some(line) = current_line.take() {
-                            text_lines.push(line);
-                        }
-                        text_lines.push(BatchedTextLine::new(
-                            visual_line,
-                            col_i32,
-                            cell.c,
-                            text_style,
-                        ));
-                    } else if let Some(line) = current_line.as_mut() {
-                        line.append(col_i32, cell.c, text_style);
-                    } else {
-                        current_line = Some(BatchedTextLine::new(
-                            visual_line,
-                            col_i32,
-                            cell.c,
-                            text_style,
-                        ));
-                    }
-                }
-                if let Some(line) = current_line {
-                    text_lines.push(line);
+        let mut rows = Vec::with_capacity(screen_lines);
+        let mut rebuilt_rows = 0usize;
+        for row in 0..screen_lines {
+            let visual_line = row as i32;
+            let buffer_line = visual_line - display_offset;
+            let cells = &grid[Line(buffer_line)];
+            let selected = selected_columns(selection, buffer_line);
+            let hash = row_hash(cells, cols, selected);
+            let reusable = previous_rows
+                .and_then(|rows| rows.get(row))
+                .filter(|row| row.hash == hash);
+            match reusable {
+                Some(row) => rows.push(row.clone()),
+                None => {
+                    rebuilt_rows += 1;
+                    rows.push(Arc::new(build_row(
+                        cells,
+                        visual_line,
+                        cols,
+                        selected,
+                        hash,
+                        t,
+                        state,
+                    )));
                 }
             }
+        }
 
-            if let Some(rect) = current_rect {
-                rects.push(rect);
+        let layout = TerminalGridLayout {
+            rows,
+            cols,
+            display_offset,
+            cursor_col: cursor_point.column.0,
+            cursor_visual_line: cursor_point.line.0 + display_offset,
+            cells_scanned: rebuilt_rows.saturating_mul(cols),
+        };
+        (content_generation, layout)
+    })
+}
+
+/// Columns of `buffer_line` covered by `selection`, inclusive; `None` when the
+/// row lies outside it. Open ends extend to `usize::MAX`.
+fn selected_columns(
+    selection: Option<((usize, i32), (usize, i32))>,
+    buffer_line: i32,
+) -> Option<(usize, usize)> {
+    let ((start_col, start_row), (end_col, end_row)) = selection?;
+    let (start_row, start_col, end_row, end_col) =
+        if start_row < end_row || (start_row == end_row && start_col <= end_col) {
+            (start_row, start_col, end_row, end_col)
+        } else {
+            (end_row, end_col, start_row, start_col)
+        };
+    if buffer_line < start_row || buffer_line > end_row {
+        return None;
+    }
+    let first = if buffer_line == start_row {
+        start_col
+    } else {
+        0
+    };
+    let last = if buffer_line == end_row {
+        end_col
+    } else {
+        usize::MAX
+    };
+    Some((first, last))
+}
+
+/// Everything that decides how a row paints besides the theme and fonts the cache
+/// key pins: each cell's glyph, colours, flags and underline colour, plus the
+/// selection span. Zero-width chars and hyperlinks are not painted by the grid.
+fn row_hash(cells: &Row<Cell>, cols: usize, selected: Option<(usize, usize)>) -> u64 {
+    let mut hasher = RowHasher::default();
+    selected.hash(&mut hasher);
+    for col in 0..cols {
+        let cell = &cells[Column(col)];
+        hasher.write_u32(u32::from(cell.c));
+        hasher.write_u16(cell.flags.bits());
+        hash_color(&cell.fg, &mut hasher);
+        hash_color(&cell.bg, &mut hasher);
+        match cell.underline_color() {
+            Some(color) => {
+                hasher.write_u8(1);
+                hash_color(&color, &mut hasher);
             }
+            None => hasher.write_u8(0),
+        }
+    }
+    hasher.finish()
+}
 
-            (
-                content_generation,
-                text_lines,
-                rects,
-                screen_lines,
-                display_offset,
-                cursor_point,
-                cols,
-            )
-        });
-    let layout = TerminalGridLayout {
+fn hash_color(color: &Color, hasher: &mut impl Hasher) {
+    std::mem::discriminant(color).hash(hasher);
+    match color {
+        Color::Named(named) => std::mem::discriminant(named).hash(hasher),
+        Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b).hash(hasher),
+        Color::Indexed(index) => index.hash(hasher),
+    }
+}
+
+/// FxHash-style word mixer: the hash pass runs over every cell of every
+/// rebuilt screen, and SipHash would cost a good part of the scan it replaces.
+#[derive(Default)]
+struct RowHasher(u64);
+
+impl Hasher for RowHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u8(*byte);
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write_u64(u64::from(value));
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write_u64(u64::from(value));
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write_u64(u64::from(value));
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+fn build_row(
+    cells: &Row<Cell>,
+    visual_line: i32,
+    cols: usize,
+    selected: Option<(usize, usize)>,
+    hash: u64,
+    t: &ThemeColors,
+    state: &TerminalElementState,
+) -> RowLayout {
+    let mut text_lines: Vec<BatchedTextLine> = Vec::new();
+    let mut rects: Vec<LayoutRect> = Vec::new();
+    let mut current_rect: Option<LayoutRect> = None;
+    let mut current_line: Option<BatchedTextLine> = None;
+
+    for col in 0..cols {
+        let cell = &cells[Column(col)];
+        let col_i32 = col as i32;
+
+        let mut fg = cell.fg;
+        let mut bg = cell.bg;
+
+        if cell.flags.contains(Flags::BOLD) {
+            fg = match fg {
+                Color::Named(NamedColor::Black) => Color::Named(NamedColor::BrightBlack),
+                Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
+                Color::Named(NamedColor::Green) => Color::Named(NamedColor::BrightGreen),
+                Color::Named(NamedColor::Yellow) => Color::Named(NamedColor::BrightYellow),
+                Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
+                Color::Named(NamedColor::Magenta) => Color::Named(NamedColor::BrightMagenta),
+                Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
+                Color::Named(NamedColor::White) => Color::Named(NamedColor::BrightWhite),
+                Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
+                other => other,
+            };
+        }
+
+        if cell.flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+
+        let is_selected = selected.is_some_and(|(first, last)| col >= first && col <= last);
+
+        let bg_color = if is_selected {
+            Some(rgb(t.selection_bg).into())
+        } else if !is_default_bg(&bg, t) {
+            Some(ansi_to_hsla(t, &bg))
+        } else {
+            None
+        };
+
+        if let Some(color) = bg_color {
+            let can_extend = current_rect.as_ref().is_some_and(|rect| {
+                rect.line == visual_line
+                    && rect.start_col + rect.num_cells as i32 == col_i32
+                    && rect.color == color
+            });
+            if can_extend {
+                if let Some(rect) = current_rect.as_mut() {
+                    rect.extend();
+                }
+            } else {
+                if let Some(previous) = current_rect.take() {
+                    rects.push(previous);
+                }
+                current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
+            }
+        } else if let Some(rect) = current_rect.take() {
+            rects.push(rect);
+        }
+
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT) {
+            continue;
+        }
+
+        let mut fg_color = if is_selected {
+            rgb(t.selection_fg).into()
+        } else {
+            ansi_to_hsla(t, &fg)
+        };
+
+        if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
+            fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
+        }
+
+        let is_bold = cell.flags.contains(Flags::BOLD);
+        let is_italic = cell.flags.contains(Flags::ITALIC);
+        let font = match (is_bold, is_italic) {
+            (true, true) => state.font_bold_italic.clone(),
+            (true, false) => state.font_bold.clone(),
+            (false, true) => state.font_italic.clone(),
+            (false, false) => state.font.clone(),
+        };
+
+        let text_style = TextRun {
+            len: cell.c.len_utf8(),
+            font,
+            color: fg_color,
+            background_color: None,
+            underline: if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                let line_color = cell
+                    .underline_color()
+                    .map(|color| ansi_to_hsla(t, &color))
+                    .unwrap_or(fg_color);
+                Some(UnderlineStyle {
+                    color: Some(line_color),
+                    thickness: px(1.0),
+                    wavy: cell.flags.contains(Flags::UNDERCURL),
+                })
+            } else {
+                None
+            },
+            strikethrough: if cell.flags.contains(Flags::STRIKEOUT) {
+                Some(StrikethroughStyle {
+                    color: Some(fg_color),
+                    thickness: px(1.0),
+                })
+            } else {
+                None
+            },
+        };
+
+        if requires_independent_shaping(cell.c) {
+            if let Some(line) = current_line.take() {
+                text_lines.push(line);
+            }
+            text_lines.push(BatchedTextLine::new(
+                visual_line,
+                col_i32,
+                cell.c,
+                text_style,
+            ));
+        } else if let Some(line) = current_line.as_mut() {
+            line.append(col_i32, cell.c, text_style);
+        } else {
+            current_line = Some(BatchedTextLine::new(
+                visual_line,
+                col_i32,
+                cell.c,
+                text_style,
+            ));
+        }
+    }
+    if let Some(line) = current_line {
+        text_lines.push(line);
+    }
+    if let Some(rect) = current_rect {
+        rects.push(rect);
+    }
+
+    RowLayout {
+        hash,
         text_lines,
         rects,
-        screen_lines,
-        display_offset,
-        cursor_col: cursor_point.column.0,
-        cursor_visual_line: cursor_point.line.0 + display_offset,
-        cells_scanned: screen_lines.saturating_mul(cols),
-    };
-    (content_generation, layout)
+    }
 }
 
 /// How much of the screen a rebuild actually changed: `(per row, after the
@@ -791,33 +1130,28 @@ fn build_terminal_grid_layout(
 /// the first number reads as "everything changed" while the second stays small
 /// — the difference decides whether line damage or scroll reuse is the fix.
 ///
-/// Diagnostic only, and deliberately cheap: rows are compared by their shaped
-/// text, so a row that changed colour but not characters reads as unchanged.
+/// Diagnostic only: rows are compared by their `row_hash`.
 fn changed_cells(
     previous: Option<&TerminalGridLayout>,
     next: &TerminalGridLayout,
 ) -> (usize, usize) {
     let Some(previous) = previous else {
-        return (next.cells_scanned, next.cells_scanned);
+        return (next.cells(), next.cells());
     };
-    if previous.screen_lines != next.screen_lines {
-        return (next.cells_scanned, next.cells_scanned);
+    if previous.rows.len() != next.rows.len() || previous.cols != next.cols {
+        return (next.cells(), next.cells());
     }
 
-    fn row_text(layout: &TerminalGridLayout) -> HashMap<i32, (i32, &str)> {
-        layout
-            .text_lines
-            .iter()
-            .map(|line| (line.line, (line.start_col, line.text.as_str())))
-            .collect()
-    }
-    let before = row_text(previous);
-    let after = row_text(next);
-
-    let rows = next.screen_lines as i32;
+    let hash_at = |layout: &TerminalGridLayout, row: i32| -> Option<u64> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|row| layout.rows.get(row))
+            .map(|row| row.hash)
+    };
+    let rows = next.rows.len() as i32;
     let changed_rows = |shift: i32| {
         (0..rows)
-            .filter(|row| before.get(&(row + shift)) != after.get(row))
+            .filter(|&row| hash_at(previous, row + shift) != hash_at(next, row))
             .count()
     };
 
@@ -826,11 +1160,10 @@ fn changed_cells(
         .map(changed_rows)
         .min()
         .unwrap_or(per_row);
-    let cols = next
-        .cells_scanned
-        .checked_div(next.screen_lines)
-        .unwrap_or(0);
-    (per_row.saturating_mul(cols), best.saturating_mul(cols))
+    (
+        per_row.saturating_mul(next.cols),
+        best.saturating_mul(next.cols),
+    )
 }
 
 /// Vertical shift the scroll-aware measurement searches. Wide enough for the
@@ -1084,6 +1417,7 @@ impl Element for TerminalElement {
             content_generation: self.terminal.content_generation(),
             selection,
             font: state.font.clone(),
+            font_size,
             theme: t,
         };
         let mut render_cache = self.render_cache.lock();
@@ -1093,8 +1427,14 @@ impl Element for TerminalElement {
         let layout = match cached_layout {
             Some(layout) => layout,
             None => {
-                let (content_generation, layout) =
-                    build_terminal_grid_layout(&self.terminal, selection, &t, state);
+                let previous = render_cache.reusable_rows(&cache_key);
+                let (content_generation, layout) = build_terminal_grid_layout(
+                    &self.terminal,
+                    selection,
+                    &t,
+                    state,
+                    previous.as_deref(),
+                );
                 if okena_core::render_probe::enabled() {
                     let previous = render_cache.previous_layout();
                     cells_changed = Some(changed_cells(previous.as_deref(), &layout));
@@ -1112,7 +1452,7 @@ impl Element for TerminalElement {
         // paying a BoundsTree insert each; stable sorting keeps their paint order.
         window.paint_layer(bounds, |window| {
             // Phase 2: Paint backgrounds
-            for rect in &layout.rects {
+            for rect in layout.rects() {
                 rect.paint(bounds.origin, cell_width, line_height, window);
             }
 
@@ -1120,7 +1460,7 @@ impl Element for TerminalElement {
             // search_match.line is an absolute grid line; convert to visual row
             for (idx, search_match) in self.search_matches.iter().enumerate() {
                 let visual_line = search_match.line + layout.display_offset;
-                if visual_line < 0 || visual_line >= layout.screen_lines as i32 {
+                if visual_line < 0 || visual_line >= layout.screen_lines() as i32 {
                     continue;
                 }
 
@@ -1162,7 +1502,7 @@ impl Element for TerminalElement {
             for url_match in self.url_matches.iter() {
                 let is_hovered = self.hovered_url_group == Some(url_match.link_group);
 
-                if url_match.line < 0 || url_match.line >= layout.screen_lines as i32 {
+                if url_match.line < 0 || url_match.line >= layout.screen_lines() as i32 {
                     continue;
                 }
 
@@ -1209,7 +1549,7 @@ impl Element for TerminalElement {
 
             // Phase 3: Paint text runs. Each shaped line opens its own nested layer
             // (GPUI `paint_line`), which keeps its decorations below its glyphs as before.
-            for line in &layout.text_lines {
+            for line in layout.text_lines() {
                 line.paint(
                     bounds.origin,
                     cell_width,
@@ -1224,7 +1564,7 @@ impl Element for TerminalElement {
         // Phase 4: Paint cursor
         if cursor_visible
             && layout.cursor_visual_line >= 0
-            && layout.cursor_visual_line < layout.screen_lines as i32
+            && layout.cursor_visual_line < layout.screen_lines() as i32
         {
             let cursor_x =
                 px((f32::from(bounds.origin.x) + layout.cursor_col as f32 * cell_width_f).floor());
@@ -1262,8 +1602,8 @@ impl Element for TerminalElement {
         } else {
             layout.cells_scanned
         };
-        let text_runs = layout.text_lines.len();
-        let background_rects = layout.rects.len();
+        let text_runs = layout.text_lines().count();
+        let background_rects = layout.rects().count();
 
         // Phase 5: Paint fog overlay for unfocused terminals
         if !is_focused {

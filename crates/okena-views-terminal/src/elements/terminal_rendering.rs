@@ -1,6 +1,7 @@
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
 use okena_core::theme::ThemeColors;
+use std::sync::OnceLock;
 
 /// A terminal row painted as one shaped line with multiple style runs.
 #[derive(Debug)]
@@ -10,6 +11,9 @@ pub(crate) struct BatchedTextLine {
     pub text: String,
     pub styles: Vec<TextRun>,
     next_col: i32,
+    /// Shaped on first paint; a row reused across layouts skips GPUI's
+    /// per-paint text hashing and its per-frame layout cache churn.
+    shaped: OnceLock<ShapedLine>,
 }
 
 impl BatchedTextLine {
@@ -24,6 +28,7 @@ impl BatchedTextLine {
             text,
             styles: vec![style],
             next_col: start_col + 1,
+            shaped: OnceLock::new(),
         }
     }
 
@@ -43,6 +48,7 @@ impl BatchedTextLine {
     }
 
     fn append_text(&mut self, text: &str, mut style: TextRun) {
+        self.shaped.take();
         self.text.push_str(text);
         style.len = text.len();
         if let Some(last) = self.styles.last_mut()
@@ -68,15 +74,15 @@ impl BatchedTextLine {
             origin.y + self.line as f32 * line_height,
         );
 
-        let _ = window
-            .text_system()
-            .shape_line(
+        let shaped = self.shaped.get_or_init(|| {
+            window.text_system().shape_line(
                 self.text.clone().into(),
                 font_size,
                 &self.styles,
                 Some(cell_width),
             )
-            .paint(pos, line_height, TextAlign::Left, None, window, cx);
+        });
+        let _ = shaped.paint(pos, line_height, TextAlign::Left, None, window, cx);
     }
 }
 
