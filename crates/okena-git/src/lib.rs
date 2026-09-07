@@ -12,7 +12,7 @@ pub mod repository;
 pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;
 pub use diff::{
-    DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options,
+    DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options, get_file_bytes_for_diff,
     get_file_contents_for_diff, is_git_repo,
 };
 pub use error::{GitError, GitResult};

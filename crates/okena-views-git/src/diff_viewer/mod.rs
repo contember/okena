@@ -20,6 +20,7 @@ use gpui::prelude::*;
 use gpui::*;
 use okena_core::selection::SelectionState;
 use okena_core::types::DiffViewMode;
+use okena_files::file_renderer::FileRenderer;
 use okena_files::syntax::load_syntax_set;
 use okena_git::{CommitLogEntry, DiffMode, FileDiff};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
@@ -77,6 +78,8 @@ pub struct DiffViewer {
     pub(super) file_stats: Vec<FileStats>,
     /// Currently processed file with syntax highlighting (lazy loaded).
     pub(super) current_file: Option<DiffDisplayFile>,
+    pub(super) binary_preview_loading: bool,
+    pub(super) binary_preview: Option<BinaryDiffPreview>,
     pub(super) file_tree: FileTreeNode,
     pub(super) expanded_folders: HashSet<String>,
     pub(super) selected_file_index: usize,
@@ -146,6 +149,17 @@ pub struct DiffViewer {
     pub(super) search_sig: Option<DiffSearchSig>,
 }
 
+pub(super) struct BinaryDiffPreview {
+    pub old: Option<BinaryPreviewSide>,
+    pub new: Option<BinaryPreviewSide>,
+}
+
+pub(super) struct BinaryPreviewSide {
+    pub path: String,
+    pub renderer: Option<Entity<FileRenderer>>,
+    pub error: Option<String>,
+}
+
 /// Which commit the viewer opens on and the history it can step through.
 #[derive(Default)]
 pub struct CommitNavigation {
@@ -201,6 +215,8 @@ impl DiffViewer {
             raw_files: Vec::new(),
             file_stats: Vec::new(),
             current_file: None,
+            binary_preview_loading: false,
+            binary_preview: None,
             file_tree: FileTreeNode::default(),
             expanded_folders: HashSet::new(),
             selected_file_index: 0,
@@ -271,6 +287,20 @@ impl DiffViewer {
             self.rehighlight_current_file();
             self.update_side_by_side_cache();
         }
+    }
+
+    pub(super) fn release_binary_preview(&mut self, cx: &mut App) {
+        if let Some(preview) = self.binary_preview.take() {
+            for side in [preview.old, preview.new].into_iter().flatten() {
+                if let Some(renderer) = side.renderer {
+                    renderer.update(cx, |renderer, cx| renderer.release_assets(cx));
+                }
+            }
+        }
+    }
+
+    pub fn release_all_image_assets(&mut self, cx: &mut App) {
+        self.release_binary_preview(cx);
     }
 }
 

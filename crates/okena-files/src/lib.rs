@@ -15,6 +15,8 @@ pub mod code_view;
 #[cfg(feature = "gpui")]
 pub mod content_search_dialog;
 #[cfg(feature = "gpui")]
+pub mod file_renderer;
+#[cfg(feature = "gpui")]
 pub mod file_search;
 #[cfg(feature = "gpui")]
 pub mod file_tree;

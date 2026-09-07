@@ -6,7 +6,7 @@ use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
 use std::path::PathBuf;
 
-use super::{DisplayMode, FileViewer, FileViewerEvent, FileViewerTab, PreviewBackground};
+use super::{DisplayMode, FileViewer, FileViewerEvent, FileViewerTab};
 
 impl FileViewer {
     /// Toggle between source and preview display modes. Only meaningful for
@@ -293,150 +293,16 @@ impl FileViewer {
         cx.notify();
     }
 
-    // ── Image zoom / pan / background ────────────────────────────────────
-
-    /// Multiply the active tab's image zoom by `factor` (e.g. 1.25 in,
-    /// 1/1.25 out). Leaves auto-fit mode and, for SVG tabs, schedules a
-    /// fresh raster at the new scale so the preview stays crisp.
     pub(super) fn image_zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
+        if let Some(renderer) = self.active_tab().file_renderer.clone() {
+            renderer.update(cx, |renderer, cx| renderer.zoom_by(factor, cx));
         }
-        tab.image_view.zoom_by(factor);
-        cx.notify();
-        self.maybe_rerender_svg(cx);
     }
 
-    /// Set the active tab's image zoom to an explicit factor (1.0 = 100%).
-    pub(super) fn image_set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.set_zoom(zoom);
-        cx.notify();
-        self.maybe_rerender_svg(cx);
-    }
-
-    /// Reset the active tab's image view to fit-to-pane.
     pub(super) fn image_fit(&mut self, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
+        if let Some(renderer) = self.active_tab().file_renderer.clone() {
+            renderer.update(cx, |renderer, cx| renderer.fit(cx));
         }
-        tab.image_view.reset_to_fit();
-        cx.notify();
-    }
-
-    /// Record a potential pan drag at `position`. Does NOT promote the
-    /// view out of auto-fit yet — a single click anywhere on a fit-mode
-    /// image (e.g. to focus the pane, or the first half of a double-click
-    /// reset) would otherwise snap the image from Fit to 100% before the
-    /// user has even moved the mouse. Promotion happens in
-    /// `image_update_pan` on the first non-zero movement.
-    pub(super) fn image_start_pan(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.is_panning = true;
-        tab.image_view.pan_anchor = Some(position);
-        tab.image_view.pan_anchor_offset = tab.image_view.pan;
-        cx.notify();
-    }
-
-    /// Continue a pan drag — translate by (current - anchor). On the
-    /// first frame with a non-zero delta we also promote the view out of
-    /// auto-fit (and zoom to 1.0 if we hadn't left fit yet) so a stationary
-    /// click that never moved leaves the view untouched.
-    pub(super) fn image_update_pan(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image || !tab.image_view.is_panning {
-            return;
-        }
-        let Some(anchor) = tab.image_view.pan_anchor else {
-            return;
-        };
-        let dx = position.x - anchor.x;
-        let dy = position.y - anchor.y;
-        if f32::from(dx) == 0.0 && f32::from(dy) == 0.0 {
-            return;
-        }
-        if tab.image_view.auto_fit {
-            tab.image_view.auto_fit = false;
-            tab.image_view.zoom = 1.0;
-            tab.image_view.pan_anchor_offset = gpui::Point::default();
-        }
-        // Clamp pan magnitude. Without this the user can drag the image
-        // arbitrarily far off-pane (the container is overflow_hidden, so
-        // it just vanishes) with no obvious recovery affordance. ±10000 px
-        // per axis is generous for any realistic display while preventing
-        // a runaway momentum drift from sending the image to infinity.
-        const PAN_HARDCAP: f32 = 10_000.0;
-        let raw_x = f32::from(tab.image_view.pan_anchor_offset.x + dx);
-        let raw_y = f32::from(tab.image_view.pan_anchor_offset.y + dy);
-        tab.image_view.pan = gpui::Point::new(
-            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-        );
-        cx.notify();
-    }
-
-    /// Translate the image by `delta` pixels — used by classic wheel-scroll
-    /// (without the Cmd/Ctrl zoom modifier). Honors the same hard-cap that
-    /// drag-pan does so a runaway momentum scroll can't send the image off
-    /// to infinity.
-    pub(super) fn image_pan_by(
-        &mut self,
-        delta: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        const PAN_HARDCAP: f32 = 10_000.0;
-        let raw_x = f32::from(tab.image_view.pan.x + delta.x);
-        let raw_y = f32::from(tab.image_view.pan.y + delta.y);
-        tab.image_view.pan = gpui::Point::new(
-            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-        );
-        cx.notify();
-    }
-
-    /// End a pan drag.
-    pub(super) fn image_end_pan(&mut self, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.is_panning = false;
-        tab.image_view.pan_anchor = None;
-        cx.notify();
-    }
-
-    /// Set the preview background explicitly (header button click).
-    pub(super) fn image_set_background(
-        &mut self,
-        background: PreviewBackground,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.background = background;
-        cx.notify();
     }
 }
 

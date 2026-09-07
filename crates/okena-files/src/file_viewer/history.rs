@@ -206,7 +206,7 @@ impl FileViewer {
                     Ok(None) => Err("File does not exist in this revision".to_string()),
                     Err(error) => Err(error),
                 };
-                tab.apply_loaded_content(content, None, &this.syntax_set, this.is_dark);
+                tab.apply_loaded_content(content, None, &this.syntax_set, this.is_dark, cx);
                 cx.notify();
             });
         })

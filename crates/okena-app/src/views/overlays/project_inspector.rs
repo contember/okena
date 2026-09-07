@@ -39,8 +39,13 @@ impl InspectorScreen {
     }
 
     fn release_image_assets(&self, cx: &mut App) {
-        if let Self::File(viewer) = self {
-            viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+        match self {
+            Self::File(viewer) => {
+                viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+            }
+            Self::Diff(viewer) => {
+                viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+            }
         }
     }
 }

@@ -784,6 +784,13 @@ pub enum ActionRequest {
         #[serde(default)]
         mode: DiffMode,
     },
+    GitBinaryFileContents {
+        project_id: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
+        #[serde(default)]
+        mode: DiffMode,
+    },
     GitCommitGraph {
         project_id: String,
         count: usize,
@@ -1689,6 +1696,12 @@ mod tests {
             ActionRequest::GitFileContents {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
+                mode: DiffMode::Staged,
+            },
+            ActionRequest::GitBinaryFileContents {
+                project_id: "p1".into(),
+                old_path: Some("old.png".into()),
+                new_path: Some("new.png".into()),
                 mode: DiffMode::Staged,
             },
             ActionRequest::GitStageFile {

@@ -3,6 +3,11 @@
 use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
 use serde::de::DeserializeOwned;
 
+pub struct BinaryFileContents {
+    pub old: Option<Vec<u8>>,
+    pub new: Option<Vec<u8>>,
+}
+
 /// Provides git data from either local git commands or a remote server.
 pub trait GitProvider: Send + Sync + 'static {
     fn is_git_repo(&self) -> bool;
@@ -18,6 +23,12 @@ pub trait GitProvider: Send + Sync + 'static {
         file_path: &str,
         mode: DiffMode,
     ) -> Result<(Option<String>, Option<String>), String>;
+    fn get_binary_file_contents(
+        &self,
+        old_path: Option<&str>,
+        new_path: Option<&str>,
+        mode: DiffMode,
+    ) -> Result<BinaryFileContents, String>;
     fn get_diff_file_summary(&self) -> Result<Vec<FileDiffSummary>, String>;
     fn get_commit_graph(
         &self,
@@ -151,6 +162,40 @@ impl GitProvider for RemoteGitProvider {
             .and_then(|v| v.as_str())
             .map(String::from);
         Ok((old, new))
+    }
+
+    fn get_binary_file_contents(
+        &self,
+        old_path: Option<&str>,
+        new_path: Option<&str>,
+        mode: DiffMode,
+    ) -> Result<BinaryFileContents, String> {
+        use base64::Engine as _;
+
+        let action = okena_core::api::ActionRequest::GitBinaryFileContents {
+            project_id: self.project_id.clone(),
+            old_path: old_path.map(str::to_string),
+            new_path: new_path.map(str::to_string),
+            mode,
+        };
+        let value = self
+            .post_action(action)?
+            .ok_or_else(|| "Missing binary file contents response".to_string())?;
+        let decode = |field: &str| -> Result<Option<Vec<u8>>, String> {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(|content| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(content)
+                        .map_err(|error| format!("Invalid base64 in {field}: {error}"))
+                })
+                .transpose()
+        };
+        Ok(BinaryFileContents {
+            old: decode("old_content_b64")?,
+            new: decode("new_content_b64")?,
+        })
     }
 
     fn get_diff_file_summary(&self) -> Result<Vec<FileDiffSummary>, String> {

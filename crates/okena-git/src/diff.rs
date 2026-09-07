@@ -168,6 +168,15 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             continue;
         }
 
+        if line.starts_with("new file mode ") {
+            file.old_path = None;
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            file.new_path = None;
+            continue;
+        }
+
         // Parse old file path. These lines are authoritative and override the
         // `diff --git` header fallback (e.g. /dev/null clears the path for an
         // added file even though the header carried a fake `a/<new>`).
@@ -637,15 +646,24 @@ pub fn is_git_repo(path: &Path) -> bool {
 ///
 /// - `revision` can be "HEAD", a commit hash, or empty for the index (staged version)
 pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> Option<String> {
+    String::from_utf8(get_file_bytes_from_git(repo_path, revision, file_path)?).ok()
+}
+
+/// Get raw file bytes from git at a revision, or from the index for an empty revision.
+pub fn get_file_bytes_from_git(
+    repo_path: &Path,
+    revision: &str,
+    file_path: &str,
+) -> Option<Vec<u8>> {
     let repo = crate::gix_helpers::open(repo_path)?;
 
-    let data = if revision.is_empty() {
+    if revision.is_empty() {
         // Empty revision → stage-0 (staged) version from the index.
         let index = repo.open_index().ok()?;
         let id = index
             .entry_by_path(gix::bstr::BStr::new(file_path.as_bytes()))?
             .id;
-        repo.find_object(id).ok()?.data.clone()
+        Some(repo.find_object(id).ok()?.data.clone())
     } else {
         // Validate to reject flag injection, then resolve <rev> → tree → blob.
         crate::validate_git_ref(revision).ok()?;
@@ -660,10 +678,8 @@ pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> O
         if !entry.mode().is_blob() {
             return None;
         }
-        entry.object().ok()?.data.clone()
-    };
-
-    String::from_utf8(data).ok()
+        Some(entry.object().ok()?.data.clone())
+    }
 }
 
 /// Safely join a file path to a repo root, rejecting path traversal attempts.
@@ -682,8 +698,53 @@ fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
 
 /// Get the full content of a file from the working tree (filesystem).
 pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<String> {
+    String::from_utf8(get_file_bytes_from_working_tree(repo_path, file_path)?).ok()
+}
+
+/// Get raw file bytes from the working tree.
+pub fn get_file_bytes_from_working_tree(repo_path: &Path, file_path: &str) -> Option<Vec<u8>> {
     let full_path = safe_repo_path(repo_path, file_path)?;
-    std::fs::read_to_string(full_path).ok()
+    std::fs::read(full_path).ok()
+}
+
+/// Get both raw sides of a diff, using each side's own path for renames.
+pub fn get_file_bytes_for_diff(
+    repo_path: &Path,
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+    mode: DiffMode,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    match mode {
+        DiffMode::WorkingTree => {
+            let old = old_path.and_then(|path| {
+                get_file_bytes_from_git(repo_path, "", path)
+                    .or_else(|| get_file_bytes_from_git(repo_path, "HEAD", path))
+            });
+            let new = new_path.and_then(|path| get_file_bytes_from_working_tree(repo_path, path));
+            (old, new)
+        }
+        DiffMode::Staged => {
+            let old = old_path.and_then(|path| get_file_bytes_from_git(repo_path, "HEAD", path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, "", path));
+            (old, new)
+        }
+        DiffMode::Commit(hash) => {
+            let parent = format!("{hash}^");
+            let old = old_path.and_then(|path| get_file_bytes_from_git(repo_path, &parent, path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, &hash, path));
+            (old, new)
+        }
+        DiffMode::BranchCompare { base, head } => {
+            let effective_base = repo_path
+                .to_str()
+                .and_then(|repo_path| merge_base(repo_path, &base, &head))
+                .unwrap_or(base);
+            let old =
+                old_path.and_then(|path| get_file_bytes_from_git(repo_path, &effective_base, path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, &head, path));
+            (old, new)
+        }
+    }
 }
 
 /// Get the "old" and "new" file content for a file diff based on the diff mode.
@@ -780,6 +841,26 @@ mod tests {
         let (old, new) = get_file_contents_for_diff(&repo, "file.txt", DiffMode::Staged);
         assert_eq!(old.as_deref(), Some("x"));
         assert_eq!(new, None);
+    }
+
+    #[test]
+    fn binary_diff_contents_use_each_side_path() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["mv", "file.txt", "renamed.bin"]);
+        let bytes = vec![0, 159, 146, 150, 255];
+        std::fs::write(repo.join("renamed.bin"), &bytes).unwrap();
+        git_in(&repo, &["add", "renamed.bin"]);
+
+        let (old, new) = get_file_bytes_for_diff(
+            &repo,
+            Some("file.txt"),
+            Some("renamed.bin"),
+            DiffMode::Staged,
+        );
+        assert_eq!(old.as_deref(), Some(b"x".as_slice()));
+        assert_eq!(new, Some(bytes));
     }
 
     #[test]
@@ -988,6 +1069,23 @@ Binary files a/image.png and b/image.png differ
         assert_eq!(result.files.len(), 1);
         assert!(result.files[0].is_binary);
         assert!(result.files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_added_and_deleted_binary_paths() {
+        let diff = r#"diff --git a/added.png b/added.png
+new file mode 100644
+Binary files /dev/null and b/added.png differ
+diff --git a/deleted.png b/deleted.png
+deleted file mode 100644
+Binary files a/deleted.png and /dev/null differ
+"#;
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files[0].old_path, None);
+        assert_eq!(result.files[0].new_path.as_deref(), Some("added.png"));
+        assert_eq!(result.files[1].old_path.as_deref(), Some("deleted.png"));
+        assert_eq!(result.files[1].new_path, None);
     }
 
     #[test]

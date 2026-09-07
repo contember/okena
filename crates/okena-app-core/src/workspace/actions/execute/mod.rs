@@ -310,6 +310,12 @@ pub fn execute_action(
             file_path,
             mode,
         } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => git::binary_file_contents(ws, project_id, old_path, new_path, mode),
         ActionRequest::GitCommitGraph {
             project_id,
             count,
