@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore generated build artifacts"
+paths = [
+  '''^target/''',
+  '''^web/dist/''',
+]

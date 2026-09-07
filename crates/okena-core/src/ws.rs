@@ -42,6 +42,9 @@ pub enum WsInbound {
         terminal_id: String,
         cols: u16,
         rows: u16,
+        /// Explicitly take resize authority from another active renderer.
+        #[serde(default)]
+        claim: bool,
     },
     Ping,
 }
@@ -95,6 +98,15 @@ pub enum WsOutbound {
         /// backward compatibility with servers that don't send the field.
         #[serde(default)]
         server_owns: bool,
+    },
+    /// Direct response to this connection's resize request. Unlike
+    /// `TerminalResized`, this is an acknowledgement, not a broadcast.
+    ResizeAcknowledged {
+        terminal_id: String,
+        /// Accepted size, or the authoritative size when denied.
+        cols: u16,
+        rows: u16,
+        accepted: bool,
     },
 }
 
@@ -177,12 +189,23 @@ mod tests {
                 terminal_id: "t1".into(),
                 cols: 80,
                 rows: 24,
+                claim: false,
             },
             WsInbound::Ping,
         ];
         for msg in messages {
             let json = serde_json::to_string(&msg).unwrap();
             let _parsed: WsInbound = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn resize_claim_defaults_false() {
+        let json = r#"{"type":"resize","terminal_id":"t1","cols":80,"rows":24}"#;
+        let parsed: WsInbound = serde_json::from_str(json).unwrap();
+        match parsed {
+            WsInbound::Resize { claim, .. } => assert!(!claim),
+            _ => panic!("expected Resize"),
         }
     }
 
@@ -241,6 +264,12 @@ mod tests {
                 cols: 120,
                 rows: 40,
                 server_owns: true,
+            },
+            WsOutbound::ResizeAcknowledged {
+                terminal_id: "t1".into(),
+                cols: 41,
+                rows: 30,
+                accepted: true,
             },
         ];
         for msg in messages {

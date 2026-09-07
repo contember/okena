@@ -303,7 +303,12 @@ async fn handle_ws(
                                     reply: None,
                                 }).await;
                             }
-                            Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
+                            Ok(WsInbound::Resize {
+                                terminal_id,
+                                cols,
+                                rows,
+                                claim,
+                            }) => {
                                 // Ask for a reply: a denied resize carries the
                                 // authoritative size, which we bounce back to
                                 // THIS client as a server-owned resize so it
@@ -316,27 +321,58 @@ async fn handle_ws(
                                         cols,
                                         rows,
                                         connection_id: connection_owner_id.clone(),
+                                        claim,
                                     },
                                     reply: Some(reply_tx),
                                 }).await.is_ok();
-                                if sent
-                                    && let Ok(CommandResult::Ok(Some(value))) = reply_rx.await
-                                    && value.get("denied").and_then(|d| d.as_bool()) == Some(true)
-                                    && let (Some(cols), Some(rows)) = (
-                                        value.get("cols").and_then(|c| c.as_u64()),
-                                        value.get("rows").and_then(|r| r.as_u64()),
-                                    )
-                                {
-                                    let msg = WsOutbound::TerminalResized {
-                                        terminal_id,
-                                        cols: cols as u16,
-                                        rows: rows as u16,
-                                        server_owns: true,
+                                if sent && let Ok(result) = reply_rx.await {
+                                    let denied_size = match &result {
+                                        CommandResult::Ok(Some(value))
+                                            if value.get("denied").and_then(|d| d.as_bool())
+                                                == Some(true) =>
+                                        {
+                                            match (
+                                                value.get("cols").and_then(|c| c.as_u64()),
+                                                value.get("rows").and_then(|r| r.as_u64()),
+                                            ) {
+                                                (Some(cols), Some(rows)) => {
+                                                    Some((cols as u16, rows as u16))
+                                                }
+                                                _ => None,
+                                            }
+                                        }
+                                        _ => None,
                                     };
-                                    let resp = serde_json::to_string(&msg)
+                                    let accepted = matches!(result, CommandResult::Ok(_))
+                                        && denied_size.is_none();
+                                    let (ack_cols, ack_rows) =
+                                        denied_size.unwrap_or((cols, rows));
+                                    let ack = WsOutbound::ResizeAcknowledged {
+                                        terminal_id: terminal_id.clone(),
+                                        cols: ack_cols,
+                                        rows: ack_rows,
+                                        accepted,
+                                    };
+                                    let resp = serde_json::to_string(&ack)
                                         .expect("BUG: WsOutbound must serialize");
                                     if out_tx.send(Message::Text(resp.into())).await.is_err() {
                                         break;
+                                    }
+
+                                    // Keep the existing denied resize event for
+                                    // older clients that do not understand ACKs.
+                                    if !accepted {
+                                        let msg = WsOutbound::TerminalResized {
+                                            terminal_id,
+                                            cols: ack_cols,
+                                            rows: ack_rows,
+                                            server_owns: true,
+                                        };
+                                        let resp = serde_json::to_string(&msg)
+                                            .expect("BUG: WsOutbound must serialize");
+                                        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                             }

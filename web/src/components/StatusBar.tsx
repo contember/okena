@@ -10,16 +10,11 @@ export function StatusBar() {
   const { state } = useApp();
 
   return (
-    <div className="panel-rule flex items-center gap-2 border-t bg-[var(--ok-header)] px-3 py-1 text-[11px] text-[var(--ok-text-secondary)]">
+    <div className="status-bar panel-rule flex flex-shrink-0 items-center gap-2 border-t bg-[var(--ok-header)] text-[0.6875rem] text-[var(--ok-text-secondary)]">
       <span
-        className={`inline-block w-2 h-2 rounded-full ${STATUS_COLORS[state.wsStatus]}`}
+        className={`inline-block h-2 w-2 rounded-full ${STATUS_COLORS[state.wsStatus]}`}
       />
       <span className="capitalize">{state.wsStatus}</span>
-      {state.workspace && (
-        <span className="ml-auto">
-          {state.workspace.projects.length} project{state.workspace.projects.length !== 1 ? "s" : ""}
-        </span>
-      )}
     </div>
   );
 }

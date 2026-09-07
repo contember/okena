@@ -1,0 +1,1009 @@
+<!doctype html>
+<!--
+  Throwaway prototype: three mobile Okena navigation concepts, switchable with ?variant=A|B|C.
+  Question: how should project/session navigation work when the terminal is the primary surface?
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#090a0f" />
+    <title>Okena Mobile UI Prototype</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090a0f;
+        --surface: #11131a;
+        --surface-2: #181b24;
+        --surface-3: #212530;
+        --line: rgba(255, 255, 255, 0.09);
+        --text: #f1f3f7;
+        --muted: #8c93a3;
+        --dim: #596071;
+        --accent: #8b7cff;
+        --accent-2: #55d6be;
+        --green: #66d9a8;
+        --red: #ff7188;
+        --yellow: #f1c75b;
+        --radius-sm: 0.7rem;
+        --radius: 1rem;
+        --radius-lg: 1.35rem;
+        --safe-top: env(safe-area-inset-top, 0px);
+        --safe-right: env(safe-area-inset-right, 0px);
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-left: env(safe-area-inset-left, 0px);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "SF Pro Text",
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+      body {
+        position: fixed;
+        inset: 0;
+        background: #05060a;
+        color: var(--text);
+      }
+      button,
+      input {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        border: 0;
+        cursor: pointer;
+      }
+      @supports (height: 100dvh) {
+        html,
+        body {
+          height: 100dvh;
+        }
+      }
+
+      #phone {
+        position: relative;
+        width: min(100%, 27rem);
+        height: 100%;
+        margin: 0 auto;
+        overflow: hidden;
+        background: var(--bg);
+        isolation: isolate;
+      }
+
+      @media (min-width: 34rem) {
+        body {
+          display: grid;
+          place-items: center;
+          padding: 1.5rem;
+          background: #030408;
+        }
+        #phone {
+          height: min(52rem, calc(100dvh - 3rem));
+          border: 1px solid var(--line);
+          border-radius: 2rem;
+          box-shadow: 0 2rem 7rem #000;
+        }
+      }
+
+      .screen {
+        display: flex;
+        height: 100%;
+        min-width: 0;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+      .grow {
+        flex: 1;
+        min-width: 0;
+      }
+      .truncate {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .eyebrow {
+        color: var(--dim);
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .dot {
+        width: 0.48rem;
+        height: 0.48rem;
+        flex: none;
+        border-radius: 999px;
+        background: var(--green);
+        box-shadow: 0 0 0 0.2rem rgba(102, 217, 168, 0.1);
+      }
+      .icon {
+        width: 1.15rem;
+        height: 1.15rem;
+        display: block;
+      }
+
+      .terminal {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        overscroll-behavior: contain;
+        padding: clamp(0.8rem, 3.5vw, 1.1rem);
+        background: #090b10;
+        color: #cdd3df;
+        font:
+          0.76rem/1.58 "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+        scrollbar-width: none;
+      }
+      .terminal::-webkit-scrollbar {
+        display: none;
+      }
+      .terminal-line {
+        min-height: 1.2rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .terminal .prompt {
+        color: var(--accent-2);
+      }
+      .terminal .path {
+        color: #9ba9ff;
+      }
+      .terminal .command {
+        color: #f4f5f8;
+      }
+      .terminal .success {
+        color: var(--green);
+      }
+      .terminal .warning {
+        color: var(--yellow);
+      }
+      .terminal .dim {
+        color: #5e6675;
+      }
+
+      .tap {
+        min-width: 2.75rem;
+        min-height: 2.75rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--line);
+        border-radius: 0.9rem;
+        background: rgba(255, 255, 255, 0.045);
+      }
+      .tap:active,
+      .nav-button:active,
+      .project-item:active {
+        transform: scale(0.97);
+      }
+
+      .command-form {
+        display: flex;
+        min-width: 0;
+        gap: 0.55rem;
+      }
+      .command-input {
+        width: 100%;
+        min-width: 0;
+        height: 2.85rem;
+        border: 1px solid var(--line);
+        border-radius: 0.9rem;
+        outline: 0;
+        background: rgba(255, 255, 255, 0.055);
+        padding: 0 0.9rem;
+        font-family: "SFMono-Regular", monospace;
+      }
+      .command-input:focus {
+        border-color: rgba(139, 124, 255, 0.72);
+        box-shadow: 0 0 0 0.2rem rgba(139, 124, 255, 0.11);
+      }
+      .send {
+        width: 2.85rem;
+        flex: none;
+        border-radius: 0.9rem;
+        background: var(--accent);
+        color: white;
+        font-size: 1.15rem;
+      }
+
+      /* A — dock */
+      .a-header {
+        gap: 0.65rem;
+        padding: max(0.65rem, var(--safe-top)) max(0.7rem, var(--safe-right))
+          0.65rem max(0.7rem, var(--safe-left));
+        border-bottom: 1px solid var(--line);
+        background: rgba(17, 19, 26, 0.94);
+        backdrop-filter: blur(1.2rem);
+      }
+      .project-pill {
+        gap: 0.6rem;
+        min-width: 0;
+        flex: 1;
+        justify-content: flex-start;
+        padding: 0.5rem 0.7rem;
+        border-radius: 0.9rem;
+        background: var(--surface-2);
+      }
+      .project-glyph {
+        display: grid;
+        width: 1.8rem;
+        aspect-ratio: 1;
+        place-items: center;
+        flex: none;
+        border-radius: 0.55rem;
+        background: linear-gradient(145deg, #8878ff, #4d3acb);
+        font-weight: 800;
+      }
+      .a-terminal-head {
+        height: 2.25rem;
+        gap: 0.45rem;
+        padding: 0 0.85rem;
+        border-bottom: 1px solid var(--line);
+        background: #0d0f15;
+        font-size: 0.72rem;
+      }
+      .a-compose {
+        padding: 0.55rem max(0.7rem, var(--safe-right)) 0.2rem
+          max(0.7rem, var(--safe-left));
+        background: #0d0f15;
+      }
+      .key-rail {
+        display: none;
+        gap: 0.4rem;
+        overflow-x: auto;
+        padding: 0.45rem max(0.7rem, var(--safe-right)) 0.2rem
+          max(0.7rem, var(--safe-left));
+        background: #0d0f15;
+        scrollbar-width: none;
+      }
+      .key-rail.open {
+        display: flex;
+      }
+      .key {
+        min-width: 2.7rem;
+        height: 2.25rem;
+        flex: none;
+        border: 1px solid var(--line);
+        border-radius: 0.65rem;
+        background: var(--surface-2);
+        color: var(--muted);
+        font:
+          0.7rem "SFMono-Regular",
+          monospace;
+      }
+      .dock {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.25rem;
+        padding: 0.45rem max(0.55rem, var(--safe-right))
+          max(0.45rem, var(--safe-bottom)) max(0.55rem, var(--safe-left));
+        border-top: 1px solid var(--line);
+        background: rgba(17, 19, 26, 0.97);
+      }
+      .nav-button {
+        display: flex;
+        min-height: 3.25rem;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.25rem;
+        border-radius: 0.8rem;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.61rem;
+      }
+      .nav-button.active {
+        background: rgba(139, 124, 255, 0.12);
+        color: #c8c1ff;
+      }
+      .nav-symbol {
+        font-size: 1.05rem;
+        line-height: 1;
+      }
+
+      /* B — cards */
+      .b-header {
+        padding: max(0.9rem, var(--safe-top)) max(1rem, var(--safe-right))
+          0.6rem max(1rem, var(--safe-left));
+        background: var(--surface);
+      }
+      .b-title {
+        font-size: 1.25rem;
+        font-weight: 750;
+        letter-spacing: -0.03em;
+      }
+      .avatar {
+        display: grid;
+        width: 2.45rem;
+        aspect-ratio: 1;
+        place-items: center;
+        border-radius: 50%;
+        background: #282c38;
+        color: #b8becc;
+        font-size: 0.72rem;
+      }
+      .cards {
+        display: flex;
+        gap: 0.7rem;
+        overflow-x: auto;
+        flex: none;
+        padding: 0.55rem max(1rem, var(--safe-right)) 0.9rem
+          max(1rem, var(--safe-left));
+        background: var(--surface);
+        scroll-snap-type: x mandatory;
+        scrollbar-width: none;
+      }
+      .cards::-webkit-scrollbar {
+        display: none;
+      }
+      .workspace-card {
+        width: min(76vw, 18rem);
+        flex: none;
+        scroll-snap-align: start;
+        padding: 0.9rem;
+        border: 1px solid var(--line);
+        border-radius: 1rem;
+        background: var(--surface-2);
+        text-align: left;
+      }
+      .workspace-card.selected {
+        border-color: rgba(139, 124, 255, 0.65);
+        background: linear-gradient(
+          145deg,
+          rgba(139, 124, 255, 0.18),
+          rgba(85, 214, 190, 0.06)
+        );
+      }
+      .workspace-card strong {
+        display: block;
+        margin: 0.45rem 0 0.2rem;
+        font-size: 0.87rem;
+      }
+      .workspace-card small {
+        color: var(--muted);
+      }
+      .b-terminal-card {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+        margin: 0 max(0.65rem, var(--safe-right)) 0
+          max(0.65rem, var(--safe-left));
+        overflow: hidden;
+        flex-direction: column;
+        border: 1px solid var(--line);
+        border-radius: 1.1rem 1.1rem 0 0;
+        background: #090b10;
+      }
+      .b-terminal-head {
+        justify-content: space-between;
+        height: 2.7rem;
+        flex: none;
+        padding: 0 0.85rem;
+        border-bottom: 1px solid var(--line);
+        background: #141720;
+        font-size: 0.72rem;
+      }
+      .b-tabs {
+        display: flex;
+        gap: 0.25rem;
+        padding: 0.45rem max(0.7rem, var(--safe-right))
+          max(0.45rem, var(--safe-bottom)) max(0.7rem, var(--safe-left));
+        background: var(--surface);
+      }
+      .b-tab {
+        flex: 1;
+        min-height: 3rem;
+        border-radius: 0.8rem;
+        background: transparent;
+        color: var(--dim);
+        font-size: 0.68rem;
+      }
+      .b-tab.active {
+        background: var(--surface-3);
+        color: var(--text);
+      }
+
+      /* C — focus */
+      .focus-wrap {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        overflow: hidden;
+        background: #08090d;
+      }
+      .focus-terminal {
+        padding-top: calc(max(0.85rem, var(--safe-top)) + 3.3rem);
+        padding-bottom: 5.6rem;
+      }
+      .focus-pill {
+        position: absolute;
+        z-index: 3;
+        top: max(0.7rem, var(--safe-top));
+        left: max(0.7rem, var(--safe-left));
+        right: max(0.7rem, var(--safe-right));
+        gap: 0.55rem;
+        min-height: 3rem;
+        padding: 0.45rem 0.55rem 0.45rem 0.65rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 1rem;
+        background: rgba(24, 27, 36, 0.86);
+        box-shadow: 0 0.8rem 2.5rem rgba(0, 0, 0, 0.38);
+        backdrop-filter: blur(1.2rem);
+      }
+      .focus-pill button {
+        background: transparent;
+      }
+      .focus-actions {
+        position: absolute;
+        z-index: 3;
+        right: max(0.65rem, var(--safe-right));
+        bottom: 6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      .focus-actions .tap {
+        background: rgba(24, 27, 36, 0.88);
+        backdrop-filter: blur(1rem);
+      }
+      .focus-compose {
+        position: absolute;
+        z-index: 3;
+        left: max(0.65rem, var(--safe-left));
+        right: max(0.65rem, var(--safe-right));
+        bottom: max(0.65rem, var(--safe-bottom));
+        padding: 0.45rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 1.1rem;
+        background: rgba(24, 27, 36, 0.9);
+        box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(1rem);
+      }
+
+      /* sheets */
+      .backdrop {
+        position: absolute;
+        z-index: 20;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.18s ease;
+      }
+      .backdrop.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .sheet {
+        position: absolute;
+        z-index: 21;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        max-height: min(76dvh, 38rem);
+        overflow: hidden;
+        transform: translateY(105%);
+        transition: transform 0.22s ease;
+        border-top: 1px solid var(--line);
+        border-radius: 1.35rem 1.35rem 0 0;
+        background: #151821;
+        box-shadow: 0 -2rem 5rem rgba(0, 0, 0, 0.5);
+        padding-bottom: var(--safe-bottom);
+      }
+      .sheet.open {
+        transform: translateY(0);
+      }
+      .sheet-grabber {
+        width: 2.5rem;
+        height: 0.25rem;
+        margin: 0.55rem auto 0.35rem;
+        border-radius: 1rem;
+        background: #444a58;
+      }
+      .sheet-head {
+        gap: 0.7rem;
+        padding: 0.7rem 1rem;
+      }
+      .sheet-head h2 {
+        margin: 0;
+        font-size: 1.05rem;
+      }
+      .sheet-close {
+        margin-left: auto;
+        background: transparent;
+        color: var(--muted);
+      }
+      .sheet-body {
+        max-height: calc(min(76dvh, 38rem) - 4.2rem - var(--safe-bottom));
+        overflow: auto;
+        padding: 0 0.8rem 1rem;
+        overscroll-behavior: contain;
+      }
+      .sheet-search {
+        width: 100%;
+        height: 2.8rem;
+        margin: 0.15rem 0 0.7rem;
+        border: 1px solid var(--line);
+        border-radius: 0.85rem;
+        outline: 0;
+        background: #0f1118;
+        padding: 0 0.85rem;
+      }
+      .project-item {
+        display: flex;
+        width: 100%;
+        min-height: 3.65rem;
+        align-items: center;
+        gap: 0.7rem;
+        border-radius: 0.85rem;
+        background: transparent;
+        padding: 0.55rem 0.65rem;
+        text-align: left;
+      }
+      .project-item:hover,
+      .project-item.selected {
+        background: rgba(255, 255, 255, 0.055);
+      }
+      .project-item .project-glyph {
+        width: 2.1rem;
+      }
+      .project-meta {
+        flex: 1;
+        min-width: 0;
+      }
+      .project-meta strong,
+      .project-meta small {
+        display: block;
+      }
+      .project-meta small {
+        margin-top: 0.18rem;
+        color: var(--dim);
+      }
+      .badge {
+        padding: 0.2rem 0.45rem;
+        border-radius: 0.5rem;
+        background: #272b36;
+        color: var(--muted);
+        font-size: 0.65rem;
+      }
+      .action-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.65rem;
+      }
+      .action-card {
+        min-height: 5rem;
+        border: 1px solid var(--line);
+        border-radius: 1rem;
+        background: #1b1e27;
+        text-align: left;
+        padding: 0.8rem;
+      }
+      .action-card span {
+        display: block;
+        margin-top: 0.55rem;
+        color: var(--muted);
+        font-size: 0.7rem;
+      }
+
+      .variant-switcher {
+        position: absolute;
+        z-index: 30;
+        left: 50%;
+        bottom: calc(max(0.55rem, var(--safe-bottom)) + 4.15rem);
+        display: flex;
+        align-items: center;
+        gap: 0.2rem;
+        transform: translateX(-50%);
+        padding: 0.28rem;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 999px;
+        background: rgba(7, 8, 12, 0.88);
+        box-shadow: 0 0.65rem 2rem rgba(0, 0, 0, 0.42);
+        backdrop-filter: blur(1rem);
+      }
+      .variant-switcher button {
+        min-width: 2.2rem;
+        height: 1.85rem;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--dim);
+        font-size: 0.67rem;
+        font-weight: 750;
+      }
+      .variant-switcher button.active {
+        background: var(--accent);
+        color: white;
+      }
+      .variant-caption {
+        position: absolute;
+        z-index: 30;
+        top: max(0.35rem, var(--safe-top));
+        right: max(0.45rem, var(--safe-right));
+        padding: 0.25rem 0.45rem;
+        border-radius: 0.45rem;
+        background: rgba(0, 0, 0, 0.5);
+        color: #7b8291;
+        font-size: 0.55rem;
+        pointer-events: none;
+      }
+      .toast {
+        position: absolute;
+        z-index: 40;
+        left: 50%;
+        top: calc(max(0.65rem, var(--safe-top)) + 3.4rem);
+        max-width: 80%;
+        transform: translate(-50%, -0.6rem);
+        opacity: 0;
+        padding: 0.55rem 0.8rem;
+        border: 1px solid var(--line);
+        border-radius: 0.8rem;
+        background: #242834;
+        color: #dce1ea;
+        font-size: 0.7rem;
+        transition: 0.18s ease;
+        pointer-events: none;
+      }
+      .toast.show {
+        transform: translate(-50%, 0);
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="phone" aria-label="Okena mobile UI prototype"></main>
+    <script>
+      const projects = [
+        {
+          id: "okena",
+          name: "okena",
+          folder: "Contember",
+          branch: "feat/mobile-web-access",
+          terminals: ["web", "cargo", "notes"],
+          color: "#8b7cff",
+        },
+        {
+          id: "crane",
+          name: "crane-rental",
+          folder: "Contember",
+          branch: "feat/add-components",
+          terminals: ["api", "admin", "worker", "tests"],
+          color: "#55d6be",
+        },
+        {
+          id: "psyon",
+          name: "project-psyon",
+          folder: "Contember",
+          branch: "fix/assign-doctor",
+          terminals: ["server", "db"],
+          color: "#ff8d73",
+        },
+        {
+          id: "helm",
+          name: "helm",
+          folder: "Neumie",
+          branch: "main",
+          terminals: ["app", "storybook"],
+          color: "#f1c75b",
+        },
+        {
+          id: "website",
+          name: "neumie-web",
+          folder: "Personal",
+          branch: "redesign",
+          terminals: ["dev"],
+          color: "#6ba8ff",
+        },
+      ];
+
+      const state = {
+        variant: new URLSearchParams(location.search).get("variant") || "A",
+        projectId: "okena",
+        terminal: "web",
+        sheet: null,
+        keyRail: false,
+        output: [
+          '<span class="dim">Last login: today from iphone-13.tailnet</span>',
+          '<span class="prompt">okena</span> <span class="path">~/code/okena</span> <span class="command">git status --short --branch</span>',
+          '<span class="success">## feat/mobile-web-access</span>',
+          " M web/src/index.css",
+          " M web/src/components/WorkspaceLayout.tsx",
+          '<span class="prompt">okena</span> <span class="path">~/code/okena</span> <span class="command">bun run build</span>',
+          '<span class="success">✓ built in 2.92s</span>',
+          "",
+          '<span class="prompt">okena</span> <span class="path">~/code/okena</span> <span class="dim">▌</span>',
+        ],
+      };
+
+      const phone = document.querySelector("#phone");
+      const currentProject = () =>
+        projects.find((p) => p.id === state.projectId) || projects[0];
+      const escapeHtml = (value) =>
+        value.replace(
+          /[&<>'"]/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              "'": "&#39;",
+              '"': "&quot;",
+            })[c],
+        );
+      const icon = (name) =>
+        ({
+          projects: "⌘",
+          tabs: "▤",
+          keys: "⌨",
+          more: "•••",
+          files: "⌁",
+          git: "⑂",
+          services: "◉",
+          send: "↑",
+        })[name] || name;
+
+      function terminalHtml(extraClass = "") {
+        return `<div class="terminal ${extraClass}" data-terminal>${state.output.map((line) => `<div class="terminal-line">${line || "&nbsp;"}</div>`).join("")}</div>`;
+      }
+
+      function commandForm(className = "") {
+        return `<form class="command-form ${className}" data-command-form><input class="command-input" name="command" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type a command…"><button class="send" aria-label="Run command">↑</button></form>`;
+      }
+
+      function projectLabel() {
+        const p = currentProject();
+        return `<span class="project-glyph" style="background:${p.color}">${p.name[0].toUpperCase()}</span><span class="grow truncate"><strong class="truncate" style="display:block;font-size:.78rem">${p.name}</strong><small class="truncate muted" style="display:block;font-size:.62rem;margin-top:.12rem">${p.branch}</small></span>`;
+      }
+
+      function variantA() {
+        const p = currentProject();
+        return `<section class="screen">
+          <header class="a-header row">
+            <button class="project-pill row" data-open="projects">${projectLabel()}<span class="muted">⌄</span></button>
+            <button class="tap" data-open="tabs" aria-label="Switch terminal">▤</button>
+          </header>
+          <div class="a-terminal-head row"><span class="dot"></span><span class="grow truncate">${state.terminal}</span><span class="muted">${p.folder} · live</span></div>
+          ${terminalHtml()}
+          <div class="key-rail ${state.keyRail ? "open" : ""}">${["esc", "tab", "ctrl-c", "↑", "↓", "←", "→", "/", "~", "|"].map((k) => `<button class="key" data-key="${k}">${k}</button>`).join("")}</div>
+          <div class="a-compose">${commandForm()}</div>
+          <nav class="dock">
+            <button class="nav-button active" data-open="projects"><span class="nav-symbol">${icon("projects")}</span>Projects</button>
+            <button class="nav-button" data-open="tabs"><span class="nav-symbol">${icon("tabs")}</span>Terminals</button>
+            <button class="nav-button ${state.keyRail ? "active" : ""}" data-toggle-keys><span class="nav-symbol">${icon("keys")}</span>Keys</button>
+            <button class="nav-button" data-open="actions"><span class="nav-symbol">${icon("more")}</span>Actions</button>
+          </nav>
+        </section>`;
+      }
+
+      function variantB() {
+        const p = currentProject();
+        return `<section class="screen">
+          <header class="b-header row"><div class="grow"><div class="eyebrow">Remote workspace</div><div class="b-title">Workspaces</div></div><button class="avatar" data-open="actions">JN</button></header>
+          <div class="cards">${projects
+            .slice(0, 4)
+            .map(
+              (project) =>
+                `<button class="workspace-card ${project.id === p.id ? "selected" : ""}" data-project="${project.id}"><span class="dot" style="background:${project.color};box-shadow:none"></span><strong>${project.name}</strong><small>${project.branch}</small><div class="row" style="margin-top:.65rem;gap:.35rem"><span class="badge">${project.terminals.length} sessions</span><span class="badge">${project.folder}</span></div></button>`,
+            )
+            .join("")}</div>
+          <section class="b-terminal-card"><div class="b-terminal-head row"><span class="row" style="gap:.45rem"><span class="dot"></span><strong>${state.terminal}</strong></span><button class="tap" style="min-width:2rem;min-height:2rem;border:0;background:transparent" data-open="tabs">⌄</button></div>${terminalHtml()}<div style="padding:.5rem">${commandForm()}</div></section>
+          <nav class="b-tabs"><button class="b-tab active">⌘<br>Terminal</button><button class="b-tab" data-toast="Files would open here">⌁<br>Files</button><button class="b-tab" data-toast="Git summary would open here">⑂<br>Git</button><button class="b-tab" data-toast="Services would open here">◉<br>Services</button></nav>
+        </section>`;
+      }
+
+      function variantC() {
+        return `<section class="screen"><div class="focus-wrap">
+          ${terminalHtml("focus-terminal")}
+          <div class="focus-pill row"><span class="dot"></span><button class="grow truncate" style="text-align:left" data-open="projects">${currentProject().name} <span class="muted">/ ${state.terminal}</span></button><button class="tap" style="min-width:2.15rem;min-height:2.15rem" data-open="tabs">⌄</button></div>
+          <div class="focus-actions"><button class="tap" data-toggle-keys title="Keyboard shortcuts">⌨</button><button class="tap" data-open="actions" title="Actions">•••</button></div>
+          <div class="focus-compose">${commandForm()}</div>
+        </div></section>`;
+      }
+
+      function projectsSheet() {
+        return `<div class="sheet-head row"><div><div class="eyebrow">Switch context</div><h2>Projects</h2></div><button class="sheet-close tap" data-close>×</button></div><div class="sheet-body"><input class="sheet-search" data-project-search placeholder="Search projects or branches…"><div data-project-list>${projectRows(projects)}</div></div>`;
+      }
+
+      function projectRows(items) {
+        return (
+          items
+            .map(
+              (p) =>
+                `<button class="project-item ${p.id === state.projectId ? "selected" : ""}" data-project="${p.id}"><span class="project-glyph" style="background:${p.color}">${p.name[0].toUpperCase()}</span><span class="project-meta"><strong class="truncate">${p.name}</strong><small class="truncate">${p.folder} · ${p.branch}</small></span><span class="badge">${p.terminals.length}</span></button>`,
+            )
+            .join("") ||
+          '<p class="muted" style="padding:1rem">No matching projects</p>'
+        );
+      }
+
+      function tabsSheet() {
+        const p = currentProject();
+        return `<div class="sheet-head row"><div><div class="eyebrow">${p.name}</div><h2>Terminals</h2></div><button class="sheet-close tap" data-close>×</button></div><div class="sheet-body">${p.terminals.map((t, i) => `<button class="project-item ${t === state.terminal ? "selected" : ""}" data-terminal-name="${t}"><span class="project-glyph" style="background:#252a35">${i + 1}</span><span class="project-meta"><strong>${t}</strong><small>${t === state.terminal ? "Active now" : "Tap to switch"}</small></span>${t === state.terminal ? '<span class="dot"></span>' : ""}</button>`).join("")}<button class="project-item" data-new-terminal><span class="project-glyph" style="background:var(--accent)">+</span><span class="project-meta"><strong>New terminal</strong><small>Start in project directory</small></span></button></div>`;
+      }
+
+      function actionsSheet() {
+        return `<div class="sheet-head row"><div><div class="eyebrow">Current terminal</div><h2>Quick actions</h2></div><button class="sheet-close tap" data-close>×</button></div><div class="sheet-body"><div class="action-grid"><button class="action-card" data-toast="Copied terminal output">Copy output<span>Visible terminal text</span></button><button class="action-card" data-toast="Rename flow would open">Rename<span>${state.terminal}</span></button><button class="action-card" data-toast="Split created">Split terminal<span>Horizontal pane</span></button><button class="action-card" data-toast="Connection is healthy">Connection<span>Tailnet · 6 ms</span></button></div></div>`;
+      }
+
+      function replaceMarkup(element, markup) {
+        const parsed = new DOMParser().parseFromString(markup, "text/html");
+        element.replaceChildren(...parsed.body.childNodes);
+      }
+
+      function updateVariantUrl() {
+        const params = new URLSearchParams(location.search);
+        params.set("variant", state.variant);
+        history.replaceState(
+          {},
+          "",
+          `${location.pathname}?${params}${location.hash}`,
+        );
+      }
+
+      function render() {
+        let content = variantA();
+        if (state.variant === "B") content = variantB();
+        if (state.variant === "C") content = variantC();
+
+        let sheetContent = actionsSheet();
+        if (state.sheet === "projects") sheetContent = projectsSheet();
+        if (state.sheet === "tabs") sheetContent = tabsSheet();
+
+        const markup = `${content}<div class="variant-caption">throwaway prototype</div><div class="backdrop ${state.sheet ? "open" : ""}" data-close></div><aside class="sheet ${state.sheet ? "open" : ""}"><div class="sheet-grabber"></div>${sheetContent}</aside><div class="variant-switcher" aria-label="Prototype variants">${["A", "B", "C"].map((v) => `<button class="${state.variant === v ? "active" : ""}" data-variant="${v}">${v}</button>`).join("")}</div><div class="toast" data-toast-box></div>`;
+        replaceMarkup(phone, markup);
+        requestAnimationFrame(() => {
+          const term = phone.querySelector("[data-terminal]");
+          if (term) term.scrollTop = term.scrollHeight;
+        });
+      }
+
+      let toastTimer;
+      function toast(message) {
+        const box = phone.querySelector("[data-toast-box]");
+        if (!box) return;
+        box.textContent = message;
+        box.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => box.classList.remove("show"), 1800);
+      }
+
+      phone.addEventListener("click", (event) => {
+        const target = event.target.closest("button,[data-close]");
+        if (!target) return;
+        if (target.dataset.variant) {
+          state.variant = target.dataset.variant;
+          updateVariantUrl();
+          render();
+          return;
+        }
+        if (target.dataset.open) {
+          state.sheet = target.dataset.open;
+          render();
+          return;
+        }
+        if (target.hasAttribute("data-close")) {
+          state.sheet = null;
+          render();
+          return;
+        }
+        if (target.dataset.project) {
+          state.projectId = target.dataset.project;
+          state.terminal = currentProject().terminals[0];
+          state.sheet = null;
+          render();
+          toast(`Switched to ${currentProject().name}`);
+          return;
+        }
+        if (target.dataset.terminalName) {
+          state.terminal = target.dataset.terminalName;
+          state.sheet = null;
+          render();
+          toast(`Terminal: ${state.terminal}`);
+          return;
+        }
+        if (target.hasAttribute("data-new-terminal")) {
+          const name = `shell-${currentProject().terminals.length + 1}`;
+          currentProject().terminals.push(name);
+          state.terminal = name;
+          state.sheet = null;
+          render();
+          toast(`Created ${name}`);
+          return;
+        }
+        if (target.hasAttribute("data-toggle-keys")) {
+          state.keyRail = !state.keyRail;
+          render();
+          toast(state.keyRail ? "Key rail shown" : "Key rail hidden");
+          return;
+        }
+        if (target.dataset.key) {
+          toast(`Sent ${target.dataset.key}`);
+          return;
+        }
+        if (target.dataset.toast) toast(target.dataset.toast);
+      });
+
+      phone.addEventListener("input", (event) => {
+        if (!event.target.matches("[data-project-search]")) return;
+        const query = event.target.value.toLowerCase();
+        const matches = projects.filter((p) =>
+          `${p.name} ${p.branch} ${p.folder}`.toLowerCase().includes(query),
+        );
+        replaceMarkup(
+          phone.querySelector("[data-project-list]"),
+          projectRows(matches),
+        );
+      });
+
+      phone.addEventListener("submit", (event) => {
+        if (!event.target.matches("[data-command-form]")) return;
+        event.preventDefault();
+        const input = event.target.elements.command;
+        const command = input.value.trim();
+        if (!command) return;
+        state.output.splice(
+          -1,
+          1,
+          `<span class="prompt">${escapeHtml(currentProject().name)}</span> <span class="path">~/code/${escapeHtml(currentProject().name)}</span> <span class="command">${escapeHtml(command)}</span>`,
+        );
+        state.output.push(
+          command === "date"
+            ? new Date().toString()
+            : `<span class="success">✓</span> Prototype ran “${escapeHtml(command)}”`,
+          "",
+          `<span class="prompt">${escapeHtml(currentProject().name)}</span> <span class="path">~/code/${escapeHtml(currentProject().name)}</span> <span class="dim">▌</span>`,
+        );
+        render();
+        requestAnimationFrame(() =>
+          phone.querySelector(".command-input")?.focus(),
+        );
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (
+          !["ArrowLeft", "ArrowRight"].includes(event.key) ||
+          /INPUT|TEXTAREA/.test(event.target.tagName) ||
+          event.target.isContentEditable
+        )
+          return;
+        const variants = ["A", "B", "C"];
+        const index = variants.indexOf(state.variant);
+        state.variant =
+          variants[(index + (event.key === "ArrowRight" ? 1 : 2)) % 3];
+        updateVariantUrl();
+        render();
+      });
+
+      render();
+    </script>
+  </body>
+</html>

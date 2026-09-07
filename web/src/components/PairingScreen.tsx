@@ -27,8 +27,8 @@ export function PairingScreen({ onPaired }: { onPaired: () => void }) {
   };
 
   return (
-    <div className="app-shell flex h-screen items-center justify-center">
-      <div className="w-[360px] border border-[var(--ok-border)] bg-[var(--ok-panel)]">
+    <div className="pairing-shell app-shell flex h-full overflow-hidden items-center justify-center">
+      <div className="pairing-panel border border-[var(--ok-border)] bg-[var(--ok-panel)]">
         <div className="project-header border-b border-[var(--ok-border)] px-4 py-3">
           <h1 className="text-[15px] font-bold text-[var(--ok-text)]">Okena</h1>
           <p className="mt-1 text-[11px] text-[var(--ok-text-secondary)]">
@@ -52,7 +52,9 @@ export function PairingScreen({ onPaired }: { onPaired: () => void }) {
           />
 
           {error && (
-            <p className="text-center text-[12px] text-[var(--ok-red)]">{error}</p>
+            <p className="text-center text-[12px] text-[var(--ok-red)]">
+              {error}
+            </p>
           )}
 
           <button

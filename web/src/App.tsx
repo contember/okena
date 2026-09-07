@@ -1,5 +1,10 @@
 import { useReducer, useEffect, useRef, useCallback, useState } from "react";
-import { appReducer, initialState, AppContext, TerminalRegistry } from "./state/store";
+import {
+  appReducer,
+  initialState,
+  AppContext,
+  TerminalRegistry,
+} from "./state/store";
 import { WsManager, type WsStatus } from "./api/websocket";
 import type { WsOutbound } from "./api/types";
 import { getState, refresh, AuthError } from "./api/client";
@@ -54,7 +59,9 @@ export function App() {
   // Keep a ref to the latest handleWsMessage so the WS effect doesn't
   // need to re-run (and kill the connection) when the handler changes.
   const handleWsMessageRef = useRef(handleWsMessage);
-  useEffect(() => { handleWsMessageRef.current = handleWsMessage; });
+  useEffect(() => {
+    handleWsMessageRef.current = handleWsMessage;
+  });
 
   // Check auth on mount
   useEffect(() => {
@@ -85,9 +92,11 @@ export function App() {
     const ws = wsRef.current;
     const registry = registryRef.current;
 
-    ws.onPtyData = (streamId, data) => registry.write(streamId, data);
+    ws.onPtyData = (streamId, data, isSnapshot) =>
+      registry.write(streamId, data, isSnapshot);
     ws.onJson = (msg) => handleWsMessageRef.current(msg);
-    ws.onStatus = (status: WsStatus) => dispatch({ type: "set_ws_status", status });
+    ws.onStatus = (status: WsStatus) =>
+      dispatch({ type: "set_ws_status", status });
     ws.connect();
 
     return () => ws.dispose();
@@ -120,7 +129,7 @@ export function App() {
 
   if (authed === null) {
     return (
-      <div className="flex items-center justify-center h-screen">
+      <div className="flex h-full overflow-hidden items-center justify-center">
         <div className="text-zinc-500">Connecting...</div>
       </div>
     );

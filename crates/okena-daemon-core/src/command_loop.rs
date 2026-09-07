@@ -4183,11 +4183,21 @@ pub async fn daemon_command_loop(
                 cols,
                 rows,
                 connection_id,
+                claim,
             } => {
-                if !okena_terminal::terminal::claim_remote_resize_if_allowed(
-                    &terminal_id,
-                    &connection_id,
-                ) {
+                let resize_allowed = if claim {
+                    okena_terminal::terminal::claim_resize_authority_remote_owner(
+                        &terminal_id,
+                        &connection_id,
+                    );
+                    true
+                } else {
+                    okena_terminal::terminal::claim_remote_resize_if_allowed(
+                        &terminal_id,
+                        &connection_id,
+                    )
+                };
+                if !resize_allowed {
                     // Denied: reply with the authoritative size so the stream
                     // handler can correct the client's optimistically-resized
                     // grid and make it cede (server_owns), instead of leaving

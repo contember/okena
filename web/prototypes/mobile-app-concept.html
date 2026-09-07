@@ -1,0 +1,1638 @@
+<!doctype html>
+<!--
+  Throwaway expanded prototype.
+  Direction: focus terminal + persistent mobile navigation.
+  Visual language adapted from Helm: flat editorial groups, one 16px text grid,
+  restrained background ladder, hairlines, one primary action, no in-flow cards.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0f1113" />
+    <title>Okena mobile concept</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --chrome: #1a1c1f;
+        --pane: #141517;
+        --well: #0f1113;
+        --hairline: rgba(255, 255, 255, 0.07);
+        --hairline-strong: rgba(255, 255, 255, 0.16);
+        --fill-subtle: rgba(255, 255, 255, 0.05);
+        --fill-raised: rgba(255, 255, 255, 0.09);
+        --fill-strong: rgba(255, 255, 255, 0.13);
+        --text-0: #ececee;
+        --text-1: #9a9ea6;
+        --text-2: #62666e;
+        --accent: #4c9aff;
+        --accent-fill: #3b82f6;
+        --success: #4ec98a;
+        --warn: #e0b341;
+        --danger: #f2585b;
+        --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+        --success-soft: color-mix(in srgb, var(--success) 15%, transparent);
+        --warn-soft: color-mix(in srgb, var(--warn) 15%, transparent);
+        --danger-soft: color-mix(in srgb, var(--danger) 15%, transparent);
+        --safe-t: env(safe-area-inset-top, 0px);
+        --safe-r: env(safe-area-inset-right, 0px);
+        --safe-b: env(safe-area-inset-bottom, 0px);
+        --safe-l: env(safe-area-inset-left, 0px);
+        --font-ui:
+          -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+          sans-serif;
+        --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: var(--font-ui);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+      @supports (height: 100dvh) {
+        html,
+        body {
+          height: 100dvh;
+        }
+      }
+      body {
+        position: fixed;
+        inset: 0;
+        background: #090a0b;
+        color: var(--text-0);
+        font-size: 13px;
+        letter-spacing: -0.01em;
+        -webkit-font-smoothing: antialiased;
+      }
+      button,
+      input {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        border: 0;
+        cursor: pointer;
+      }
+      #phone {
+        position: relative;
+        width: min(100%, 27rem);
+        height: 100%;
+        margin: auto;
+        overflow: hidden;
+        background: var(--pane);
+        isolation: isolate;
+      }
+      @media (min-width: 34rem) {
+        body {
+          display: grid;
+          place-items: center;
+          padding: 24px;
+        }
+        #phone {
+          height: min(52rem, calc(100dvh - 48px));
+          border: 1px solid var(--hairline);
+          border-radius: 24px;
+          box-shadow: 0 24px 72px rgba(0, 0, 0, 0.65);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      .app {
+        display: flex;
+        height: 100%;
+        min-width: 0;
+        flex-direction: column;
+        overflow: hidden;
+        padding-right: var(--safe-r);
+        padding-left: var(--safe-l);
+        background: var(--pane);
+      }
+      .page {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .page-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: none;
+      }
+      .page-scroll::-webkit-scrollbar,
+      .terminal::-webkit-scrollbar {
+        display: none;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+      .grow {
+        flex: 1;
+        min-width: 0;
+      }
+      .truncate {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .muted {
+        color: var(--text-1);
+      }
+      .dim {
+        color: var(--text-2);
+      }
+      .icon {
+        display: block;
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.6;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .icon-button {
+        display: grid;
+        width: 32px;
+        height: 32px;
+        place-items: center;
+        flex: none;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text-2);
+        transition:
+          background-color 140ms ease-out,
+          color 140ms ease-out;
+      }
+      .icon-button:active {
+        background: var(--fill-raised);
+        color: var(--text-0);
+      }
+      .page-header {
+        display: flex;
+        height: 52px;
+        flex: none;
+        align-items: center;
+        gap: 4px;
+        padding: calc(var(--safe-t) + 4px) 8px 0;
+        border-bottom: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      .page-header-title {
+        min-width: 0;
+        flex: 1;
+        margin: 0 8px;
+        font-size: 17px;
+        font-weight: 600;
+        line-height: 1.3;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .page-header-meta {
+        flex: none;
+        margin-right: 8px;
+        color: var(--text-2);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      .btn {
+        display: inline-flex;
+        height: 32px;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 0 14px;
+        border-radius: 8px;
+        background: none;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .btn-primary {
+        background: var(--accent-fill);
+        color: white;
+      }
+      .btn-quiet {
+        background: var(--fill-raised);
+        color: var(--text-0);
+      }
+      .btn-ghost {
+        color: var(--text-2);
+      }
+      .btn:active {
+        filter: brightness(1.12);
+      }
+
+      /* Persistent mobile navigation: Helm's text index translated to a dock. */
+      .dock {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        height: calc(56px + var(--safe-b));
+        flex: none;
+        padding: 0 8px var(--safe-b);
+        border-top: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      .dock-button {
+        position: relative;
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        background: transparent;
+        color: var(--text-2);
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .dock-button .icon {
+        width: 15px;
+        height: 15px;
+      }
+      .dock-button.active {
+        color: var(--text-0);
+        font-weight: 600;
+      }
+      .dock-button.active .icon {
+        color: var(--accent);
+      }
+
+      /* Search */
+      .search-bar {
+        display: flex;
+        min-height: 52px;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--hairline);
+      }
+      .search-field {
+        display: flex;
+        height: 36px;
+        min-width: 0;
+        flex: 1;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        border: 1px solid var(--hairline);
+        border-radius: 6px;
+        background: var(--fill-subtle);
+        color: var(--text-2);
+      }
+      .search-field:focus-within {
+        border-color: var(--accent);
+      }
+      .search-field input {
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--text-0);
+        font-size: 12px;
+      }
+      .search-field input::placeholder {
+        color: var(--text-2);
+      }
+      .search-field .icon {
+        width: 14px;
+        height: 14px;
+      }
+      .search-result {
+        flex: none;
+        color: var(--text-2);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Terminal */
+      .terminal-page {
+        background: var(--well);
+      }
+      .terminal-chrome {
+        display: flex;
+        height: 44px;
+        flex: none;
+        align-items: center;
+        gap: 8px;
+        padding: var(--safe-t) 8px 0 16px;
+        border-bottom: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      .terminal-context {
+        display: flex;
+        height: 32px;
+        min-width: 0;
+        flex: 1;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px;
+        border-radius: 6px;
+        background: var(--fill-subtle);
+        text-align: left;
+        transition: background-color 140ms ease-out;
+      }
+      .terminal-context:active {
+        background: var(--fill-raised);
+      }
+      .terminal-context .icon {
+        width: 14px;
+        height: 14px;
+        flex: none;
+        color: var(--text-2);
+      }
+      .terminal-project {
+        overflow: hidden;
+        color: var(--text-0);
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .terminal-name {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        color: var(--text-2);
+        font: 11px var(--font-mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .terminal-search {
+        display: none;
+        height: 44px;
+        flex: none;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px 4px 16px;
+        border-bottom: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      .terminal-search.open {
+        display: flex;
+      }
+      .terminal-search .search-field {
+        height: 32px;
+      }
+      .terminal-search-count {
+        min-width: 48px;
+        color: var(--text-2);
+        font-size: 11px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .terminal {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        overscroll-behavior: contain;
+        padding: 12px 12px 12px 16px;
+        background: var(--well);
+        color: #c9ccd1;
+        font: 13px/1.48 var(--font-mono);
+        letter-spacing: normal;
+        scrollbar-width: none;
+      }
+      .terminal-line {
+        min-height: 19px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .terminal .prompt {
+        color: #54c6d6;
+      }
+      .terminal .path {
+        color: #78b5ff;
+      }
+      .terminal .command {
+        color: var(--text-0);
+      }
+      .terminal .success {
+        color: var(--success);
+      }
+      .terminal .warning {
+        color: var(--warn);
+      }
+      .terminal mark {
+        border-radius: 2px;
+        background: var(--warn);
+        color: var(--well);
+      }
+      .terminal-controls {
+        display: flex;
+        min-height: 48px;
+        flex: none;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 8px 8px 16px;
+        border-top: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      .command-form {
+        display: flex;
+        min-width: 0;
+        flex: 1;
+        align-items: center;
+        gap: 8px;
+      }
+      .command-prefix {
+        color: var(--success);
+        font: 13px var(--font-mono);
+      }
+      .command-input {
+        width: 100%;
+        min-width: 0;
+        height: 32px;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        font: 13px var(--font-mono);
+      }
+      .send-button {
+        display: grid;
+        width: 32px;
+        height: 32px;
+        place-items: center;
+        flex: none;
+        border-radius: 8px;
+        background: var(--accent-fill);
+        color: white;
+      }
+      .key-panel {
+        display: none;
+        grid-template-columns: repeat(5, 1fr);
+        flex: none;
+        gap: 4px;
+        padding: 8px 16px;
+        border-top: 1px solid var(--hairline);
+        background: var(--chrome);
+      }
+      .key-panel.open {
+        display: grid;
+      }
+      .key {
+        height: 32px;
+        border-radius: 6px;
+        background: var(--fill-raised);
+        color: var(--text-1);
+        font: 11px var(--font-mono);
+      }
+
+      /* Helm-like list/index */
+      .index {
+        display: flex;
+        height: 44px;
+        flex: none;
+        align-items: center;
+        gap: 24px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--hairline);
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .index::-webkit-scrollbar {
+        display: none;
+      }
+      .index-button {
+        position: relative;
+        height: 44px;
+        flex: none;
+        padding: 0;
+        background: transparent;
+        color: var(--text-2);
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .index-button.active {
+        color: var(--text-0);
+        font-weight: 600;
+      }
+      .index-button.active::after {
+        position: absolute;
+        right: 0;
+        bottom: -1px;
+        left: 0;
+        height: 2px;
+        border-radius: 1px;
+        background: var(--accent);
+        content: "";
+      }
+      .index-count {
+        margin-left: 6px;
+        color: var(--text-2);
+        font-size: 11px;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+      }
+      .group-heading {
+        display: flex;
+        height: 32px;
+        align-items: end;
+        gap: 8px;
+        padding: 0 16px 6px;
+        color: var(--text-1);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .group-heading .count {
+        margin-left: auto;
+        color: var(--text-2);
+        font-size: 11px;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+      }
+      .list-row {
+        display: flex;
+        width: 100%;
+        height: 64px;
+        align-items: center;
+        gap: 12px;
+        padding: 0 16px;
+        border-radius: 0;
+        background: transparent;
+        text-align: left;
+        transition: background-color 140ms ease-out;
+      }
+      .list-row:active {
+        background: var(--fill-raised);
+      }
+      .row-main {
+        min-width: 0;
+        flex: 1;
+      }
+      .row-line {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+      }
+      .row-title {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        color: var(--text-0);
+        font-size: 13px;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .row-time {
+        flex: none;
+        color: var(--text-2);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      .row-meta {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+        overflow: hidden;
+        color: var(--text-2);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .row-meta span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .project-color {
+        font-weight: 500;
+      }
+      .row-chevron {
+        flex: none;
+        color: var(--text-2);
+      }
+      .activity {
+        display: flex;
+        width: 14px;
+        height: 14px;
+        align-items: center;
+        justify-content: center;
+        gap: 1px;
+        flex: none;
+      }
+      .activity i {
+        width: 2px;
+        height: 7px;
+        border-radius: 1px;
+        background: var(--text-1);
+        animation: work 1.1s ease-in-out infinite;
+      }
+      .activity i:nth-child(2) {
+        height: 11px;
+        animation-delay: 0.13s;
+      }
+      .activity i:nth-child(3) {
+        height: 5px;
+        animation-delay: 0.26s;
+      }
+      @keyframes work {
+        0%,
+        100% {
+          opacity: 0.35;
+          transform: scaleY(0.65);
+        }
+        50% {
+          opacity: 1;
+          transform: scaleY(1);
+        }
+      }
+      .empty {
+        display: flex;
+        min-height: 180px;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        text-align: center;
+      }
+      .empty strong,
+      .empty span {
+        display: block;
+      }
+      .empty strong {
+        color: var(--text-1);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .empty span {
+        margin-top: 6px;
+        color: var(--text-2);
+        font-size: 12px;
+      }
+
+      /* Projects */
+      .resume {
+        display: flex;
+        width: 100%;
+        min-height: 76px;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        background: transparent;
+        text-align: left;
+      }
+      .resume:active {
+        background: var(--fill-raised);
+      }
+      .resume-terminal {
+        display: grid;
+        width: 44px;
+        height: 44px;
+        place-items: center;
+        flex: none;
+        border-radius: 8px;
+        background: var(--well);
+        color: var(--accent);
+        font: 15px var(--font-mono);
+      }
+      .flat-section {
+        margin: 0 16px;
+        padding: 20px 0 0;
+        border-top: 1px solid var(--hairline);
+      }
+      .flat-section:first-child {
+        border-top: 0;
+      }
+      .section-head {
+        display: flex;
+        min-height: 20px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .section-title {
+        margin: 0;
+        color: var(--text-1);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .section-action {
+        height: 28px;
+        padding: 0 8px;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-2);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .section-action:active {
+        background: var(--fill-subtle);
+        color: var(--text-0);
+      }
+
+      /* Detail */
+      .detail-scroll {
+        padding: 20px 16px;
+      }
+      .identity {
+        padding-bottom: 16px;
+      }
+      .identity-top {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .identity-title {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+      .identity-path {
+        margin-top: 4px;
+        color: var(--text-2);
+        font: 11px var(--font-mono);
+      }
+      .identity-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+        color: var(--text-1);
+        font-size: 11px;
+      }
+      .identity-meta span + span::before {
+        margin-right: 8px;
+        color: var(--text-2);
+        content: "·";
+      }
+      .detail-action {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .detail-action .btn-primary {
+        flex: 1;
+      }
+      .fact-row {
+        display: flex;
+        min-height: 28px;
+        align-items: center;
+        gap: 12px;
+      }
+      .fact-label {
+        min-width: 0;
+        flex: 1;
+        color: var(--text-2);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .fact-value {
+        max-width: 62%;
+        overflow: hidden;
+        color: var(--text-0);
+        font-size: 12px;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .fact-value.mono {
+        font: 11px var(--font-mono);
+      }
+      .nav-row {
+        display: flex;
+        width: calc(100% + 32px);
+        min-height: 44px;
+        align-items: center;
+        gap: 8px;
+        margin: 0 -16px;
+        padding: 0 16px;
+        border-radius: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .nav-row + .nav-row {
+        border-top: 1px solid
+          color-mix(in srgb, var(--hairline) 60%, transparent);
+      }
+      .nav-row:active {
+        background: var(--fill-subtle);
+      }
+      .nav-row-title {
+        min-width: 0;
+        flex: 1;
+        color: var(--text-0);
+        font-size: 13px;
+      }
+      .nav-row-value {
+        max-width: 46%;
+        overflow: hidden;
+        color: var(--text-1);
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .nav-row .icon {
+        width: 14px;
+        height: 14px;
+        color: var(--text-2);
+      }
+
+      /* More */
+      .profile {
+        display: flex;
+        min-height: 56px;
+        align-items: center;
+        gap: 12px;
+      }
+      .profile-mark {
+        display: grid;
+        width: 36px;
+        height: 36px;
+        place-items: center;
+        flex: none;
+        border-radius: 50%;
+        background: var(--fill-raised);
+        color: var(--text-1);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .profile strong,
+      .profile small {
+        display: block;
+      }
+      .profile strong {
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .profile small {
+        margin-top: 4px;
+        color: var(--text-2);
+        font-size: 11px;
+      }
+      .connection-line {
+        display: flex;
+        min-height: 36px;
+        align-items: center;
+        gap: 8px;
+      }
+      .live-word {
+        color: var(--success);
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .connection-detail {
+        color: var(--text-2);
+        font-size: 11px;
+      }
+
+      /* Compact context sheet — detached from the terminal surface. */
+      .sheet-scrim {
+        position: absolute;
+        z-index: 60;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        animation: scrim-in 150ms ease-out;
+      }
+      .context-sheet {
+        position: absolute;
+        z-index: 61;
+        right: max(8px, var(--safe-r));
+        bottom: max(8px, var(--safe-b));
+        left: max(8px, var(--safe-l));
+        overflow: hidden;
+        border: 1px solid var(--hairline);
+        border-radius: 8px;
+        background: var(--chrome);
+        box-shadow:
+          0 10px 30px -8px rgba(0, 0, 0, 0.6),
+          0 2px 8px rgba(0, 0, 0, 0.35);
+        animation: sheet-in 150ms ease-out;
+      }
+      .sheet-header {
+        display: flex;
+        min-height: 52px;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 8px 8px 16px;
+        border-bottom: 1px solid var(--hairline);
+      }
+      .sheet-header strong,
+      .sheet-header small {
+        display: block;
+      }
+      .sheet-header strong {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .sheet-header small {
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--text-2);
+        font: 11px var(--font-mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sheet-body {
+        padding: 8px 0;
+      }
+      .sheet-label {
+        height: 24px;
+        padding: 4px 16px;
+        color: var(--text-1);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .sheet-terminal {
+        display: flex;
+        width: 100%;
+        height: 44px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        border-radius: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .sheet-terminal:active {
+        background: var(--fill-raised);
+      }
+      .sheet-terminal span {
+        font: 13px var(--font-mono);
+      }
+      .sheet-terminal small {
+        color: var(--text-2);
+        font-size: 11px;
+      }
+      .sheet-footer {
+        display: flex;
+        min-height: 56px;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 12px;
+        border-top: 1px solid var(--hairline);
+        background: var(--pane);
+      }
+      @keyframes sheet-in {
+        from {
+          transform: translateY(8px);
+          opacity: 0;
+        }
+      }
+      @keyframes scrim-in {
+        from {
+          opacity: 0;
+        }
+      }
+
+      /* Detached only */
+      .toast {
+        position: absolute;
+        z-index: 100;
+        right: 16px;
+        bottom: calc(72px + var(--safe-b));
+        left: 16px;
+        min-height: 48px;
+        padding: 11px 40px 11px 12px;
+        transform: translateY(8px);
+        opacity: 0;
+        border: 1px solid var(--hairline);
+        border-radius: 8px;
+        background: var(--chrome);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        color: var(--text-0);
+        font-size: 13px;
+        font-weight: 500;
+        transition:
+          opacity 150ms ease-out,
+          transform 150ms ease-out;
+        pointer-events: none;
+      }
+      .toast.show {
+        transform: translateY(0);
+        opacity: 1;
+      }
+      .toast-detail {
+        display: block;
+        margin-top: 2px;
+        color: var(--text-2);
+        font-size: 11px;
+        font-weight: 400;
+      }
+      .prototype-label {
+        position: absolute;
+        z-index: 120;
+        top: max(2px, var(--safe-t));
+        right: max(4px, var(--safe-r));
+        color: var(--text-2);
+        font-size: 9px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="phone" aria-label="Okena mobile app concept"></main>
+    <script>
+      const projects = [
+        {
+          id: "okena",
+          name: "okena",
+          folder: "Contember",
+          branch: "feat/mobile-web-access",
+          path: "~/code/okena",
+          color: "#8e9cff",
+          terminals: ["web", "cargo", "notes"],
+          changes: "8 files",
+          services: "2 running",
+          last: "now",
+        },
+        {
+          id: "crane",
+          name: "crane-rental",
+          folder: "Contember",
+          branch: "feat/add-components",
+          path: "~/projects/crane-rental",
+          color: "#68bfae",
+          terminals: ["api", "admin", "worker", "tests"],
+          changes: "4 files",
+          services: "5 running",
+          last: "4m",
+        },
+        {
+          id: "psyon",
+          name: "project-psyon",
+          folder: "Contember",
+          branch: "fix/assign-doctor",
+          path: "~/projects/psyon",
+          color: "#dd8d78",
+          terminals: ["server", "db"],
+          changes: "2 files",
+          services: "3 running",
+          last: "18m",
+        },
+        {
+          id: "helm",
+          name: "helm",
+          folder: "Neumie",
+          branch: "main",
+          path: "~/code/helm",
+          color: "#c7a95e",
+          terminals: ["app", "storybook"],
+          changes: "clean",
+          services: "1 running",
+          last: "1h",
+        },
+        {
+          id: "website",
+          name: "neumie-web",
+          folder: "Personal",
+          branch: "redesign",
+          path: "~/code/neumie-web",
+          color: "#71a2d6",
+          terminals: ["dev"],
+          changes: "5 files",
+          services: "1 running",
+          last: "2h",
+        },
+      ];
+      const params = new URLSearchParams(location.search);
+      const state = {
+        page: params.get("page") || "terminal",
+        projectId: params.get("project") || "okena",
+        terminal: params.get("terminal") || "web",
+        returnPage: "projects",
+        tool: "files",
+        keys: false,
+        terminalFind: false,
+        terminalFilter: "all",
+        terminalQuery: "",
+        sheet: false,
+        output: [
+          [{ tone: "dim", text: "Last login: today from iphone-13.tailnet" }],
+          [
+            { tone: "prompt", text: "okena" },
+            { text: " " },
+            { tone: "path", text: "~/code/okena" },
+            { text: " " },
+            { tone: "command", text: "git status --short --branch" },
+          ],
+          [{ tone: "success", text: "## feat/mobile-web-access" }],
+          [{ text: " M web/src/index.css" }],
+          [{ text: " M web/prototypes/mobile-app-concept.html" }],
+          [],
+          [
+            { tone: "prompt", text: "okena" },
+            { text: " " },
+            { tone: "path", text: "~/code/okena" },
+            { text: " " },
+            { tone: "command", text: "bun run build" },
+          ],
+          [{ tone: "success", text: "✓ built in 2.92s" }],
+          [],
+          [
+            { tone: "prompt", text: "okena" },
+            { text: " " },
+            { tone: "path", text: "~/code/okena" },
+            { text: " " },
+            { tone: "dim", text: "▌" },
+          ],
+        ],
+      };
+      const phone = document.querySelector("#phone");
+      const currentProject = () =>
+        projects.find((project) => project.id === state.projectId) ||
+        projects[0];
+      const escapeHtml = (value) =>
+        value.replace(
+          /[&<>'"]/g,
+          (char) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              "'": "&#39;",
+              '"': "&quot;",
+            })[char],
+        );
+      const lineText = (line) => line.map((segment) => segment.text).join("");
+      function terminalToneClass(tone) {
+        if (
+          ["dim", "prompt", "path", "command", "success", "warning"].includes(
+            tone,
+          )
+        )
+          return tone;
+        return "";
+      }
+      const pageNames = {
+        terminal: "Current",
+        projects: "Projects",
+        terminals: "Terminals",
+        more: "More",
+      };
+      const icons = {
+        current:
+          '<svg class="icon" viewBox="0 0 24 24"><path d="m5 7 4 4-4 4M11 16h8"/></svg>',
+        projects:
+          '<svg class="icon" viewBox="0 0 24 24"><path d="M3 7.5h7l2-2h9v13H3z"/></svg>',
+        terminals:
+          '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m5 0h5"/></svg>',
+        more: '<svg class="icon" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>',
+        search:
+          '<svg class="icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>',
+        back: '<svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
+        chevron:
+          '<svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
+        chevronDown:
+          '<svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
+        plus: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+        keyboard:
+          '<svg class="icon" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h4M7 16h10"/></svg>',
+        copy: '<svg class="icon" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>',
+        close:
+          '<svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>',
+      };
+
+      function replaceMarkup(element, markup) {
+        const parsed = new DOMParser().parseFromString(markup, "text/html");
+        element.replaceChildren(...parsed.body.childNodes);
+      }
+      function syncUrl(mode = "replace") {
+        const next = new URLSearchParams();
+        next.set("page", state.page);
+        next.set("project", state.projectId);
+        next.set("terminal", state.terminal);
+        const method = mode === "push" ? "pushState" : "replaceState";
+        history[method](
+          { page: state.page },
+          "",
+          `${location.pathname}?${next}${location.hash}`,
+        );
+      }
+      function navigate(page, { push = true } = {}) {
+        state.page = page;
+        syncUrl(push ? "push" : "replace");
+        render();
+      }
+      function pageHeader(
+        title,
+        { back = false, meta = "", action = "" } = {},
+      ) {
+        const backButton = back
+          ? `<button class="icon-button" data-back aria-label="Back">${icons.back}</button>`
+          : "";
+        return `<header class="page-header">${backButton}<h1 class="page-header-title">${title}</h1>${meta ? `<span class="page-header-meta">${meta}</span>` : ""}${action}</header>`;
+      }
+      function dock() {
+        const entries = [
+          ["terminal", icons.current],
+          ["projects", icons.projects],
+          ["terminals", icons.terminals],
+          ["more", icons.more],
+        ];
+        return `<nav class="dock">${entries.map(([page, icon]) => `<button class="dock-button ${activeDockPage() === page ? "active" : ""}" data-page="${page}">${icon}<span>${pageNames[page]}</span></button>`).join("")}</nav>`;
+      }
+      function activeDockPage() {
+        if (state.page === "project") return "projects";
+        if (state.page === "tool" && state.returnPage === "project")
+          return "projects";
+        if (state.page === "tool") return "more";
+        return state.page;
+      }
+      function activity() {
+        return '<span class="activity" aria-label="Running"><i></i><i></i><i></i></span>';
+      }
+      function projectText(project) {
+        return `<span class="project-color" style="color:color-mix(in srgb,${project.color} 55%,var(--text-1))">${project.name}</span>`;
+      }
+      function searchField(kind, placeholder, value = "") {
+        return `<label class="search-field">${icons.search}<input data-search="${escapeHtml(kind)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" autocapitalize="off"></label>`;
+      }
+      function terminalHtml() {
+        return '<div class="terminal" data-terminal></div>';
+      }
+      function populateTerminal() {
+        const terminal = phone.querySelector("[data-terminal]");
+        if (!terminal) return;
+        for (const line of state.output) {
+          const row = document.createElement("div");
+          row.className = "terminal-line";
+          if (line.length === 0) {
+            row.textContent = "\u00a0";
+          } else {
+            for (const segment of line) {
+              const tone = terminalToneClass(segment.tone);
+              if (!tone) {
+                row.append(document.createTextNode(segment.text));
+                continue;
+              }
+              const span = document.createElement("span");
+              span.className = tone;
+              span.textContent = segment.text;
+              row.append(span);
+            }
+          }
+          terminal.append(row);
+        }
+      }
+
+      function currentPage() {
+        const project = currentProject();
+        return `<section class="page terminal-page"><div class="terminal-chrome"><button class="terminal-context" data-context-sheet aria-label="Switch terminal in ${project.name}"><span class="terminal-project">${project.name}</span><span class="terminal-name">/ ${state.terminal}</span>${icons.chevronDown}</button><button class="icon-button" data-terminal-search aria-label="Find in output">${icons.search}</button><button class="icon-button" data-copy aria-label="Copy output">${icons.copy}</button></div><div class="terminal-search ${state.terminalFind ? "open" : ""}">${searchField("output", "Find in output")}<span class="terminal-search-count" data-find-count>0 matches</span><button class="icon-button" data-terminal-search aria-label="Close search">${icons.close}</button></div>${terminalHtml()}<div class="key-panel ${state.keys ? "open" : ""}">${["esc", "tab", "^C", "^D", "↑", "↓", "←", "→", "/", "~"].map((key) => `<button class="key" data-key="${key}">${key}</button>`).join("")}</div><div class="terminal-controls"><form class="command-form" data-command-form><span class="command-prefix">›</span><input class="command-input" name="command" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type a command"><button class="send-button" aria-label="Run command">↑</button></form><button class="icon-button" data-keys aria-label="Terminal keys">${icons.keyboard}</button></div></section>`;
+      }
+
+      function projectRows(items) {
+        if (items.length === 0)
+          return '<div class="empty"><div><strong>No projects found</strong><span>Try a project or branch name.</span></div></div>';
+        return items
+          .map(
+            (project) =>
+              `<button class="list-row" data-project="${project.id}"><span class="row-main"><span class="row-line"><span class="row-title">${projectText(project)}</span><span class="row-time">${project.last}</span></span><span class="row-meta"><span>${project.branch}</span><span>${project.terminals.length} terminals</span></span></span><span class="row-chevron">${icons.chevron}</span></button>`,
+          )
+          .join("");
+      }
+      function groupedProjects(items) {
+        const folders = [...new Set(items.map((project) => project.folder))];
+        return folders
+          .map((folder) => {
+            const members = items.filter(
+              (project) => project.folder === folder,
+            );
+            return `<section><div class="group-heading"><span>${folder}</span><span class="count">${members.length}</span></div>${projectRows(members)}</section>`;
+          })
+          .join("");
+      }
+      function projectsPage() {
+        const project = currentProject();
+        const add = `<button class="icon-button" data-toast="Add project" aria-label="Add project">${icons.plus}</button>`;
+        return `<section class="page">${pageHeader("Projects", { action: add })}<div class="search-bar">${searchField("projects", "Search projects or branches")}</div><div class="page-scroll"><section><div class="group-heading"><span>Continue</span></div><button class="resume" data-open-terminal="${project.terminals[0]}" data-project-id="${project.id}"><span class="resume-terminal">›_</span><span class="row-main"><span class="row-line"><span class="row-title">${projectText(project)}</span><span class="row-time">${project.last}</span></span><span class="row-meta"><span>${project.terminals[0]}</span><span>${project.branch}</span></span></span><span class="row-chevron">${icons.chevron}</span></button></section><div data-project-results>${groupedProjects(projects)}</div></div></section>`;
+      }
+
+      function terminalState(terminal, index) {
+        if (terminal === state.terminal) return "Current";
+        if (index === 0) return "Running";
+        return "Idle";
+      }
+      function detailTerminalRows(project) {
+        return project.terminals
+          .map(
+            (terminal, index) =>
+              `<button class="nav-row" data-open-terminal="${terminal}" data-project-id="${project.id}"><span class="nav-row-title">${terminal}</span><span class="nav-row-value">${terminalState(terminal, index)}</span>${icons.chevron}</button>`,
+          )
+          .join("");
+      }
+      function projectPage() {
+        const project = currentProject();
+        return `<section class="page">${pageHeader(project.name, { back: true, meta: project.folder })}<div class="page-scroll detail-scroll"><section class="identity"><div class="identity-top"><div class="grow"><h2 class="identity-title" style="color:color-mix(in srgb,${project.color} 55%,var(--text-0))">${project.name}</h2><div class="identity-path">${project.path}</div><div class="identity-meta"><span>${project.branch}</span><span>${project.last}</span></div></div></div><div class="detail-action"><button class="btn btn-primary" data-open-terminal="${project.terminals[0]}" data-project-id="${project.id}">Open terminal</button><button class="btn btn-quiet" data-new-terminal>New terminal</button></div></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Terminals</h3><button class="section-action" data-page="terminals">Show all</button></div>${detailTerminalRows(project)}</section><section class="flat-section"><div class="section-head"><h3 class="section-title">Repository</h3></div><div class="fact-row"><span class="fact-label">Branch</span><span class="fact-value mono">${project.branch}</span></div><div class="fact-row"><span class="fact-label">Working tree</span><span class="fact-value">${project.changes}</span></div><button class="nav-row" data-tool="git"><span class="nav-row-title">Changes</span><span class="nav-row-value">Review diff</span>${icons.chevron}</button></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Workspace</h3></div><button class="nav-row" data-tool="files"><span class="nav-row-title">Files</span><span class="nav-row-value">${project.path}</span>${icons.chevron}</button><button class="nav-row" data-tool="services"><span class="nav-row-title">Services</span><span class="nav-row-value">${project.services}</span>${icons.chevron}</button></section></div></section>`;
+      }
+
+      function terminalItems(query = "") {
+        const needle = query.trim().toLowerCase();
+        return projects
+          .flatMap((project) =>
+            project.terminals.map((terminal, index) => ({
+              project,
+              terminal,
+              index,
+            })),
+          )
+          .filter((item) => {
+            const matchesQuery =
+              `${item.terminal} ${item.project.name} ${item.project.branch}`
+                .toLowerCase()
+                .includes(needle);
+            if (!matchesQuery) return false;
+            if (state.terminalFilter === "running") return item.index === 0;
+            if (state.terminalFilter === "idle") return item.index > 0;
+            return true;
+          });
+      }
+      function terminalRows(query = "") {
+        const rows = terminalItems(query);
+        if (rows.length === 0)
+          return '<div class="empty"><div><strong>No terminals found</strong><span>Try a terminal, project, or branch name.</span></div></div>';
+        return rows
+          .map(
+            ({ project, terminal, index }) =>
+              `<button class="list-row" data-open-terminal="${terminal}" data-project-id="${project.id}">${index === 0 ? activity() : ""}<span class="row-main"><span class="row-line"><span class="row-title">${terminal}</span><span class="row-time">${project.last}</span></span><span class="row-meta"><span>${projectText(project)}</span><span>${project.branch}</span></span></span><span class="row-chevron">${icons.chevron}</span></button>`,
+          )
+          .join("");
+      }
+      function terminalsPage() {
+        const count = projects.reduce(
+          (sum, project) => sum + project.terminals.length,
+          0,
+        );
+        const visible = terminalItems(state.terminalQuery).length;
+        return `<section class="page">${pageHeader("Terminals", { meta: `${count} open` })}<div class="search-bar">${searchField("terminals", "Search terminals, projects, branches", state.terminalQuery)}<span class="search-result" data-terminal-count>${visible}</span></div><div class="index"><button class="index-button ${state.terminalFilter === "all" ? "active" : ""}" data-filter="all">All<span class="index-count">${count}</span></button><button class="index-button ${state.terminalFilter === "running" ? "active" : ""}" data-filter="running">Running<span class="index-count">5</span></button><button class="index-button ${state.terminalFilter === "idle" ? "active" : ""}" data-filter="idle">Idle<span class="index-count">7</span></button></div><div class="page-scroll" data-terminal-results>${terminalRows(state.terminalQuery)}</div></section>`;
+      }
+
+      function morePage() {
+        return `<section class="page">${pageHeader("More")}<div class="page-scroll detail-scroll"><section class="identity"><div class="profile"><span class="profile-mark">JN</span><span class="grow"><strong>Jakub’s Okena</strong><small>neubook.tailnet</small></span></div></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Workspace</h3></div><button class="nav-row" data-tool="files"><span class="nav-row-title">Files</span><span class="nav-row-value">Browse projects</span>${icons.chevron}</button><button class="nav-row" data-tool="git"><span class="nav-row-title">Git</span><span class="nav-row-value">Changes and branches</span>${icons.chevron}</button><button class="nav-row" data-tool="services"><span class="nav-row-title">Services</span><span class="nav-row-value">Processes and ports</span>${icons.chevron}</button></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Connection</h3></div><div class="connection-line"><span class="live-word">Connected</span><span class="connection-detail grow">iphone-13 → neubook</span><span class="row-time">6 ms</span></div><div class="fact-row"><span class="fact-label">Transport</span><span class="fact-value">Tailscale · WebSocket</span></div><div class="fact-row"><span class="fact-label">Pairing token</span><span class="fact-value">14 days</span></div></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Preferences</h3></div><button class="nav-row" data-toast="Appearance settings"><span class="nav-row-title">Appearance</span><span class="nav-row-value">Helm dark</span>${icons.chevron}</button><button class="nav-row" data-toast="Keyboard settings"><span class="nav-row-title">Terminal keyboard</span><span class="nav-row-value">Default</span>${icons.chevron}</button><button class="nav-row" data-toast="Paired devices"><span class="nav-row-title">Paired devices</span><span class="nav-row-value">1 device</span>${icons.chevron}</button></section></div></section>`;
+      }
+
+      function toolPage() {
+        const project = currentProject();
+        const name = state.tool[0].toUpperCase() + state.tool.slice(1);
+        let content = "";
+        if (state.tool === "files")
+          content = `<section class="flat-section"><div class="section-head"><h3 class="section-title">${project.path}</h3></div>${["src", "crates", "web", "Cargo.toml", "README.md"].map((file, index) => `<button class="nav-row" data-toast="Opened ${file}"><span class="nav-row-title">${file}</span><span class="nav-row-value">${index < 3 ? "Folder" : "File"}</span>${icons.chevron}</button>`).join("")}</section>`;
+        if (state.tool === "git")
+          content = `<section class="identity"><h2 class="identity-title">${project.branch}</h2><div class="identity-meta"><span>${project.changes}</span><span>Local changes</span></div></section><section class="flat-section"><div class="section-head"><h3 class="section-title">Changed files</h3></div>${["web/src/index.css", "web/vite.config.ts", "web/prototypes/mobile-app-concept.html"].map((file) => `<button class="nav-row" data-toast="Diff: ${file}"><span class="nav-row-title">${file}</span><span class="nav-row-value">Modified</span>${icons.chevron}</button>`).join("")}</section>`;
+        if (state.tool === "services")
+          content = `<section class="flat-section"><div class="section-head"><h3 class="section-title">Running</h3></div>${[
+            ["Vite web", "100.107.39.88:5173"],
+            ["Okena daemon", "127.0.0.1:19100"],
+            ["Postgres", "localhost:5432"],
+          ]
+            .map(
+              ([service, address]) =>
+                `<button class="nav-row" data-toast="Restarted ${service}"><span class="nav-row-title">${service}</span><span class="nav-row-value">${address}</span>${icons.chevron}</button>`,
+            )
+            .join("")}</section>`;
+        return `<section class="page">${pageHeader(name, { back: true, meta: project.name })}<div class="page-scroll detail-scroll">${content}</div></section>`;
+      }
+
+      function contextSheet() {
+        if (!state.sheet) return "";
+        const project = currentProject();
+        const terminals = project.terminals
+          .map(
+            (terminal) =>
+              `<button class="sheet-terminal" data-open-terminal="${terminal}" data-project-id="${project.id}"><span>${terminal}</span><small>${terminal === state.terminal ? "Current" : "Open"}</small></button>`,
+          )
+          .join("");
+        return `<div class="sheet-scrim" data-sheet-close></div><section class="context-sheet" aria-label="Switch terminal"><header class="sheet-header"><div class="grow"><strong>${project.name}</strong><small>${project.branch}</small></div><button class="icon-button" data-sheet-close aria-label="Close">${icons.close}</button></header><div class="sheet-body"><div class="sheet-label">Terminals</div>${terminals}</div><footer class="sheet-footer"><button class="btn btn-ghost" data-sheet-project>Project details</button><button class="btn btn-quiet" data-page="projects">All projects</button></footer></section>`;
+      }
+
+      function render() {
+        let content = currentPage();
+        if (state.page === "projects") content = projectsPage();
+        if (state.page === "project") content = projectPage();
+        if (state.page === "terminals") content = terminalsPage();
+        if (state.page === "more") content = morePage();
+        if (state.page === "tool") content = toolPage();
+        replaceMarkup(
+          phone,
+          `<div class="app">${content}${dock()}</div>${contextSheet()}<div class="prototype-label">Helm-inspired prototype</div><div class="toast" data-toast></div>`,
+        );
+        populateTerminal();
+        requestAnimationFrame(() => {
+          const terminal = phone.querySelector("[data-terminal]");
+          if (terminal) terminal.scrollTop = terminal.scrollHeight;
+        });
+      }
+      let toastTimer;
+      function toast(message, detail = "") {
+        const box = phone.querySelector("[data-toast]");
+        if (!box) return;
+        replaceMarkup(
+          box,
+          `${escapeHtml(message)}${detail ? `<span class="toast-detail">${escapeHtml(detail)}</span>` : ""}`,
+        );
+        box.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => box.classList.remove("show"), 2400);
+      }
+      function openTerminal(projectId, terminal) {
+        state.projectId = projectId;
+        state.terminal = terminal;
+        state.keys = false;
+        state.terminalFind = false;
+        state.sheet = false;
+        navigate("terminal");
+      }
+      function findInOutput(query) {
+        const needle = query.trim().toLowerCase();
+        if (!needle) return 0;
+        return state.output.reduce(
+          (count, line) =>
+            count + (lineText(line).toLowerCase().includes(needle) ? 1 : 0),
+          0,
+        );
+      }
+
+      phone.addEventListener("click", (event) => {
+        const target = event.target.closest("button,[data-sheet-close]");
+        if (!target) return;
+        if (target.hasAttribute("data-sheet-close")) {
+          state.sheet = false;
+          render();
+          return;
+        }
+        if (target.hasAttribute("data-context-sheet")) {
+          state.sheet = true;
+          render();
+          return;
+        }
+        if (target.hasAttribute("data-sheet-project")) {
+          state.sheet = false;
+          state.returnPage = "terminal";
+          navigate("project");
+          return;
+        }
+        if (target.dataset.page) {
+          state.sheet = false;
+          navigate(target.dataset.page);
+          return;
+        }
+        if (target.dataset.project) {
+          state.projectId = target.dataset.project;
+          state.returnPage = "projects";
+          navigate("project");
+          return;
+        }
+        if (target.dataset.openTerminal) {
+          openTerminal(target.dataset.projectId, target.dataset.openTerminal);
+          return;
+        }
+        if (target.hasAttribute("data-back")) {
+          navigate(state.returnPage || "projects");
+          return;
+        }
+        if (target.dataset.tool) {
+          state.tool = target.dataset.tool;
+          state.returnPage = state.page === "project" ? "project" : "more";
+          navigate("tool");
+          return;
+        }
+        if (target.hasAttribute("data-new-terminal")) {
+          const project = currentProject();
+          const name = `shell-${project.terminals.length + 1}`;
+          project.terminals.push(name);
+          state.terminal = name;
+          render();
+          toast(`${name} created`, project.name);
+          return;
+        }
+        if (target.hasAttribute("data-terminal-search")) {
+          state.terminalFind = !state.terminalFind;
+          render();
+          if (state.terminalFind)
+            requestAnimationFrame(() =>
+              phone.querySelector('[data-search="output"]')?.focus(),
+            );
+          return;
+        }
+        if (target.hasAttribute("data-keys")) {
+          state.keys = !state.keys;
+          render();
+          return;
+        }
+        if (target.hasAttribute("data-copy")) {
+          toast("Terminal output copied", state.terminal);
+          return;
+        }
+        if (target.dataset.key) {
+          toast(`${target.dataset.key} sent`, state.terminal);
+          return;
+        }
+        if (target.dataset.filter) {
+          state.terminalFilter = target.dataset.filter;
+          render();
+          return;
+        }
+        if (target.dataset.toast) toast(target.dataset.toast);
+      });
+      phone.addEventListener("input", (event) => {
+        if (event.target.matches('[data-search="projects"]')) {
+          const query = event.target.value.toLowerCase();
+          const matches = projects.filter((project) =>
+            `${project.name} ${project.branch} ${project.folder}`
+              .toLowerCase()
+              .includes(query),
+          );
+          replaceMarkup(
+            phone.querySelector("[data-project-results]"),
+            groupedProjects(matches),
+          );
+          return;
+        }
+        if (event.target.matches('[data-search="terminals"]')) {
+          state.terminalQuery = event.target.value;
+          replaceMarkup(
+            phone.querySelector("[data-terminal-results]"),
+            terminalRows(state.terminalQuery),
+          );
+          phone.querySelector("[data-terminal-count]").textContent = String(
+            terminalItems(state.terminalQuery).length,
+          );
+          return;
+        }
+        if (event.target.matches('[data-search="output"]')) {
+          const count = findInOutput(event.target.value);
+          phone.querySelector("[data-find-count]").textContent =
+            count === 1 ? "1 match" : `${count} matches`;
+        }
+      });
+      phone.addEventListener("submit", (event) => {
+        if (!event.target.matches("[data-command-form]")) return;
+        event.preventDefault();
+        const input = event.target.elements.command;
+        const command = input.value.trim();
+        if (!command) return;
+        const project = currentProject();
+        state.output.splice(-1, 1, [
+          { tone: "prompt", text: project.name },
+          { text: " " },
+          { tone: "path", text: project.path },
+          { text: " " },
+          { tone: "command", text: command },
+        ]);
+        const result =
+          command === "date"
+            ? [{ text: new Date().toString() }]
+            : [
+                { tone: "success", text: "✓" },
+                { text: ` Prototype ran “${command}”` },
+              ];
+        state.output.push(
+          result,
+          [],
+          [
+            { tone: "prompt", text: project.name },
+            { text: " " },
+            { tone: "path", text: project.path },
+            { text: " " },
+            { tone: "dim", text: "▌" },
+          ],
+        );
+        render();
+        requestAnimationFrame(() =>
+          phone.querySelector(".command-input")?.focus(),
+        );
+      });
+      addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !state.sheet) return;
+        state.sheet = false;
+        render();
+      });
+      addEventListener("popstate", () => {
+        const next = new URLSearchParams(location.search);
+        state.sheet = false;
+        state.page = next.get("page") || "terminal";
+        state.projectId = next.get("project") || state.projectId;
+        state.terminal = next.get("terminal") || state.terminal;
+        render();
+      });
+      syncUrl();
+      render();
+    </script>
+  </body>
+</html>

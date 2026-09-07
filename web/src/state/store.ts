@@ -8,17 +8,24 @@ import { WsManager, type WsStatus } from "../api/websocket";
  * Maps streamId → xterm.write callback, with buffering for data that
  * arrives before a handler is registered (e.g. snapshot frames).
  */
-export class TerminalRegistry {
-  private handlers = new Map<number, (data: Uint8Array) => void>();
-  private pendingData = new Map<number, Uint8Array[]>();
+type TerminalFrame = {
+  data: Uint8Array;
+  isSnapshot: boolean;
+};
 
-  register(streamId: number, handler: (data: Uint8Array) => void): void {
+type TerminalDataHandler = (data: Uint8Array, isSnapshot: boolean) => void;
+
+export class TerminalRegistry {
+  private handlers = new Map<number, TerminalDataHandler>();
+  private pendingData = new Map<number, TerminalFrame[]>();
+
+  register(streamId: number, handler: TerminalDataHandler): void {
     this.handlers.set(streamId, handler);
-    // Flush any data that arrived before the handler was registered
+    // Flush any data that arrived before the handler was registered.
     const pending = this.pendingData.get(streamId);
     if (pending) {
-      for (const data of pending) {
-        handler(data);
+      for (const frame of pending) {
+        handler(frame.data, frame.isSnapshot);
       }
       this.pendingData.delete(streamId);
     }
@@ -29,18 +36,25 @@ export class TerminalRegistry {
     this.pendingData.delete(streamId);
   }
 
-  write(streamId: number, data: Uint8Array): void {
+  write(streamId: number, data: Uint8Array, isSnapshot: boolean): void {
     const handler = this.handlers.get(streamId);
     if (handler) {
-      handler(data);
+      handler(data, isSnapshot);
+      return;
+    }
+
+    const frame = { data, isSnapshot };
+    if (isSnapshot) {
+      // A full snapshot supersedes anything buffered before it.
+      this.pendingData.set(streamId, [frame]);
+      return;
+    }
+
+    const pending = this.pendingData.get(streamId);
+    if (pending) {
+      pending.push(frame);
     } else {
-      // Buffer data until a handler is registered
-      let pending = this.pendingData.get(streamId);
-      if (!pending) {
-        pending = [];
-        this.pendingData.set(streamId, pending);
-      }
-      pending.push(data);
+      this.pendingData.set(streamId, [frame]);
     }
   }
 }
@@ -79,7 +93,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "set_ws_status":
       return { ...state, wsStatus: action.status };
     case "set_stream_mappings":
-      return { ...state, streamMappings: { ...state.streamMappings, ...action.mappings } };
+      return {
+        ...state,
+        streamMappings: { ...state.streamMappings, ...action.mappings },
+      };
     case "clear_stream_mappings":
       return { ...state, streamMappings: {} };
   }
