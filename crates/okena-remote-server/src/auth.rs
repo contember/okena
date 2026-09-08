@@ -81,6 +81,17 @@ pub struct AuthStore {
     inner: Mutex<AuthStoreInner>,
     tokens_path: PathBuf,
     pair_code_path: PathBuf,
+    /// Bumped whenever a stored token stops being usable, so connections that
+    /// authenticated with one can notice and drop themselves.
+    revocations: tokio::sync::watch::Sender<u64>,
+}
+
+/// The token identity behind an established connection. Kept so revocation and
+/// expiry can end the connection, not just refuse the next handshake.
+#[derive(Clone, Debug)]
+pub struct AuthSession {
+    pub token_id: String,
+    pub expires_at: SystemTime,
 }
 
 #[derive(Debug)]
@@ -142,12 +153,13 @@ impl AuthStore {
             }),
             tokens_path: t_path,
             pair_code_path: pair_code_path(),
+            revocations: tokio::sync::watch::channel(0).0,
         }
     }
 
     /// Create an AuthStore with a given secret and isolated temp directory (for testing).
     #[cfg(test)]
-    fn with_secret(secret: Vec<u8>) -> Self {
+    pub(crate) fn with_secret(secret: Vec<u8>) -> Self {
         let test_dir = std::env::temp_dir().join(format!(
             "okena-auth-test-{:?}-{}",
             std::thread::current().id(),
@@ -167,6 +179,7 @@ impl AuthStore {
             }),
             tokens_path: test_dir.join("remote_tokens.json"),
             pair_code_path: test_dir.join("pair_code"),
+            revocations: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -272,7 +285,8 @@ impl AuthStore {
         // Evict oldest tokens if we exceed the limit
         const MAX_TOKENS: usize = 64;
         let count = inner.tokens.len();
-        if count > MAX_TOKENS {
+        let evicted = count > MAX_TOKENS;
+        if evicted {
             inner.tokens.drain(0..count - MAX_TOKENS);
         }
 
@@ -286,29 +300,57 @@ impl AuthStore {
 
         save_tokens_to(&self.tokens_path, &inner.tokens);
 
+        drop(inner);
+        if evicted {
+            self.note_revocation();
+        }
+
         Ok(token)
     }
 
     /// Validate a bearer token. Returns true if valid and not expired.
     pub fn validate_token(&self, token: &str) -> bool {
-        let inner = self.inner.lock();
-        let candidate_hmac = compute_hmac(&inner.app_secret, token.as_bytes());
-        let now = SystemTime::now();
+        self.authenticate(token).is_some()
+    }
 
-        for record in &inner.tokens {
-            if constant_time_eq(&record.token_hmac, &candidate_hmac) {
-                // Check token expiration (24 hours)
-                let age = now
-                    .duration_since(record.created_at)
-                    .unwrap_or(Duration::MAX);
-                if age >= Duration::from_secs(TOKEN_TTL_SECS) {
-                    return false;
-                }
-                *record.last_used_at.lock() = now;
-                return true;
-            }
+    /// Validate a bearer token and return the identity behind it.
+    pub fn authenticate(&self, token: &str) -> Option<AuthSession> {
+        authenticate_locked(&self.inner.lock(), token)
+    }
+
+    /// Authenticate and take the revocation receiver under the *same* lock.
+    /// Subscribing afterwards would mark a revocation that landed in between as
+    /// already seen, and the connection it authorized would never learn of it.
+    pub fn authenticate_watched(
+        &self,
+        token: &str,
+    ) -> (tokio::sync::watch::Receiver<u64>, Option<AuthSession>) {
+        let inner = self.inner.lock();
+        let revocations = self.revocations.subscribe();
+        (revocations, authenticate_locked(&inner, token))
+    }
+
+    /// Whether the token an established connection authenticated with is still
+    /// stored and unexpired.
+    pub fn session_is_live(&self, session: &AuthSession) -> bool {
+        if SystemTime::now() >= session.expires_at {
+            return false;
         }
-        false
+        let inner = self.inner.lock();
+        inner
+            .tokens
+            .iter()
+            .any(|record| record.id == session.token_id)
+    }
+
+    /// Fires whenever a stored token stops being usable — revoked, reloaded
+    /// away, or evicted. Subscribers re-check their own session.
+    pub fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.revocations.subscribe()
+    }
+
+    fn note_revocation(&self) {
+        self.revocations.send_modify(|epoch| *epoch += 1);
     }
 
     /// List all non-expired tokens with metadata.
@@ -357,6 +399,10 @@ impl AuthStore {
         if removed && let Err(error) = remove_persisted_token(&self.tokens_path, id) {
             log::error!("Failed to persist token revocation: {error}");
         }
+        drop(inner);
+        if removed {
+            self.note_revocation();
+        }
         removed
     }
 
@@ -372,6 +418,8 @@ impl AuthStore {
         };
         let mut inner = self.inner.lock();
         inner.tokens = tokens;
+        drop(inner);
+        self.note_revocation();
         true
     }
 
@@ -415,11 +463,17 @@ impl AuthStore {
         // Evict oldest tokens if we exceed the limit
         const MAX_TOKENS: usize = 64;
         let count = inner.tokens.len();
-        if count > MAX_TOKENS {
+        let evicted = count > MAX_TOKENS;
+        if evicted {
             inner.tokens.drain(0..count - MAX_TOKENS);
         }
 
         save_tokens_to(&self.tokens_path, &inner.tokens);
+
+        drop(inner);
+        if evicted {
+            self.note_revocation();
+        }
 
         Ok(new_token)
     }
@@ -468,6 +522,28 @@ fn check_file_pair_code(code: &str, path: &std::path::Path) -> bool {
     };
 
     constant_time_eq(file_code.trim().as_bytes(), code.as_bytes())
+}
+
+fn authenticate_locked(inner: &AuthStoreInner, token: &str) -> Option<AuthSession> {
+    let candidate_hmac = compute_hmac(&inner.app_secret, token.as_bytes());
+    let now = SystemTime::now();
+
+    for record in &inner.tokens {
+        if constant_time_eq(&record.token_hmac, &candidate_hmac) {
+            let age = now
+                .duration_since(record.created_at)
+                .unwrap_or(Duration::MAX);
+            if age >= Duration::from_secs(TOKEN_TTL_SECS) {
+                return None;
+            }
+            *record.last_used_at.lock() = now;
+            return Some(AuthSession {
+                token_id: record.id.clone(),
+                expires_at: record.created_at + Duration::from_secs(TOKEN_TTL_SECS),
+            });
+        }
+    }
+    None
 }
 
 /// Compute HMAC-SHA256.
@@ -799,6 +875,80 @@ mod tests {
     }
 
     #[test]
+    fn authenticate_reports_the_identity_behind_a_token() {
+        let store = test_store();
+        let token = pair_token(&store);
+
+        let session = store
+            .authenticate(&token)
+            .expect("a freshly paired token authenticates");
+        assert!(store.session_is_live(&session));
+        assert_eq!(
+            store.list_tokens().first().map(|info| info.id.clone()),
+            Some(session.token_id)
+        );
+    }
+
+    /// The handshake takes its receiver and its session together, so a
+    /// revocation racing the rest of the handshake still reaches the stream.
+    #[test]
+    fn a_revocation_after_the_watched_handshake_still_reaches_the_stream() {
+        let store = test_store();
+        let token = pair_token(&store);
+
+        let (revocations, session) = store.authenticate_watched(&token);
+        let session = session.expect("token authenticates");
+        assert!(store.revoke_token(&session.token_id));
+
+        assert!(
+            revocations.has_changed().expect("sender outlives the stream"),
+            "the receiver taken during the handshake must observe the revocation"
+        );
+        assert!(!store.session_is_live(&session));
+    }
+
+    #[test]
+    fn revoking_a_token_kills_its_established_session() {
+        let store = test_store();
+        let token = pair_token(&store);
+        let session = store.authenticate(&token).expect("token authenticates");
+        let revocations = store.subscribe_revocations();
+
+        assert!(store.revoke_token(&session.token_id));
+
+        assert!(revocations.has_changed().unwrap_or(false));
+        assert!(
+            !store.session_is_live(&session),
+            "a revoked token must not keep an established connection alive"
+        );
+    }
+
+    #[test]
+    fn reloading_tokens_kills_sessions_the_new_file_dropped() {
+        let store = test_store();
+        let token = pair_token(&store);
+        let session = store.authenticate(&token).expect("token authenticates");
+        let revocations = store.subscribe_revocations();
+
+        std::fs::write(&store.tokens_path, "[]").expect("write an empty token file");
+        assert!(store.reload_tokens());
+
+        assert!(revocations.has_changed().unwrap_or(false));
+        assert!(!store.session_is_live(&session));
+    }
+
+    #[test]
+    fn an_expired_session_is_not_live_even_while_stored() {
+        let store = test_store();
+        let token = pair_token(&store);
+        let mut session = store.authenticate(&token).expect("token authenticates");
+
+        session.expires_at = SystemTime::now() - Duration::from_secs(1);
+
+        assert!(!store.session_is_live(&session));
+    }
+
+    #[test]
     fn refresh_valid_token_returns_new_different_token() {
         let store = test_store();
         let original = pair_token(&store);
@@ -885,6 +1035,7 @@ mod tests {
             }),
             tokens_path: store.tokens_path.clone(),
             pair_code_path: store.pair_code_path.clone(),
+            revocations: tokio::sync::watch::channel(0).0,
         };
 
         assert!(
