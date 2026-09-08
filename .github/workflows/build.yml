@@ -72,8 +72,10 @@ jobs:
             exit 1
           fi
 
+      # The workspace declares no `default-members`, so a bare `cargo test` would
+      # run the root `okena` package alone and skip every member crate's tests.
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace --no-fail-fast
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so
   # a platform-specific break used to surface only once a tag started the full
@@ -274,6 +276,15 @@ jobs:
         with:
           path: artifacts
 
+      # upload-artifact drops permission bits (files come back 0644), and the ZIP
+      # and TAR below both record modes — so the exec bit has to be restored here,
+      # between the download and the archiving, or it ships missing.
+      - name: Restore executable bits
+        run: |
+          chmod +x artifacts/okena-linux-*/okena artifacts/okena-linux-*/okena-daemon
+          chmod +x artifacts/okena-macos-*/Okena.app/Contents/MacOS/okena \
+                   artifacts/okena-macos-*/Okena.app/Contents/MacOS/okena-daemon
+
       - name: Prepare release assets
         run: |
           cd artifacts
@@ -296,6 +307,40 @@ jobs:
               tar -czvf "../${name}.tar.gz" -C "$dir" .
             fi
           done
+
+      # Guards the step above: the Homebrew cask and the shell installer both
+      # unpack these archives directly, so a lost exec bit is a broken install.
+      - name: Assert executable bits in release archives
+        run: |
+          failed=0
+          assert_exec() {
+            local archive="$1" entry="$2" mode
+            case "$archive" in
+              *.tar.gz) mode=$(tar -tvzf "$archive" | awk -v f="$entry" '$NF == f { print $1; exit }') ;;
+              *) mode=$(unzip -Z "$archive" "$entry" 2>/dev/null | awk 'NR == 1 { print $1 }') ;;
+            esac
+            case "$mode" in
+              -*x*) echo "ok    $archive :: $entry ($mode)" ;;
+              *) echo "FAIL  $archive :: $entry (mode '${mode:-not found}')"; failed=1 ;;
+            esac
+          }
+
+          shopt -s nullglob
+          linux_archives=(okena-linux-*.tar.gz)
+          macos_archives=(okena-macos-*.zip)
+          [[ ${#linux_archives[@]} -gt 0 ]] || { echo "FAIL  no okena-linux-*.tar.gz produced"; failed=1; }
+          [[ ${#macos_archives[@]} -gt 0 ]] || { echo "FAIL  no okena-macos-*.zip produced"; failed=1; }
+
+          for archive in "${linux_archives[@]}"; do
+            assert_exec "$archive" ./okena
+            assert_exec "$archive" ./okena-daemon
+          done
+          for archive in "${macos_archives[@]}"; do
+            assert_exec "$archive" Okena.app/Contents/MacOS/okena
+            assert_exec "$archive" Okena.app/Contents/MacOS/okena-daemon
+          done
+
+          exit "$failed"
 
       # The cask is the stable channel — a prerelease must not overwrite it.
       - name: Generate ContemberBot token
