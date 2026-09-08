@@ -1615,6 +1615,9 @@ impl FileViewer {
                 );
                 let target_row = tab.target_line.map(|line| tab.source_row_for_line(line));
                 tab.blame = BlameLoadState::NotLoaded;
+                if tab_index == this.active_tab {
+                    this.perform_file_search(cx);
+                }
                 cx.notify();
                 if let Some(row) = target_row {
                     this.active_tab()
