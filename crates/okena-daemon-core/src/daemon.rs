@@ -402,8 +402,11 @@ impl DaemonCore {
                 &no_hook_monitor,
             );
             let mut ws = reactor.workspace.lock();
-            let project_ids: Vec<String> =
-                ws.projects().iter().map(|project| project.id.clone()).collect();
+            let project_ids: Vec<String> = ws
+                .projects()
+                .iter()
+                .map(|project| project.id.clone())
+                .collect();
             for project_id in project_ids {
                 for terminal_id in ws.finished_hook_terminals_to_evict(
                     &project_id,

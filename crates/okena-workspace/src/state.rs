@@ -4102,7 +4102,10 @@ mod gpui_tests {
         }
     }
 
-    fn finished_hook_entry(status: HookTerminalStatus, finished_at: Option<u64>) -> HookTerminalEntry {
+    fn finished_hook_entry(
+        status: HookTerminalStatus,
+        finished_at: Option<u64>,
+    ) -> HookTerminalEntry {
         HookTerminalEntry {
             status,
             finished_at,
@@ -4133,9 +4136,18 @@ mod gpui_tests {
             project_with_hooks(
                 "p1",
                 vec![
-                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
-                    ("mid", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
-                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(300))),
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "mid",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(300)),
+                    ),
                 ],
             ),
             2,
@@ -4153,8 +4165,14 @@ mod gpui_tests {
                 "p1",
                 vec![
                     ("running", make_hook_entry("on_project_open")),
-                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
-                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4175,7 +4193,10 @@ mod gpui_tests {
                         "failed",
                         finished_hook_entry(HookTerminalStatus::Failed { exit_code: 1 }, Some(100)),
                     ),
-                    ("succeeded", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "succeeded",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4191,8 +4212,14 @@ mod gpui_tests {
             project_with_hooks(
                 "p1",
                 vec![
-                    ("legacy", finished_hook_entry(HookTerminalStatus::Succeeded, None)),
-                    ("recent", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "legacy",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, None),
+                    ),
+                    (
+                        "recent",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4206,7 +4233,10 @@ mod gpui_tests {
         let stale = evict_from(
             project_with_hooks(
                 "p1",
-                vec![("only", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)))],
+                vec![(
+                    "only",
+                    finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                )],
             ),
             5,
         );

@@ -107,18 +107,14 @@ fn resizing_scrollback_preserves_the_rest_of_the_config() {
     // and new config, so a scrollback change must not disturb it.
     terminal.process_output(b"\x1b[>1u");
     assert!(
-        terminal
-            .kitty_keyboard_flags()
-            .disambiguate_escape_codes,
+        terminal.kitty_keyboard_flags().disambiguate_escape_codes,
         "expected the app's kitty keyboard request to take effect"
     );
 
     terminal.set_scrollback_lines(100);
 
     assert!(
-        terminal
-            .kitty_keyboard_flags()
-            .disambiguate_escape_codes,
+        terminal.kitty_keyboard_flags().disambiguate_escape_codes,
         "changing scrollback must not reset kitty keyboard state"
     );
 }
