@@ -4,7 +4,6 @@
 pub mod blame;
 pub mod content_search;
 pub mod file_scan;
-pub mod history;
 pub mod list_directory;
 pub mod project_fs;
 
@@ -22,6 +21,10 @@ pub mod file_search;
 pub mod file_tree;
 #[cfg(feature = "gpui")]
 pub mod file_viewer;
+// Reads files at a git revision, but its `FileSource` lives in `file_viewer`
+// and both consumers are gpui crates.
+#[cfg(feature = "gpui")]
+pub mod history;
 #[cfg(feature = "gpui")]
 pub mod in_page_search;
 #[cfg(feature = "gpui")]
