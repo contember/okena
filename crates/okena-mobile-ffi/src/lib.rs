@@ -81,6 +81,16 @@ pub fn get_token(conn_id: String) -> Option<String> {
     ConnectionManager::get().get_token(&conn_id)
 }
 
+/// Get the server certificate fingerprint this connection is pinned to.
+///
+/// `None` means no TLS identity has been established, so a token obtained over
+/// this connection was accepted trust-on-first-use and must not be replayed as
+/// if it were pinned. The RN client persists this alongside the token.
+#[uniffi::export]
+pub fn get_cert_fingerprint(conn_id: String) -> Option<String> {
+    ConnectionManager::get().get_cert_fingerprint(&conn_id)
+}
+
 /// Pair with the server using a pairing code. (Body is synchronous: it only
 /// kicks off the manager's pairing task.)
 #[uniffi::export]

@@ -9,7 +9,8 @@
  *   - `secondsSinceActivity` (staleness indicator),
  *   - status polling: ~500ms while connecting/pairing, ~2s once connected
  *     (matching the Dart `_startPolling(fast:)` cadence),
- *   - persisting the auth token back onto the saved server once paired.
+ *   - persisting the auth token and its certificate pin back onto the saved
+ *     server once paired.
  *
  * Dependencies — the native module and persistence — are INJECTED via
  * {@link configureConnectionStore}, mirroring `TerminalView`'s `native` prop.
@@ -46,9 +47,26 @@ export const SLOW_POLL_MS = 2000;
 /** Initial, disconnected status. */
 const DISCONNECTED: ConnectionStatus = { kind: 'disconnected' };
 
+/**
+ * The slice of the native surface this store calls. Narrowed from
+ * {@link OkenaNative} so a test stub only has to provide these.
+ */
+export type ConnectionNative = Pick<
+  OkenaNative,
+  | 'initApp'
+  | 'connect'
+  | 'getToken'
+  | 'getCertFingerprint'
+  | 'canReportCertFingerprint'
+  | 'pair'
+  | 'disconnect'
+  | 'connectionStatus'
+  | 'secondsSinceActivity'
+>;
+
 /** Dependencies the store calls out to. Overridable for tests. */
 export interface ConnectionDeps {
-  native: OkenaNative;
+  native: ConnectionNative;
   persistence: Persistence;
 }
 
@@ -165,44 +183,77 @@ function persistServers(servers: readonly SavedServer[]): void {
   void deps().persistence.setItem(SAVED_SERVERS_KEY, listToJson(servers));
 }
 
-/** Connect using every transport-security field persisted with the server. */
+/**
+ * Whether the saved credentials for `server` rest on an established server
+ * identity. Without a pin the transport accepts any certificate, so replaying
+ * the bearer token would hand it to whoever answers — plaintext included.
+ */
+export function hasEstablishedTrust(server: SavedServer): boolean {
+  return server.fingerprint !== undefined;
+}
+
+/**
+ * Connect using every transport-security field persisted with the server. A
+ * token saved without a pin is withheld, so the connection falls back to
+ * pairing and the user re-establishes trust out of band.
+ *
+ * Pass `enforcePin: false` when the binding cannot read pins at all: the
+ * withholding would then re-pair on every launch and never record a pin.
+ */
 export function connectSavedServer(
   native: Pick<OkenaNative, 'connect'>,
   server: SavedServer,
+  enforcePin = true,
 ): ConnId {
+  const trusted = !enforcePin || hasEstablishedTrust(server);
   return native.connect(
     server.host,
     server.port,
-    server.token,
+    trusted ? server.token : undefined,
     server.tls,
     server.fingerprint,
   );
 }
 
 /**
- * After connecting, copy the freshly-negotiated auth token back onto the
- * active server and persist. Mirrors `_persistToken`.
+ * After connecting, copy the freshly-negotiated auth token AND the certificate
+ * pin it was obtained under back onto the active server, then persist. Mirrors
+ * `_persistToken`.
  */
-function persistToken(
+function persistCredentials(
   get: StoreApi<ConnectionState>['getState'],
   set: StoreApi<ConnectionState>['setState'],
 ): void {
   const { connId, activeServer } = get();
   if (!connId || !activeServer) return;
-  const token = deps().native.getToken(connId);
-  if (token && token !== activeServer.token) {
-    const updated = withSavedServer(activeServer, { token });
-    const servers = get().servers.map((s) =>
-      savedServerEquals(s, activeServer) ? updated : s,
-    );
-    set({ servers, activeServer: updated });
-    persistServers(servers);
+  const native = deps().native;
+  const fingerprint = native.canReportCertFingerprint()
+    ? native.getCertFingerprint(connId)
+    : undefined;
+  const updated = withSavedServer(activeServer, {
+    token: native.getToken(connId),
+    fingerprint,
+    // A fingerprint can only come from a TLS handshake, so store the upgrade
+    // with it — otherwise the next connect may still fall back to plaintext.
+    tls: fingerprint === undefined ? undefined : true,
+  });
+  if (
+    updated.token === activeServer.token &&
+    updated.fingerprint === activeServer.fingerprint &&
+    updated.tls === activeServer.tls
+  ) {
+    return;
   }
+  const servers = get().servers.map((s) =>
+    savedServerEquals(s, activeServer) ? updated : s,
+  );
+  set({ servers, activeServer: updated });
+  persistServers(servers);
 }
 
 /**
  * One poll tick: refresh `status` + `secondsSinceActivity`. On the
- * connecting→connected edge, switch to slow polling and persist the token; on
+ * connecting→connected edge, switch to slow polling and persist credentials; on
  * disconnect/error, stop polling. Mirrors `_pollStatus`.
  */
 function pollStatus(
@@ -219,9 +270,9 @@ function pollStatus(
   set({ status: newStatus, secondsSinceActivity: activity });
 
   if (newStatus.kind === 'connected' && oldStatus.kind !== 'connected') {
-    // Connected edge: slow down polling and capture the token.
+    // Connected edge: slow down polling and capture the credentials.
     startPolling(get, set, /* fast */ false);
-    persistToken(get, set);
+    persistCredentials(get, set);
   }
 
   if (newStatus.kind === 'disconnected' || newStatus.kind === 'error') {
@@ -301,7 +352,11 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         native.disconnect(connId);
         stopPolling();
       }
-      const newConnId = connectSavedServer(native, server);
+      const newConnId = connectSavedServer(
+        native,
+        server,
+        native.canReportCertFingerprint(),
+      );
       set({
         activeServer: server,
         connId: newConnId,
