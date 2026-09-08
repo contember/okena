@@ -60,6 +60,30 @@ use crate::workspace_cx::DaemonWorkspaceCx;
 /// next turn (nothing is dropped). Mirrors the GUI's `MAX_BYTES_PER_TURN`.
 const MAX_BYTES_PER_TURN: usize = 256 * 1024;
 
+/// Companion cap for the work the byte budget cannot see: an `Exit`, or `Data`
+/// discarded as stale or orphaned, still costs a channel read and a lookup.
+const MAX_EVENTS_PER_TURN: usize = 4096;
+
+/// Work charged in one drain pass. EVERY event is charged, including the ones
+/// whose payload is discarded — uncharged work is what let a replenished queue
+/// drain without bound.
+#[derive(Default)]
+struct TurnBudget {
+    bytes: usize,
+    events: usize,
+}
+
+impl TurnBudget {
+    fn charge(&mut self, bytes: usize) {
+        self.bytes += bytes;
+        self.events += 1;
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.bytes >= MAX_BYTES_PER_TURN || self.events >= MAX_EVENTS_PER_TURN
+    }
+}
+
 /// The shared reactor handles the PTY loop needs to run terminal-exit lifecycle
 /// work directly against the daemon-owned workspace + hooks. Bundled so the loop
 /// signature (and the per-batch handlers it calls) stay readable.
@@ -147,8 +171,8 @@ pub async fn run_pty_loop(
         // Terminals that produced output this pass (for the OSC hook-exit title
         // check, mirroring the GUI's `dirty_terminal_ids`).
         let mut dirty_terminal_ids: Vec<String> = Vec::new();
-        // Bytes parsed so far in this pass (across batched `Data` events).
-        let mut bytes_this_turn: usize = 0;
+        // Work done so far in this pass (across batched events).
+        let mut budget = TurnBudget::default();
 
         process_event(
             &event,
@@ -156,13 +180,13 @@ pub async fn run_pty_loop(
             &pty_manager,
             &mut exit_events,
             &mut dirty_terminal_ids,
-            &mut bytes_this_turn,
+            &mut budget,
         );
 
         // Drain additional pending events (batch processing), stopping once we
-        // exceed the per-turn byte budget so we yield instead of monopolizing
-        // the LocalSet thread.
-        while bytes_this_turn < MAX_BYTES_PER_TURN {
+        // exceed the per-turn budget so we yield instead of monopolizing the
+        // LocalSet thread.
+        while !budget.is_exhausted() {
             let event = match pty_events.try_recv() {
                 Ok(event) => event,
                 Err(_) => break,
@@ -173,7 +197,7 @@ pub async fn run_pty_loop(
                 &pty_manager,
                 &mut exit_events,
                 &mut dirty_terminal_ids,
-                &mut bytes_this_turn,
+                &mut budget,
             );
         }
 
@@ -226,6 +250,11 @@ pub async fn run_pty_loop(
             // to clients on their next resync.
             state_version.send_modify(|v| *v += 1);
         }
+
+        // `async_channel::recv` resolves without suspending while the queue is
+        // hot and takes no part in tokio's coop budget, so nothing else on the
+        // LocalSet runs unless this loop hands the executor back itself.
+        tokio::task::yield_now().await;
     }
 }
 
@@ -238,7 +267,7 @@ fn process_event(
     pty_manager: &PtyManager,
     exit_events: &mut Vec<(String, PtyGeneration, Option<u32>)>,
     dirty_terminal_ids: &mut Vec<String>,
-    bytes_this_turn: &mut usize,
+    budget: &mut TurnBudget,
 ) {
     match event {
         PtyEvent::Data {
@@ -247,6 +276,7 @@ fn process_event(
             data,
             sequence,
         } => {
+            budget.charge(data.len());
             if !pty_manager.is_current_generation(terminal_id, *generation) {
                 return;
             }
@@ -256,7 +286,6 @@ fn process_event(
             // block behind it.
             let term = terminals.lock().get(terminal_id).cloned();
             if let Some(term) = term {
-                *bytes_this_turn += data.len();
                 term.process_output_with_sequence(data, *sequence);
             }
             dirty_terminal_ids.push(terminal_id.clone());
@@ -266,6 +295,7 @@ fn process_event(
             generation,
             exit_code,
         } => {
+            budget.charge(0);
             // Clean up the PtyHandle (reader/writer threads) but don't remove
             // the Terminal yet — the service manager may keep it so users can
             // see crash output.
@@ -1491,7 +1521,7 @@ mod tests {
             .run_until(async {
                 let mut exit_events = Vec::new();
                 let mut dirty_terminal_ids = Vec::new();
-                let mut bytes_this_turn = 0;
+                let mut budget = TurnBudget::default();
                 tokio::time::timeout(Duration::from_secs(2), async {
                     while exit_events.is_empty() {
                         let event = pty_events.recv().await.expect("receive hook PTY event");
@@ -1501,7 +1531,7 @@ mod tests {
                             &pty_manager,
                             &mut exit_events,
                             &mut dirty_terminal_ids,
-                            &mut bytes_this_turn,
+                            &mut budget,
                         );
                     }
                 })
@@ -1837,7 +1867,7 @@ mod tests {
         };
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
         let mut dirty = Vec::new();
-        let mut bytes = 0;
+        let mut budget = TurnBudget::default();
 
         let mut first_batch = Vec::new();
         process_event(
@@ -1846,7 +1876,7 @@ mod tests {
             &pty_manager,
             &mut first_batch,
             &mut dirty,
-            &mut bytes,
+            &mut budget,
         );
         assert_eq!(first_batch.len(), 1);
 
@@ -1857,10 +1887,148 @@ mod tests {
             &pty_manager,
             &mut second_batch,
             &mut dirty,
-            &mut bytes,
+            &mut budget,
         );
         assert!(second_batch.is_empty());
         pty_manager.flush_teardown();
+    }
+
+    /// Stale and orphaned `Data` events are dropped, but they were still read
+    /// off the channel: charging them is what bounds a discarded backlog.
+    #[test]
+    fn discarded_data_events_still_charge_the_turn_budget() {
+        let (pty_manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = pty_manager
+            .create_or_reconnect_terminal(Some("budget"), &cwd)
+            .expect("create PTY");
+        let generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("generation");
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut exits = Vec::new();
+        let mut dirty = Vec::new();
+        let mut budget = TurnBudget::default();
+
+        process_event(
+            &PtyEvent::Data {
+                terminal_id: "vanished".to_string(),
+                generation,
+                data: vec![0u8; 512],
+                sequence: 0,
+            },
+            &terminals,
+            &pty_manager,
+            &mut exits,
+            &mut dirty,
+            &mut budget,
+        );
+        process_event(
+            &PtyEvent::Data {
+                terminal_id: terminal_id.clone(),
+                generation,
+                data: vec![0u8; 256],
+                sequence: 1,
+            },
+            &terminals,
+            &pty_manager,
+            &mut exits,
+            &mut dirty,
+            &mut budget,
+        );
+
+        assert_eq!(
+            budget.bytes, 768,
+            "stale and unregistered events cost their bytes"
+        );
+        assert_eq!(budget.events, 2);
+        assert!(exits.is_empty());
+        pty_manager.kill(&terminal_id);
+        pty_manager.flush_teardown();
+    }
+
+    /// A queue that stays hot must not monopolize the LocalSet: the loop yields
+    /// after each bounded pass, so a sibling task runs while events remain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hot_event_queue_yields_to_other_localset_tasks() {
+        const QUEUED_EVENTS: usize = 50_000;
+
+        let (tx, pty_events) = async_channel::unbounded::<PtyEvent>();
+        let (pty_manager, _pty_manager_events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let terminal_id = pty_manager
+            .create_or_reconnect_terminal(Some("hot-queue"), &cwd)
+            .expect("create PTY");
+        let generation = pty_manager
+            .current_generation(&terminal_id)
+            .expect("generation");
+        let pty_manager = Arc::new(pty_manager);
+        // Deliberately unregistered: every queued event is discarded, which is
+        // exactly the backlog the byte budget alone could not see.
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        for sequence in 0..QUEUED_EVENTS {
+            tx.try_send(PtyEvent::Data {
+                terminal_id: terminal_id.clone(),
+                generation,
+                data: vec![0u8; 8],
+                sequence: sequence as u64,
+            })
+            .expect("queue event");
+        }
+
+        let backend = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(backend, terminals.clone())));
+        let (service_tick, _srx) = watch::channel(0u64);
+        let (state_version, _vrx) = watch::channel(0u64);
+        let reactor = test_reactor(
+            Workspace::new(WorkspaceData::empty()),
+            AppSettings::default(),
+        );
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = tokio::task::spawn_local(run_pty_loop(
+                    pty_events,
+                    terminals.clone(),
+                    pty_manager.clone(),
+                    service_manager.clone(),
+                    Handle::current(),
+                    service_tick,
+                    reactor,
+                    state_version,
+                ));
+                // What the first sibling turn sees left in the queue: the loop
+                // must hand the executor back long before the backlog is gone.
+                let backlog_when_sibling_ran =
+                    Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+                let observed = backlog_when_sibling_ran.clone();
+                let observer_tx = tx.clone();
+                tokio::task::spawn_local(async move {
+                    observed.store(observer_tx.len(), std::sync::atomic::Ordering::SeqCst);
+                });
+
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+
+                let backlog = backlog_when_sibling_ran.load(std::sync::atomic::Ordering::SeqCst);
+                assert_ne!(
+                    backlog,
+                    usize::MAX,
+                    "a sibling LocalSet task must get to run at all"
+                );
+                assert!(
+                    backlog > 0,
+                    "the loop drained the whole backlog before yielding to a sibling task"
+                );
+
+                drop(tx);
+                handle.await.expect("pty loop task joins");
+                pty_manager.kill(&terminal_id);
+                pty_manager.flush_teardown();
+            })
+            .await;
     }
 
     #[test]
@@ -1895,7 +2063,7 @@ mod tests {
             &pty_manager,
             &mut exits,
             &mut Vec::new(),
-            &mut 0,
+            &mut TurnBudget::default(),
         );
 
         assert!(exits.is_empty());
