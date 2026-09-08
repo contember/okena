@@ -114,16 +114,74 @@ pub fn store_prevalidated_settings<B: ConfigBackend>(
     CommandResult::Ok(Some(out))
 }
 
-/// Recursively merge `patch` into `base`: objects merge key-by-key, everything
-/// else (scalars, arrays) is overwritten wholesale.
+/// Recursively merge `patch` into `base`: objects merge key-by-key, a `null`
+/// clears the key (so it falls back to its serde default), everything else
+/// (scalars, arrays) is overwritten wholesale.
 fn merge_json(base: &mut Value, patch: Value) {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
             for (k, v) in p {
-                merge_json(b.entry(k).or_insert(Value::Null), v);
+                if v.is_null() {
+                    b.remove(&k);
+                } else {
+                    merge_json(b.entry(k).or_insert(Value::Null), v);
+                }
             }
         }
         (b, p) => *b = p,
+    }
+}
+
+/// The settings a client mirrors to the daemon: everything except the
+/// client-local `remote_connections` list.
+pub fn shared_settings_value(settings: &AppSettings) -> Result<Value, String> {
+    let mut value =
+        serde_json::to_value(settings).map_err(|e| format!("failed to encode settings: {e}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("remote_connections");
+    }
+    Ok(value)
+}
+
+/// Field-level delta from `previous` to `next`, ready to send as a `SetSettings`
+/// patch: only changed fields appear, and a field that went back to its default
+/// is cleared with an explicit `null` (see [`merge_json`]). Applying the delta
+/// to any settings leaves every field the client did not change untouched.
+pub fn settings_delta(previous: &Value, next: &Value) -> Value {
+    let (Value::Object(previous), Value::Object(next)) = (previous, next) else {
+        return next.clone();
+    };
+    let mut delta = serde_json::Map::new();
+    for (key, next_value) in next {
+        match previous.get(key) {
+            Some(previous_value) if previous_value == next_value => {}
+            Some(previous_value) => {
+                delta.insert(key.clone(), settings_delta(previous_value, next_value));
+            }
+            None => {
+                delta.insert(key.clone(), next_value.clone());
+            }
+        }
+    }
+    for (key, previous_value) in previous {
+        if !next.contains_key(key) {
+            delta.insert(key.clone(), clear_value(previous_value));
+        }
+    }
+    Value::Object(delta)
+}
+
+/// The patch that resets `previous` to its default. Objects are cleared
+/// key-by-key so keys another client added meanwhile survive.
+fn clear_value(previous: &Value) -> Value {
+    match previous {
+        Value::Object(fields) if !fields.is_empty() => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), clear_value(value)))
+                .collect(),
+        ),
+        _ => Value::Null,
     }
 }
 
@@ -372,6 +430,13 @@ mod tests {
     }
 
     #[test]
+    fn merge_json_null_clears_a_key() {
+        let mut base = json!({ "a": 1, "nested": { "x": 1, "y": 2 } });
+        merge_json(&mut base, json!({ "a": null, "nested": { "x": null } }));
+        assert_eq!(base, json!({ "nested": { "y": 2 } }));
+    }
+
+    #[test]
     fn merge_json_overwrites_scalars_and_arrays_wholesale() {
         let mut base = json!({ "n": 1, "list": [1, 2, 3] });
         merge_json(&mut base, json!({ "n": 99, "list": [4] }));
@@ -494,6 +559,135 @@ mod tests {
                 _ => assert!(!active, "{kind}/{id} should be inactive"),
             }
         }
+    }
+
+    fn shared(settings: &AppSettings) -> Value {
+        shared_settings_value(settings).expect("settings serialize")
+    }
+
+    #[test]
+    fn shared_settings_value_omits_client_local_connections() {
+        let value = shared(&AppSettings::default());
+        let object = value.as_object().expect("settings are an object");
+        assert!(!object.contains_key("remote_connections"));
+        assert!(object.contains_key("font_size"));
+    }
+
+    #[test]
+    fn settings_delta_carries_only_the_changed_field() {
+        let previous = AppSettings::default();
+        let mut next = previous.clone();
+        next.font_size = 19.0;
+
+        assert_eq!(
+            settings_delta(&shared(&previous), &shared(&next)),
+            json!({ "font_size": 19.0 })
+        );
+    }
+
+    #[test]
+    fn stale_clients_editing_different_fields_do_not_overwrite_each_other() {
+        use okena_terminal::session_backend::SessionBackend;
+
+        let stale = AppSettings::default();
+        let mut font_edit = stale.clone();
+        font_edit.font_size = 19.0;
+        let mut backend_edit = stale.clone();
+        backend_edit.session_backend = SessionBackend::None;
+
+        // Both clients diff against the same stale snapshot.
+        let baseline = shared(&stale);
+        let font_patch = settings_delta(&baseline, &shared(&font_edit));
+        let backend_patch = settings_delta(&baseline, &shared(&backend_edit));
+
+        let daemon = preview_settings_patch(&stale, font_patch).expect("font patch applies");
+        let daemon = preview_settings_patch(&daemon, backend_patch).expect("backend patch applies");
+
+        assert_eq!(daemon.font_size, 19.0);
+        assert_eq!(daemon.session_backend, SessionBackend::None);
+    }
+
+    #[test]
+    fn an_unrelated_edit_keeps_another_clients_hook_value() {
+        let mut stale = AppSettings::default();
+        stale.hooks.terminal.on_create = Some("echo stale".to_string());
+        // Another client rewrote the hook after this client's snapshot.
+        let mut daemon = stale.clone();
+        daemon.hooks.terminal.on_create = Some("echo newer".to_string());
+
+        let mut next = stale.clone();
+        next.font_size = 19.0;
+        let patch = settings_delta(&shared(&stale), &shared(&next));
+        let applied = preview_settings_patch(&daemon, patch).expect("patch applies");
+
+        assert_eq!(
+            applied.hooks.terminal.on_create.as_deref(),
+            Some("echo newer")
+        );
+        assert_eq!(applied.font_size, 19.0);
+    }
+
+    #[test]
+    fn clearing_a_hook_reaches_the_daemon_without_touching_other_hooks() {
+        let mut stale = AppSettings::default();
+        stale.hooks.terminal.on_create = Some("echo mine".to_string());
+        let mut daemon = stale.clone();
+        daemon.hooks.project.on_open = Some("echo theirs".to_string());
+
+        let mut next = stale.clone();
+        next.hooks.terminal.on_create = None;
+        let patch = settings_delta(&shared(&stale), &shared(&next));
+        let applied = preview_settings_patch(&daemon, patch).expect("patch applies");
+
+        assert_eq!(applied.hooks.terminal.on_create, None);
+        assert_eq!(
+            applied.hooks.project.on_open.as_deref(),
+            Some("echo theirs")
+        );
+    }
+
+    #[test]
+    fn clearing_a_map_field_falls_back_to_its_default() {
+        let mut current = AppSettings::default();
+        current
+            .extension_settings
+            .insert("claude-code".to_string(), json!({ "config_dir": "/tmp" }));
+
+        let applied = preview_settings_patch(&current, json!({ "extension_settings": null }))
+            .expect("null clears the map");
+
+        assert!(applied.extension_settings.is_empty());
+    }
+
+    #[test]
+    fn settings_delta_reproduces_the_new_settings_exactly() {
+        let mut previous = AppSettings::default();
+        previous.hooks.terminal.on_create = Some("echo create".to_string());
+        previous.custom_theme_id = Some("mine".to_string());
+        previous
+            .enabled_extensions
+            .insert("claude-code".to_string());
+        previous.extension_settings.insert(
+            "usage".to_string(),
+            json!({ "working_days": [true, false], "stale": 1 }),
+        );
+
+        let mut next = previous.clone();
+        next.font_size = 17.5;
+        next.hooks.terminal.on_create = None;
+        next.hooks.project.on_close = Some("echo close".to_string());
+        next.custom_theme_id = None;
+        next.enabled_extensions.clear();
+        next.enabled_extensions.insert("codex".to_string());
+        next.extension_settings.insert(
+            "usage".to_string(),
+            json!({ "working_days": [true, true, true] }),
+        );
+
+        let patch = settings_delta(&shared(&previous), &shared(&next));
+        let applied = preview_settings_patch(&previous, patch).expect("patch applies");
+
+        assert_eq!(shared(&applied), shared(&next));
     }
 
     #[test]
