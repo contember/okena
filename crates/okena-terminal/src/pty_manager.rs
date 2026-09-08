@@ -670,11 +670,15 @@ impl PtyManager {
                 // kill the session inside WSL instead of on the host.
                 #[cfg(windows)]
                 if let Some(backend) = wsl_backend {
-                    crate::session_backend::kill_wsl_session(
+                    if crate::session_backend::kill_wsl_session(
                         backend,
                         wsl_distro.as_deref(),
                         &session_name,
-                    );
+                    ) {
+                        tracker.mark_verified(&terminal_id);
+                    } else {
+                        tracker.mark_unverified(&terminal_id);
+                    }
                 } else {
                     record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
                 }
