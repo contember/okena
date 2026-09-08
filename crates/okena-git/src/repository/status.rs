@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::time::SystemTime;
 
+use okena_core::process::{command, safe_output};
+
 use super::diff_memo;
 use crate::GitStatus;
 
@@ -83,25 +85,82 @@ pub fn get_status(path: &Path) -> StatusFetch {
     }))
 }
 
-/// Check if a worktree/repo has uncommitted changes (staged, unstaged, or untracked).
+/// Three-state result of a fresh dirty check — see [`uncommitted_changes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirtyCheck {
+    /// Definitive reading of the working tree.
+    Known(bool),
+    /// There is no repository at the path or above it.
+    NotRepo,
+    /// A repository is there, but neither gix nor git could read its status.
+    Unknown,
+}
+
+/// Whether a worktree/repo has uncommitted changes (staged, unstaged, or
+/// untracked), keeping "could not tell" apart from "clean".
 /// Always performs a fresh check (no caching).
-pub fn has_uncommitted_changes(path: &Path) -> bool {
-    let Some(repo) = crate::gix_helpers::open(path) else {
-        return false;
-    };
+///
+/// gix answers the common case in-process. It gives up on shapes git handles
+/// fine — a sparse index, a directory it cannot read — so on a user-action path
+/// (never the poll loop) we ask git itself rather than report a status we do
+/// not have.
+pub fn uncommitted_changes(path: &Path) -> DirtyCheck {
+    if let Some(dirty) = gix_uncommitted_changes(path) {
+        return DirtyCheck::Known(dirty);
+    }
+    if !git_dir_exists_upwards(path) {
+        return DirtyCheck::NotRepo;
+    }
+    cli_uncommitted_changes(path).map_or(DirtyCheck::Unknown, DirtyCheck::Known)
+}
 
-    let Ok(platform) = repo.status(gix::progress::Discard) else {
-        return false;
-    };
-
-    let Ok(iter) = crate::gix_helpers::single_threaded(platform)
+/// `None` when the gix walk could not run, or an entry errored part-way.
+fn gix_uncommitted_changes(path: &Path) -> Option<bool> {
+    let repo = crate::gix_helpers::open(path)?;
+    let platform = repo.status(gix::progress::Discard).ok()?;
+    let mut iter = crate::gix_helpers::single_threaded(platform)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
-    else {
-        return false;
-    };
+        .ok()?;
+    match iter.next() {
+        Some(Ok(_)) => Some(true),
+        Some(Err(_)) => None,
+        None => Some(false),
+    }
+}
 
-    iter.filter_map(Result::ok).next().is_some()
+/// `None` when git itself refuses to report status.
+fn cli_uncommitted_changes(path: &Path) -> Option<bool> {
+    let p = path.to_str()?;
+    let output = safe_output(command("git").args(["-C", p, "status", "--porcelain"])).ok()?;
+    output
+        .status
+        .success()
+        .then(|| !output.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
+/// Whether a `.git` entry sits at `path` or any ancestor.
+///
+/// "No repository here" is a filesystem fact. Asking git would let a `.git`
+/// we merely failed to read — an unparsable config, no permission — pass
+/// itself off as an absent one, and absent means "nothing to protect".
+fn git_dir_exists_upwards(path: &Path) -> bool {
+    path.ancestors().any(|dir| dir.join(".git").exists())
+}
+
+/// Safety-gate view of [`uncommitted_changes`]: a status that could not be
+/// established counts as dirty, so destructive flows prompt or refuse instead
+/// of proceeding as if the checkout were clean.
+///
+/// Callers that can *escalate* on a dirty answer (deriving a force flag, say)
+/// must match on [`uncommitted_changes`] instead — for them `Unknown` has to
+/// refuse, and this collapses it into the same `true` a user-accepted dirty
+/// close produces.
+pub fn has_uncommitted_changes(path: &Path) -> bool {
+    matches!(
+        uncommitted_changes(path),
+        DirtyCheck::Known(true) | DirtyCheck::Unknown
+    )
 }
 
 /// Get the current branch name or short commit hash for detached HEAD.
@@ -171,9 +230,11 @@ pub(crate) struct WorktreeDiff {
     /// equivalent of `git diff --numstat --no-renames HEAD`. Binary files
     /// appear with `(.., 0, 0)`, matching numstat's `-`/`-`.
     pub tracked: Vec<(String, usize, usize)>,
-    /// Untracked file paths, relative to the queried path (monorepo-subdir
-    /// prefix stripped, matching the previous standalone untracked listing).
+    /// Untracked file paths, scoped to the queried path's subtree but relative
+    /// to the worktree root — the same base as `tracked`.
     pub untracked: Vec<String>,
+    /// Worktree root both path lists are relative to.
+    pub root: std::path::PathBuf,
 }
 
 /// Tracked diff counts **and** the untracked-file list from one HEAD → index →
@@ -202,9 +263,8 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     // leaves this `None`, so every tracked blob diffs against an empty source.
     let head_tree = repo.head_tree().ok();
 
-    // Prefix from workdir down to the queried path, so untracked paths are
-    // reported relative to the (possibly monorepo-subdir) project — matching the
-    // previous standalone untracked listing. Tracked counts stay repo-relative.
+    // Prefix from workdir down to the queried path, scoping untracked entries
+    // to the (possibly monorepo-subdir) project. Both lists stay repo-relative.
     let canonical_query = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
     let untracked_prefix: String = canonical_query
@@ -246,10 +306,8 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         {
             if matches!(entry.status, gix::dir::entry::Status::Untracked) {
                 let rela = entry.rela_path.to_string();
-                if untracked_prefix.is_empty() {
+                if untracked_prefix.is_empty() || rela.starts_with(&untracked_prefix) {
                     untracked.push(rela);
-                } else if let Some(stripped) = rela.strip_prefix(&untracked_prefix) {
-                    untracked.push(stripped.to_string());
                 }
             }
             continue;
@@ -302,14 +360,19 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     }
     diff_memo::store(path, memo);
 
-    Some(WorktreeDiff { tracked, untracked })
+    Some(WorktreeDiff {
+        tracked,
+        untracked,
+        root: workdir,
+    })
 }
 
 /// Line count of an untracked file listed in [`WorktreeDiff::untracked`]
-/// (relative to the queried `path`), each line counting as an addition.
-/// Unreadable or non-UTF-8 files count as zero. Memoized like tracked files.
-pub(crate) fn untracked_line_count(path: &Path, file: &str) -> usize {
-    let full_path = path.join(file);
+/// (relative to `root`), each line counting as an addition. Unreadable or
+/// non-UTF-8 files count as zero. Memoized like tracked files, keyed by the
+/// queried `path` that produced the listing.
+pub(crate) fn untracked_line_count(path: &Path, root: &Path, file: &str) -> usize {
+    let full_path = root.join(file);
     let observed = diff_memo::observe(&full_path, SystemTime::now());
     if let Some(observed) = &observed
         && let Some(lines) =
@@ -353,7 +416,7 @@ fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
 
     // Untracked files: count each line as an addition.
     for file in &diff.untracked {
-        added += untracked_line_count(path, file);
+        added += untracked_line_count(path, &diff.root, file);
     }
 
     Some((added, removed))
@@ -634,6 +697,73 @@ mod tests {
     fn has_uncommitted_returns_false_for_clean_repo() {
         let (_tmp, repo) = init_temp_repo();
         assert!(!has_uncommitted_changes(&repo));
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(false));
+    }
+
+    #[test]
+    fn an_unreadable_status_is_unknown_rather_than_clean() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        // A directory where the index file belongs: the walk cannot start, so
+        // the answer is "we do not know", not "clean".
+        std::fs::remove_file(repo.join(".git").join("index")).unwrap();
+        std::fs::create_dir(repo.join(".git").join("index")).unwrap();
+
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Unknown);
+        assert!(
+            has_uncommitted_changes(&repo),
+            "a status we cannot read must gate destructive flows, not wave them through"
+        );
+    }
+
+    #[test]
+    fn a_path_outside_any_repository_is_not_dirty() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        assert_eq!(uncommitted_changes(&path), DirtyCheck::NotRepo);
+    }
+
+    #[test]
+    fn a_repository_we_cannot_open_is_unknown_not_absent() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        // A `.git` that is plainly there but unusable. Reporting "no
+        // repository" would read as "nothing to protect" and wave a
+        // destructive removal through.
+        std::fs::remove_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+
+        assert_eq!(gix_uncommitted_changes(&repo), None);
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Unknown);
+        assert!(has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn a_sparse_index_checkout_still_reports_its_dirty_state() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(
+            &repo,
+            &["sparse-checkout", "init", "--cone", "--sparse-index"],
+        );
+
+        // gix cannot walk a sparse index at all, so every answer here comes
+        // from the git fallback.
+        assert_eq!(gix_uncommitted_changes(&repo), None);
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(false));
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(true));
+    }
+
+    #[test]
+    fn untracked_listing_from_a_subdirectory_uses_the_worktree_root_base() {
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("fresh.txt"), "x").unwrap();
+        std::fs::write(repo.join("outside.txt"), "y").unwrap();
+
+        let untracked = crate::gix_helpers::list_untracked_files(&project)
+            .expect("gix status should succeed on a clean test repo");
+        assert_eq!(untracked, vec!["packages/app/fresh.txt".to_string()]);
     }
 
     #[test]

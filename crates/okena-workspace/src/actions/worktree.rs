@@ -47,6 +47,22 @@ enum WorktreeRemovalTarget {
     Orphaned(okena_git::OrphanedWorktree),
 }
 
+/// Dirty state for a close decision, refusing rather than guessing.
+///
+/// The caller turns `true` into a force-remove, so "we could not read the
+/// status" must not collapse into it — that is the one case where git's own
+/// dirty refusal is the last thing standing.
+fn close_dirty_state(project_path: &str) -> Result<bool, String> {
+    match okena_git::uncommitted_changes(std::path::Path::new(project_path)) {
+        okena_git::DirtyCheck::Known(dirty) => Ok(dirty),
+        okena_git::DirtyCheck::NotRepo => Ok(false),
+        okena_git::DirtyCheck::Unknown => Err(
+            "could not determine whether the worktree has uncommitted changes; refusing to close it"
+                .to_string(),
+        ),
+    }
+}
+
 impl WorktreeRemovalPlan {
     pub fn worktree_path(&self) -> &std::path::Path {
         &self.worktree_path
@@ -62,15 +78,19 @@ impl WorktreeRemovalPlan {
     pub fn preflight_remove(&self, force: bool) -> Result<(), String> {
         // An orphan has no Git to consult about dirty state, and reaching this
         // plan already required an explicit force-remove.
-        if self.is_orphaned() {
+        if self.is_orphaned() || force {
             return Ok(());
         }
-        if !force && okena_git::has_uncommitted_changes(&self.worktree_path) {
-            return Err(
-                "worktree has uncommitted changes; pass force=true to remove it".to_string(),
-            );
+        match okena_git::uncommitted_changes(&self.worktree_path) {
+            okena_git::DirtyCheck::Known(true) => {
+                Err("worktree has uncommitted changes; pass force=true to remove it".to_string())
+            }
+            okena_git::DirtyCheck::Unknown => Err(
+                "could not determine whether the worktree has uncommitted changes; refusing to remove it"
+                    .to_string(),
+            ),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     pub fn remove(&self, force: bool) -> Result<(), String> {
@@ -1194,7 +1214,11 @@ impl Workspace {
             okena_git::get_current_branch(std::path::Path::new(&project_path)).unwrap_or_default();
         let default_branch = okena_git::get_default_branch(std::path::Path::new(&main_repo_path))
             .unwrap_or_default();
-        let is_dirty = okena_git::has_uncommitted_changes(std::path::Path::new(&project_path));
+        // Refuse before any hook runs: below, `force_remove` is derived from
+        // this, and an unknown status must never become `git worktree remove
+        // --force` — that would strip git's own refusal exactly when we cannot
+        // see what it is protecting.
+        let is_dirty = close_dirty_state(&project_path)?;
 
         let merge_enabled =
             merge && (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
@@ -1342,7 +1366,7 @@ impl Workspace {
 #[cfg(test)]
 mod merge_pipeline_tests {
     use super::{
-        CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget,
+        CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget, close_dirty_state,
         close_worktree_merge_git,
     };
     use crate::hook_monitor::{HookMonitor, HookStatus};
@@ -1526,5 +1550,99 @@ mod merge_pipeline_tests {
                 .iter()
                 .all(|entry| matches!(entry.status, HookStatus::Succeeded { .. }))
         );
+    }
+
+    /// A main repo with one linked worktree holding uncommitted work, plus the
+    /// name of the worktree's admin directory.
+    fn dirty_linked_worktree(fixture: &TestRepo) -> (std::path::PathBuf, std::path::PathBuf) {
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        std::fs::write(worktree.join("base.txt"), "uncommitted work\n").unwrap();
+        (main_repo, worktree)
+    }
+
+    /// Make the checkout's index unreadable, so neither gix nor git can say
+    /// whether it is dirty.
+    fn break_worktree_index(main_repo: &Path, name: &str) {
+        let index = main_repo
+            .join(".git")
+            .join("worktrees")
+            .join(name)
+            .join("index");
+        std::fs::remove_file(&index).unwrap();
+        std::fs::create_dir(&index).unwrap();
+    }
+
+    #[test]
+    fn close_refuses_a_checkout_whose_dirty_state_cannot_be_read() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = dirty_linked_worktree(&fixture);
+
+        assert_eq!(close_dirty_state(path_str(&worktree)), Ok(true));
+
+        break_worktree_index(&main_repo, "worktree");
+
+        // The boolean the close path used to read: it says "dirty", which the
+        // caller turns into `git worktree remove --force`.
+        assert!(okena_git::has_uncommitted_changes(&worktree));
+        let error = close_dirty_state(path_str(&worktree))
+            .expect_err("an unreadable status must not decide a force-remove");
+        assert!(error.contains("could not determine"), "{error}");
+    }
+
+    #[test]
+    fn preflight_refuses_a_checkout_whose_dirty_state_cannot_be_read() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = dirty_linked_worktree(&fixture);
+        let verified_worktree =
+            okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
+        let plan = WorktreeRemovalPlan {
+            project_id: "p1".to_string(),
+            worktree_path: worktree.clone(),
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+            target: WorktreeRemovalTarget::Linked(verified_worktree),
+            branch: "feature".to_string(),
+            project_hooks: HooksConfig::default(),
+            project_name: "Project".to_string(),
+            project_path: worktree.to_string_lossy().into_owned(),
+            folder_id: None,
+            folder_name: None,
+        };
+
+        break_worktree_index(&main_repo, "worktree");
+
+        let error = plan
+            .preflight_remove(false)
+            .expect_err("an unreadable status must block removal");
+        assert!(error.contains("could not determine"), "{error}");
+        // An explicit force is the user's own decision and still passes.
+        assert_eq!(plan.preflight_remove(true), Ok(()));
     }
 }
