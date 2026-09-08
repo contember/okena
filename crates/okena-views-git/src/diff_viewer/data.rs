@@ -74,6 +74,7 @@ impl DiffViewer {
         self.side_by_side_lines.clear();
         self.scroll_x = 0.0;
         self.max_line_chars = 0;
+        self.composition.clear();
         cx.notify();
 
         let provider = self.provider.clone();
@@ -113,10 +114,13 @@ impl DiffViewer {
                             }
 
                             this.process_current_file_async(cx);
+                            this.load_composition_async(cx);
                         }
                     }
                     Err(e) => {
                         this.error_message = Some(e);
+                        this.composition.clear();
+                        this.composition.loading = false;
                     }
                 }
                 cx.notify();
@@ -318,12 +322,14 @@ impl DiffViewer {
     }
 
     pub(super) fn build_file_tree(&mut self) {
-        self.file_tree = build_file_tree(
+        let tree = build_file_tree(
             self.file_stats
                 .iter()
                 .enumerate()
-                .map(|(i, f)| (i, &f.path)),
+                .filter(|(_, file)| self.composition.accepts(&file.path))
+                .map(|(index, file)| (index, &file.path)),
         );
+        self.file_tree = tree;
         // Auto-expand all folders in diff view
         self.expanded_folders.clear();
         Self::collect_folder_paths(&self.file_tree, "", &mut self.expanded_folders);
@@ -350,5 +356,64 @@ impl DiffViewer {
             })
             .max()
             .unwrap_or(0)
+    }
+}
+
+impl DiffViewer {
+    /// Load the role composition for the comparison already on screen.
+    ///
+    /// Separate from the diff on purpose: it parses source, so it must never
+    /// delay the diff the reviewer actually asked for.
+    pub(super) fn load_composition_async(&mut self, cx: &mut Context<Self>) {
+        let generation = self.request_generation;
+        let provider = self.provider.clone();
+        let mode = self.diff_mode.clone();
+        let ignore_whitespace = self.ignore_whitespace;
+        self.composition.loading = true;
+
+        cx.spawn(async move |this, cx| {
+            let result =
+                smol::unblock(move || provider.get_review_composition(mode, ignore_whitespace))
+                    .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.request_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(composition) => this.composition.set(composition),
+                    Err(error) => this.composition.fail(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rebuild the tree for the current role filter, keeping a visible file
+    /// selected so the diff pane never goes blank behind a filter.
+    pub(super) fn apply_role_filter(&mut self, cx: &mut Context<Self>) {
+        self.build_file_tree();
+        let selected_visible = self
+            .file_stats
+            .get(self.selected_file_index)
+            .is_some_and(|file| self.composition.accepts(&file.path));
+        if !selected_visible
+            && let Some(index) = self
+                .file_stats
+                .iter()
+                .position(|file| self.composition.accepts(&file.path))
+        {
+            self.selected_file_index = index;
+            self.process_current_file_async(cx);
+        }
+        cx.notify();
+    }
+
+    /// Files the role filter lets through.
+    pub(super) fn visible_file_count(&self) -> usize {
+        self.file_stats
+            .iter()
+            .filter(|file| self.composition.accepts(&file.path))
+            .count()
     }
 }

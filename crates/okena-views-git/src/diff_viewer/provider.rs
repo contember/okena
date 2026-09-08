@@ -1,5 +1,6 @@
 //! GitProvider trait and the remote-server (HTTP) implementation.
 
+use okena_core::review::ChangeComposition;
 use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
 use serde::de::DeserializeOwned;
 
@@ -18,6 +19,12 @@ pub trait GitProvider: Send + Sync + 'static {
         true
     }
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
+    /// Role volumes for the same comparison `get_diff` returns.
+    fn get_review_composition(
+        &self,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<ChangeComposition, String>;
     fn get_file_contents(
         &self,
         file_path: &str,
@@ -138,6 +145,19 @@ impl GitProvider for RemoteGitProvider {
             ignore_whitespace,
         };
         self.post_json(action, "diff")
+    }
+
+    fn get_review_composition(
+        &self,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<ChangeComposition, String> {
+        let action = okena_core::api::ActionRequest::ReviewComposition {
+            project_id: self.project_id.clone(),
+            mode,
+            ignore_whitespace,
+        };
+        self.post_json(action, "review composition")
     }
 
     fn get_file_contents(
