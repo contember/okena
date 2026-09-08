@@ -107,14 +107,18 @@ mod tests {
     use okena_state::{ProjectData, WorktreeMetadata};
 
     fn worktree_project(id: &str, path: &str) -> ProjectData {
+        // Empty checkout root: the pre-persistence shape, where it resolves
+        // from `project.path`.
+        monorepo_worktree_project(id, path, "")
+    }
+
+    fn monorepo_worktree_project(id: &str, path: &str, checkout_root: &str) -> ProjectData {
         ProjectData {
             worktree_info: Some(WorktreeMetadata {
                 parent_project_id: "parent".to_string(),
                 color_override: None,
                 main_repo_path: String::new(),
-                // Deprecated and unset on save, so the checkout path resolves
-                // from `project.path` — exactly what the sweep must stat.
-                worktree_path: String::new(),
+                worktree_path: checkout_root.to_string(),
                 branch_name: String::new(),
             }),
             ..plain_project(id, path)
@@ -163,6 +167,22 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, "wt");
+        assert_eq!(candidates[0].1, PathBuf::from("/tmp/wt"));
+    }
+
+    #[test]
+    fn a_monorepo_worktree_is_stated_at_its_checkout_root() {
+        // The project path is a package inside the checkout. Statting that
+        // instead would call a healthy worktree stale as soon as a branch
+        // switch drops the package directory.
+        let workspace = workspace_with(vec![monorepo_worktree_project(
+            "wt",
+            "/tmp/wt/packages/app",
+            "/tmp/wt",
+        )]);
+
+        let candidates = sweep_candidates(&workspace);
+
         assert_eq!(candidates[0].1, PathBuf::from("/tmp/wt"));
     }
 

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Auto-save MUST NOT overwrite the real workspace.json in this state.
 static LOADED_FROM_DEFAULT: AtomicBool = AtomicBool::new(false);
 
+
 /// Process-level mutex serializing workspace saves.
 ///
 /// The debounced auto-save dispatches `save_workspace` onto `smol::unblock`'s
@@ -489,7 +490,7 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         return Ok(());
     }
 
-    let json = serde_json::to_string_pretty(data)?;
+    let json = encode_workspace(data)?;
 
     // Layer 3: rolling backup — move the current file to .bak via an atomic
     // rename (not a copy). A rename never produces a truncated .bak, so the
@@ -513,6 +514,12 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
+}
+
+/// The exact bytes `save_workspace` writes. Split out so a round-trip test
+/// reads through the production encoder rather than a look-alike.
+fn encode_workspace(data: &WorkspaceData) -> Result<String> {
+    Ok(serde_json::to_string_pretty(data)?)
 }
 
 /// Version that introduced client-owned project presentation fields.
@@ -969,6 +976,8 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
     backend_preference: SessionBackend,
     global_default_shell: &ShellType,
 ) -> Vec<TerminalSessionTeardown> {
+    backfill_worktree_checkout_roots(data);
+
     let stale_ids: Vec<String> = data
         .projects
         .iter()
@@ -1085,8 +1094,78 @@ fn interrupted_create_is_usable(project: &ProjectData) -> bool {
     path.exists() && okena_git::is_complete_checkout(path)
 }
 
+/// Recover the checkout root of worktree rows written while it was not
+/// persisted, so a monorepo worktree is no longer judged by its package
+/// subdirectory. Rows whose root cannot be established keep the old fallback.
+fn backfill_worktree_checkout_roots(data: &mut WorkspaceData) {
+    let occupied: Vec<String> = data
+        .projects
+        .iter()
+        .map(|project| project.path.clone())
+        .collect();
+    let mut registries: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut resolved: Vec<(usize, String)> = Vec::new();
+
+    for (index, project) in data.projects.iter().enumerate() {
+        let Some(metadata) = project.worktree_info.as_ref() else {
+            continue;
+        };
+        if !metadata.worktree_path.is_empty() {
+            continue;
+        }
+        let repo = data
+            .projects
+            .iter()
+            .find(|candidate| candidate.id == metadata.parent_project_id)
+            .map_or(metadata.main_repo_path.as_str(), |parent| {
+                parent.path.as_str()
+            });
+        if repo.is_empty() {
+            continue;
+        }
+        let registered = registries
+            .entry(repo.to_string())
+            .or_insert_with(|| okena_git::list_linked_worktree_paths(Path::new(repo)));
+        let Some(root) = registered_checkout_root(registered, Path::new(&project.path)) else {
+            continue;
+        };
+        // Another project's own directory is never this row's checkout root.
+        // Adopting it is how a deleted checkout nested inside a live worktree
+        // would inherit its neighbour's existence and stop being swept.
+        if occupied
+            .iter()
+            .enumerate()
+            .any(|(other, path)| other != index && Path::new(path) == root)
+        {
+            continue;
+        }
+        resolved.push((index, root.to_string_lossy().into_owned()));
+    }
+
+    for (index, root) in resolved {
+        if let Some(metadata) = data.projects[index].worktree_info.as_mut() {
+            metadata.worktree_path = root;
+        }
+    }
+}
+
+/// The registered worktree a project sits in: the deepest checkout Git lists
+/// for the parent repo that contains it. A nested checkout and a submodule both
+/// carry a `.git` pointer file, so only Git's registry tells them apart.
+fn registered_checkout_root<'a>(
+    registered: &'a [PathBuf],
+    project_path: &Path,
+) -> Option<&'a Path> {
+    registered
+        .iter()
+        .filter(|root| project_path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .map(PathBuf::as_path)
+}
+
 /// The directory a worktree project actually checks out into: its recorded
-/// worktree path, falling back to the project path when that is unset.
+/// checkout root, falling back to the project path for rows old enough to have
+/// none (correct unless the project is a subdirectory of the checkout).
 pub fn worktree_checkout_path(project: &ProjectData) -> &Path {
     let path = project
         .worktree_info
@@ -1633,6 +1712,83 @@ mod tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    /// A throwaway Git repository plus the worktrees a test registers in it.
+    struct GitFixture {
+        root: PathBuf,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("okena-wt-registry-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).expect("create fixture root");
+            Self { root }
+        }
+
+        fn path_str<'a>(&self, path: &'a Path) -> &'a str {
+            path.to_str().expect("fixture path is utf-8")
+        }
+
+        fn git(&self, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn repo(&self, name: &str) -> PathBuf {
+            let repo = self.root.join(name);
+            self.git(&["init", "-b", "main", self.path_str(&repo)]);
+            let path = self.path_str(&repo);
+            self.git(&["-C", path, "config", "user.email", "okena@example.invalid"]);
+            self.git(&["-C", path, "config", "user.name", "Okena Test"]);
+            std::fs::write(repo.join("base.txt"), "base\n").expect("write base file");
+            self.git(&["-C", path, "add", "base.txt"]);
+            self.git(&["-C", path, "commit", "-m", "base"]);
+            repo
+        }
+
+        fn add_worktree(&self, repo: &Path, branch: &str, checkout: &Path) {
+            self.git(&[
+                "-C",
+                self.path_str(repo),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                self.path_str(checkout),
+            ]);
+        }
+    }
+
+    impl Drop for GitFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn legacy_worktree_info(parent_id: &str, repo: &Path) -> WorktreeMetadata {
+        WorktreeMetadata {
+            parent_project_id: parent_id.to_string(),
+            color_override: None,
+            main_repo_path: repo.to_string_lossy().into_owned(),
+            worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
+        }
+    }
+
+    /// What the next startup sees: the bytes the save encoder wrote, parsed
+    /// back through the load path's typed step.
+    fn reload_saved(data: &WorkspaceData) -> WorkspaceData {
+        let json = encode_workspace(data).expect("encode workspace");
+        migrate_workspace(serde_json::from_str(&json).expect("decode workspace"))
     }
 
     // === validate_workspace_data ===
@@ -2407,6 +2563,8 @@ mod tests {
 
     #[test]
     fn sync_worktrees_preserves_monorepo_worktree_when_project_subdir_is_missing() {
+        // Through the saved bytes: a checkout root held only in memory proves
+        // nothing, because startup reads what the encoder wrote.
         let checkout =
             std::env::temp_dir().join(format!("okena-monorepo-sync-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&checkout).expect("create checkout root");
@@ -2422,17 +2580,115 @@ mod tests {
             worktree_path: checkout.to_string_lossy().into_owned(),
             branch_name: "some-branch".to_string(),
         });
-        let mut data = make_workspace(
+        let mut data = reload_saved(&make_workspace(
             vec![make_project("p1"), wt_project],
             vec!["p1", "wt1"],
             vec![],
-        );
+        ));
 
         sync_worktrees(&mut data);
 
         assert!(data.projects.iter().any(|project| project.id == "wt1"));
         assert!(data.project_order.contains(&"wt1".to_string()));
-        std::fs::remove_dir(checkout).expect("remove checkout root");
+        std::fs::remove_dir_all(checkout).expect("remove checkout root");
+    }
+
+    #[test]
+    fn sync_worktrees_recovers_a_legacy_checkout_root_from_the_worktree_registry() {
+        // Rows written while the root was not persisted carry only the package
+        // subdirectory; Git's worktree registry gives the root back.
+        let fixture = GitFixture::new();
+        let repo = fixture.repo("main");
+        let checkout = fixture.root.join("wt");
+        fixture.add_worktree(&repo, "feature", &checkout);
+
+        let mut parent = make_project("p1");
+        parent.path = repo.to_string_lossy().into_owned();
+        let mut wt_project = make_project("wt1");
+        wt_project.path = checkout
+            .join("packages/missing")
+            .to_string_lossy()
+            .into_owned();
+        wt_project.worktree_info = Some(legacy_worktree_info("p1", &repo));
+        let mut data = make_workspace(vec![parent, wt_project], vec!["p1", "wt1"], vec![]);
+
+        sync_worktrees(&mut data);
+
+        let wt = data
+            .projects
+            .iter()
+            .find(|project| project.id == "wt1")
+            .expect("legacy monorepo worktree kept");
+        assert_eq!(
+            wt.worktree_info.as_ref().unwrap().worktree_path,
+            checkout.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn legacy_recovery_refuses_the_neighbouring_checkout_of_a_deleted_worktree() {
+        // A checkout nested inside a live worktree, deleted and pruned out of
+        // the registry. Adopting the surviving neighbour as its root would make
+        // the dead row permanently un-sweepable, and persist that mistake.
+        let fixture = GitFixture::new();
+        let repo = fixture.repo("main");
+        let outer = fixture.root.join("outer");
+        fixture.add_worktree(&repo, "outer-branch", &outer);
+        let inner = outer.join("inner");
+        fixture.add_worktree(&repo, "inner-branch", &inner);
+        std::fs::remove_dir_all(&inner).expect("delete nested checkout");
+        fixture.git(&["-C", fixture.path_str(&repo), "worktree", "prune"]);
+
+        let mut parent = make_project("p1");
+        parent.path = repo.to_string_lossy().into_owned();
+        let mut outer_project = make_project("outer1");
+        outer_project.path = outer.to_string_lossy().into_owned();
+        outer_project.worktree_info = Some(legacy_worktree_info("p1", &repo));
+        let mut inner_project = make_project("inner1");
+        inner_project.path = inner.join("packages/app").to_string_lossy().into_owned();
+        inner_project.worktree_info = Some(legacy_worktree_info("p1", &repo));
+        let mut data = make_workspace(
+            vec![parent, outer_project, inner_project],
+            vec!["p1", "outer1", "inner1"],
+            vec![],
+        );
+
+        sync_worktrees(&mut data);
+
+        assert!(
+            !data.projects.iter().any(|project| project.id == "inner1"),
+            "a deleted checkout must stay sweepable"
+        );
+        let outer_row = data
+            .projects
+            .iter()
+            .find(|project| project.id == "outer1")
+            .expect("live worktree kept");
+        assert_eq!(
+            outer_row.worktree_info.as_ref().unwrap().worktree_path,
+            outer.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn registered_checkout_root_picks_the_deepest_registered_ancestor() {
+        // A submodule is never in the registry, so a project inside one finds
+        // no root at all rather than adopting the submodule directory.
+        let registered = vec![PathBuf::from("/wt"), PathBuf::from("/wt/nested")];
+
+        assert_eq!(
+            registered_checkout_root(&registered, Path::new("/wt/packages/app")),
+            Some(Path::new("/wt"))
+        );
+        assert_eq!(
+            registered_checkout_root(&registered, Path::new("/wt/nested/packages/app")),
+            Some(Path::new("/wt/nested"))
+        );
+        assert_eq!(
+            registered_checkout_root(&registered, Path::new("/elsewhere/packages/app")),
+            None
+        );
+        assert_eq!(registered_checkout_root(&[], Path::new("/wt/app")), None);
     }
 
     #[test]
