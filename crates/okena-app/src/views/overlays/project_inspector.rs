@@ -167,6 +167,7 @@ impl ProjectInspector {
             viewer.update_config(
                 file_config.font_size,
                 file_config.font_family.clone(),
+                file_config.line_height,
                 file_config.is_dark,
                 cx,
             );

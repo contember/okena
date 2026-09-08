@@ -2069,6 +2069,7 @@ impl OverlayManager {
             .clone();
         FileViewerConfig {
             font_size: settings.file_font_size,
+            line_height: settings.file_line_height,
             font_family: settings.file_font_family.into(),
             is_dark: crate::theme::theme(cx).is_dark(),
             blame_visible: settings.blame_visible,

@@ -313,7 +313,7 @@ impl FileViewer {
         };
 
         let font_size = self.file_font_size;
-        let line_height = font_size * 1.8;
+        let line_height = font_size * self.file_line_height;
         let char_width = self.measured_char_width;
         let gutter_width = (tab.line_num_width as f32) * char_width + 16.0;
         let scroll_state = tab.source_scroll_handle.0.borrow();
@@ -372,7 +372,7 @@ impl FileViewer {
             .when(tab.target_line == Some(row.logical_line + 1), |d| {
                 d.bg(rgba(t.bg_selection, 0.55))
             })
-            .text_size(ui_text(font_size, cx))
+            .text_size(px(font_size))
             .font(self.file_font.clone())
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
@@ -1393,7 +1393,7 @@ impl Render for FileViewer {
         // Measure actual monospace character width from font metrics
         let font = self.file_font.clone();
         let font_size = self.file_font_size;
-        let rendered_font_size = ui_text(font_size, cx);
+        let rendered_font_size = px(font_size);
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&font);
         self.measured_char_width = text_system
@@ -2263,9 +2263,10 @@ impl Render for FileViewer {
                                                         .px(px(14.0))
                                                         .py(px(10.0))
                                                         .font(this.file_font.clone())
-                                                        .text_size(ui_text(
-                                                            this.file_font_size,
-                                                            cx,
+                                                        .text_size(px(this.file_font_size))
+                                                        .line_height(px(
+                                                            this.file_font_size
+                                                                * this.file_line_height,
                                                         ))
                                                         .text_color(rgb(t.text_primary))
                                                         .flex()
