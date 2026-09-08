@@ -195,9 +195,7 @@ pub fn bind_unix_socket(path: &std::path::Path) -> std::io::Result<tokio::net::U
     if let Some(parent) = path.parent() {
         // `create_dir_all` and `set_permissions` both follow symlinks, so a
         // planted link would redirect the chmod and the bind together.
-        if std::fs::symlink_metadata(parent)
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
+        if std::fs::symlink_metadata(parent).is_ok_and(|meta| meta.file_type().is_symlink()) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!("{} is a symlink", parent.display()),

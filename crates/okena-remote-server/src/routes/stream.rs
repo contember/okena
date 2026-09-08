@@ -102,12 +102,10 @@ async fn handle_ws(
     } else {
         // Wait for first-message auth (2 second timeout)
         match tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                match serde_json::from_str::<WsInbound>(&text) {
-                    Ok(WsInbound::Auth { token }) => state.auth_store.authenticate_watched(&token),
-                    _ => (state.auth_store.subscribe_revocations(), None),
-                }
-            }
+            Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<WsInbound>(&text) {
+                Ok(WsInbound::Auth { token }) => state.auth_store.authenticate_watched(&token),
+                _ => (state.auth_store.subscribe_revocations(), None),
+            },
             _ => (state.auth_store.subscribe_revocations(), None),
         }
     };

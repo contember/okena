@@ -446,7 +446,7 @@ mod tests {
             }
         }
 
-        fn from_peer(mut self, peer: PeerInfo) -> Self {
+        fn via_peer(mut self, peer: PeerInfo) -> Self {
             self.peer = peer;
             self
         }
@@ -588,7 +588,7 @@ mod tests {
         );
         assert_eq!(
             Call::get("/v1/update/status")
-                .from_peer(PeerInfo::Local)
+                .via_peer(PeerInfo::Local)
                 .status(&mut router)
                 .await,
             StatusCode::OK
@@ -610,7 +610,7 @@ mod tests {
         );
         assert_eq!(
             Call::get("/v1/update/status")
-                .from_peer(OFF_HOST)
+                .via_peer(OFF_HOST)
                 .status(&mut router)
                 .await,
             StatusCode::FORBIDDEN
@@ -625,7 +625,7 @@ mod tests {
 
         assert_eq!(
             Call::get("/v1/update/status")
-                .from_peer(OFF_HOST)
+                .via_peer(OFF_HOST)
                 .with_token(&token)
                 .status(&mut router)
                 .await,
@@ -682,7 +682,9 @@ mod tests {
             .expect("the daemon accepts the frame");
     }
 
-    async fn connect_stream(addr: SocketAddr) -> impl futures::Stream<Item = Result<TestFrame, TestFrameError>>
+    async fn connect_stream(
+        addr: SocketAddr,
+    ) -> impl futures::Stream<Item = Result<TestFrame, TestFrameError>>
     + futures::Sink<TestFrame, Error = TestFrameError>
     + Unpin {
         let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/stream"))
@@ -705,7 +707,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_failed")
+        );
     }
 
     #[tokio::test]
@@ -720,7 +725,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_failed")
+        );
     }
 
     #[tokio::test]
@@ -736,7 +744,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_ok")
+        );
     }
 
     /// Revocation must end the established stream, not merely refuse the next
@@ -758,11 +769,17 @@ mod tests {
             serde_json::json!({ "type": "auth", "token": token }),
         )
         .await;
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_ok")
+        );
 
         assert!(store.revoke_token(&token_id));
 
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_failed")
+        );
         assert!(
             next_frame_type(&mut socket).await.is_none(),
             "the daemon must close the revoked stream"
@@ -791,7 +808,10 @@ mod tests {
             .await
             .expect("the daemon accepts the upgrade");
 
-        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_ok")
+        );
     }
 
     #[tokio::test]

@@ -901,7 +901,9 @@ mod tests {
         assert!(store.revoke_token(&session.token_id));
 
         assert!(
-            revocations.has_changed().expect("sender outlives the stream"),
+            revocations
+                .has_changed()
+                .expect("sender outlives the stream"),
             "the receiver taken during the handshake must observe the revocation"
         );
         assert!(!store.session_is_live(&session));
