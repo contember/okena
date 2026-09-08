@@ -80,6 +80,14 @@ enum DecodedImage {
         width: u32,
         height: u32,
     },
+    /// An animation, decoded here rather than handed to GPUI as raw bytes:
+    /// GPUI's decoder retains every frame, and this preview only ever paints
+    /// frame 0.
+    Decoded {
+        image: Arc<RenderImage>,
+        width: u32,
+        height: u32,
+    },
     Rendered {
         image: Arc<RenderImage>,
         width: u32,
@@ -92,9 +100,9 @@ enum DecodedImage {
 impl DecodedImage {
     fn dimensions(&self) -> (u32, u32) {
         match self {
-            Self::Raster { width, height, .. } | Self::Rendered { width, height, .. } => {
-                (*width, *height)
-            }
+            Self::Raster { width, height, .. }
+            | Self::Decoded { width, height, .. }
+            | Self::Rendered { width, height, .. } => (*width, *height),
         }
     }
 }
@@ -103,7 +111,9 @@ impl From<DecodedImage> for ImageSource {
     fn from(value: DecodedImage) -> Self {
         match value {
             DecodedImage::Raster { image, .. } => ImageSource::Image(image),
-            DecodedImage::Rendered { image, .. } => ImageSource::Render(image),
+            DecodedImage::Decoded { image, .. } | DecodedImage::Rendered { image, .. } => {
+                ImageSource::Render(image)
+            }
         }
     }
 }
@@ -725,6 +735,22 @@ fn prepare_image(
     let format = guessed
         .and_then(image_format_from_content)
         .unwrap_or(format);
+    if format == ImageFormat::Gif {
+        // One canvas: the preview never advances the frame, so decoding the
+        // rest would retain frame_count x canvas bytes for nothing.
+        let budget = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        let frames = decode_gif_frames(&bytes, budget)?;
+        return Ok(PreparedFile {
+            content: PreparedContent::Image(DecodedImage::Decoded {
+                image: Arc::new(RenderImage::new(frames)),
+                width,
+                height,
+            }),
+            source: None,
+        });
+    }
     Ok(PreparedFile {
         content: PreparedContent::Image(DecodedImage::Raster {
             image: Arc::new(Image::from_bytes(format, bytes)),
@@ -733,6 +759,44 @@ fn prepare_image(
         }),
         source: None,
     })
+}
+
+/// Decode GIF frames to BGRA, keeping frames while they fit in `budget`. The
+/// check is after the decode, so peak use is `budget` plus one canvas.
+/// A truncated animation still previews; an undecodable one errors.
+fn decode_gif_frames(bytes: &[u8], budget: u64) -> Result<Vec<image::Frame>, String> {
+    use image::AnimationDecoder;
+
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|error| format!("Cannot decode GIF: {error}"))?;
+    let mut frames = Vec::new();
+    let mut decoded_bytes: u64 = 0;
+    for frame in decoder.into_frames() {
+        let mut frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                log::debug!("Skipping GIF frame due to decode error: {error}");
+                continue;
+            }
+        };
+        let buffer = frame.buffer_mut();
+        decoded_bytes = decoded_bytes.saturating_add(buffer.as_raw().len() as u64);
+        if decoded_bytes > budget {
+            log::debug!(
+                "Stopping the animation preview at {} frames: the next one passes {budget} bytes",
+                frames.len()
+            );
+            break;
+        }
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        frames.push(frame);
+    }
+    if frames.is_empty() {
+        return Err("GIF could not be decoded: no frame is small enough to show".to_string());
+    }
+    Ok(frames)
 }
 
 fn prepare_font(path: &Path, bytes: Vec<u8>) -> Result<PreparedFile, String> {
@@ -821,7 +885,9 @@ fn register_font_bytes(cx: &mut App, bytes: &Arc<Vec<u8>>) {
 fn release_image_assets(image: DecodedImage, cx: &mut App) {
     match image {
         DecodedImage::Raster { image, .. } => image.remove_asset(cx),
-        DecodedImage::Rendered { image, .. } => cx.drop_image(image, None),
+        DecodedImage::Decoded { image, .. } | DecodedImage::Rendered { image, .. } => {
+            cx.drop_image(image, None)
+        }
     }
 }
 
@@ -957,8 +1023,36 @@ fn render_font<T: 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::FileRenderer;
+    use super::{DecodedImage, FileRenderer, PreparedContent, decode_gif_frames, prepare_image};
+    use gpui::TestAppContext;
     use std::path::Path;
+
+    const STILL_PNG: &[u8] = include_bytes!("../../../assets/app-icon-16.png");
+    const SIDE: u32 = 64;
+    const FRAME_BYTES: u64 = (SIDE as u64) * (SIDE as u64) * 4;
+
+    /// Every frame is a full canvas of one flat colour — individually tiny
+    /// compressed, individually within every per-frame limit.
+    fn animation(frames: u8) -> Vec<u8> {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, Rgba, RgbaImage};
+
+        let mut encoded = Vec::new();
+        let mut encoder = GifEncoder::new(&mut encoded);
+        for index in 0..frames {
+            let buffer = RgbaImage::from_pixel(SIDE, SIDE, Rgba([index, index, index, 255]));
+            encoder
+                .encode_frame(Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(100, 1),
+                ))
+                .expect("frame encodes");
+        }
+        drop(encoder);
+        encoded
+    }
 
     #[test]
     fn recognizes_supported_image_and_font_paths() {
@@ -966,5 +1060,43 @@ mod tests {
         assert!(FileRenderer::supports_path(Path::new("icon.svg")));
         assert!(FileRenderer::supports_path(Path::new("typeface.otf")));
         assert!(!FileRenderer::supports_path(Path::new("archive.zip")));
+    }
+
+    #[test]
+    fn an_animation_stops_decoding_at_the_aggregate_budget() {
+        let frames = decode_gif_frames(&animation(8), FRAME_BYTES * 3).expect("decodes");
+        assert_eq!(frames.len(), 3);
+    }
+
+    #[test]
+    fn an_animation_within_the_budget_keeps_every_frame() {
+        let frames = decode_gif_frames(&animation(8), FRAME_BYTES * 8).expect("decodes");
+        assert_eq!(frames.len(), 8);
+    }
+
+    /// The budget only bites if `prepare` actually routes GIF bytes to the
+    /// bounded decoder instead of handing them to GPUI whole.
+    #[gpui::test]
+    fn preparing_a_gif_retains_the_single_frame_the_preview_paints(cx: &mut TestAppContext) {
+        let svg_renderer = cx.update(|cx| cx.svg_renderer());
+        let prepared = prepare_image(Path::new("loop.gif"), animation(8), &svg_renderer)
+            .expect("gif prepares");
+
+        let PreparedContent::Image(DecodedImage::Decoded { image, .. }) = prepared.content else {
+            panic!("a gif did not take the decoded-here path");
+        };
+        assert_eq!(image.frame_count(), 1);
+    }
+
+    #[gpui::test]
+    fn preparing_a_still_image_still_defers_decoding_to_gpui(cx: &mut TestAppContext) {
+        let svg_renderer = cx.update(|cx| cx.svg_renderer());
+        let prepared = prepare_image(Path::new("icon.png"), STILL_PNG.to_vec(), &svg_renderer)
+            .expect("png prepares");
+
+        assert!(matches!(
+            prepared.content,
+            PreparedContent::Image(DecodedImage::Raster { .. })
+        ));
     }
 }
