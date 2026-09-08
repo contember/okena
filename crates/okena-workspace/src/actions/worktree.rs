@@ -194,6 +194,23 @@ fn stash_pop_recover(did_stash: bool, project_path: &str, branch: &str, step: &s
     }
 }
 
+/// The parent checkout must already sit on the branch the merge targets — a
+/// merge lands in whatever HEAD points at, so a parent on `develop` would take
+/// the work while the pipeline pushes and cleans up `main`.
+fn verify_merge_destination(main_repo_path: &str, default_branch: &str) -> Result<(), String> {
+    match okena_git::get_current_branch(std::path::Path::new(main_repo_path)) {
+        Some(current) if current == default_branch => Ok(()),
+        Some(current) => Err(format!(
+            "the checkout at {} is on '{}', not the merge target '{}'; refusing to merge",
+            main_repo_path, current, default_branch
+        )),
+        None => Err(format!(
+            "could not read the current branch of {}; refusing to merge into '{}'",
+            main_repo_path, default_branch
+        )),
+    }
+}
+
 /// The worktree-close merge pipeline: stash → fetch → pre_merge hook → rebase →
 /// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
 /// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
@@ -220,6 +237,11 @@ pub fn close_worktree_merge_git(
 ) -> CloseWorktreeGitOutcome {
     use std::path::Path;
     let mut did_stash = false;
+
+    // Refuse before anything is stashed, fetched or rebased.
+    if let Err(e) = verify_merge_destination(main_repo_path, default_branch) {
+        return CloseWorktreeGitOutcome::Err(e);
+    }
 
     if stash_enabled {
         if let Err(e) = okena_git::stash_changes(Path::new(project_path)) {
@@ -276,7 +298,13 @@ pub fn close_worktree_merge_git(
         };
     }
 
-    // Merge (ff-only) in the main repo.
+    // Re-check: a hook, or anything else holding the repo, may have moved HEAD.
+    if let Err(e) = verify_merge_destination(main_repo_path, default_branch) {
+        stash_pop_recover(did_stash, project_path, branch, "merge destination check");
+        return CloseWorktreeGitOutcome::Err(e);
+    }
+
+    // Merge the worktree branch into the parent checkout, keeping a merge commit.
     if let Err(e) = okena_git::merge_branch(Path::new(main_repo_path), branch, true) {
         stash_pop_recover(did_stash, project_path, branch, "merge");
         return CloseWorktreeGitOutcome::Err(format!("Merge failed: {}", e));
@@ -1407,9 +1435,24 @@ mod merge_pipeline_tests {
         path.to_str().expect("test path is utf-8")
     }
 
-    #[test]
-    fn post_merge_is_finished_before_merge_pipeline_returns() {
-        let fixture = TestRepo::new();
+    fn rev_parse(repo: &Path, rev: &str) -> String {
+        let output = Command::new("git")
+            .args(["-C", path_str(repo), "rev-parse", rev])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git rev-parse {} failed: {}",
+            rev,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A main repo with one commit on `main` and a `feature` worktree ahead of it.
+    fn main_repo_with_feature_worktree(
+        fixture: &TestRepo,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let main_repo = fixture.root.join("main");
         let worktree = fixture.root.join("worktree");
         git(&["init", "-b", "main", path_str(&main_repo)]);
@@ -1442,6 +1485,57 @@ mod merge_pipeline_tests {
         std::fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
         git(&["-C", path_str(&worktree), "add", "feature.txt"]);
         git(&["-C", path_str(&worktree), "commit", "-m", "feature"]);
+        (main_repo, worktree)
+    }
+
+    #[test]
+    fn merge_refuses_a_parent_checkout_on_another_branch() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        git(&["-C", path_str(&main_repo), "checkout", "-b", "develop"]);
+        let main_before = rev_parse(&main_repo, "main");
+        let develop_before = rev_parse(&main_repo, "develop");
+
+        let outcome = close_worktree_merge_git(
+            false,
+            false,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &HooksConfig::default(),
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        match outcome {
+            CloseWorktreeGitOutcome::Err(error) => assert!(
+                error.contains("is on 'develop'") && error.contains("'main'"),
+                "unexpected error: {error}"
+            ),
+            other => panic!(
+                "expected a refusal, got {}",
+                match other {
+                    CloseWorktreeGitOutcome::Ok { .. } => "Ok",
+                    CloseWorktreeGitOutcome::RebaseConflict { .. } => "RebaseConflict",
+                    CloseWorktreeGitOutcome::Err(_) => unreachable!(),
+                }
+            ),
+        }
+        assert_eq!(rev_parse(&main_repo, "develop"), develop_before);
+        assert_eq!(rev_parse(&main_repo, "main"), main_before);
+    }
+
+    #[test]
+    fn post_merge_is_finished_before_merge_pipeline_returns() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
 
         let hooks = HooksConfig {
             worktree: WorktreeHooks {
