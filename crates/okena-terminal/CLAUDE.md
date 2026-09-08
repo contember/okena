@@ -38,4 +38,8 @@ See the doc comments on `pub struct Terminal` in `terminal.rs` for per-field thr
 - **Batched PTY processing**: The PTY reader thread sends `PtyEvent::Data` via `async_channel`. The host reactor drains all pending events before notifying, avoiding per-byte updates.
 - **Remote output decoupling**: Remote tokio readers call `enqueue_output` (append to `pending_output` + set `dirty`) and ring the manager's capacity-1 activity doorbell. The host reactor's activity pump drains/parses output, then emits targeted pane/sidebar notifications; `with_content` remains the fallback drain. Never restore per-pane polling or hold `term.lock()` on the tokio thread.
 - **Persistent dtach teardown**: `SIGTERM` to the dtach master does not propagate to its PTY child tree. Teardown must keep the socket discoverable, revalidate PID birth markers, quiesce/reap descendants before the master, and unlink only after socket death is verified.
+- **Teardown fixtures must be bounded**: process-tree teardown tests spawn real
+  descendants. Keep the fixture to a handful of processes that die on `SIGKILL` —
+  never one that re-forks or ignores signals. Exhausting the PID table makes every
+  PTY test in the workspace time out, which reads exactly like a code regression.
 - **Shell detection**: Auto-detects available shells on the system. On Windows, detects WSL distros and converts paths (`C:\` → `/mnt/c/`).
