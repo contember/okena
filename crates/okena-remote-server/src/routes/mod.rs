@@ -85,6 +85,10 @@ pub struct AppState {
     /// run loop awaits it and tears down the socket, discovery file, and
     /// instance lock through normal drops.
     pub process_shutdown: Arc<tokio::sync::Notify>,
+    /// Whether the daemon actually bound a same-user local endpoint. Management
+    /// routes can only demand more than loopback where one exists — see
+    /// [`management_middleware`].
+    pub local_bootstrap: bool,
     pub update_info: okena_ext_updater::UpdateInfo,
 }
 
@@ -135,6 +139,7 @@ pub fn build_router(
     process_shutdown: Arc<tokio::sync::Notify>,
     ui_owned: bool,
     had_client: Arc<AtomicBool>,
+    local_bootstrap: bool,
     update_info: okena_ext_updater::UpdateInfo,
 ) -> Router {
     let state = AppState {
@@ -155,6 +160,7 @@ pub fn build_router(
         ui_owned,
         shutdown_when_idle: Arc::new(AtomicBool::new(false)),
         had_client,
+        local_bootstrap,
         update_info,
     };
 
@@ -176,7 +182,6 @@ pub fn build_router(
             axum::routing::post(paste_image::post_paste_file)
                 .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
         )
-        .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route(
@@ -192,18 +197,18 @@ pub fn build_router(
             auth_middleware,
         ));
 
-    // Public routes (no bearer auth required).
-    // `/v1/auth/reload` is loopback-gated in its handler: the CLI register
-    // flow calls it before the new token is visible in-memory, so bearer auth
-    // would deadlock, but exposed listeners must not accept network callers.
-    // `/v1/restart` is loopback-gated in the same way: a same-host UI restarts
-    // the daemon; it is bearer-free so the restart works even if the caller's
-    // token is in an awkward state, and off-host callers are refused.
-    // `/v1/shutdown` is loopback-gated identically: a same-host UI asks the
-    // daemon to stop on quit, but the daemon refuses while other clients remain.
-    let public = Router::new()
-        .route("/health", axum::routing::get(health::get_health))
-        .route("/v1/pair", axum::routing::post(pair::post_pair))
+    // The WebSocket route runs its own handshake auth (query token, first
+    // message, or the local socket), so it must stay off the bearer middleware:
+    // browsers cannot set an Authorization header on an upgrade request.
+    let stream = Router::new().route("/v1/stream", axum::routing::get(stream::ws_handler));
+
+    // Daemon lifecycle and updater routes. Loopback is not an identity — it
+    // does not distinguish OS users — so these need the same-user local socket
+    // or a bearer token on top of it, wherever such a socket exists.
+    // `/v1/auth/reload` is why the local socket is the bootstrap transport: the
+    // CLI register flow calls it before the new token is visible in-memory, so
+    // requiring a bearer there would deadlock.
+    let management = Router::new()
         .route(
             "/v1/auth/reload",
             axum::routing::post(auth_reload::post_reload),
@@ -227,10 +232,22 @@ pub fn build_router(
         .route(
             "/v1/update/dismiss",
             axum::routing::post(update::post_dismiss),
-        );
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            management_middleware,
+        ));
+
+    // Public routes: liveness, and the pairing handshake that mints the very
+    // first token for an off-host client.
+    let public = Router::new()
+        .route("/health", axum::routing::get(health::get_health))
+        .route("/v1/pair", axum::routing::post(pair::post_pair));
 
     public
         .merge(protected)
+        .merge(stream)
+        .merge(management)
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .fallback(serve_web_asset)
         .with_state(state)
@@ -275,40 +292,56 @@ fn serve_embedded_file(path: &str, file: rust_embed::EmbeddedFile) -> axum::resp
     ([(axum::http::header::CONTENT_TYPE, mime)], file.data).into_response()
 }
 
-/// Auth middleware: validates Bearer token on protected routes.
+fn bearer_token(req: &Request) -> Option<&str> {
+    req.headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+}
+
+/// Whether the caller has proven it may act as this user: it either arrived on
+/// the same-user local socket or presented a valid bearer token.
+fn caller_is_authorized(state: &AppState, req: &Request) -> bool {
+    request_is_unix_socket(req)
+        || bearer_token(req).is_some_and(|token| state.auth_store.validate_token(token))
+}
+
+/// Auth middleware: validates the Bearer token on protected routes.
 /// Unix socket traffic is already same-user scoped by the local transport.
-/// Skips validation for WebSocket upgrade requests (WS has its own auth flow).
 async fn auth_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if request_is_unix_socket(&req) {
-        return Ok(next.run(req).await);
+    if !caller_is_authorized(&state, &req) {
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Allow WebSocket upgrades through — they handle auth via query param or first message
-    let is_websocket = req
-        .headers()
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
-    if is_websocket {
-        return Ok(next.run(req).await);
+    Ok(next.run(req).await)
+}
+
+/// Management middleware: daemon lifecycle and updater routes stay same-host,
+/// and additionally require the local socket or a bearer token — loopback on
+/// its own says nothing about which OS user is calling.
+async fn management_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let local_host = req
+        .extensions()
+        .get::<PeerInfo>()
+        .copied()
+        .is_some_and(PeerInfo::is_local_trusted);
+    if !local_host {
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    let token = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
-        _ => return Err(StatusCode::UNAUTHORIZED),
-    };
-
-    if !state.auth_store.validate_token(token) {
+    // Conditional because the desktop's own quit and update calls have no other
+    // way to prove identity where this daemon bound no local endpoint (Windows,
+    // or a runtime dir we could not make private); refusing them there would
+    // strand unsaved workspace state, so loopback stays the only gate.
+    if state.local_bootstrap && !caller_is_authorized(&state, &req) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -318,6 +351,8 @@ async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower_service::Service as _;
 
     #[test]
     fn unix_socket_requests_skip_bearer_auth() {
@@ -334,5 +369,443 @@ mod tests {
             .insert(PeerInfo::Tcp(SocketAddr::from(([127, 0, 0, 1], 19100))));
 
         assert!(!request_is_unix_socket(&req));
+    }
+
+    const LOOPBACK: PeerInfo = PeerInfo::Tcp(SocketAddr::new(
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        19100,
+    ));
+    const OFF_HOST: PeerInfo = PeerInfo::Tcp(SocketAddr::new(
+        IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 50)),
+        19100,
+    ));
+
+    fn test_router(auth_store: Arc<AuthStore>) -> Router {
+        router_with_bootstrap(auth_store, true)
+    }
+
+    fn router_with_bootstrap(auth_store: Arc<AuthStore>, local_bootstrap: bool) -> Router {
+        // Dropping the bridge receiver makes authorized calls fail at the
+        // bridge instead of hanging on a reply that never comes.
+        let (bridge_tx, _) = crate::bridge::bridge_channel();
+        build_router(
+            bridge_tx,
+            auth_store,
+            Arc::new(PtyBroadcaster::new()),
+            Arc::new(tokio::sync::watch::channel(0).0),
+            Instant::now(),
+            Arc::new(tokio::sync::watch::channel(HashMap::new()).0),
+            Arc::new(tokio::sync::broadcast::channel(8).0),
+            Arc::new(tokio::sync::broadcast::channel(8).0),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(tokio::sync::Notify::new()),
+            false,
+            Arc::new(AtomicBool::new(false)),
+            local_bootstrap,
+            okena_ext_updater::UpdateInfo::new("0.0.0-test".to_string()),
+        )
+    }
+
+    fn paired_token(store: &AuthStore) -> String {
+        let code = store.generate_fresh_code();
+        store
+            .try_pair(&code, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            .expect("pairing succeeds")
+    }
+
+    struct Call {
+        method: &'static str,
+        uri: &'static str,
+        peer: PeerInfo,
+        upgrade: bool,
+        token: Option<String>,
+    }
+
+    impl Call {
+        fn get(uri: &'static str) -> Self {
+            Self {
+                method: "GET",
+                uri,
+                peer: LOOPBACK,
+                upgrade: false,
+                token: None,
+            }
+        }
+
+        fn post(uri: &'static str) -> Self {
+            Self {
+                method: "POST",
+                uri,
+                peer: LOOPBACK,
+                upgrade: false,
+                token: None,
+            }
+        }
+
+        fn from_peer(mut self, peer: PeerInfo) -> Self {
+            self.peer = peer;
+            self
+        }
+
+        fn upgrading(mut self) -> Self {
+            self.upgrade = true;
+            self
+        }
+
+        fn with_token(mut self, token: &str) -> Self {
+            self.token = Some(token.to_string());
+            self
+        }
+
+        async fn status(self, router: &mut Router) -> StatusCode {
+            let mut builder = axum::http::Request::builder()
+                .method(self.method)
+                .uri(self.uri)
+                .header("content-type", "application/json");
+            if self.upgrade {
+                builder = builder
+                    .header("upgrade", "websocket")
+                    .header("connection", "Upgrade");
+            }
+            if let Some(token) = &self.token {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            let mut req = builder.body(Body::from("{}")).expect("build request");
+            req.extensions_mut().insert(self.peer);
+            router
+                .call(req)
+                .await
+                .expect("the router is infallible")
+                .status()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_header_does_not_bypass_rest_authentication() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/v1/state").upgrading().status(&mut router).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            Call::post("/v1/actions")
+                .upgrading()
+                .status(&mut router)
+                .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            Call::post("/v1/files/download")
+                .upgrading()
+                .status(&mut router)
+                .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_routes_still_reject_a_missing_bearer() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/v1/state").status(&mut router).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_routes_accept_a_valid_bearer() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+
+        assert_ne!(
+            Call::get("/v1/state")
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// The WebSocket route authenticates inside its own handshake, so the
+    /// bearer middleware must not stand in front of it: a plain GET reaches the
+    /// upgrade extractor and is rejected there, not by auth or routing.
+    #[tokio::test]
+    async fn the_stream_route_reaches_its_own_upgrade_handshake() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/v1/stream").status(&mut router).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_loopback_alone_cannot_reach_management_routes() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        // `/v1/restart` and `/v1/shutdown` are deliberately absent: they are
+        // safe here only while the middleware rejects first, and a regression
+        // would spawn or stop a real daemon from inside the suite.
+        for call in [
+            Call::post("/v1/auth/reload"),
+            Call::get("/v1/update/status"),
+            Call::post("/v1/update/check"),
+            Call::post("/v1/update/install"),
+            Call::post("/v1/update/dismiss"),
+        ] {
+            let uri = call.uri;
+            assert_eq!(
+                call.status(&mut router).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri} must not trust loopback on its own"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn management_routes_accept_a_bearer_or_the_local_socket() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/v1/update/status")
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            Call::get("/v1/update/status")
+                .from_peer(PeerInfo::Local)
+                .status(&mut router)
+                .await,
+            StatusCode::OK
+        );
+    }
+
+    /// A daemon with no same-user local endpoint (Windows, or a runtime dir it
+    /// could not make private) has no bootstrap transport, so management stays
+    /// on the pre-existing loopback-only gate rather than locking the desktop
+    /// out of its own quit and update calls.
+    #[tokio::test]
+    async fn management_falls_back_to_loopback_without_a_local_endpoint() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = router_with_bootstrap(store, false);
+
+        assert_eq!(
+            Call::get("/v1/update/status").status(&mut router).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            Call::get("/v1/update/status")
+                .from_peer(OFF_HOST)
+                .status(&mut router)
+                .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn management_routes_stay_closed_to_off_host_callers() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/v1/update/status")
+                .from_peer(OFF_HOST)
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    type TestFrame = tokio_tungstenite::tungstenite::Message;
+    type TestFrameError = tokio_tungstenite::tungstenite::Error;
+
+    async fn spawn_stream_server(auth_store: Arc<AuthStore>) -> SocketAddr {
+        let router = test_router(auth_store);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let _ = crate::serve::serve_plain(listener, router, std::future::pending::<()>()).await;
+        });
+        addr
+    }
+
+    /// The `type` of the next text frame, or `None` if the daemon closed first.
+    async fn next_frame_type<S>(socket: &mut S) -> Option<String>
+    where
+        S: futures::Stream<Item = Result<TestFrame, TestFrameError>> + Unpin,
+    {
+        use futures::StreamExt as _;
+
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await {
+                Ok(Some(Ok(TestFrame::Text(text)))) => {
+                    let frame: serde_json::Value = serde_json::from_str(&text).ok()?;
+                    return frame
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    async fn send_frame<S>(socket: &mut S, frame: serde_json::Value)
+    where
+        S: futures::Sink<TestFrame, Error = TestFrameError> + Unpin,
+    {
+        use futures::SinkExt as _;
+
+        socket
+            .send(TestFrame::Text(frame.to_string()))
+            .await
+            .expect("the daemon accepts the frame");
+    }
+
+    async fn connect_stream(addr: SocketAddr) -> impl futures::Stream<Item = Result<TestFrame, TestFrameError>>
+    + futures::Sink<TestFrame, Error = TestFrameError>
+    + Unpin {
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/stream"))
+            .await
+            .expect("the daemon accepts the upgrade");
+        socket
+    }
+
+    /// `/v1/stream` sits outside the bearer middleware, so its own handshake is
+    /// the only thing standing between a dialer and terminal I/O.
+    #[tokio::test]
+    async fn the_stream_refuses_a_client_that_presents_no_token() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let addr = spawn_stream_server(store).await;
+        let mut socket = connect_stream(addr).await;
+
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "subscribe", "terminal_ids": [] }),
+        )
+        .await;
+
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+    }
+
+    #[tokio::test]
+    async fn the_stream_refuses_an_unknown_token() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let addr = spawn_stream_server(store).await;
+        let mut socket = connect_stream(addr).await;
+
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "auth", "token": "not-a-real-token" }),
+        )
+        .await;
+
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+    }
+
+    #[tokio::test]
+    async fn the_stream_accepts_a_valid_token() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let addr = spawn_stream_server(store).await;
+        let mut socket = connect_stream(addr).await;
+
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "auth", "token": token }),
+        )
+        .await;
+
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+    }
+
+    /// Revocation must end the established stream, not merely refuse the next
+    /// handshake — the connection already has terminal read/write.
+    #[tokio::test]
+    async fn the_stream_ends_when_its_token_is_revoked() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let token_id = store
+            .list_tokens()
+            .first()
+            .map(|info| info.id.clone())
+            .expect("the paired token is listed");
+        let addr = spawn_stream_server(store.clone()).await;
+        let mut socket = connect_stream(addr).await;
+
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "auth", "token": token }),
+        )
+        .await;
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+
+        assert!(store.revoke_token(&token_id));
+
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_failed"));
+        assert!(
+            next_frame_type(&mut socket).await.is_none(),
+            "the daemon must close the revoked stream"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_local_socket_peer_streams_without_a_token() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("daemon.sock");
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let router = test_router(store);
+        let listener = crate::serve::bind_unix_socket(&path).expect("bind the local socket");
+        tokio::spawn(crate::serve::serve_unix_listener(
+            path.clone(),
+            listener,
+            router,
+            std::future::pending::<()>(),
+        ));
+
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect to the local socket");
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://okena.local/v1/stream", stream)
+            .await
+            .expect("the daemon accepts the upgrade");
+
+        assert_eq!(next_frame_type(&mut socket).await.as_deref(), Some("auth_ok"));
+    }
+
+    #[tokio::test]
+    async fn health_and_pairing_stay_public() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::get("/health").status(&mut router).await,
+            StatusCode::OK
+        );
+        assert_ne!(
+            Call::post("/v1/pair").status(&mut router).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
