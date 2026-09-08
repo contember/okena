@@ -156,7 +156,7 @@ fn bind_addrs_with_loopback(addr: IpAddr) -> Vec<IpAddr> {
 #[cfg(unix)]
 pub fn default_unix_socket_path(dir: &Path) -> PathBuf {
     let key = profile_key(dir);
-    runtime_dir().join("okena").join(format!("{key}.sock"))
+    runtime_dir(dir).join("okena").join(format!("{key}.sock"))
 }
 
 #[cfg(unix)]
@@ -168,11 +168,54 @@ fn profile_key(dir: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
+fn runtime_dir(config_dir: &Path) -> PathBuf {
+    runtime_dir_from(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("TMPDIR"),
+        config_dir,
+    )
+}
+
+/// Where the local daemon socket lives. `XDG_RUNTIME_DIR` and macOS's per-user
+/// `TMPDIR` are private to the user; the shared system temp dir is not, so the
+/// last resort is the user's own config dir instead.
+#[cfg(unix)]
+fn runtime_dir_from(
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    tmpdir: Option<std::ffi::OsString>,
+    config_dir: &Path,
+) -> PathBuf {
+    xdg_runtime_dir
+        .or(tmpdir)
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(|| config_dir.to_path_buf())
+}
+
+/// The daemon binds its socket in a directory it owns and no other user can
+/// write to. Anywhere else the socket may have been planted to impersonate the
+/// daemon, so clients ignore it and dial TCP instead.
+#[cfg(unix)]
+fn local_socket_dir_is_private(socket_path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Some(parent) = Path::new(socket_path).parent() else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(parent) else {
+        return false;
+    };
+    // SAFETY: `geteuid(2)` takes no arguments, dereferences no pointers, and is
+    // documented as never failing.
+    let euid = unsafe { libc::geteuid() };
+    dir_is_ours_and_private(metadata.uid(), metadata.permissions().mode(), euid)
+}
+
+/// Owner *and* mode: a directory another user owns is unsafe even at 0700, and
+/// one we own is unsafe as soon as anyone else can write into it.
+#[cfg(unix)]
+fn dir_is_ours_and_private(owner_uid: u32, mode: u32, euid: u32) -> bool {
+    owner_uid == euid && mode & 0o022 == 0
 }
 
 /// Parse `remote.json` from the user's config dir.
@@ -1107,14 +1150,17 @@ fn blocking_client_and_url(
 ) -> (reqwest::blocking::Client, String) {
     #[cfg(unix)]
     if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = local_endpoint {
-        let client = reqwest::blocking::Client::builder()
-            .unix_socket(socket_path.as_str())
-            .build()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
-                reqwest::blocking::Client::new()
-            });
-        return (client, format!("http://okena.local{path}"));
+        if local_socket_dir_is_private(socket_path) {
+            let client = reqwest::blocking::Client::builder()
+                .unix_socket(socket_path.as_str())
+                .build()
+                .unwrap_or_else(|e| {
+                    log::error!("Failed to build Unix socket HTTP client for {socket_path}: {e}");
+                    reqwest::blocking::Client::new()
+                });
+            return (client, format!("http://okena.local{path}"));
+        }
+        log::warn!("Ignoring local daemon socket {socket_path}: its directory is not private");
     }
 
     (
@@ -1745,6 +1791,60 @@ mod tests {
         mint_local_token_in(&dir).expect("mint should regenerate invalid secret");
         let secret = std::fs::read(dir.join("remote_secret")).unwrap();
         assert_eq!(secret.len(), 32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_in_a_world_writable_directory_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("make the directory private");
+        assert!(local_socket_dir_is_private(&socket.to_string_lossy()));
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("make the directory readable to others");
+        assert!(
+            local_socket_dir_is_private(&socket.to_string_lossy()),
+            "others reading the directory cannot replace the socket"
+        );
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("make the directory writable by others");
+        assert!(!local_socket_dir_is_private(&socket.to_string_lossy()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_directory_owned_by_another_user_is_not_trusted() {
+        assert!(dir_is_ours_and_private(1000, 0o700, 1000));
+        assert!(
+            !dir_is_ours_and_private(1001, 0o700, 1000),
+            "a private directory another user owns is still theirs to replace"
+        );
+        assert!(!dir_is_ours_and_private(1000, 0o777, 1000));
+        assert!(!dir_is_ours_and_private(1000, 0o720, 1000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_root_falls_back_to_the_config_dir_not_shared_temp() {
+        let config = std::path::Path::new("/home/somebody/.config/okena");
+        let runtime = std::ffi::OsString::from("/run/user/1000");
+        let tmp = std::ffi::OsString::from("/tmp");
+
+        assert_eq!(
+            runtime_dir_from(Some(runtime.clone()), Some(tmp.clone()), config),
+            std::path::Path::new("/run/user/1000")
+        );
+        assert_eq!(
+            runtime_dir_from(None, Some(tmp), config),
+            std::path::Path::new("/tmp")
+        );
+        assert_eq!(runtime_dir_from(None, None, config), config);
     }
 
     #[test]
