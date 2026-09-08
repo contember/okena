@@ -104,11 +104,13 @@ fn record(
         }
         return;
     };
+    let body = node.child_by_field_name("body");
     if !push(
         kind,
         name_of(node, source),
         node,
         export,
+        body.is_some(),
         source,
         scope,
         document,
@@ -117,7 +119,7 @@ fn record(
         return;
     }
     let name = name_of(node, source);
-    if let Some(body) = node.child_by_field_name("body") {
+    if let Some(body) = body {
         scope.push(name);
         walk(body, source, scope, document, limits);
         scope.pop();
@@ -155,7 +157,17 @@ fn record_exported_bindings(
         } else {
             SymbolKind::Constant
         };
-        if !push(kind, name, node, export, source, scope, document, limits) {
+        if !push(
+            kind,
+            name,
+            node,
+            export,
+            is_function,
+            source,
+            scope,
+            document,
+            limits,
+        ) {
             return;
         }
     }
@@ -184,19 +196,8 @@ fn record_test_group(
         .and_then(|node| text(&node, source))
         .map(|raw| raw.trim_matches(['"', '\'', '`']).to_string())
         .unwrap_or_else(|| head.to_string());
-    if !push(
-        SymbolKind::TestGroup,
-        name.clone(),
-        call,
-        None,
-        source,
-        scope,
-        document,
-        limits,
-    ) {
-        return;
-    }
-    let Some(body) = arguments
+    // The block the callback carries is this scope's body.
+    let body = arguments
         .and_then(|node| {
             let mut cursor = node.walk();
             node.named_children(&mut cursor).find(|child| {
@@ -206,8 +207,22 @@ fn record_test_group(
                 )
             })
         })
-        .and_then(|function| function.child_by_field_name("body"))
-    else {
+        .and_then(|function| function.child_by_field_name("body"));
+
+    if !push(
+        SymbolKind::TestGroup,
+        name.clone(),
+        call,
+        None,
+        body.is_some(),
+        source,
+        scope,
+        document,
+        limits,
+    ) {
+        return;
+    }
+    let Some(body) = body else {
         return;
     };
     scope.push(name);
@@ -222,6 +237,7 @@ fn push(
     name: String,
     node: &Node<'_>,
     export: Option<&Node<'_>>,
+    has_body: bool,
     source: &str,
     scope: &[String],
     document: &mut DocumentSymbols,
@@ -241,6 +257,7 @@ fn push(
         visibility: visibility(node, export, source),
         start_line: line(span.start_position().row),
         end_line: line(node.end_position().row),
+        has_body,
         attributes: Vec::new(),
     });
     true
@@ -362,6 +379,14 @@ describe('engine', () => {
     fn an_ordinary_call_is_not_a_test_scope() {
         let symbols = symbols("configure('engine', () => {});");
         assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn a_describe_block_reports_the_callback_block_as_its_body() {
+        let symbols =
+            symbols("describe('engine', () => {\n  const x = 1;\n});\ndescribe('bare');\n");
+        assert!(find(&symbols, "engine").has_body);
+        assert!(!find(&symbols, "bare").has_body);
     }
 
     #[test]

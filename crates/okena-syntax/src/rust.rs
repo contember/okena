@@ -99,6 +99,7 @@ fn walk(
             visibility: visibility(&child, source),
             start_line: line(start_line),
             end_line: line(child.end_position().row),
+            has_body: child.child_by_field_name("body").is_some(),
             attributes: pending
                 .iter()
                 .map(|node| attribute_text(node, source))
@@ -238,6 +239,16 @@ fn hidden() {}
             find(&symbols, "hidden").visibility,
             SymbolVisibility::Private
         );
+    }
+
+    #[test]
+    fn a_module_declaration_is_recorded_without_a_body() {
+        let symbols = symbols("#[cfg(test)]\npub(crate) mod fixtures;\n\nmod inline {}\n");
+        let declaration = find(&symbols, "fixtures");
+        assert_eq!(declaration.kind, SymbolKind::Module);
+        assert!(!declaration.has_body);
+        assert!(declaration.has_attribute("cfg"));
+        assert!(find(&symbols, "inline").has_body);
     }
 
     #[test]

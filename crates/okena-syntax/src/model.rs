@@ -42,6 +42,10 @@ pub struct SymbolFact {
     /// One-based inclusive line span of the whole declaration.
     pub start_line: u32,
     pub end_line: u32,
+    /// Whether the declaration carries a body. False for a Rust `mod foo;`
+    /// that names a module living in another file, and for a trait's
+    /// signature-only methods.
+    pub has_body: bool,
     /// Attributes written on the declaration, normalized without `#[]` —
     /// `cfg(test)`, `test`, `tokio::test`. Empty for languages without them.
     pub attributes: Vec<String>,
@@ -132,6 +136,7 @@ mod tests {
             visibility: SymbolVisibility::Private,
             start_line: 1,
             end_line: 2,
+            has_body: true,
             attributes: attributes.iter().map(|part| part.to_string()).collect(),
         }
     }
