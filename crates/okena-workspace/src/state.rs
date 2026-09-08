@@ -2478,6 +2478,7 @@ mod workspace_tests {
             hook_terminal_id: "hook-1".into(),
             branch: "feature".into(),
             main_repo_path: "/tmp".into(),
+            did_stash: false,
         });
         assert!(workspace.is_project_closing("wt1"));
         assert!(workspace.project("wt1").unwrap().is_closing);

@@ -141,6 +141,7 @@ mod tests {
             hook_terminal_id: terminal_id.into(),
             branch: "feature".into(),
             main_repo_path: std::env::temp_dir().to_string_lossy().into_owned(),
+            did_stash: false,
         });
         workspace
     }
@@ -209,6 +210,7 @@ mod tests {
                 hook_terminal_id: "hook-retry".into(),
                 branch: "feature".into(),
                 main_repo_path: std::env::temp_dir().to_string_lossy().into_owned(),
+                did_stash: false,
             });
         assert!(
             workspace.lock().is_project_closing("worktree"),

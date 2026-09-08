@@ -416,7 +416,7 @@ fn resolve_osc_worktree_closes(
                     let _ = crate::command_loop::spawn_background_worktree_removal(
                         plan,
                         operation_epoch,
-                        false,
+                        pending.did_stash,
                         std::slice::from_ref(terminal_id),
                         &global_hooks,
                         &reactor.workspace,
@@ -761,7 +761,7 @@ fn handle_hook_terminal_exits(
                         let _ = crate::command_loop::spawn_background_worktree_removal(
                             plan,
                             operation_epoch,
-                            false,
+                            pending.did_stash,
                             std::slice::from_ref(&tid),
                             &global_hooks,
                             &context.reactor.workspace,
@@ -1037,6 +1037,7 @@ mod tests {
         main_repo: &Path,
         worktree: &Path,
         hook_terminal_id: &str,
+        did_stash: bool,
     ) -> Workspace {
         let parent = ProjectData {
             id: "parent".into(),
@@ -1114,6 +1115,7 @@ mod tests {
             hook_terminal_id: hook_terminal_id.into(),
             branch: "feature".into(),
             main_repo_path: main_repo.to_string_lossy().into_owned(),
+            did_stash,
         });
         workspace
     }
@@ -1371,7 +1373,7 @@ mod tests {
         let repo = std::env::temp_dir().join("okena-osc-hook-failure-main");
         let worktree = std::env::temp_dir().join("okena-osc-hook-failure-worktree");
         let reactor = test_reactor(
-            workspace_with_pending_close(&repo, &worktree, "hook-osc"),
+            workspace_with_pending_close(&repo, &worktree, "hook-osc", false),
             AppSettings::default(),
         );
         let monitor = reactor.hook_monitor.clone().expect("hook monitor");
@@ -1489,7 +1491,7 @@ mod tests {
             .expect("create before-remove hook PTY");
         let pty_manager = Arc::new(pty_manager);
         let reactor = test_reactor_with_manager(
-            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id),
+            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id, false),
             AppSettings::default(),
             pty_manager.clone(),
         );
@@ -1595,6 +1597,122 @@ mod tests {
         std::fs::remove_dir_all(repo).ok();
     }
 
+    /// A merge-plus-stash close reaches the hook exit with `did_stash = true`.
+    /// Work written into the checkout after that stash must keep it: the
+    /// post-stash guard refuses the removal instead of deleting the changes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hook_exit_after_stash_keeps_changes_written_since_the_stash() {
+        let (repo, worktree) = real_git_worktree();
+        let written_after_stash = worktree.join("written-after-stash.txt");
+        std::fs::write(&written_after_stash, "work done while the hook ran\n")
+            .expect("dirty the checkout after the stash");
+        let (pty_manager, pty_events) = PtyManager::new(SessionBackend::None);
+        let hook_terminal_id = pty_manager
+            .create_terminal_with_shell(
+                worktree.to_str().expect("utf-8 worktree path"),
+                Some(&ShellType::for_command("exit 0".to_string())),
+            )
+            .expect("create before-remove hook PTY");
+        let pty_manager = Arc::new(pty_manager);
+        let reactor = test_reactor_with_manager(
+            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id, true),
+            AppSettings::default(),
+            pty_manager.clone(),
+        );
+        let workspace = reactor.workspace.clone();
+        let monitor = reactor.hook_monitor.clone().expect("hook monitor");
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        terminals.lock().insert(
+            hook_terminal_id.clone(),
+            Arc::new(Terminal::new(
+                hook_terminal_id.clone(),
+                terminal_size(),
+                pty_manager.clone(),
+                worktree.to_string_lossy().into_owned(),
+            )),
+        );
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (service_tick, _service_rx) = watch::channel(0u64);
+        let runtime = Handle::current();
+        let reactor_ref = ServiceReactorRef::new(
+            service_manager.clone(),
+            runtime.clone(),
+            service_tick.clone(),
+        );
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut exit_events = Vec::new();
+                let mut dirty_terminal_ids = Vec::new();
+                let mut budget = TurnBudget::default();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while exit_events.is_empty() {
+                        let event = pty_events.recv().await.expect("receive hook PTY event");
+                        process_event(
+                            &event,
+                            &terminals,
+                            &pty_manager,
+                            &mut exit_events,
+                            &mut dirty_terminal_ids,
+                            &mut budget,
+                        );
+                    }
+                })
+                .await
+                .expect("before-remove hook exits");
+
+                let context = ExitHandlingContext {
+                    terminals: &terminals,
+                    pty_manager: pty_manager.as_ref(),
+                    service_manager: &service_manager,
+                    reactor_ref: &reactor_ref,
+                    service_tick: &service_tick,
+                    runtime: &runtime,
+                    reactor: &reactor,
+                };
+                handle_exits(&exit_events, &context);
+
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while workspace.lock().is_project_closing("wt1") {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("the refused removal releases the closing marker");
+            })
+            .await;
+
+        assert!(
+            worktree.exists(),
+            "post-stash changes must keep the checkout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&written_after_stash).expect("post-stash work survives"),
+            "work done while the hook ran\n"
+        );
+        assert!(
+            workspace.lock().project("wt1").is_some(),
+            "a refused removal keeps the project row"
+        );
+        let toasts = monitor.drain_pending_toasts();
+        assert!(
+            toasts
+                .iter()
+                .any(|toast| toast.message.contains("became dirty after stash")),
+            "the post-stash guard must report why the checkout was kept: {:?}",
+            toasts
+                .iter()
+                .map(|toast| &toast.message)
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&worktree).ok();
+        std::fs::remove_dir_all(repo).ok();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_osc_hook_exit_removes_worktree_once() {
         let (repo, worktree) = real_git_worktree();
@@ -1607,7 +1725,7 @@ mod tests {
             .expect("create keep-alive before-remove hook PTY");
         let pty_manager = Arc::new(pty_manager);
         let reactor = test_reactor_with_manager(
-            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id),
+            workspace_with_pending_close(&repo, &worktree, &hook_terminal_id, false),
             AppSettings::default(),
             pty_manager.clone(),
         );
@@ -1673,7 +1791,7 @@ mod tests {
         let repo = std::env::temp_dir().join("okena-hook-failure-main");
         let worktree = std::env::temp_dir().join("okena-hook-failure-worktree");
         let reactor = test_reactor(
-            workspace_with_pending_close(&repo, &worktree, "hook-1"),
+            workspace_with_pending_close(&repo, &worktree, "hook-1", false),
             AppSettings::default(),
         );
         let workspace = reactor.workspace.clone();

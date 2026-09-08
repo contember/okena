@@ -2489,6 +2489,57 @@ fn abort_background_worktree_close(
     }
 }
 
+/// Re-enter the close pipeline after its merge phase already ran off-reactor.
+///
+/// Calls the workspace API directly rather than dispatching an
+/// `ActionRequest::CloseWorktree`: the wire action cannot carry `did_stash`, and
+/// this pass (with `merge` off) cannot recompute it, so routing through the
+/// action would register a pending close claiming nothing was stashed.
+#[allow(clippy::too_many_arguments)]
+fn resume_worktree_close_after_merge(
+    project_id: &str,
+    did_stash: bool,
+    global_hooks: &okena_workspace::persistence::HooksConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+) -> CommandResult {
+    let (result, queued_terminal_ids) = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        if ws.project(project_id).is_none() {
+            return CommandResult::Err(format!("project not found: {project_id}"));
+        }
+        let mut focus_manager = FocusManager::new();
+        let result = ws.close_worktree_after_merge(
+            &mut focus_manager,
+            project_id,
+            false,
+            false,
+            false,
+            false,
+            false,
+            did_stash,
+            global_hooks,
+            &mut cx,
+        );
+        (result, ws.drain_pending_terminal_kills())
+    };
+    // Mirrors `run_main_workspace_action`: PTY teardown only after the
+    // authoritative state lock is released.
+    for terminal_id in queued_terminal_ids {
+        backend.kill(&terminal_id);
+        terminals.lock().remove(&terminal_id);
+    }
+    match result {
+        Ok(()) => CommandResult::Ok(None),
+        Err(error) => CommandResult::Err(error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_merge_worktree_close(
     project_id: String,
@@ -2725,34 +2776,23 @@ fn spawn_merge_worktree_close(
             return;
         }
 
-        let result = {
-            let app_settings = settings.lock().clone();
-            {
-                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                let mut ws = workspace.lock();
-                ws.finish_closing_project(&project_id);
-                cx.notify();
-            }
-            let mut focus_manager = FocusManager::new();
-            run_main_workspace_action(
-                ActionRequest::CloseWorktree {
-                    project_id: project_id.clone(),
-                    merge: false,
-                    stash: false,
-                    fetch: false,
-                    push: false,
-                    delete_branch: false,
-                },
-                &workspace,
-                &mut focus_manager,
-                &backend,
-                &terminals,
-                &app_settings,
-                &workspace_tick,
-                &hook_runner,
-                &hook_monitor,
-            )
-        };
+        {
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            let mut ws = workspace.lock();
+            ws.finish_closing_project(&project_id);
+            cx.notify();
+        }
+        let result = resume_worktree_close_after_merge(
+            &project_id,
+            did_stash,
+            &global_hooks,
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &backend,
+            &terminals,
+        );
         if let CommandResult::Err(error) = result {
             abort_background_worktree_close(
                 &project_id,
@@ -9273,6 +9313,113 @@ mod tests {
                 .drain_pending_toasts()
                 .is_empty()
         );
+    }
+
+    /// The merge phase runs off-reactor, so the close that fires the
+    /// `before_remove` hook is a second pass with `merge` off. That pass cannot
+    /// recompute the stash, so the resume must carry it into the pending record
+    /// — otherwise the hook exit removes the checkout with the post-stash guard
+    /// disarmed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_after_merge_carries_the_real_stash_into_the_pending_close() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use std::process::Command;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-resume-stash-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let repo = fixture.join("main");
+        let checkout = fixture.join("worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        std::fs::create_dir_all(&repo).expect("create repository");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@okena.local"]);
+        git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+        git(&repo, &["add", "base.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                checkout.to_str().expect("utf-8 worktree path"),
+            ],
+        );
+
+        let mut data = workspace_with_worktree_child();
+        data.projects[0].path = repo.to_string_lossy().into_owned();
+        data.projects[1].path = checkout.to_string_lossy().into_owned();
+        data.projects[1].hooks.worktree.before_remove = Some("true".to_string());
+        let metadata = data.projects[1]
+            .worktree_info
+            .as_mut()
+            .expect("worktree metadata");
+        metadata.worktree_path = checkout.to_string_lossy().into_owned();
+        metadata.main_repo_path = repo.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let hook_runner = Some(okena_hooks::HookRunner::new(
+            backend.clone(),
+            terminals.clone(),
+        ));
+        let hook_monitor = Some(okena_hooks::HookMonitor::new());
+        let (workspace_tick, _receiver) = watch::channel(0u64);
+
+        let result = resume_worktree_close_after_merge(
+            "wt1",
+            true,
+            &Default::default(),
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &backend,
+            &terminals,
+        );
+        assert!(
+            matches!(result, CommandResult::Ok(_)),
+            "resume must defer removal to the before_remove hook: {result:?}"
+        );
+
+        let pending = {
+            let mut ws = workspace.lock();
+            let ids = ws.pending_worktree_close_terminal_ids();
+            assert_eq!(ids.len(), 1, "the before_remove hook registered one close");
+            ws.take_pending_worktree_close(&ids[0])
+                .expect("pending close is registered under its hook terminal")
+        };
+        assert!(
+            pending.did_stash,
+            "the merge phase stashed; the pending close must say so"
+        );
+
+        for terminal_id in terminals.lock().keys() {
+            pty_manager.kill(terminal_id);
+        }
+        std::fs::remove_dir_all(&fixture).ok();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

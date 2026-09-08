@@ -1217,6 +1217,39 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
+        self.close_worktree_after_merge(
+            focus_manager,
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+            false,
+            global_hooks,
+            cx,
+        )
+    }
+
+    /// [`close_worktree`](Self::close_worktree) for a close whose merge phase
+    /// already ran elsewhere: `did_stash` is that phase's real stash outcome.
+    /// This pass runs with `merge` off and so cannot recompute it, and a stash
+    /// the pass cannot see would drop the post-stash guard that protects
+    /// changes made after it.
+    #[allow(clippy::too_many_arguments)] // cohesive close-pipeline toggle flags
+    pub fn close_worktree_after_merge(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        merge: bool,
+        stash: bool,
+        fetch: bool,
+        push: bool,
+        delete_branch: bool,
+        did_stash: bool,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
         // Reject up front while the worktree is still being created — before a
         // before_remove hook is spawned and a pending close (with its mirrored
         // `is_closing` marker) is registered. `begin_worktree_removal` has the
@@ -1264,7 +1297,7 @@ impl Workspace {
 
         // Step 1: If merge enabled, run the merge pipeline (pure git + headless
         // hooks — see `close_worktree_merge_git`; the daemon runs it off-reactor).
-        let did_stash = if merge_enabled {
+        let merge_did_stash = if merge_enabled {
             match close_worktree_merge_git(
                 stash_enabled,
                 fetch_enabled,
@@ -1301,6 +1334,8 @@ impl Workspace {
         } else {
             false
         };
+        // A stash taken by an earlier phase of this same close counts as well.
+        let did_stash = did_stash || merge_did_stash;
 
         let force_remove = is_dirty && !did_stash;
 
@@ -1338,6 +1373,7 @@ impl Workspace {
                     hook_terminal_id,
                     branch: branch.clone(),
                     main_repo_path: main_repo_path.clone(),
+                    did_stash,
                 });
                 Ok(())
             } else {
