@@ -3,9 +3,9 @@
 use crate::{ActionDispatch, RemotePasteFile};
 use gpui::*;
 use okena_core::api::ActionRequest;
-#[cfg(target_os = "windows")]
 use okena_terminal::shell_config::ShellType;
 use okena_workspace::state::SplitDirection;
+use okena_workspace::toast::{Toast, ToastManager};
 
 use super::TerminalPane;
 
@@ -308,29 +308,129 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             return;
         }
 
+        let quoting = self.drop_path_quoting(cx);
         for path in paths.paths() {
-            let escaped_path = Self::shell_escape_path(path);
-            terminal.send_input(&format!("{} ", escaped_path));
-        }
-    }
-
-    pub(super) fn shell_escape_path(path: &std::path::Path) -> String {
-        let path_str = path.to_string_lossy();
-        let mut escaped = String::with_capacity(path_str.len() * 2);
-
-        for c in path_str.chars() {
-            match c {
-                ' ' | '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '`' | '$' | '&' | '|'
-                | ';' | '<' | '>' | '*' | '?' | '!' | '#' | '~' | '\\' => {
-                    escaped.push('\\');
-                    escaped.push(c);
+            match quote_dropped_path(path, quoting) {
+                Some(quoted) => terminal.send_input(&format!("{quoted} ")),
+                None => {
+                    // Controls reach the PTY as themselves: no quoting makes a name
+                    // carrying LF (submits the line) or ESC (drives the emulator) safe.
+                    log::warn!("Refusing to insert dropped path {path:?} into the terminal");
+                    ToastManager::post(
+                        Toast::warning("Dropped file skipped: its name is not safe to insert")
+                            .with_detail(format!("{path:?}")),
+                        cx,
+                    );
                 }
-                _ => escaped.push(c),
             }
         }
-
-        escaped
     }
+
+    /// How the shell that reads this drop wants a path quoted. A pane shell of
+    /// `Default` still means "ask the settings", the way paste resolves it, and
+    /// off Windows falls back to the login shell — fish must be named, it quotes
+    /// unlike every other POSIX shell.
+    fn drop_path_quoting(&self, cx: &App) -> PathQuoting {
+        let settings = crate::terminal_view_settings(cx);
+        let ws = self.workspace.read(cx);
+        let shell = self.shell_type.clone().resolve_default(
+            ws.project(&self.project_id)
+                .and_then(|p| p.default_shell.as_ref()),
+            &settings.default_shell,
+        );
+        PathQuoting::for_pane_shell(&shell, &std::env::var("SHELL").unwrap_or_default())
+    }
+}
+
+/// The quoting dialect of the shell a dropped path is written into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PathQuoting {
+    Posix,
+    /// fish reads `\\` as an escape inside single quotes, where every other
+    /// POSIX shell reads it literally — the two cannot share one dialect.
+    Fish,
+    PowerShell,
+    Cmd,
+}
+
+impl PathQuoting {
+    /// Off Windows a pane that names no shell runs the login shell, which is
+    /// where fish is normally met — `for_shell` alone would never see it.
+    fn for_pane_shell(shell: &ShellType, login_shell: &str) -> Self {
+        if *shell == ShellType::Default && !cfg!(target_os = "windows") {
+            return Self::for_program(login_shell);
+        }
+        Self::for_shell(shell)
+    }
+
+    fn for_shell(shell: &ShellType) -> Self {
+        match shell {
+            #[cfg(target_os = "windows")]
+            ShellType::Cmd => Self::Cmd,
+            #[cfg(target_os = "windows")]
+            ShellType::PowerShell { .. } => Self::PowerShell,
+            #[cfg(target_os = "windows")]
+            ShellType::Wsl { .. } => Self::Posix,
+            ShellType::Custom { path, .. } => Self::for_program(path),
+            // Unresolved `Default` is whatever the OS spawns: ComSpec, i.e. cmd.exe.
+            ShellType::Default => {
+                if cfg!(target_os = "windows") {
+                    Self::Cmd
+                } else {
+                    Self::Posix
+                }
+            }
+        }
+    }
+
+    /// A custom shell is known only by its program path.
+    fn for_program(program: &str) -> Self {
+        let file_name = program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(program)
+            .to_ascii_lowercase();
+        let stem = file_name.strip_suffix(".exe").unwrap_or(&file_name);
+        match stem {
+            "cmd" => Self::Cmd,
+            "powershell" | "pwsh" => Self::PowerShell,
+            "fish" => Self::Fish,
+            _ => Self::Posix,
+        }
+    }
+
+    /// Characters the shell reads literally, so a path built only from them
+    /// needs no quotes at all.
+    fn is_literal(self, c: char) -> bool {
+        c.is_ascii_alphanumeric()
+            || match self {
+                PathQuoting::Posix | PathQuoting::Fish => "._-/@:+,=%".contains(c),
+                PathQuoting::PowerShell | PathQuoting::Cmd => "._-/\\:".contains(c),
+            }
+    }
+}
+
+/// Quote a dropped path so the receiving shell reads it as one literal
+/// argument, or `None` when the name cannot be written safely.
+fn quote_dropped_path(path: &std::path::Path, quoting: PathQuoting) -> Option<String> {
+    let path = path.to_string_lossy();
+    if path.is_empty() || path.chars().any(char::is_control) {
+        return None;
+    }
+    // cmd expands `%VAR%` and `!VAR!` inside quotes too, with no escape at the
+    // prompt, and cannot escape a quote it has already opened.
+    if quoting == PathQuoting::Cmd && path.contains(['"', '%', '!']) {
+        return None;
+    }
+    if path.chars().all(|c| quoting.is_literal(c)) {
+        return Some(path.into_owned());
+    }
+    Some(match quoting {
+        PathQuoting::Posix => format!("'{}'", path.replace('\'', r"'\''")),
+        PathQuoting::Fish => format!("'{}'", path.replace('\\', r"\\").replace('\'', r"\'")),
+        PathQuoting::PowerShell => format!("'{}'", path.replace('\'', "''")),
+        PathQuoting::Cmd => format!("\"{path}\""),
+    })
 }
 
 const REMOTE_FILE_UPLOAD_LIMIT: u64 = 64 * 1024 * 1024;
@@ -450,5 +550,322 @@ fn run_in_wsl(distro: &str, cmd: &str) -> bool {
             log::warn!("wsl.exe -d {} failed: {}", distro, e);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PathQuoting, quote_dropped_path};
+    use okena_terminal::shell_config::ShellType;
+    use std::path::Path;
+
+    const DIALECTS: [PathQuoting; 4] = [
+        PathQuoting::Posix,
+        PathQuoting::Fish,
+        PathQuoting::PowerShell,
+        PathQuoting::Cmd,
+    ];
+
+    fn quote(path: &str, quoting: PathQuoting) -> Option<String> {
+        quote_dropped_path(Path::new(path), quoting)
+    }
+
+    #[test]
+    fn ordinary_paths_are_inserted_unquoted() {
+        assert_eq!(
+            quote("/home/me/notes.md", PathQuoting::Posix).as_deref(),
+            Some("/home/me/notes.md")
+        );
+        assert_eq!(
+            quote(r"C:\Users\me\notes.md", PathQuoting::Cmd).as_deref(),
+            Some(r"C:\Users\me\notes.md")
+        );
+    }
+
+    #[test]
+    fn posix_quoting_survives_spaces_and_single_quotes() {
+        assert_eq!(
+            quote("/home/me/my report's.txt", PathQuoting::Posix).as_deref(),
+            Some(r"'/home/me/my report'\''s.txt'")
+        );
+        assert_eq!(
+            quote("/home/me/$(id).txt", PathQuoting::Posix).as_deref(),
+            Some("'/home/me/$(id).txt'")
+        );
+        assert_eq!(
+            quote("/home/me/a;rm -rf ~", PathQuoting::Posix).as_deref(),
+            Some("'/home/me/a;rm -rf ~'")
+        );
+    }
+
+    #[test]
+    fn control_characters_are_refused() {
+        // A URI-decoded drop can carry any of these in the file name.
+        for control in ['\n', '\r', '\t', '\x1b', '\x00', '\x7f', '\u{85}'] {
+            let path = format!("/tmp/drop{control}injected");
+            for quoting in DIALECTS {
+                assert_eq!(
+                    quote(&path, quoting),
+                    None,
+                    "{control:?} accepted by {quoting:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_newline_in_a_name_cannot_reach_the_shell() {
+        // `file:///tmp/a%0Arm%20-rf%20~` decodes to this.
+        assert_eq!(quote("/tmp/a\nrm -rf ~", PathQuoting::Posix), None);
+    }
+
+    #[test]
+    fn accepted_paths_never_carry_a_control_character() {
+        let names = [
+            "/tmp/plain.txt",
+            "/tmp/with space.txt",
+            "/tmp/it's.txt",
+            "/tmp/esc\x1bhere",
+            "/tmp/nl\nhere",
+            r"C:\Users\me\a b.txt",
+        ];
+        for name in names {
+            for quoting in DIALECTS {
+                if let Some(quoted) = quote(name, quoting) {
+                    assert!(
+                        !quoted.chars().any(char::is_control),
+                        "{quoting:?} emitted a control character for {name:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn windows_paths_keep_their_backslashes() {
+        for quoting in [
+            PathQuoting::Posix,
+            PathQuoting::PowerShell,
+            PathQuoting::Cmd,
+        ] {
+            let quoted = quote(r"C:\Users\me\my report.txt", quoting)
+                .unwrap_or_else(|| panic!("{quoting:?} refused a valid Windows path"));
+            assert!(
+                !quoted.contains(r"\\"),
+                "{quoting:?} doubled the separators: {quoted}"
+            );
+            assert!(quoted.contains(r"C:\Users\me\my report.txt"), "{quoted}");
+        }
+        // fish is the exception: inside '' it reads `\\` back as one backslash.
+        assert_eq!(
+            quote(r"C:\Users\me\my report.txt", PathQuoting::Fish).as_deref(),
+            Some(r"'C:\\Users\\me\\my report.txt'")
+        );
+        assert_eq!(
+            quote(r"C:\Users\me\my report.txt", PathQuoting::Cmd).as_deref(),
+            Some("\"C:\\Users\\me\\my report.txt\"")
+        );
+        assert_eq!(
+            quote(r"C:\Users\me\my report.txt", PathQuoting::Posix).as_deref(),
+            Some(r"'C:\Users\me\my report.txt'")
+        );
+    }
+
+    #[test]
+    fn powershell_doubles_a_single_quote() {
+        assert_eq!(
+            quote(r"C:\Users\me\it's here.txt", PathQuoting::PowerShell).as_deref(),
+            Some(r"'C:\Users\me\it''s here.txt'")
+        );
+    }
+
+    #[test]
+    fn cmd_refuses_a_name_it_cannot_quote() {
+        // A quote cannot be escaped once cmd has opened one, and `%VAR%` /
+        // `!VAR!` expand inside the quotes before the line is parsed.
+        assert_eq!(quote("C:\\tmp\\a\"b.txt", PathQuoting::Cmd), None);
+        assert_eq!(quote(r"C:\tmp\%PATH%.txt", PathQuoting::Cmd), None);
+        assert_eq!(quote(r"C:\tmp\!PATH!.txt", PathQuoting::Cmd), None);
+        // The other dialects expand neither, so they still take the name.
+        assert!(quote(r"C:\tmp\%PATH%.txt", PathQuoting::PowerShell).is_some());
+        assert!(quote("/tmp/100%.png", PathQuoting::Posix).is_some());
+    }
+
+    #[test]
+    fn empty_paths_are_refused() {
+        for quoting in DIALECTS {
+            assert_eq!(quote("", quoting), None);
+        }
+    }
+
+    #[test]
+    fn the_dialect_follows_the_shell_program() {
+        assert_eq!(PathQuoting::for_program("/bin/bash"), PathQuoting::Posix);
+        assert_eq!(PathQuoting::for_program("/usr/bin/fish"), PathQuoting::Fish);
+        assert_eq!(PathQuoting::for_program("/bin/dash"), PathQuoting::Posix);
+        assert_eq!(
+            PathQuoting::for_program(r"C:\Windows\System32\cmd.exe"),
+            PathQuoting::Cmd
+        );
+        assert_eq!(
+            PathQuoting::for_program(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            PathQuoting::PowerShell
+        );
+        assert_eq!(
+            PathQuoting::for_program("PowerShell.exe"),
+            PathQuoting::PowerShell
+        );
+    }
+
+    #[test]
+    fn a_custom_shell_picks_its_own_dialect() {
+        assert_eq!(
+            PathQuoting::for_shell(&ShellType::Custom {
+                path: "/bin/zsh".to_string(),
+                args: Vec::new(),
+            }),
+            PathQuoting::Posix
+        );
+        assert_eq!(
+            PathQuoting::for_shell(&ShellType::Custom {
+                path: "pwsh".to_string(),
+                args: Vec::new(),
+            }),
+            PathQuoting::PowerShell
+        );
+        assert_eq!(
+            PathQuoting::for_shell(&ShellType::Custom {
+                path: "/usr/local/bin/fish".to_string(),
+                args: Vec::new(),
+            }),
+            PathQuoting::Fish
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn an_unnamed_shell_falls_back_to_posix_off_windows() {
+        assert_eq!(
+            PathQuoting::for_shell(&ShellType::Default),
+            PathQuoting::Posix
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn an_unnamed_shell_follows_the_login_shell_off_windows() {
+        assert_eq!(
+            PathQuoting::for_pane_shell(&ShellType::Default, "/usr/bin/fish"),
+            PathQuoting::Fish
+        );
+        assert_eq!(
+            PathQuoting::for_pane_shell(&ShellType::Default, "/bin/bash"),
+            PathQuoting::Posix
+        );
+        assert_eq!(
+            PathQuoting::for_pane_shell(&ShellType::Default, ""),
+            PathQuoting::Posix
+        );
+        // A shell the pane names itself outranks the login shell.
+        assert_eq!(
+            PathQuoting::for_pane_shell(
+                &ShellType::Custom {
+                    path: "/bin/bash".to_string(),
+                    args: Vec::new(),
+                },
+                "/usr/bin/fish"
+            ),
+            PathQuoting::Posix
+        );
+    }
+
+    /// fish's own rules for a single-quoted word: `\\` and `\'` are the only
+    /// escapes, and a bare `'` ends the word.
+    fn fish_unquote(quoted: &str) -> String {
+        let inner = quoted
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            .expect("fish output is not a single-quoted word");
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some(escaped @ ('\\' | '\'')) => out.push(escaped),
+                    other => panic!("fish does not read \\{other:?} as an escape: {quoted}"),
+                },
+                '\'' => panic!("the word ends early, the rest is command text: {quoted}"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn fish_escapes_the_backslash_it_reads_inside_single_quotes() {
+        assert_eq!(
+            quote(r"/x/a\';touch /x/PWNED;\'b", PathQuoting::Fish).as_deref(),
+            Some(r"'/x/a\\\';touch /x/PWNED;\\\'b'")
+        );
+        assert_eq!(
+            quote(r"/x/y\';touch /x/PWNED3;\'", PathQuoting::Fish).as_deref(),
+            Some(r"'/x/y\\\';touch /x/PWNED3;\\\''")
+        );
+        assert_eq!(
+            quote(r"/x/trailing\", PathQuoting::Fish).as_deref(),
+            Some(r"'/x/trailing\\'")
+        );
+        assert_eq!(
+            quote(r"/x/double\\bs", PathQuoting::Fish).as_deref(),
+            Some(r"'/x/double\\\\bs'")
+        );
+    }
+
+    #[test]
+    fn fish_round_trips_the_names_that_break_the_posix_splice() {
+        for name in [
+            r"/x/a\';touch /x/PWNED;\'b",
+            r"/x/y\';touch /x/PWNED3;\'",
+            r"/x/trailing\",
+            r"/x/double\\bs",
+            "/x/plain'quote",
+            "/x/a b;touch /x/PWNED",
+        ] {
+            let quoted =
+                quote(name, PathQuoting::Fish).unwrap_or_else(|| panic!("fish refused {name:?}"));
+            assert_eq!(fish_unquote(&quoted), name, "round trip changed {name:?}");
+        }
+    }
+
+    /// The unquoted fast path is the whole bug class, so pin both of its edges:
+    /// what must never take it, and what must still take it.
+    #[test]
+    fn the_unquoted_fast_path_admits_exactly_the_inert_characters() {
+        let unquoted = |path: &str, quoting| quote(path, quoting).as_deref() == Some(path);
+        for c in [
+            ' ', '\'', '"', '`', '$', '&', '|', ';', '<', '>', '(', ')', '[', ']', '{', '}', '*',
+            '?', '!', '#', '~', '^',
+        ] {
+            let path = format!("/tmp/a{c}b");
+            for quoting in DIALECTS {
+                assert!(!unquoted(&path, quoting), "{quoting:?} left {c:?} unquoted");
+            }
+        }
+        for c in ['%', ',', '@', '=', '+'] {
+            let path = format!(r"C:\tmp\a{c}b");
+            for quoting in [PathQuoting::PowerShell, PathQuoting::Cmd] {
+                assert!(!unquoted(&path, quoting), "{quoting:?} left {c:?} unquoted");
+            }
+        }
+        for quoting in [PathQuoting::Posix, PathQuoting::Fish] {
+            assert!(
+                !unquoted(r"/tmp/a\b", quoting),
+                "{quoting:?} left a backslash unquoted"
+            );
+        }
+        assert!(unquoted("/tmp/a-b_c.d/e:f+g,h=i@j%k", PathQuoting::Posix));
+        assert!(unquoted("/tmp/a-b_c.d/e:f+g,h=i@j%k", PathQuoting::Fish));
+        assert!(unquoted(r"C:\Users\me-1_2.txt", PathQuoting::Cmd));
+        assert!(unquoted(r"C:\Users\me-1_2.txt", PathQuoting::PowerShell));
     }
 }
