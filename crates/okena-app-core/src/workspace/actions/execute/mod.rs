@@ -12,6 +12,7 @@
 mod files;
 mod git;
 mod project;
+mod review;
 mod session;
 mod tab;
 mod terminal;
@@ -303,6 +304,11 @@ pub fn execute_action(
             mode,
             ignore_whitespace,
         } => git::diff(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::ReviewComposition {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => review::composition(ws, project_id, mode, ignore_whitespace),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
         ActionRequest::GitListPullRequests { project_id, limit } => {
             git::list_pull_requests(ws, project_id, limit)

@@ -380,7 +380,11 @@ fn has_merge_base(repo_path: &str, base: &str, head: &str) -> bool {
     merge_base(repo_path, base, head).is_some()
 }
 
-fn merge_base(repo_path: &str, base: &str, head: &str) -> Option<String> {
+/// The merge base of two refs, or `None` when they share no history.
+///
+/// Shells out, so a caller working over many files should resolve it once
+/// rather than through a per-file content lookup.
+pub fn merge_base(repo_path: &str, base: &str, head: &str) -> Option<String> {
     crate::validate_git_ref(base).ok()?;
     crate::validate_git_ref(head).ok()?;
     let output =

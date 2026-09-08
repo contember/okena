@@ -13,7 +13,7 @@ pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;
 pub use diff::{
     DiffLineType, DiffMode, DiffResult, FileDiff, get_diff_with_options, get_file_bytes_for_diff,
-    get_file_contents_for_diff, is_git_repo,
+    get_file_contents_for_diff, get_file_from_git, is_git_repo, merge_base,
 };
 pub use error::{GitError, GitResult};
 pub use file_history::{FileHistoryEntry, get_file_history};

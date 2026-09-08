@@ -760,6 +760,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
             ignore_whitespace,
         },
+        ActionRequest::ReviewComposition {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => ActionRequest::ReviewComposition {
+            project_id: s(&project_id),
+            mode,
+            ignore_whitespace,
+        },
         ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
             project_id: s(&project_id),
         },
