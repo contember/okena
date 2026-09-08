@@ -7,6 +7,7 @@ pub mod input;
 pub mod macos_proc;
 pub mod process;
 pub mod pty_manager;
+mod pty_write_queue;
 pub mod session_backend;
 pub mod shell_config;
 pub mod terminal;

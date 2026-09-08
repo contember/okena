@@ -271,8 +271,8 @@ impl EventListener for ZedEventListener {
                     return;
                 }
                 // Terminal→program reply (Device Attributes, cursor position
-                // report, DSR, …). Sent on the synchronous fast-lane so it beats
-                // the querying program's exit back to the shell.
+                // report, DSR, …). Queued on the priority lane so it beats the
+                // querying program's exit back to the shell.
                 log::debug!("PtyWrite event: {:?}", data);
                 self.transport
                     .send_response(&self.terminal_id, data.as_bytes());
