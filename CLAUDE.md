@@ -54,7 +54,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-files` | File search, file viewer, syntax highlighting |
 | `okena-highlight` | syntect/tree-sitter syntax highlighting shared by the file viewer, diff viewer and markdown code blocks |
 | `okena-syntax` | tree-sitter declaration facts (name, kind, visibility, span, attributes) for Rust and TypeScript. Sibling of `okena-highlight`: that one colours source, this one describes its shape. |
-| `okena-review` | What a comparison is made of: path-based file roles, and the inline-test split that moves `#[cfg(test)]` volume out of implementation |
+| `okena-review` | What a comparison is made of: path-based file roles, and the test split that moves `#[cfg(test)]` volume out of implementation — both inline scopes and whole files gated by a `mod` declaration elsewhere |
 | `okena-markdown` | Markdown parsing and rendering |
 | `okena-views-terminal` | Terminal pane, layout container, split/tabs views |
 | `okena-views-sidebar` | Sidebar, project list, folder list, drag-and-drop |

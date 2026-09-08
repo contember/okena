@@ -1,20 +1,21 @@
 //! What a comparison is made of: role volumes, with inline test scopes moved
 //! out of the implementation they are written inside.
 //!
-//! Analysis is per file. A module gated at its *declaration*
-//! (`#[cfg(test)] mod fixtures;` in the parent) is therefore not recognised as
-//! a test scope — resolving that needs the declaring file, which this pass
-//! never opens.
+//! Tests hide in two places. Inside a file, as a `#[cfg(test)]` scope, which
+//! `inline_test_lines` measures; and in another file entirely, when
+//! `#[cfg(test)] mod fixtures;` makes the whole of `fixtures.rs` test code —
+//! see `crate::modules`.
 
 use okena_core::review::{
     AnalysisCoverage, ChangeComposition, CompositionFile, CompositionTotals, FileAnalysis,
-    FileRole, RoleVolume,
+    FileClassification, FileRole, RoleVolume,
 };
 use okena_syntax::{
     AnalysisLimits, DocumentSymbols, SymbolFact, SymbolKind, SyntaxLanguage, Truncation,
 };
 
 use crate::classification;
+use crate::modules::TestGate;
 
 /// One changed file, as the caller's diff already describes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,12 +75,29 @@ pub fn compose(
     let mut out = Vec::with_capacity(files.len());
     let mut coverage = AnalysisCoverage::default();
     let mut budget = limits.max_analyzed_files;
+    let gate = TestGate::new(loader, limits.syntax);
 
     for file in files {
         let path = file.path().to_string();
-        let classification = classification::classify(&path);
+        let mut classification = classification::classify(&path);
         let added = count(&file.added_lines);
         let deleted = count(&file.deleted_lines);
+
+        // A file can be tests without containing a word that says so: the
+        // `#[cfg(test)] mod name;` that reaches it lives in another file.
+        // Only asked within the analysis budget, since it costs a parse too.
+        if budget > 0
+            && classification.role.is_implementation()
+            && !file.is_binary
+            && SyntaxLanguage::from_path(&path) == Some(SyntaxLanguage::Rust)
+            && gate.is_gated(&path, file.new_path.is_some())
+        {
+            classification = FileClassification {
+                role: FileRole::Test,
+                rule_id: classification::TEST_MODULE_RULE.to_string(),
+            };
+        }
+
         let language = analysis_candidate(file, classification.role);
         if let Some(language) = language {
             coverage.candidates += 1;
@@ -257,7 +275,7 @@ fn is_test_scope(symbol: &SymbolFact) -> bool {
 
 /// Whether a `cfg(…)` attribute enables the item for tests. String literals are
 /// dropped first, so `cfg(feature = "testing")` is not a test gate.
-fn cfg_names_test(attribute: &str) -> bool {
+pub(crate) fn cfg_names_test(attribute: &str) -> bool {
     let Some(arguments) = attribute
         .strip_prefix("cfg")
         .and_then(|rest| rest.trim_start().strip_prefix('('))
@@ -380,19 +398,23 @@ fn share(part: u64, total: u64) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
 
+    pub(crate) fn sources() -> Sources {
+        Sources::default()
+    }
+
     #[derive(Default)]
-    struct Sources {
+    pub(crate) struct Sources {
         head: HashMap<String, String>,
         base: HashMap<String, String>,
     }
 
     impl Sources {
-        fn with_head(mut self, path: &str, source: &str) -> Self {
+        pub(crate) fn with_head(mut self, path: &str, source: &str) -> Self {
             self.head.insert(path.to_string(), source.to_string());
             self
         }
@@ -411,7 +433,7 @@ mod tests {
         }
     }
 
-    fn added(path: &str, lines: &[u32]) -> ChangedFile {
+    pub(crate) fn added(path: &str, lines: &[u32]) -> ChangedFile {
         ChangedFile {
             old_path: Some(path.to_string()),
             new_path: Some(path.to_string()),
@@ -421,7 +443,7 @@ mod tests {
         }
     }
 
-    fn volume(composition: &ChangeComposition, role: FileRole) -> RoleVolume {
+    pub(crate) fn volume(composition: &ChangeComposition, role: FileRole) -> RoleVolume {
         composition
             .roles
             .iter()
@@ -691,5 +713,94 @@ describe('run', () => {
             AnalysisLimits::default(),
         );
         assert_eq!(test_scopes(&document), vec![(1, 5)]);
+    }
+}
+
+#[cfg(test)]
+mod gated_module_tests {
+    use super::tests::*;
+    use super::*;
+
+    /// `src/ui/mod.rs` gates `fixtures`, and the comparison never touches it.
+    fn ui_sources() -> impl SourceLoader {
+        crate::composition::tests::sources()
+            .with_head(
+                "src/ui/mod.rs",
+                "mod panel;\n#[cfg(test)]\npub mod fixtures;\n",
+            )
+            .with_head("src/ui/fixtures.rs", "pub fn seed() -> u32 {\n    1\n}\n")
+            .with_head("src/ui/panel.rs", "pub fn draw() {}\n")
+    }
+
+    #[test]
+    fn a_file_gated_by_its_declaring_module_counts_wholly_as_tests() {
+        let composition = compose(
+            &[added("src/ui/fixtures.rs", &[1, 2, 3])],
+            &ui_sources(),
+            CompositionLimits::default(),
+        );
+        let file = &composition.files[0];
+        assert_eq!(file.role, FileRole::Test);
+        assert_eq!(file.rule_id, crate::classification::TEST_MODULE_RULE);
+        // Its lines belong to Tests as a file, not as borrowed volume.
+        assert_eq!(file.inline_test_lines, 0);
+        let tests = volume(&composition, FileRole::Test);
+        assert_eq!(
+            (tests.files, tests.changed_lines, tests.borrowed_lines),
+            (1, 3, 0)
+        );
+    }
+
+    #[test]
+    fn an_ungated_sibling_in_the_same_module_stays_implementation() {
+        let composition = compose(
+            &[added("src/ui/panel.rs", &[1])],
+            &ui_sources(),
+            CompositionLimits::default(),
+        );
+        assert_eq!(composition.files[0].role, FileRole::Implementation);
+    }
+
+    #[test]
+    fn a_gated_file_is_not_parsed_and_so_is_not_a_coverage_candidate() {
+        let composition = compose(
+            &[added("src/ui/fixtures.rs", &[1, 2, 3])],
+            &ui_sources(),
+            CompositionLimits::default(),
+        );
+        assert_eq!(composition.files[0].analysis, FileAnalysis::Skipped);
+        assert_eq!(composition.coverage.candidates, 0);
+        assert!(composition.coverage.is_complete());
+    }
+
+    #[test]
+    fn the_gate_is_not_asked_once_the_file_budget_is_spent() {
+        let composition = compose(
+            &[
+                added("src/ui/panel.rs", &[1]),
+                added("src/ui/fixtures.rs", &[1, 2, 3]),
+            ],
+            &ui_sources(),
+            CompositionLimits {
+                max_analyzed_files: 1,
+                ..CompositionLimits::default()
+            },
+        );
+        // Unreached, so its role stays what the path alone said.
+        assert_eq!(composition.files[1].role, FileRole::Implementation);
+        assert_eq!(composition.files[1].analysis, FileAnalysis::NotReached);
+        assert!(!composition.coverage.is_complete());
+    }
+
+    #[test]
+    fn a_typescript_file_never_consults_the_rust_module_gate() {
+        let sources = crate::composition::tests::sources()
+            .with_head("web/src/index.ts", "export const a = 1;\n");
+        let composition = compose(
+            &[added("web/src/index.ts", &[1])],
+            &sources,
+            CompositionLimits::default(),
+        );
+        assert_eq!(composition.files[0].role, FileRole::Implementation);
     }
 }

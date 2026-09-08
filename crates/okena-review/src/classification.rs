@@ -17,6 +17,9 @@ const EXAMPLE: &str = "builtin.path.example.v1";
 const CONFIGURATION: &str = "builtin.path.configuration.v1";
 const IMPLEMENTATION: &str = "builtin.path.implementation.v1";
 const UNCLASSIFIED: &str = "builtin.path.unclassified.v1";
+/// Applied by `composition`, not by `classify`: it needs the declaring file's
+/// source, which a path alone cannot give.
+pub const TEST_MODULE_RULE: &str = "builtin.module.cfg-test.v1";
 
 /// Classify one repository-relative path.
 ///
@@ -81,6 +84,7 @@ pub fn rule_label(rule_id: &str) -> &'static str {
         EXAMPLE => "an examples directory",
         CONFIGURATION => "a config directory, extension, or well-known config filename",
         IMPLEMENTATION => "a source-code extension",
+        TEST_MODULE_RULE => "declared behind #[cfg(test)] by the file that owns it",
         _ => "no rule matched",
     }
 }

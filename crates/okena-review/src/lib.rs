@@ -8,6 +8,7 @@
 
 pub mod classification;
 pub mod composition;
+mod modules;
 
 pub use classification::{classify, is_test_directory, rule_label};
 pub use composition::{ChangedFile, CompositionLimits, SourceLoader, compose};
