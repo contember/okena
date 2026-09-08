@@ -18,6 +18,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Auto-save MUST NOT overwrite the real workspace.json in this state.
 static LOADED_FROM_DEFAULT: AtomicBool = AtomicBool::new(false);
 
+/// Whether saves are currently blocked because this session never read the
+/// workspace file successfully.
+pub fn workspace_save_suppressed() -> bool {
+    LOADED_FROM_DEFAULT.load(Ordering::Relaxed)
+}
+
+/// Re-enable saving after an accepted recovery replaced the live workspace.
+/// Call it only once the replacement committed: cleared earlier, it arms the
+/// save that overwrites the protected file with the fallback default.
+pub fn clear_workspace_save_suppression() {
+    if LOADED_FROM_DEFAULT.swap(false, Ordering::Relaxed) {
+        log::info!("workspace recovery accepted — saving re-enabled");
+    }
+}
 
 /// Process-level mutex serializing workspace saves.
 ///
@@ -453,21 +467,27 @@ pub fn load_workspace_with_cleanup_for_shell(
 /// Save workspace to disk using atomic write (write to temp file + rename).
 /// Remote projects are excluded. Refuses to save after a load failure.
 ///
-/// Safety layers (all must pass for a save to proceed):
-/// 1. LOADED_FROM_DEFAULT — blocks save entirely if load failed or file was missing
-/// 2. Empty-workspace guard — refuses to save 0 local projects
-/// 3. Rolling backup — always creates .bak before overwriting
-/// 4. Atomic write — tmp + fsync + rename prevents partial writes
+/// Safety layers:
+/// 1. LOADED_FROM_DEFAULT — fails the save if load failed or the file was missing
+/// 2. Rolling backup — always creates .bak before overwriting
+/// 3. Atomic write — tmp + fsync + rename prevents partial writes
+///
+/// There is no empty-workspace guard: deleting the last project is a genuine
+/// user action, and an empty workspace after a failed load never reaches disk
+/// because layer 1 already failed the save.
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     let _slow = okena_core::timing::SlowGuard::new("save_workspace");
     // Serialize concurrent saves so they don't race on the shared tmp path.
     let _guard = WORKSPACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Layer 1: block save if we loaded from fallback default
+    // Layer 1: block save if we loaded from fallback default. This is a
+    // failure, not a no-op: reporting success lets the caller record the
+    // version as persisted and stop retrying, so every later edit is lost too.
     if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
-        log::warn!(
-            "Skipping workspace save — loaded from fallback default, protecting file on disk."
+        anyhow::bail!(
+            "workspace not saved — this session started from a fallback default because \
+             the workspace file could not be read; the file on disk stays protected until \
+             a session load or import replaces the workspace"
         );
-        return Ok(());
     }
 
     let path = get_workspace_path();
@@ -475,24 +495,9 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Layer 2: refuse to save an empty workspace ONLY if we started from a
-    // fallback default this session. If load succeeded (LOADED_FROM_DEFAULT is
-    // false), an empty workspace is a genuine user action (they deleted their
-    // last project) and must be allowed to persist. If load failed, an empty
-    // workspace is likely a startup glitch — skip the save to protect the good
-    // file on disk. Crucially, do NOT latch LOADED_FROM_DEFAULT here: a single
-    // empty save must not permanently disable all future persistence.
-    if data.projects.is_empty() && LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
-        log::warn!(
-            "Skipping save of empty workspace — loaded from fallback default this session, \
-             protecting file on disk."
-        );
-        return Ok(());
-    }
-
     let json = encode_workspace(data)?;
 
-    // Layer 3: rolling backup — move the current file to .bak via an atomic
+    // Layer 2: rolling backup — move the current file to .bak via an atomic
     // rename (not a copy). A rename never produces a truncated .bak, so the
     // backup is always a complete previous version even if we crash mid-save.
     // Skip when there's nothing to back up yet (first save).
@@ -503,7 +508,7 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         }
     }
 
-    // Layer 4: atomic write — tmp + fsync + rename ensures the file is never partial
+    // Layer 3: atomic write — tmp + fsync + rename ensures the file is never partial
     let tmp_path = path.with_extension("json.tmp");
     {
         use std::io::Write;
@@ -1789,6 +1794,23 @@ mod tests {
     fn reload_saved(data: &WorkspaceData) -> WorkspaceData {
         let json = encode_workspace(data).expect("encode workspace");
         migrate_workspace(serde_json::from_str(&json).expect("decode workspace"))
+    }
+
+    #[test]
+    fn a_suppressed_save_fails_instead_of_reporting_durable_success() {
+        // Reported as Ok, the autosave records the version as persisted and
+        // stops retrying, so every edit made after a corrupt start is lost
+        // silently — including the one that recovered the workspace.
+        LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
+        let data = make_workspace(vec![make_project("p1")], vec!["p1"], vec![]);
+
+        let error = save_workspace(&data).expect_err("a blocked save must not report success");
+
+        assert!(error.to_string().contains("workspace not saved"));
+        assert!(workspace_save_suppressed());
+
+        clear_workspace_save_suppression();
+        assert!(!workspace_save_suppressed());
     }
 
     // === validate_workspace_data ===
