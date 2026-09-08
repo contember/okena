@@ -38,6 +38,7 @@ pub use project::{
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
     execute_prepared_content_search_with_cancellation, prepare_content_search,
+    prepare_content_search_for_path,
 };
 pub use session::{
     apply_imported_workspace, apply_loaded_session, begin_workspace_replacement,

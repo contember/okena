@@ -534,7 +534,7 @@ pub fn prepare_content_search(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_content_search_for_path(
+pub fn prepare_content_search_for_path(
     root: &str,
     query: String,
     case_sensitive: bool,
