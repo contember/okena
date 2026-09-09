@@ -636,7 +636,7 @@ impl ClaudeUsageData {
                             log::info!(
                                 "[claude-usage] HTTP {} body={}",
                                 status,
-                                &body[..body.len().min(500)]
+                                &body[..body.floor_char_boundary(500)]
                             );
                             if !resp.is_success() {
                                 return (None, None);
