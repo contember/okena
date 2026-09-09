@@ -14,7 +14,7 @@ impl SettingsPanel {
             section_container(&t)
                 .child(self.render_number_stepper(
                     "font-size",
-                    "Font Size",
+                    "Terminal Font Size",
                     s.font_size,
                     "{}",
                     1.0,
@@ -23,16 +23,29 @@ impl SettingsPanel {
                     |state, val, cx| state.set_font_size(val, cx),
                     cx,
                 ))
-                .child(self.render_font_dropdown_row(&s.font_family, cx))
+                .child(self.render_font_dropdown_row(
+                    super::FontSetting::Terminal,
+                    "Terminal Font Family",
+                    &s.font_family,
+                    true,
+                    cx,
+                ))
                 .child(self.render_number_stepper(
                     "line-height",
-                    "Line Height",
+                    "Terminal Line Height",
                     s.line_height,
                     "{}",
                     0.1,
                     50.0,
                     true,
                     |state, val, cx| state.set_line_height(val, cx),
+                    cx,
+                ))
+                .child(self.render_font_dropdown_row(
+                    super::FontSetting::Ui,
+                    "UI Font Family",
+                    &s.ui_font_family,
+                    true,
                     cx,
                 ))
                 .child(self.render_number_stepper(
@@ -53,8 +66,15 @@ impl SettingsPanel {
                     "{}",
                     1.0,
                     50.0,
-                    false,
+                    true,
                     |state, val, cx| state.set_file_font_size(val, cx),
+                    cx,
+                ))
+                .child(self.render_font_dropdown_row(
+                    super::FontSetting::File,
+                    "File Font Family",
+                    &s.file_font_family,
+                    false,
                     cx,
                 )),
         )

@@ -778,6 +778,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             file_path,
             mode,
         },
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => ActionRequest::GitBinaryFileContents {
+            project_id: s(&project_id),
+            old_path,
+            new_path,
+            mode,
+        },
         ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
         ActionRequest::CloneProject {
             url,

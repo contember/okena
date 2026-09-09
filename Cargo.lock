@@ -6542,6 +6542,7 @@ dependencies = [
 name = "okena-views-git"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures",
  "gpui",
  "gpui-component",

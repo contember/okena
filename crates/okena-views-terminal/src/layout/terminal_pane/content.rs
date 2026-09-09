@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::scrollbar::Scrollbar;
-use super::url_detector::UrlDetector;
+use super::url_detector::{HyperlinkTarget, UrlDetector, classify_hyperlink};
 
 /// Events emitted by terminal content.
 pub enum TerminalContentEvent {
@@ -445,10 +445,13 @@ impl TerminalContent {
                 .as_ref()
                 .and_then(|t| t.hyperlink_at(col, row))
             {
-                if uri.starts_with("file://") {
-                    self.request_file_viewer(&uri, None, None, cx);
-                } else {
-                    UrlDetector::open_url(&uri);
+                match classify_hyperlink(&uri) {
+                    HyperlinkTarget::Url => UrlDetector::open_url(&uri),
+                    HyperlinkTarget::Path {
+                        path,
+                        line: file_line,
+                        col: file_col,
+                    } => self.request_file_viewer(&path, file_line, file_col, cx),
                 }
                 self.mouse_down_cell = None;
                 return;

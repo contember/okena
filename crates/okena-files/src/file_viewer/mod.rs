@@ -26,16 +26,13 @@ use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
 /// Maximum file size to load for text/markdown (5MB)
 const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
-
-/// Maximum file size to load for image previews (20MB — image decoders
-/// handle larger files comfortably than the text/syntect path).
-const MAX_IMAGE_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Maximum number of lines to display
 const MAX_LINES: usize = 10000;
@@ -83,94 +80,6 @@ pub(super) enum DisplayMode {
     Preview,
 }
 
-/// Background fill behind an image / SVG preview. Single-colour SVGs (a
-/// black icon) become invisible on a matching pane background, so the user
-/// can flip between a checkerboard (default — shows both extremes) and
-/// explicit Light / Dark fills.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum PreviewBackground {
-    #[default]
-    Checker,
-    Light,
-    Dark,
-}
-
-/// Per-tab zoom / pan / background state for the image preview.
-///
-/// `auto_fit` is the default: image renders with `ObjectFit::Contain` to
-/// fill the pane, `zoom` and `pan` are ignored. Once the user wheel-zooms,
-/// drags, or clicks 100%, `auto_fit` flips off and the view renders at
-/// natural-size × `zoom` with `pan` applied.
-#[derive(Clone)]
-pub struct ImageViewState {
-    /// Fit-to-pane mode (ObjectFit::Contain). Reset via Ctrl+0 or the Fit
-    /// header button.
-    pub auto_fit: bool,
-    /// Scale factor: 1.0 = 100% natural pixel size. Ignored when `auto_fit`.
-    pub zoom: f32,
-    /// Pan offset (image translates by this). Ignored when `auto_fit`.
-    pub pan: gpui::Point<gpui::Pixels>,
-    /// True while a pan drag is in progress.
-    pub is_panning: bool,
-    /// Mouse position at drag start, plus the pan offset captured then, so
-    /// we can compute pan = offset + (mouse - anchor) without drift.
-    pub pan_anchor: Option<gpui::Point<gpui::Pixels>>,
-    pub pan_anchor_offset: gpui::Point<gpui::Pixels>,
-    pub background: PreviewBackground,
-    /// True while a background SVG re-rasterization is in flight. Set on
-    /// `maybe_rerender_svg` dispatch and cleared on apply, so concurrent
-    /// zoom changes coalesce into a single follow-up raster instead of
-    /// spamming the background executor.
-    pub svg_rerender_in_flight: bool,
-}
-
-impl Default for ImageViewState {
-    fn default() -> Self {
-        Self {
-            auto_fit: true,
-            zoom: 1.0,
-            pan: gpui::Point::default(),
-            is_panning: false,
-            pan_anchor: None,
-            pan_anchor_offset: gpui::Point::default(),
-            background: PreviewBackground::Checker,
-            svg_rerender_in_flight: false,
-        }
-    }
-}
-
-impl ImageViewState {
-    /// Clamp the zoom factor to a sane range. Below 0.1× the image
-    /// disappears; above 10× the rendered surface dwarfs any reasonable
-    /// display and pan becomes unusable.
-    pub const MIN_ZOOM: f32 = 0.1;
-    pub const MAX_ZOOM: f32 = 10.0;
-
-    /// Set zoom and leave auto-fit mode. Pan stays as-is.
-    pub fn set_zoom(&mut self, zoom: f32) {
-        self.zoom = zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
-        self.auto_fit = false;
-    }
-
-    /// Multiply current zoom by `factor` and leave auto-fit mode.
-    pub fn zoom_by(&mut self, factor: f32) {
-        let current = if self.auto_fit { 1.0 } else { self.zoom };
-        self.set_zoom(current * factor);
-    }
-
-    /// Reset to fit-to-pane.
-    pub fn reset_to_fit(&mut self) {
-        self.auto_fit = true;
-        self.zoom = 1.0;
-        self.pan = gpui::Point::default();
-        self.is_panning = false;
-        self.pan_anchor = None;
-        self.pan_anchor_offset = gpui::Point::default();
-        // Keep svg_rerender_in_flight as-is; the in-flight task will
-        // resolve and we'll just discard its result via the apply check.
-    }
-}
-
 /// Type alias for source view selection (line, column).
 type Selection = SelectionState<(usize, usize)>;
 
@@ -185,8 +94,14 @@ pub(super) struct FileViewerTab {
     pub relative_path: String,
     pub content: String,
     pub highlighted_lines: Vec<HighlightedLine>,
+    pub source_rows: Vec<SourceRow>,
     pub line_count: usize,
     pub line_num_width: usize,
+    pub longest_source_row: usize,
+    pub wrap_lines: bool,
+    pub wrap_columns: usize,
+    pub json_pretty: bool,
+    pub json_alternate: Option<JsonAlternateView>,
     pub error_message: Option<String>,
     pub selection: Selection,
     pub display_mode: DisplayMode,
@@ -227,9 +142,7 @@ pub(super) struct FileViewerTab {
     /// has been queued in the meantime, so a slow earlier load can't
     /// clobber a faster later one with stale content.
     pub load_generation: u64,
-    /// True for files previewed as images (png/jpg/gif/webp/svg/...). When
-    /// set, `image_data` carries the bytes and the source/markdown rendering
-    /// paths are bypassed.
+    /// True for files previewed as images (png/jpg/gif/webp/svg/...).
     pub is_image: bool,
     /// True for SVG files specifically. SVG is the one image format that
     /// also has a meaningful source view — the loader keeps the raw XML in
@@ -237,73 +150,24 @@ pub(super) struct FileViewerTab {
     /// (rendered) and Source (highlighted XML) via the same toggle markdown
     /// uses.
     pub is_svg: bool,
-    /// Decoded image data wrapped for GPUI's `img()` element. Populated by
-    /// the async loader for image tabs.
-    pub image_data: Option<DecodedImage>,
-    /// Pan / zoom / background state for image and SVG-Preview tabs.
-    /// Persists across freshness reloads so the user keeps their view as
-    /// the file changes on disk.
-    pub image_view: ImageViewState,
-    /// True for font files (otf/ttf/woff/woff2). When set, `font_data`
-    /// carries parsed metadata and the source/image rendering paths are
-    /// bypassed in favour of the font-preview branch.
+    /// Shared complete-file renderer used by image/font tabs and binary diffs.
+    pub file_renderer: Option<Entity<crate::file_renderer::FileRenderer>>,
+    /// True for font files (otf/ttf/woff/woff2).
     pub is_font: bool,
-    /// Parsed font metadata + family name. The TTF bytes themselves are
-    /// registered with GPUI's text system on apply (kept inside the system,
-    /// not on the tab) so the preview pane can render sample text in the
-    /// font.
-    pub font_data: Option<Arc<FontData>>,
     /// One-based source position requested by the link that opened this tab.
     pub target_line: Option<usize>,
     pub target_column: Option<usize>,
 }
 
-/// Decoded image payload. Raster formats let GPUI's asset cache handle the
-/// RGBA→BGRA swap; SVGs are pre-rasterized to BGRA ourselves because GPUI's
-/// built-in `ImageDecoder` calls `render_single_frame(.., to_bgra=false)` for
-/// SVG, leaving R/B swapped and the preview inverted. Each variant carries
-/// the intrinsic pixel dimensions so the zoom UI can compute pan bounds
-/// and a "100%" / "fit" mode without re-decoding.
-#[derive(Clone)]
-pub enum DecodedImage {
-    Raster {
-        image: Arc<Image>,
-        width: u32,
-        height: u32,
-    },
-    Rendered {
-        image: Arc<RenderImage>,
-        width: u32,
-        height: u32,
-        /// Raw SVG bytes kept for re-rasterization at higher resolutions
-        /// when the user zooms in. Without this, `image` (a fixed bitmap)
-        /// would visibly pixelate past the rasterized scale.
-        svg_bytes: Arc<Vec<u8>>,
-        /// The `scale_factor` argument that was passed to
-        /// `SvgRenderer::render_single_frame` when `image` was produced.
-        /// GPUI multiplies this by `SMOOTH_SVG_SCALE_FACTOR (= 2)`
-        /// internally, so the actual pixmap is `intrinsic × scale_factor × 2`.
-        /// Used to decide when a re-raster is needed (zoom > rendered_scale).
-        rendered_scale: f32,
-    },
+pub(super) struct SourceRow {
+    pub logical_line: usize,
+    pub byte_range: Range<usize>,
+    pub columns: usize,
 }
 
-impl DecodedImage {
-    pub fn dimensions(&self) -> (u32, u32) {
-        match self {
-            DecodedImage::Raster { width, height, .. } => (*width, *height),
-            DecodedImage::Rendered { width, height, .. } => (*width, *height),
-        }
-    }
-}
-
-impl From<DecodedImage> for ImageSource {
-    fn from(value: DecodedImage) -> Self {
-        match value {
-            DecodedImage::Raster { image, .. } => ImageSource::Image(image),
-            DecodedImage::Rendered { image, .. } => ImageSource::Render(image),
-        }
-    }
+pub(super) struct JsonAlternateView {
+    pub content: String,
+    pub highlighted_lines: Option<Vec<HighlightedLine>>,
 }
 
 /// Lifecycle of a tab's blame data.
@@ -325,72 +189,14 @@ pub enum FileHistoryLoadState {
     Error(String),
 }
 
-/// Map an extension to a `gpui::ImageFormat` for files we can preview as
-/// images. Returns `None` for non-image extensions.
-pub(super) fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "png" => ImageFormat::Png,
-        "jpg" | "jpeg" => ImageFormat::Jpeg,
-        "gif" => ImageFormat::Gif,
-        "webp" => ImageFormat::Webp,
-        "bmp" => ImageFormat::Bmp,
-        "tif" | "tiff" => ImageFormat::Tiff,
-        "ico" => ImageFormat::Ico,
-        "svg" => ImageFormat::Svg,
-        _ => return None,
-    })
-}
-
-/// Font container format we know how to load.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum FontFormat {
-    /// OpenType / TrueType — fed straight to ttf-parser and registered as-is.
-    OpenType,
-    /// WOFF / WOFF2 — compressed web-font containers. We detect them so the
-    /// viewer can show a clear "not supported" message instead of falling
-    /// back to a generic binary-file error, but we don't decode them:
-    /// decompression (zlib for WOFF1, Brotli for WOFF2) would pull in a
-    /// sizable dependency tree for a format that's rare on disk. Adding a
-    /// decoder is a follow-up.
-    Woff,
-}
-
-/// Detect whether `path`'s extension is one of the font formats we preview.
-pub(super) fn font_format_for_path(path: &Path) -> Option<FontFormat> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "ttf" | "otf" => FontFormat::OpenType,
-        "woff" | "woff2" => FontFormat::Woff,
-        _ => return None,
-    })
-}
-
-/// Parsed metadata for a font preview, plus the OpenType bytes that GPUI's
-/// text system needs to actually render text in the font. Wrapped in `Arc`
-/// on the tab so freshness reloads can swap it cheaply.
-#[derive(Clone)]
-pub struct FontData {
-    /// Family name from the OpenType `name` table (e.g. "JetBrains Mono"),
-    /// used as the `Font::family` for sample-text rendering.
-    pub family_name: String,
-    /// Full font name from the `name` table (e.g. "JetBrains Mono Bold Italic").
-    pub full_name: String,
-    /// Subfamily / style description ("Regular", "Bold", "Italic", ...).
-    pub style: String,
-    /// Font version string from the `name` table.
-    pub version: String,
-    /// Number of glyphs in the font.
-    pub num_glyphs: u16,
-    /// EM square units (typically 1000 for OTF, 2048 for TTF).
-    pub units_per_em: u16,
-    /// OS/2 `usWeightClass` — 100 (Thin) through 900 (Black).
-    pub weight_class: u16,
-    /// Whether the font advertises italic style.
-    pub is_italic: bool,
-}
-
 impl FileViewerTab {
+    fn source_row_for_line(&self, line: usize) -> usize {
+        let logical_line = line.saturating_sub(1);
+        self.source_rows
+            .partition_point(|row| row.logical_line < logical_line)
+            .min(self.source_rows.len().saturating_sub(1))
+    }
+
     /// Create a new tab for browsing (no file loaded).
     pub(super) fn new_empty() -> Self {
         Self {
@@ -398,8 +204,14 @@ impl FileViewerTab {
             relative_path: String::new(),
             content: String::new(),
             highlighted_lines: Vec::new(),
+            source_rows: Vec::new(),
             line_count: 0,
             line_num_width: 3,
+            longest_source_row: 0,
+            wrap_lines: false,
+            wrap_columns: 120,
+            json_pretty: false,
+            json_alternate: None,
             error_message: None,
             selection: Selection::default(),
             display_mode: DisplayMode::Source,
@@ -422,10 +234,8 @@ impl FileViewerTab {
             load_generation: 0,
             is_image: false,
             is_svg: false,
-            image_data: None,
-            image_view: ImageViewState::default(),
+            file_renderer: None,
             is_font: false,
-            font_data: None,
             target_line: None,
             target_column: None,
         }
@@ -433,18 +243,30 @@ impl FileViewerTab {
 
     /// Create a tab in loading state (content will be filled asynchronously).
     fn new_loading(relative_path: String, file_path: PathBuf) -> Self {
-        let image_format = image_format_for_path(&file_path);
-        let is_image = image_format.is_some();
-        let is_svg = image_format == Some(ImageFormat::Svg);
-        let is_font = !is_image && font_format_for_path(&file_path).is_some();
+        let renderer_kind = crate::file_renderer::FileRenderer::kind_for_path(&file_path);
+        let is_image = matches!(
+            renderer_kind,
+            Some(crate::file_renderer::FileRendererKind::Image { .. })
+        );
+        let is_svg = matches!(
+            renderer_kind,
+            Some(crate::file_renderer::FileRendererKind::Image { is_svg: true })
+        );
+        let is_font = renderer_kind == Some(crate::file_renderer::FileRendererKind::Font);
         let is_markdown = !is_image && !is_font && Self::is_markdown_file(&file_path);
         Self {
             file_path,
             relative_path,
             content: String::new(),
             highlighted_lines: Vec::new(),
+            source_rows: Vec::new(),
             line_count: 0,
             line_num_width: 3,
+            longest_source_row: 0,
+            wrap_lines: false,
+            wrap_columns: 120,
+            json_pretty: false,
+            json_alternate: None,
             error_message: None,
             selection: Selection::default(),
             display_mode: if is_markdown || is_svg {
@@ -471,10 +293,8 @@ impl FileViewerTab {
             load_generation: 0,
             is_image,
             is_svg,
-            image_data: None,
-            image_view: ImageViewState::default(),
+            file_renderer: None,
             is_font,
-            font_data: None,
             target_line: None,
             target_column: None,
         }
@@ -571,6 +391,8 @@ pub struct FileViewer {
     syntax_set: std::sync::Arc<SyntaxSet>,
     /// File font size from settings
     file_font_size: f32,
+    /// Monospace font used for source measurement and rendering.
+    file_font: Font,
     /// Measured monospace character width (from font metrics)
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting)
@@ -674,9 +496,10 @@ impl FileViewerScope {
 }
 
 /// Presentation state, read from the user's settings and the active theme.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct FileViewerConfig {
     pub font_size: f32,
+    pub font_family: SharedString,
     pub is_dark: bool,
     pub blame_visible: bool,
 }
@@ -740,9 +563,7 @@ impl FileViewer {
             history_provider,
         } = scope;
         for tab in &mut self.tabs {
-            if let Some(decoded) = tab.image_data.take() {
-                release_image_assets(decoded, cx);
-            }
+            release_tab_renderer(tab, cx);
         }
         self.project_fs = project_fs;
         self.scope = None;
@@ -820,6 +641,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            font_family,
             is_dark,
             blame_visible,
         } = config;
@@ -840,6 +662,7 @@ impl FileViewer {
             project_fs,
             syntax_set,
             file_font_size: font_size,
+            file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
@@ -907,6 +730,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            font_family,
             is_dark,
             blame_visible,
         } = config;
@@ -917,6 +741,7 @@ impl FileViewer {
             project_fs,
             syntax_set: load_syntax_set(),
             file_font_size: font_size,
+            file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
@@ -1078,11 +903,18 @@ impl FileViewer {
         }
     }
 
-    /// Update configuration (font size and dark mode) from the host app.
+    /// Update configuration (font and dark mode) from the host app.
     /// Also refreshes the daemon-backed file tree.
-    pub fn update_config(&mut self, font_size: f32, is_dark: bool, cx: &mut Context<Self>) {
+    pub fn update_config(
+        &mut self,
+        font_size: f32,
+        font_family: SharedString,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
+        self.file_font = okena_ui::tokens::file_font_for_family(font_family, cx);
         self.is_dark = is_dark;
 
         // Re-fetch directory listings so the sidebar reflects added/removed files
@@ -1097,6 +929,9 @@ impl FileViewer {
             // source-view XML), so they need the rehighlight too.
             if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
                 tab.do_highlight_content(&tab.file_path.clone(), &self.syntax_set, self.is_dark);
+                if let Some(alternate) = tab.json_alternate.as_mut() {
+                    alternate.highlighted_lines = None;
+                }
                 // The rendered markdown view carries its own highlighted code
                 // blocks, separate from the source view's lines.
                 if let Some(doc) = tab.markdown_doc.as_mut() {
@@ -1402,200 +1237,6 @@ impl FileViewer {
         .detach();
     }
 
-    /// If the active tab is an SVG and the current zoom exceeds the
-    /// rasterized bitmap's resolution, kick off a background re-raster at
-    /// a higher scale so the preview stays crisp.
-    ///
-    /// Coalescing: at most one re-raster is in flight per tab. While one
-    /// is running, further zoom changes are silently absorbed; when the
-    /// result arrives we re-check the current zoom and schedule another
-    /// raster if the user has zoomed further in the meantime.
-    pub(super) fn maybe_rerender_svg(&mut self, cx: &mut Context<Self>) {
-        let relative_path = self.active_tab().relative_path.clone();
-        self.maybe_rerender_svg_for(relative_path, cx);
-    }
-
-    /// Re-raster the SVG on the tab identified by `relative_path` (not
-    /// necessarily the active tab). Used both as the entry point from
-    /// zoom actions (which pass the active tab) and from the apply
-    /// callback's chase-loop recursion, where the user may have switched
-    /// tabs mid-raster and `self.active_tab()` would target the wrong
-    /// path.
-    pub(super) fn maybe_rerender_svg_for(&mut self, relative_path: String, cx: &mut Context<Self>) {
-        let svg_renderer = cx.svg_renderer();
-        let Some((bytes, target_scale)) = self.compute_rerender_target(&relative_path) else {
-            return;
-        };
-        // Capture the source bytes' Arc identity so we can detect — at
-        // apply time — that image_data was swapped to a different SVG
-        // (freshness reload, tab-replace) while our raster was in flight.
-        // Without this guard the stale bitmap would overwrite the fresh
-        // image, showing pre-edit pixels for the post-edit file.
-        let dispatched_bytes_id = Arc::as_ptr(&bytes) as usize;
-
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.relative_path == relative_path)
-        {
-            tab.image_view.svg_rerender_in_flight = true;
-        }
-
-        cx.spawn(async move |entity, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    svg_renderer
-                        .render_single_frame(&bytes, target_scale)
-                        .map_err(|e| format!("Cannot re-rasterize SVG: {}", e))
-                })
-                .await;
-            let path_for_callback = relative_path.clone();
-            let _ = entity.update(cx, |this, cx| {
-                let mut should_chase = false;
-                if let Some(tab) = this
-                    .tabs
-                    .iter_mut()
-                    .find(|t| t.relative_path == relative_path)
-                {
-                    tab.image_view.svg_rerender_in_flight = false;
-                    match (result, tab.image_data.as_mut()) {
-                        (
-                            Ok(new_image),
-                            Some(DecodedImage::Rendered {
-                                image,
-                                rendered_scale,
-                                svg_bytes,
-                                ..
-                            }),
-                        ) => {
-                            // Discard the result if image_data was
-                            // replaced (different SVG bytes) while we
-                            // were rasterizing — otherwise the stale
-                            // raster would overwrite the new bitmap.
-                            if Arc::as_ptr(svg_bytes) as usize == dispatched_bytes_id {
-                                // Replace the bitmap, then evict the old
-                                // sprite-atlas tile so the GPU memory
-                                // gets reclaimed (cx.drop_image is the
-                                // only path; the Arc drop on its own
-                                // leaves the tile resident).
-                                let old_image = std::mem::replace(image, new_image);
-                                *rendered_scale = target_scale;
-                                cx.drop_image(old_image, None);
-                                cx.notify();
-                                should_chase = true;
-                            } else {
-                                // Bytes mismatch — image_data was replaced
-                                // by a freshness reload. The new bitmap
-                                // (the freshness reload's 1× raster) is
-                                // already on the tab; drop our raster.
-                                cx.drop_image(new_image, None);
-                            }
-                        }
-                        (
-                            Err(_),
-                            Some(DecodedImage::Rendered {
-                                rendered_scale,
-                                svg_bytes,
-                                ..
-                            }),
-                        ) => {
-                            // Pin rendered_scale to the failed target so
-                            // compute_rerender_target stops requesting
-                            // the same raster on every chase tick. The
-                            // bitmap stays at its previous resolution
-                            // (the user keeps seeing whatever crisp /
-                            // soft state they had before). Only apply
-                            // this pin to the SVG we dispatched against.
-                            if Arc::as_ptr(svg_bytes) as usize == dispatched_bytes_id {
-                                *rendered_scale = target_scale;
-                            }
-                        }
-                        (Ok(new_image), _) => {
-                            // Tab still exists but no longer shows a Rendered
-                            // SVG (a freshness reload swapped it to a raster /
-                            // text view). Our freshly-rasterized bitmap has
-                            // nowhere to go — drop_image it so its atlas tile
-                            // is reclaimed instead of leaking for the session.
-                            cx.drop_image(new_image, None);
-                        }
-                        (Err(_), _) => {}
-                    }
-                } else if let Ok(new_image) = result {
-                    // Tab was closed / reordered away while the raster ran.
-                    // The render succeeded but has no home; release its atlas
-                    // tile rather than leaking it (RenderImage has no Drop —
-                    // drop_image is the only path that frees the tile).
-                    cx.drop_image(new_image, None);
-                }
-                // Recurse against the captured relative_path, not the
-                // active tab — the user may have switched tabs while the
-                // raster ran.
-                if should_chase {
-                    this.maybe_rerender_svg_for(path_for_callback, cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Return `(svg_bytes, target_scale)` if a re-raster of the named tab
-    /// would meaningfully sharpen the preview. Returns `None` when the tab
-    /// isn't an SVG, isn't zoomed in past its rendered scale, or already
-    /// has a re-raster in flight.
-    fn compute_rerender_target(&self, relative_path: &str) -> Option<(Arc<Vec<u8>>, f32)> {
-        let tab = self
-            .tabs
-            .iter()
-            .find(|t| t.relative_path == relative_path)?;
-        if !tab.is_svg || tab.image_view.svg_rerender_in_flight {
-            return None;
-        }
-        // Fit mode renders via ObjectFit::Contain so the existing 2× pixmap
-        // is plenty — no need to re-raster.
-        if tab.image_view.auto_fit {
-            return None;
-        }
-        let DecodedImage::Rendered {
-            svg_bytes,
-            rendered_scale,
-            width,
-            height,
-            ..
-        } = tab.image_data.as_ref()?
-        else {
-            return None;
-        };
-        let zoom = tab.image_view.zoom;
-        // Small threshold avoids re-rastering on micro-zoom adjustments
-        // and on the way back down from a previously-rendered high scale.
-        if zoom <= *rendered_scale * 1.1 {
-            return None;
-        }
-        // Two ceilings on the raster scale:
-        //   * a flat 16× cap (a 100×100 icon → 3200×3200 ≈ 40 MB), and
-        //   * an absolute-pixel cap, because the flat cap alone is only safe
-        //     for small SVGs. The rendered pixmap is
-        //     intrinsic × (scale × SMOOTH_SVG_SCALE_FACTOR=2)² pixels, so a
-        //     large-but-valid SVG (intrinsic up to MAX_SVG_PIXELS = 64 MP)
-        //     zoomed to 16× would otherwise demand tens of GB of RGBA. Bound
-        //     the final pixmap to ~256 MP (~1 GB), matching the initial-load
-        //     worst case.
-        const MAX_SVG_RENDER_PIXELS: u64 = 256 * 1024 * 1024;
-        let intrinsic = (*width as u64).saturating_mul(*height as u64).max(1);
-        // intrinsic × (target × 2)² ≤ budget  ⇒  target ≤ √(budget/intrinsic) / 2
-        let max_by_pixels =
-            ((MAX_SVG_RENDER_PIXELS as f64 / intrinsic as f64).sqrt() as f32 / 2.0).max(1.0);
-        let target = (zoom * 1.25).clamp(1.0, 16.0).min(max_by_pixels);
-        // If the pixel ceiling holds target at (or below) what we already
-        // rendered, a sharper raster isn't possible — bail so the chase loop
-        // stops instead of re-rendering the same scale forever.
-        if target <= *rendered_scale * 1.05 {
-            return None;
-        }
-        Some((svg_bytes.clone(), target))
-    }
-
     /// Get the active tab.
     pub(super) fn active_tab(&self) -> &FileViewerTab {
         &self.tabs[self.active_tab]
@@ -1637,11 +1278,8 @@ impl FileViewer {
 
         // If current tab is empty (no file loaded), replace it
         if self.active_tab().is_empty() {
-            let old_image = self.tabs[self.active_tab].image_data.take();
+            release_tab_renderer(&mut self.tabs[self.active_tab], cx);
             self.tabs[self.active_tab] = new_tab;
-            if let Some(decoded) = old_image {
-                release_image_assets(decoded, cx);
-            }
             self.spawn_tab_load(relative_path, cx);
             if self.history_visible {
                 self.spawn_history_load_for_active(cx);
@@ -1661,10 +1299,8 @@ impl FileViewer {
         // its sprite-atlas tile / decoded asset cache entry would linger
         // after the tab is gone (an SVG that had been zoomed to 16× is
         // tens of MB of GPU memory).
-        if let Some(mut tab) = evicted
-            && let Some(decoded) = tab.image_data.take()
-        {
-            release_image_assets(decoded, cx);
+        if let Some(mut tab) = evicted {
+            release_tab_renderer(&mut tab, cx);
         }
 
         self.spawn_tab_load(relative_path, cx);
@@ -1686,8 +1322,9 @@ impl FileViewer {
         tab.target_column = position.column;
         if let Some(line) = position.line {
             tab.display_mode = DisplayMode::Source;
+            let row = tab.source_row_for_line(line);
             tab.source_scroll_handle
-                .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+                .scroll_to_item(row, ScrollStrategy::Center);
         }
         cx.notify();
     }
@@ -1755,9 +1392,7 @@ impl FileViewer {
         }
 
         let mut removed = self.tabs.remove(index);
-        if let Some(decoded) = removed.image_data.take() {
-            release_image_assets(decoded, cx);
-        }
+        release_tab_renderer(&mut removed, cx);
 
         if index == self.active_tab {
             // Closed the active tab: prefer the tab to the right (same index),
@@ -1784,9 +1419,7 @@ impl FileViewer {
             self.tabs.push(kept);
             self.active_tab = 0;
             for mut tab in dropped.drain(..) {
-                if let Some(decoded) = tab.image_data.take() {
-                    release_image_assets(decoded, cx);
-                }
+                release_tab_renderer(&mut tab, cx);
             }
             cx.notify();
         }
@@ -1798,25 +1431,15 @@ impl FileViewer {
         self.tabs.push(FileViewerTab::new_empty());
         self.active_tab = 0;
         for mut tab in dropped.drain(..) {
-            if let Some(decoded) = tab.image_data.take() {
-                release_image_assets(decoded, cx);
-            }
+            release_tab_renderer(&mut tab, cx);
         }
         cx.notify();
     }
 
-    /// Release every tab's GPU-side image asset. Called when the whole
-    /// viewer entity is about to be dropped — chiefly cache eviction on
-    /// project close — where the per-tab close paths that normally call
-    /// `release_image_assets` never run. Without this, an `Arc<RenderImage>`
-    /// dropped on entity teardown leaves its sprite-atlas tile resident
-    /// (RenderImage has no `Drop`), and decoded raster assets stay cached,
-    /// for the rest of the session.
+    /// Release every tab's GPU-side image asset before the viewer is dropped.
     pub fn release_all_image_assets(&mut self, cx: &mut App) {
         for tab in &mut self.tabs {
-            if let Some(decoded) = tab.image_data.take() {
-                release_image_assets(decoded, cx);
-            }
+            release_tab_renderer(tab, cx);
         }
     }
 
@@ -1879,11 +1502,8 @@ impl FileViewer {
 
         let file_path = Self::tree_path(&self.project_fs, &relative_path);
         let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
-        let old_image = self.tabs[self.active_tab].image_data.take();
+        release_tab_renderer(&mut self.tabs[self.active_tab], cx);
         self.tabs[self.active_tab] = new_tab;
-        if let Some(decoded) = old_image {
-            release_image_assets(decoded, cx);
-        }
         self.spawn_tab_load(relative_path, cx);
         if self.history_visible {
             self.spawn_history_load_for_active(cx);
@@ -1914,44 +1534,33 @@ impl FileViewer {
         // Image / font detection is driven purely by extension, so we can
         // decide the load strategy off-thread without holding the tab borrow.
         let asset_path = PathBuf::from(&relative_path);
-        let is_image = image_format_for_path(&asset_path).is_some();
-        let is_font = !is_image && font_format_for_path(&asset_path).is_some();
+        let renderer_kind = crate::file_renderer::FileRenderer::kind_for_path(&asset_path);
+        let is_image = matches!(
+            renderer_kind,
+            Some(crate::file_renderer::FileRendererKind::Image { .. })
+        );
+        let is_font = renderer_kind == Some(crate::file_renderer::FileRendererKind::Font);
         let svg_renderer = cx.svg_renderer();
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result: Result<(loading::LoadedContent, Option<u64>), String> = cx
                 .background_executor()
                 .spawn(async move {
                     let metadata = fs.file_metadata(&rel)?;
-                    let content = if is_image {
-                        if metadata.size > MAX_IMAGE_FILE_SIZE {
+                    let content = if is_image || is_font {
+                        if metadata.size > crate::file_renderer::MAX_RENDERED_FILE_SIZE {
                             return Err(format!(
-                                "Image too large ({} bytes). Maximum size is 20 MB.",
+                                "File too large ({} bytes). Maximum size is 20 MB.",
                                 metadata.size
                             ));
                         }
                         let bytes = fs.read_file_bytes(&rel)?;
-                        if bytes.len() as u64 > MAX_IMAGE_FILE_SIZE {
-                            return Err(format!(
-                                "Image too large ({:.1} MB). Maximum size is 20 MB.",
-                                bytes.len() as f64 / 1024.0 / 1024.0
-                            ));
+                        if is_image {
+                            loading::build_image_content(&asset_path, bytes, &svg_renderer)?
+                        } else {
+                            loading::build_font_content(&asset_path, bytes, &svg_renderer)?
                         }
-                        loading::build_image_content(&asset_path, bytes, &svg_renderer)?
-                    } else if is_font {
-                        if metadata.size > loading::MAX_FONT_FILE_SIZE {
-                            return Err(format!(
-                                "Font too large ({} bytes). Maximum size is 20 MB.",
-                                metadata.size
-                            ));
-                        }
-                        let bytes = fs.read_file_bytes(&rel)?;
-                        if bytes.len() as u64 > loading::MAX_FONT_FILE_SIZE {
-                            return Err(format!(
-                                "Font too large ({:.1} MB). Maximum size is 20 MB.",
-                                bytes.len() as f64 / 1024.0 / 1024.0
-                            ));
-                        }
-                        loading::build_font_content(&asset_path, bytes)?
                     } else {
                         if metadata.size > MAX_FILE_SIZE {
                             return Err(format!(
@@ -1959,61 +1568,58 @@ impl FileViewer {
                                 metadata.size
                             ));
                         }
-                        loading::LoadedContent::Text(fs.read_file(&rel)?)
+                        loading::build_text_content(
+                            &asset_path,
+                            fs.read_file(&rel)?,
+                            &syntax_set,
+                            is_dark,
+                        )
                     };
                     Ok((content, metadata.modified_at_millis))
                 })
                 .await;
-            let _ = entity.update(cx, |this, cx| {
-                let mut old_image: Option<DecodedImage> = None;
-                let mut target_line: Option<usize> = None;
-                if let Some(tab) = this
-                    .tabs
-                    .iter_mut()
-                    .find(|t| t.relative_path == relative_path)
-                {
-                    // Drop stale results: a newer spawn_tab_load has been
-                    // queued for this tab (closed-and-reopened, navigated
-                    // away and back, etc.) and its result is what the user
-                    // is waiting for.
-                    if tab.load_generation != generation {
-                        return;
-                    }
-                    // Register font bytes with the platform text system
-                    // BEFORE applying so the family name is resolvable by
-                    // the time render runs. register_font_bytes dedups on
-                    // a byte hash so a re-register of the same font is a
-                    // no-op (without that, GPUI's add_fonts pushes every
-                    // call into the platform font source and never frees).
-                    if let Ok((loading::LoadedContent::Font { ttf_bytes, .. }, _)) = &result {
-                        register_font_bytes(cx, ttf_bytes);
-                    }
-                    // Capture the previously-installed image so we can
-                    // evict its sprite-atlas tile after the new one is in
-                    // place — apply_loaded_content runs on `&mut tab`
-                    // alone and can't see `cx: &mut App`.
-                    old_image = tab.image_data.take();
-                    let modified_at = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|(_, modified_at)| *modified_at);
-                    tab.apply_loaded_content(
-                        result.map(|(content, _)| content),
-                        modified_at,
-                        &this.syntax_set,
-                        this.is_dark,
-                    );
-                    target_line = tab.target_line;
-                    tab.blame = BlameLoadState::NotLoaded;
-                    cx.notify();
+            let Some(entity) = entity.upgrade() else {
+                if let Ok((content, _)) = result {
+                    cx.update(|cx| content.release(cx));
                 }
-                if let Some(line) = target_line {
+                return;
+            };
+            entity.update(cx, |this, cx| {
+                let tab_index = this
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.relative_path == relative_path);
+                let Some(tab_index) = tab_index else {
+                    if let Ok((content, _)) = result {
+                        content.release(cx);
+                    }
+                    return;
+                };
+                if this.tabs[tab_index].load_generation != generation {
+                    if let Ok((content, _)) = result {
+                        content.release(cx);
+                    }
+                    return;
+                }
+                let modified_at = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, modified_at)| *modified_at);
+                let tab = &mut this.tabs[tab_index];
+                tab.apply_loaded_content(
+                    result.map(|(content, _)| content),
+                    modified_at,
+                    &this.syntax_set,
+                    this.is_dark,
+                    cx,
+                );
+                let target_row = tab.target_line.map(|line| tab.source_row_for_line(line));
+                tab.blame = BlameLoadState::NotLoaded;
+                cx.notify();
+                if let Some(row) = target_row {
                     this.active_tab()
                         .source_scroll_handle
-                        .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
-                }
-                if let Some(decoded) = old_image {
-                    release_image_assets(decoded, cx);
+                        .scroll_to_item(row, ScrollStrategy::Center);
                 }
                 if this.blame_visible {
                     this.spawn_blame_load_for_active(cx);
@@ -2069,74 +1675,9 @@ pub enum FileViewerEvent {
     },
 }
 
-/// Release the GPU-side cache entries backing a `DecodedImage` before the
-/// owning `Arc` is dropped.
-///
-/// Without this, replacing `image_data` (on tab close, freshness reload,
-/// or an SVG re-raster) only drops the CPU-side `Arc`; the corresponding
-/// sprite-atlas tile / asset-cache entry stays resident in GPU memory.
-/// Repeatedly zooming an SVG (which kicks a fresh rasterization per 1.1×
-/// past the rendered scale) and external-edit cycles can each leak tens
-/// of MB of GPU memory over a session if this isn't called.
-pub(super) fn release_image_assets(decoded: DecodedImage, cx: &mut App) {
-    match decoded {
-        DecodedImage::Raster { image, .. } => {
-            // `Image::remove_asset` removes the decoded `RenderImage`
-            // produced by `ImageDecoder` from the asset cache; the
-            // underlying sprite-atlas tile is dropped along with it.
-            image.remove_asset(cx);
-        }
-        DecodedImage::Rendered { image, .. } => {
-            // Rendered SVG bitmaps live as `Arc<RenderImage>` directly in
-            // the sprite atlas; `cx.drop_image` is the only path that
-            // removes them across all windows.
-            cx.drop_image(image, None);
-        }
-    }
-}
-
-/// Register a font's OpenType bytes with the active text system so any
-/// subsequent render of `Font { family: family_name, .. }` resolves to it.
-///
-/// GPUI's `add_fonts` does NOT dedup internally — every call pushes a
-/// fresh `Handle::from_memory` into the platform text system's font
-/// source. Without our own gate, every freshness reload of a font tab
-/// (and every reopen of the same file) leaks the full payload again.
-/// We hash the bytes and short-circuit if we've already registered an
-/// identical font this session.
-fn register_font_bytes(cx: &mut App, ttf_bytes: &Arc<Vec<u8>>) {
-    use std::collections::HashSet;
-    use std::hash::{Hash, Hasher};
-    use std::sync::{Mutex, OnceLock};
-    static REGISTERED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
-
-    let registered = REGISTERED.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ttf_bytes.as_ref().hash(&mut hasher);
-    let hash = hasher.finish();
-    {
-        let mut guard = match registered.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        if !guard.insert(hash) {
-            return;
-        }
-    }
-
-    let bytes: Vec<u8> = ttf_bytes.as_ref().clone();
-    if let Err(e) = cx
-        .text_system()
-        .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
-    {
-        log::warn!("Failed to register font with text system: {}", e);
-        // Roll back the dedup entry so a transient registration failure
-        // doesn't permanently block a retry from re-attempting it.
-        let mut guard = match registered.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        guard.remove(&hash);
+fn release_tab_renderer(tab: &mut FileViewerTab, cx: &mut App) {
+    if let Some(renderer) = tab.file_renderer.take() {
+        renderer.update(cx, |renderer, cx| renderer.release_assets(cx));
     }
 }
 

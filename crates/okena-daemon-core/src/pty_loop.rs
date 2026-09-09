@@ -1307,7 +1307,10 @@ mod tests {
         process_osc_hook_exits(&["hook-new".into()], &terminals, &reactor);
 
         let workspace = reactor.workspace.lock();
-        let hooks = &workspace.project("project-1").expect("project").hook_terminals;
+        let hooks = &workspace
+            .project("project-1")
+            .expect("project")
+            .hook_terminals;
         assert_eq!(
             hooks.len(),
             5,

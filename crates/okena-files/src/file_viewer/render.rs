@@ -7,7 +7,7 @@ use crate::code_view::{
 use crate::file_search::Cancel;
 use crate::file_tree::{FileTreeRow, expandable_file_row, expandable_folder_row};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
-use crate::syntax::HighlightedLine;
+use crate::syntax::HighlightedSpan;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::context_menu::TreeNodeTarget;
-use super::{DisplayMode, FileViewer, FontData, PreviewBackground};
+use super::{DisplayMode, FileViewer, SourceRow};
 
 const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
 
@@ -47,6 +47,91 @@ fn markdown_table_scrollbar(id: impl Into<ElementId>, scroll_handle: &ScrollHand
             .id(id)
             .scrollbar_show(ScrollbarShow::Always),
     )
+}
+
+fn source_horizontal_scrollbar(
+    id: impl Into<ElementId>,
+    scroll_handle: &UniformListScrollHandle,
+) -> Div {
+    div().absolute().inset_0().child(
+        Scrollbar::horizontal(scroll_handle)
+            .id(id)
+            .scrollbar_show(ScrollbarShow::Always),
+    )
+}
+
+fn byte_range_for_char_window(text: &str, start: usize, count: usize) -> std::ops::Range<usize> {
+    if text.is_ascii() {
+        let start = start.min(text.len());
+        return start..(start + count).min(text.len());
+    }
+    let start_byte = text
+        .char_indices()
+        .nth(start)
+        .map_or(text.len(), |(byte, _)| byte);
+    let end_byte = text[start_byte..]
+        .char_indices()
+        .nth(count)
+        .map_or(text.len(), |(byte, _)| start_byte + byte);
+    start_byte..end_byte
+}
+
+fn visible_source_range(
+    text: &str,
+    row: &SourceRow,
+    horizontal_offset: f32,
+    viewport_width: f32,
+    char_width: f32,
+    fixed_width: f32,
+    wrap_lines: bool,
+) -> std::ops::Range<usize> {
+    if wrap_lines || row.columns <= 4096 {
+        return row.byte_range.clone();
+    }
+    const OVERSCAN_COLUMNS: usize = 64;
+    let first_visible = ((horizontal_offset - fixed_width).max(0.0) / char_width.max(1.0)) as usize;
+    let start = first_visible.saturating_sub(OVERSCAN_COLUMNS);
+    let count = (viewport_width / char_width.max(1.0)).ceil() as usize + OVERSCAN_COLUMNS * 2;
+    let local = byte_range_for_char_window(&text[row.byte_range.clone()], start, count);
+    row.byte_range.start + local.start..row.byte_range.start + local.end
+}
+
+fn slice_highlighted_spans(
+    spans: &[HighlightedSpan],
+    range: std::ops::Range<usize>,
+) -> Vec<HighlightedSpan> {
+    let mut result = Vec::new();
+    let mut span_start = 0;
+    for span in spans {
+        let span_end = span_start + span.text.len();
+        let start = span_start.max(range.start);
+        let end = span_end.min(range.end);
+        if start < end {
+            result.push(HighlightedSpan {
+                color: span.color,
+                text: span.text[start - span_start..end - span_start].to_string(),
+            });
+        }
+        span_start = span_end;
+        if span_start >= range.end {
+            break;
+        }
+    }
+    result
+}
+
+fn clip_background_ranges(
+    ranges: Vec<(std::ops::Range<usize>, Hsla)>,
+    visible: std::ops::Range<usize>,
+) -> Vec<(std::ops::Range<usize>, Hsla)> {
+    ranges
+        .into_iter()
+        .filter_map(|(range, color)| {
+            let start = range.start.max(visible.start);
+            let end = range.end.min(visible.end);
+            (start < end).then_some((start - visible.start..end - visible.start, color))
+        })
+        .collect()
 }
 
 fn distance_squared_to_bounds(position: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
@@ -208,47 +293,87 @@ impl FileViewer {
     /// Render a single highlighted line with selection support.
     pub(super) fn render_line(
         &self,
-        line_number: usize,
-        line: &HighlightedLine,
+        row_number: usize,
+        row: &SourceRow,
+        window_width: Pixels,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let tab = self.active_tab();
-        let line_num_str = format!("{:>width$}", line_number + 1, width = tab.line_num_width);
+        let line = &tab.highlighted_lines[row.logical_line];
+        let row_text = &line.plain_text[row.byte_range.clone()];
+        let line_num_str = if row.byte_range.start == 0 {
+            format!(
+                "{:>width$}",
+                row.logical_line + 1,
+                width = tab.line_num_width
+            )
+        } else {
+            " ".repeat(tab.line_num_width)
+        };
 
         let font_size = self.file_font_size;
         let line_height = font_size * 1.8;
         let char_width = self.measured_char_width;
         let gutter_width = (tab.line_num_width as f32) * char_width + 16.0;
+        let scroll_state = tab.source_scroll_handle.0.borrow();
+        let horizontal_offset = -f32::from(scroll_state.base_handle.offset().x);
+        let viewport_width = scroll_state
+            .last_item_size
+            .map(|size| f32::from(size.item.width))
+            .unwrap_or_default()
+            .max(f32::from(window_width));
+        drop(scroll_state);
+        let visible_range = visible_source_range(
+            &line.plain_text,
+            row,
+            horizontal_offset,
+            viewport_width,
+            char_width,
+            gutter_width,
+            tab.wrap_lines,
+        );
+        let visible_local =
+            visible_range.start - row.byte_range.start..visible_range.end - row.byte_range.start;
 
-        let mut bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
-        bg_ranges.extend(self.search_bg_ranges_for_line(line_number, t));
-        if tab.target_line == Some(line_number + 1)
+        let mut bg_ranges = selection_bg_ranges(&tab.selection, row_number, row_text.len());
+        bg_ranges.extend(self.search_bg_ranges_for_line(row_number, t));
+        if tab.target_line == Some(row.logical_line + 1)
             && let Some(column) = tab.target_column
         {
             let char_index = column.saturating_sub(1);
             if let Some((start, character)) = line.plain_text.char_indices().nth(char_index) {
                 let end = start + character.len_utf8();
-                bg_ranges.push((start..end, rgba(t.selection_bg, 0.8).into()));
+                if start >= row.byte_range.start && end <= row.byte_range.end {
+                    bg_ranges.push((
+                        start - row.byte_range.start..end - row.byte_range.start,
+                        rgba(t.selection_bg, 0.8).into(),
+                    ));
+                }
             }
         }
 
-        let plain_text = line.plain_text.clone();
-        let line_len = line.plain_text.len();
+        let plain_text = row_text.to_string();
+        let line_len = row_text.len();
+        let hidden_columns = line.plain_text[row.byte_range.start..visible_range.start]
+            .chars()
+            .count();
 
-        let styled_text = build_styled_text_with_backgrounds(&line.spans, &bg_ranges);
+        let visible_spans = slice_highlighted_spans(&line.spans, visible_range.clone());
+        let bg_ranges = clip_background_ranges(bg_ranges, visible_local.clone());
+        let styled_text = build_styled_text_with_backgrounds(&visible_spans, &bg_ranges);
         let text_layout = styled_text.layout().clone();
 
         div()
-            .id(ElementId::Name(format!("line-{}", line_number).into()))
-            .w_full()
+            .id(ElementId::Name(format!("line-{}", row_number).into()))
+            .when(tab.wrap_lines, |d| d.w_full())
             .flex()
             .h(px(line_height))
-            .when(tab.target_line == Some(line_number + 1), |d| {
+            .when(tab.target_line == Some(row.logical_line + 1), |d| {
                 d.bg(rgba(t.bg_selection, 0.55))
             })
             .text_size(ui_text(font_size, cx))
-            .font_family("monospace")
+            .font(self.file_font.clone())
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
                 let plain_text = plain_text.clone();
@@ -257,19 +382,20 @@ impl FileViewer {
                     let col = text_layout
                         .index_for_position(event.position)
                         .unwrap_or_else(|ix| ix)
-                        .min(line_len);
+                        + visible_local.start;
+                    let col = col.min(line_len);
                     if event.click_count >= 3 {
-                        tab.selection.start = Some((line_number, 0));
-                        tab.selection.end = Some((line_number, line_len));
+                        tab.selection.start = Some((row_number, 0));
+                        tab.selection.end = Some((row_number, line_len));
                         tab.selection.finish();
                     } else if event.click_count == 2 {
                         let (start, end) = find_word_boundaries(&plain_text, col);
-                        tab.selection.start = Some((line_number, start));
-                        tab.selection.end = Some((line_number, end));
+                        tab.selection.start = Some((row_number, start));
+                        tab.selection.end = Some((row_number, end));
                         tab.selection.finish();
                     } else {
-                        tab.selection.start = Some((line_number, col));
-                        tab.selection.end = Some((line_number, col));
+                        tab.selection.start = Some((row_number, col));
+                        tab.selection.end = Some((row_number, col));
                         tab.selection.is_selecting = true;
                     }
                     cx.notify();
@@ -283,8 +409,9 @@ impl FileViewer {
                         let col = text_layout
                             .index_for_position(event.position)
                             .unwrap_or_else(|ix| ix)
-                            .min(line_len);
-                        tab.selection.end = Some((line_number, col));
+                            + visible_local.start;
+                        let col = col.min(line_len);
+                        tab.selection.end = Some((row_number, col));
                         cx.notify();
                     }
                 })
@@ -325,16 +452,29 @@ impl FileViewer {
                     ),
             )
             .when_some(
-                self.render_blame_cell(line_number, line_height, char_width, t, cx),
+                self.render_blame_cell(
+                    row.logical_line,
+                    row.byte_range.start == 0,
+                    line_height,
+                    char_width,
+                    t,
+                    cx,
+                ),
                 |d, cell| d.child(cell),
             )
             .child(
                 div()
-                    .flex_1()
-                    .pl(px(10.0))
-                    .overflow_hidden()
+                    .w(px(row.columns as f32 * char_width + 20.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
                     .whitespace_nowrap()
                     .line_height(px(line_height))
+                    .child(
+                        div()
+                            .w(px(hidden_columns as f32 * char_width + 10.0))
+                            .flex_shrink_0(),
+                    )
                     .child(styled_text),
             )
     }
@@ -343,15 +483,17 @@ impl FileViewer {
     pub(super) fn render_visible_lines(
         &self,
         range: std::ops::Range<usize>,
+        window_width: Pixels,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let tab = self.active_tab();
         range
             .filter_map(|i| {
-                tab.highlighted_lines
-                    .get(i)
-                    .map(|line| self.render_line(i, line, t, cx).into_any_element())
+                tab.source_rows.get(i).map(|row| {
+                    self.render_line(i, row, window_width, t, cx)
+                        .into_any_element()
+                })
             })
             .collect()
     }
@@ -1113,6 +1255,43 @@ impl FileViewer {
 }
 
 impl FileViewer {
+    fn update_source_wrap_columns(&mut self, cx: &mut Context<Self>) {
+        let (wrap_lines, current_columns, line_num_width, viewport_width) = {
+            let tab = self.active_tab();
+            let viewport_width = tab
+                .source_scroll_handle
+                .0
+                .borrow()
+                .last_item_size
+                .map(|size| f32::from(size.item.width));
+            (
+                tab.wrap_lines,
+                tab.wrap_columns,
+                tab.line_num_width,
+                viewport_width,
+            )
+        };
+        let Some(viewport_width) = viewport_width.filter(|width| *width > 0.0) else {
+            return;
+        };
+        if !wrap_lines {
+            return;
+        }
+
+        let blame_columns = if self.blame_visible { 24.0 } else { 0.0 };
+        let fixed_width = (line_num_width as f32 + blame_columns) * self.measured_char_width + 42.0;
+        let columns = ((viewport_width - fixed_width) / self.measured_char_width.max(1.0))
+            .floor()
+            .max(20.0) as usize;
+        if columns != current_columns {
+            let tab = self.active_tab_mut();
+            tab.wrap_columns = columns;
+            tab.selection.clear();
+            tab.rebuild_source_rows();
+            self.perform_file_search(cx);
+        }
+    }
+
     /// Ensure the active tab has a `ListState` matching its markdown document,
     /// returning a clone for the render to drive the virtualized preview.
     ///
@@ -1144,365 +1323,6 @@ impl FileViewer {
 
         tab.markdown_list_state.clone()
     }
-
-    /// Render the image / SVG-Preview pane with zoom / pan / background
-    /// support. Default is `auto_fit` (ObjectFit::Contain); once the user
-    /// wheel-zooms or drags, the view switches to natural-size × zoom with
-    /// manual pan. Double-click resets to fit.
-    pub(super) fn render_image_preview(
-        &self,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let tab = self.active_tab();
-        let image_data = tab.image_data.clone();
-        let view = tab.image_view.clone();
-        let muted = t.text_muted;
-        let bg_secondary = t.bg_secondary;
-
-        let Some(image) = image_data else {
-            return div()
-                .id("file-image-empty")
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(bg_secondary))
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(muted))
-                        .child("Image not available"),
-                )
-                .into_any_element();
-        };
-
-        let (nat_w, nat_h) = image.dimensions();
-        let zoom = view.zoom;
-        let pan = view.pan;
-        let auto_fit = view.auto_fit;
-
-        // Background fill: explicit color for Light/Dark, checkerboard
-        // canvas for Checker. The canvas is painted into the pane via
-        // paint_quad in tiles small enough to read against both extremes.
-        let (bg_solid, show_checker) = match view.background {
-            PreviewBackground::Light => (0xFFFFFFu32, false),
-            PreviewBackground::Dark => (0x111111u32, false),
-            PreviewBackground::Checker => (0x808080u32, true),
-        };
-
-        let fallback_muted = muted;
-        let img_element = img(image).with_fallback(move || {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(14.0))
-                .text_color(rgb(fallback_muted))
-                .child("Cannot decode image")
-                .into_any_element()
-        });
-
-        let img_styled: AnyElement = if auto_fit {
-            img_element
-                .object_fit(ObjectFit::Contain)
-                .max_w_full()
-                .max_h_full()
-                .into_any_element()
-        } else {
-            // flex_shrink_0 is required: without it, the flex container at
-            // the next layer ("size_full .flex .items_center .justify_center")
-            // squishes one axis once the image's explicit size exceeds the
-            // pane, which combined with ObjectFit::Fill produced a stretched
-            // preview and made only one axis appear to "zoom past" the
-            // viewport. Contain keeps aspect inside the (now-fixed) box.
-            img_element
-                .object_fit(ObjectFit::Contain)
-                .w(px((nat_w as f32) * zoom))
-                .h(px((nat_h as f32) * zoom))
-                .flex_shrink_0()
-                .ml(pan.x)
-                .mt(pan.y)
-                .into_any_element()
-        };
-
-        let cursor = if auto_fit {
-            CursorStyle::Arrow
-        } else if view.is_panning {
-            CursorStyle::ClosedHand
-        } else {
-            CursorStyle::OpenHand
-        };
-
-        let mut container = div()
-            .id("file-image")
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .overflow_hidden()
-            .bg(rgb(bg_solid))
-            .cursor(cursor);
-
-        if show_checker {
-            container = container.child(
-                canvas(
-                    |_, _, _| (),
-                    |bounds, _, window, _| paint_checkerboard(bounds, window),
-                )
-                .absolute()
-                .inset_0()
-                .size_full(),
-            );
-        }
-
-        container
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let delta = event.delta.pixel_delta(px(17.0));
-                let dx = f32::from(delta.x);
-                let dy = f32::from(delta.y);
-                // Reject non-finite deltas (a hostile remote bridge or
-                // momentum-extrapolation overflow can hand us NaN/inf;
-                // those would otherwise poison zoom into NaN).
-                if !dx.is_finite() || !dy.is_finite() {
-                    return;
-                }
-                let zoom_modifier = event.modifiers.platform || event.modifiers.control;
-                if zoom_modifier {
-                    // Filter the kinetic-momentum tail (sub-pixel deltas
-                    // continuing for ~1 s after the user stopped) — they
-                    // would otherwise keep nudging zoom and respawning
-                    // the SVG re-raster pipeline.
-                    if dy.abs() < 0.5 {
-                        return;
-                    }
-                    // Exponential: positive dy zooms in, negative out.
-                    // ±100 px ≈ 1.2× / 0.83×.
-                    let factor = (dy / 250.0).exp();
-                    this.image_zoom_by(factor, cx);
-                } else {
-                    // Plain scroll = classic pan. Skip on auto-fit (the
-                    // image already fills the pane and there's nothing
-                    // to reveal) so a stray trackpad gesture doesn't
-                    // accidentally promote out of fit mode.
-                    if this.active_tab().image_view.auto_fit {
-                        return;
-                    }
-                    // Shift+scroll maps vertical wheel to horizontal pan —
-                    // standard mouse-wheel convention for users without a
-                    // tilt wheel or horizontal trackpad gesture.
-                    let (pan_dx, pan_dy) = if event.modifiers.shift && dx.abs() < 0.5 {
-                        (dy, 0.0)
-                    } else {
-                        (dx, dy)
-                    };
-                    if pan_dx.abs() < 0.5 && pan_dy.abs() < 0.5 {
-                        return;
-                    }
-                    this.image_pan_by(gpui::point(px(pan_dx), px(pan_dy)), cx);
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    if event.click_count >= 2 {
-                        this.image_fit(cx);
-                    } else {
-                        this.image_start_pan(event.position, cx);
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                // If the user released the button outside the container
-                // we never saw the on_mouse_up — clear sticky pan state
-                // on the next move that arrives without a pressed Left
-                // button so the image doesn't follow the cursor with no
-                // button held.
-                if event.pressed_button != Some(MouseButton::Left) {
-                    if this.active_tab().image_view.is_panning {
-                        this.image_end_pan(cx);
-                    }
-                    return;
-                }
-                this.image_update_pan(event.position, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.image_end_pan(cx);
-                }),
-            )
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(img_styled),
-            )
-            .into_any_element()
-    }
-}
-
-/// Click handler captured by the small `−` / `+` chiclets — boxed so the
-/// helper can take heterogeneous closures by value.
-type ZoomButtonHandler = Box<dyn Fn(&mut FileViewer, &mut Context<FileViewer>)>;
-
-/// Header chiclet: `−` / `Fit | 100%` / `+`. Click on the label toggles
-/// between Fit and 100%. Buttons step zoom by 1.25× / 0.8×.
-fn image_zoom_controls(
-    zoom_label: String,
-    t: &ThemeColors,
-    cx: &mut Context<FileViewer>,
-) -> impl IntoElement {
-    let button = move |id: &'static str,
-                       glyph: &'static str,
-                       t: &ThemeColors,
-                       cx: &mut Context<FileViewer>,
-                       on_click: ZoomButtonHandler| {
-        let t_text_muted = t.text_muted;
-        let t_bg_hover = t.bg_hover;
-        div()
-            .id(id)
-            .cursor_pointer()
-            .w(px(24.0))
-            .h(px(24.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(t_bg_hover)))
-            .text_size(px(13.0))
-            .text_color(rgb(t_text_muted))
-            .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-            .child(glyph)
-    };
-    h_flex()
-        .gap(px(2.0))
-        .px(px(4.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .bg(rgb(t.bg_secondary))
-        .child(button(
-            "zoom-out",
-            "−",
-            t,
-            cx,
-            Box::new(|this, cx| this.image_zoom_by(1.0 / 1.25, cx)),
-        ))
-        .child(
-            div()
-                .id("zoom-label")
-                .cursor_pointer()
-                .min_w(px(48.0))
-                .text_align(TextAlign::Center)
-                .text_size(px(12.0))
-                .text_color(rgb(t.text_muted))
-                .rounded(px(4.0))
-                .hover(|s| s.bg(rgb(t.bg_hover)))
-                .px(px(4.0))
-                .py(px(2.0))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.active_tab().image_view.auto_fit {
-                        this.image_set_zoom(1.0, cx);
-                    } else {
-                        this.image_fit(cx);
-                    }
-                }))
-                .child(zoom_label),
-        )
-        .child(button(
-            "zoom-in",
-            "+",
-            t,
-            cx,
-            Box::new(|this, cx| this.image_zoom_by(1.25, cx)),
-        ))
-}
-
-/// Header chiclet that cycles the preview background (Checker / Light /
-/// Dark). The current option is highlighted; clicking advances to the
-/// next. Solves the "black SVG on dark theme" / "white SVG on light
-/// theme" invisibility problem.
-fn image_background_toggle(
-    current: PreviewBackground,
-    t: &ThemeColors,
-    cx: &mut Context<FileViewer>,
-) -> impl IntoElement {
-    let labels = [
-        (PreviewBackground::Checker, "Checker"),
-        (PreviewBackground::Light, "Light"),
-        (PreviewBackground::Dark, "Dark"),
-    ];
-    h_flex()
-        .gap(px(2.0))
-        .px(px(2.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .bg(rgb(t.bg_secondary))
-        .children(labels.into_iter().map(|(bg, label)| {
-            let is_active = current == bg;
-            let t_active = t.bg_selection;
-            let t_hover = t.bg_hover;
-            let t_text_primary = t.text_primary;
-            let t_text_muted = t.text_muted;
-            div()
-                .id(ElementId::Name(format!("bg-{}", label).into()))
-                .cursor_pointer()
-                .px(px(8.0))
-                .py(px(2.0))
-                .rounded(px(3.0))
-                .when(is_active, |d| d.bg(rgb(t_active)))
-                .when(!is_active, |d| d.hover(|s| s.bg(rgb(t_hover))))
-                .text_size(px(12.0))
-                .text_color(rgb(if is_active {
-                    t_text_primary
-                } else {
-                    t_text_muted
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.image_set_background(bg, cx);
-                }))
-                .child(label)
-        }))
-}
-
-/// Paint a procedural 12 px checkerboard inside `bounds`. Used as the
-/// default image-preview background — a black SVG icon stays visible
-/// against the light tiles and a white one against the dark tiles, so the
-/// user always sees at least half the artwork regardless of fill color.
-fn paint_checkerboard(bounds: gpui::Bounds<gpui::Pixels>, window: &mut gpui::Window) {
-    const TILE: f32 = 12.0;
-    let light: gpui::Rgba = gpui::Rgba {
-        r: 0.62,
-        g: 0.62,
-        b: 0.62,
-        a: 1.0,
-    };
-    let dark: gpui::Rgba = gpui::Rgba {
-        r: 0.42,
-        g: 0.42,
-        b: 0.42,
-        a: 1.0,
-    };
-    // Base fill — every "even" tile inherits this.
-    window.paint_quad(fill(bounds, light));
-    let cols = (f32::from(bounds.size.width) / TILE).ceil() as usize + 1;
-    let rows = (f32::from(bounds.size.height) / TILE).ceil() as usize + 1;
-    for row in 0..rows {
-        for col in 0..cols {
-            if (row + col) % 2 == 0 {
-                continue;
-            }
-            let x = f32::from(bounds.origin.x) + (col as f32) * TILE;
-            let y = f32::from(bounds.origin.y) + (row as f32) * TILE;
-            let tile_bounds = gpui::Bounds {
-                origin: gpui::point(px(x), px(y)),
-                size: gpui::size(px(TILE), px(TILE)),
-            };
-            window.paint_quad(fill(tile_bounds, dark));
-        }
-    }
 }
 
 impl Render for FileViewer {
@@ -1524,9 +1344,12 @@ impl Render for FileViewer {
         let is_svg = tab.is_svg;
         let is_font = tab.is_font;
         let has_revision = tab.revision.is_some();
-        let font_data = tab.font_data.clone();
+        let file_renderer = tab.file_renderer.clone();
         let display_mode = tab.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
+        let wrap_lines = tab.wrap_lines;
+        let json_pretty = tab.json_pretty;
+        let can_pretty_print = tab.json_alternate.is_some();
         // Body view selectors. Each tab renders exactly one of these branches:
         //   * show_image   — raster image, or SVG in Preview mode
         //   * show_font    — font preview (sample text + metadata)
@@ -1568,19 +1391,16 @@ impl Render for FileViewer {
         let transfer_status = self.transfer_status.clone();
 
         // Measure actual monospace character width from font metrics
-        let font = Font {
-            family: "monospace".into(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            ..Default::default()
-        };
+        let font = self.file_font.clone();
         let font_size = self.file_font_size;
+        let rendered_font_size = ui_text(font_size, cx);
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&font);
         self.measured_char_width = text_system
-            .advance(font_id, px(font_size), 'm')
+            .advance(font_id, rendered_font_size, 'm')
             .map(|size| f32::from(size.width))
-            .unwrap_or(font_size * 0.6);
+            .unwrap_or(f32::from(rendered_font_size) * 0.6);
+        self.update_source_wrap_columns(cx);
 
         // Virtualization setup
         let tab = self.active_tab();
@@ -1589,6 +1409,7 @@ impl Render for FileViewer {
         let view = cx.entity().clone();
         let scrollbar_geometry = get_scrollbar_geometry(&tab.source_scroll_handle);
         let is_dragging_scrollbar = tab.scrollbar_drag.is_some();
+        let longest_source_row = tab.longest_source_row;
 
         // Flatten the tree only when its structure changes. The sidebar list
         // renders just the visible range from these cached rows.
@@ -1728,6 +1549,9 @@ impl Render for FileViewer {
                         }
                     "b" if !modifiers.platform && !modifiers.control => {
                         this.toggle_sidebar(cx);
+                    }
+                    "z" if modifiers.alt && !is_preview && !is_img_view && !is_font_tab => {
+                        this.toggle_line_wrap(cx);
                     }
                     "c" if modifiers.platform || modifiers.control => {
                         if is_img_view || is_font_tab {
@@ -2079,16 +1903,87 @@ impl Render for FileViewer {
                                         )),
                                 )
                             })
-                            .when(show_image, |d| {
-                                let view = self.active_tab().image_view.clone();
-                                let zoom_label = if view.auto_fit {
-                                    "Fit".to_string()
-                                } else {
-                                    format!("{}%", (view.zoom * 100.0).round() as i32)
-                                };
-                                let bg = view.background;
-                                d.child(image_zoom_controls(zoom_label, &t, cx))
-                                    .child(image_background_toggle(bg, &t, cx))
+                            .when(show_source && has_file, |d| {
+                                d.child(
+                                    div()
+                                        .id("line-wrap-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(rgb(if wrap_lines {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if wrap_lines {
+                                            t.bg_secondary
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle line wrapping (Alt+Z)",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_line_wrap(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(if wrap_lines {
+                                                    t.text_primary
+                                                } else {
+                                                    t.text_secondary
+                                                }))
+                                                .child("Wrap"),
+                                        ),
+                                )
+                            })
+                            .when(show_source && can_pretty_print, |d| {
+                                d.child(
+                                    div()
+                                        .id("json-pretty-toggle")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(rgb(if json_pretty {
+                                            t.border_active
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .bg(rgb(if json_pretty {
+                                            t.bg_secondary
+                                        } else {
+                                            t.bg_primary
+                                        }))
+                                        .hover(|style| style.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "Toggle pretty-printed JSON",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_json_pretty(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(if json_pretty {
+                                                    t.text_primary
+                                                } else {
+                                                    t.text_secondary
+                                                }))
+                                                .child("Pretty"),
+                                        ),
+                                )
                             })
                             .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
                             .when(!self.is_detached, |d| {
@@ -2198,12 +2093,14 @@ impl Render for FileViewer {
                                         ),
                                 )
                             })
-                            .when(!tab_loading && !has_error && show_image, |d| {
-                                d.child(self.render_image_preview(&t, cx))
-                            })
-                            .when(!tab_loading && !has_error && show_font, |d| {
-                                d.child(render_font_preview(font_data.clone(), &t, cx))
-                            })
+                            .when(
+                                !tab_loading && !has_error && (show_image || show_font),
+                                |d| {
+                                    d.when_some(file_renderer.clone(), |d, renderer| {
+                                        d.child(renderer)
+                                    })
+                                },
+                            )
                             .when(!tab_loading && !has_error && show_source, |d| {
                                 // SVG in Source mode with no decoded XML (loader
                                 // got non-UTF-8 bytes) would render as a blank
@@ -2239,20 +2136,38 @@ impl Render for FileViewer {
                                             uniform_list(
                                                 "file-lines",
                                                 line_count,
-                                                move |range, _window, cx| {
+                                                move |range, window, cx| {
                                                     let tc = tc.clone();
+                                                    let window_width = window.viewport_size().width;
                                                     view_clone.update(cx, |this, cx| {
-                                                        this.render_visible_lines(range, &tc, cx)
+                                                        this.render_visible_lines(
+                                                            range,
+                                                            window_width,
+                                                            &tc,
+                                                            cx,
+                                                        )
                                                     })
                                                 },
                                             )
                                             .size_full()
                                             .bg(rgb(t.bg_secondary))
                                             .cursor(CursorStyle::IBeam)
+                                            .with_width_from_item(Some(longest_source_row))
+                                            .with_horizontal_sizing_behavior(if wrap_lines {
+                                                ListHorizontalSizingBehavior::FitList
+                                            } else {
+                                                ListHorizontalSizingBehavior::Unconstrained
+                                            })
                                             .track_scroll(
                                                 &self.active_tab().source_scroll_handle,
                                             ),
                                         )
+                                        .when(!wrap_lines, |d| {
+                                            d.child(source_horizontal_scrollbar(
+                                                "file-source-horizontal-scrollbar",
+                                                &self.active_tab().source_scroll_handle,
+                                            ))
+                                        })
                                         .when_some(
                                             scrollbar_geometry,
                                             |d, (_, _, thumb_y, thumb_height)| {
@@ -2347,7 +2262,7 @@ impl Render for FileViewer {
                                                     div()
                                                         .px(px(14.0))
                                                         .py(px(10.0))
-                                                        .font_family("monospace")
+                                                        .font(this.file_font.clone())
                                                         .text_size(ui_text(
                                                             this.file_font_size,
                                                             cx,
@@ -2567,7 +2482,7 @@ impl Render for FileViewer {
                                             .when(!is_preview_mode, |d| {
                                                 d.child(format!(
                                                     "{} lines",
-                                                    self.active_tab().line_count
+                                                    self.active_tab().highlighted_lines.len()
                                                 ))
                                             })
                                             .when(is_preview_mode, |d| {
@@ -2677,120 +2592,51 @@ impl FileViewer {
     }
 }
 
-/// Render the font-preview body: a pangram in descending sizes followed by
-/// a metadata table. `data` is None while the loader is still running or
-/// if the font failed to parse (caller already gates on error state, so
-/// None here means the font Arc was somehow dropped — render a placeholder).
-fn render_font_preview(
-    data: Option<Arc<FontData>>,
-    t: &ThemeColors,
-    cx: &mut Context<FileViewer>,
-) -> impl IntoElement {
-    let Some(data) = data else {
-        return div()
-            .id("font-empty")
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(t.bg_secondary))
-            .child(
-                div()
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("Font not available"),
-            )
-            .into_any_element();
-    };
-
-    let family: SharedString = data.family_name.clone().into();
-    let sample = "The quick brown fox jumps over the lazy dog";
-    let sample_sizes_px: [f32; 5] = [48.0, 32.0, 24.0, 18.0, 14.0];
-
-    let sample_block = v_flex()
-        .gap(px(20.0))
-        .children(sample_sizes_px.iter().map(|&size| {
-            div()
-                .text_size(px(size))
-                .text_color(rgb(t.text_primary))
-                .font_family(family.clone())
-                .child(sample.to_string())
-        }));
-
-    let metadata_rows: Vec<(&str, String)> = vec![
-        ("Family", data.family_name.clone()),
-        ("Full name", data.full_name.clone()),
-        ("Style", data.style.clone()),
-        ("Weight class", data.weight_class.to_string()),
-        (
-            "Italic",
-            if data.is_italic { "yes" } else { "no" }.to_string(),
-        ),
-        ("Glyphs", data.num_glyphs.to_string()),
-        ("Units per em", data.units_per_em.to_string()),
-        (
-            "Version",
-            if data.version.is_empty() {
-                "—".to_string()
-            } else {
-                data.version.clone()
-            },
-        ),
-    ];
-
-    let metadata_block = v_flex()
-        .gap(px(6.0))
-        .children(metadata_rows.into_iter().map(|(label, value)| {
-            h_flex()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .w(px(120.0))
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(value),
-                )
-        }));
-
-    div()
-        .id("font-preview")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .bg(rgb(t.bg_secondary))
-        .child(
-            v_flex()
-                .gap(px(32.0))
-                .p(px(32.0))
-                .child(sample_block)
-                .child(div().h(px(1.0)).bg(rgb(t.border)).w_full())
-                .child(metadata_block),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod markdown_selection_tests {
     use super::{
         MARKDOWN_TABLE_SCROLLBAR_GUTTER, byte_offset_for_char, char_offset_for_byte,
-        markdown_table_scrollbar, markdown_word_boundaries,
+        markdown_table_scrollbar, markdown_word_boundaries, source_horizontal_scrollbar,
     };
     use gpui::prelude::*;
     use gpui::{
-        Context, Render, ScrollHandle, StatefulInteractiveElement, TestAppContext,
-        VisualTestContext, Window, div, px,
+        Context, ListHorizontalSizingBehavior, Render, ScrollHandle, StatefulInteractiveElement,
+        TestAppContext, UniformListScrollHandle, VisualTestContext, Window, div, px, uniform_list,
     };
     use okena_core::theme::DARK_THEME;
     use okena_markdown::{MarkdownDocument, RenderedNode};
 
     struct MarkdownTableScrollTest {
         scroll_handle: ScrollHandle,
+    }
+
+    struct SourceHorizontalScrollTest {
+        scroll_handle: UniformListScrollHandle,
+    }
+
+    impl Render for SourceHorizontalScrollTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(360.0)).h(px(200.0)).child(
+                div()
+                    .relative()
+                    .size_full()
+                    .debug_selector(|| "test-source-container".to_string())
+                    .child(
+                        uniform_list("test-source-list", 1, |_, _, _| {
+                            vec![div().w(px(4000.0)).h(px(20.0))]
+                        })
+                        .size_full()
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .track_scroll(&self.scroll_handle),
+                    )
+                    .child(
+                        source_horizontal_scrollbar("test-source-scrollbar", &self.scroll_handle)
+                            .debug_selector(|| "test-source-scrollbar-layer".to_string()),
+                    ),
+            )
+        }
     }
 
     impl Render for MarkdownTableScrollTest {
@@ -2927,5 +2773,31 @@ mod markdown_selection_tests {
             scroll_handle.offset().x < px(0.0),
             "horizontal wheel input must move the horizontal scrollbar"
         );
+    }
+
+    #[gpui::test]
+    fn source_list_exposes_horizontal_overflow_and_scrollbar(cx: &mut TestAppContext) {
+        let scroll_handle = UniformListScrollHandle::new();
+        let handle_for_view = scroll_handle.clone();
+        cx.update(gpui_component::init);
+        let (_, vcx) = cx.add_window_view(move |_, _| SourceHorizontalScrollTest {
+            scroll_handle: handle_for_view,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.run_until_parked();
+        vcx.update(|window, cx| _ = window.draw(cx));
+
+        let container_bounds = vcx
+            .debug_bounds("test-source-container")
+            .expect("source container should be rendered");
+        let scrollbar_bounds = vcx
+            .debug_bounds("test-source-scrollbar-layer")
+            .expect("source scrollbar should be rendered");
+
+        assert!(
+            scroll_handle.0.borrow().base_handle.max_offset().x > px(0.0),
+            "wide source rows must produce horizontal overflow"
+        );
+        assert_eq!(scrollbar_bounds, container_bounds);
     }
 }

@@ -379,6 +379,63 @@ impl UrlDetector {
     }
 }
 
+/// What an OSC 8 hyperlink points at.
+pub(crate) enum HyperlinkTarget {
+    /// An absolute URI — hand it to the system opener.
+    Url,
+    /// A filesystem path, resolved against the terminal's cwd by the daemon.
+    Path {
+        path: String,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+}
+
+/// Classify an OSC 8 URI. CLIs emit schemeless targets relative to the shell's
+/// cwd (`docs/foo.md#anchor`), which no browser opener can resolve.
+pub(crate) fn classify_hyperlink(uri: &str) -> HyperlinkTarget {
+    if uri.starts_with("file://") {
+        return HyperlinkTarget::Path {
+            path: uri.to_string(),
+            line: None,
+            col: None,
+        };
+    }
+    if has_uri_scheme(uri) {
+        return HyperlinkTarget::Url;
+    }
+    let path = uri.split('#').next().unwrap_or(uri);
+    let (line, col) = parse_line_col_suffix(path);
+    HyperlinkTarget::Path {
+        path: path.to_string(),
+        line,
+        col,
+    }
+}
+
+/// Does `uri` start with an RFC 3986 scheme? A one-letter prefix is a Windows
+/// drive, not a scheme.
+fn has_uri_scheme(uri: &str) -> bool {
+    let Some(colon) = uri.find(':') else {
+        return false;
+    };
+    let scheme = &uri[..colon];
+    scheme.len() > 1
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Parse the `:line[:col]` suffix that `strip_line_col_suffix` removes.
+fn parse_line_col_suffix(path: &str) -> (Option<u32>, Option<u32>) {
+    let suffix = &path[strip_line_col_suffix(path).len()..];
+    let mut parts = suffix.split(':').skip(1);
+    let line = parts.next().and_then(|part| part.parse().ok());
+    let col = parts.next().and_then(|part| part.parse().ok());
+    (line, col)
+}
+
 /// Strip `:line` or `:line:col` suffix from a path string.
 pub(crate) fn strip_line_col_suffix(path: &str) -> &str {
     if let Some(colon_pos) = path.rfind(':') {
@@ -395,4 +452,67 @@ pub(crate) fn strip_line_col_suffix(path: &str) -> &str {
         }
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HyperlinkTarget, classify_hyperlink};
+
+    fn path_of(uri: &str) -> (String, Option<u32>, Option<u32>) {
+        match classify_hyperlink(uri) {
+            HyperlinkTarget::Path { path, line, col } => (path, line, col),
+            HyperlinkTarget::Url => panic!("{uri} classified as a URL"),
+        }
+    }
+
+    #[test]
+    fn schemed_uris_are_urls() {
+        for uri in [
+            "https://example.com/a",
+            "http://example.com",
+            "mailto:a@b.c",
+            "vscode://file/tmp/x",
+        ] {
+            assert!(
+                matches!(classify_hyperlink(uri), HyperlinkTarget::Url),
+                "{uri} should be a URL"
+            );
+        }
+    }
+
+    #[test]
+    fn file_urls_stay_intact_for_the_daemon() {
+        assert_eq!(
+            path_of("file:///tmp/a.md"),
+            ("file:///tmp/a.md".to_string(), None, None)
+        );
+    }
+
+    #[test]
+    fn relative_targets_are_paths() {
+        assert_eq!(
+            path_of("docs/ideas/checker.md"),
+            ("docs/ideas/checker.md".to_string(), None, None)
+        );
+        assert_eq!(
+            path_of("/abs/src/main.rs"),
+            ("/abs/src/main.rs".to_string(), None, None)
+        );
+    }
+
+    #[test]
+    fn fragment_is_dropped_and_line_col_parsed() {
+        assert_eq!(
+            path_of("docs/specs/plan.md#phase-8--research"),
+            ("docs/specs/plan.md".to_string(), None, None)
+        );
+        assert_eq!(
+            path_of("src/main.rs:42:7"),
+            ("src/main.rs:42:7".to_string(), Some(42), Some(7))
+        );
+        assert_eq!(
+            path_of("src/main.rs:42"),
+            ("src/main.rs:42".to_string(), Some(42), None)
+        );
+    }
 }

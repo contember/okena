@@ -1,20 +1,23 @@
 //! GPUI-free git-status polling for the headless daemon.
 //!
-//! Projects visible in any window, or owning a terminal streamed by a client
-//! that never declared a viewport, stay on the responsive tier: HEAD every
-//! 250ms and full status every 5s. A client that declares its viewport
-//! (`SetVisibleProjects`) counts only that set — the desktop subscribes to
+//! Projects in a client's declared viewport (`SetVisibleProjects`), or owning a
+//! terminal streamed by a client that never declared one, stay on the
+//! responsive tier: HEAD every 250ms and full status every 5s. A declared
+//! viewport is the whole truth for that client — the desktop subscribes to
 //! every terminal it mirrors, so its subscriptions say nothing about what is
-//! on screen. Everything else uses bounded fallback cadences (2s HEAD, 30s full
-//! status). Explicit actions and detected HEAD changes still trigger an
-//! immediate targeted refresh. Cached statuses for projects not selected in a
-//! cycle remain published, so tiering changes freshness rather than visibility.
+//! on screen — and any declared viewport supersedes the workspace's own window
+//! state: visibility is client-owned (`window-layout.json`), so the daemon's
+//! copy is a stale legacy set, consulted only while nobody has declared one.
+//! Everything else uses bounded fallback cadences (2s HEAD, 30s full status).
+//! Explicit actions and detected HEAD changes still trigger an immediate
+//! targeted refresh. Cached statuses for projects not selected in a cycle
+//! remain published, so tiering changes freshness rather than visibility.
 //!
 //! The GitHub PR/CI fan-out is deliberately *narrower* than the local tier: it
-//! covers only projects visible in a window (plus explicitly requested ones),
-//! is scheduled per project by [`GithubPollSchedule`], skips any project whose
-//! upstream commit hasn't moved since its last settled result, and parks itself
-//! when GitHub reports the API rate limit as exhausted.
+//! covers only that visible set (plus explicitly requested ones), is scheduled
+//! per project by [`GithubPollSchedule`], skips any project whose upstream
+//! commit hasn't moved since its last settled result, and parks itself when
+//! GitHub reports the API rate limit as exhausted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -140,27 +143,17 @@ struct ProjectPoll {
     cached_pr_number: Option<u32>,
 }
 
-/// Projects the user can currently see. The GitHub fan-out is scoped to these:
-/// a badge nobody is looking at is not worth GitHub API budget.
-///
-/// Two sources, unioned. The workspace's own hidden set covers a daemon driving
-/// its own surface, but for a desktop client it is a stale copy that the client
-/// never writes to — visibility is client-owned presentation state, persisted
-/// client-side in `window-layout.json` under different window ids. So each
-/// connected client declares what it renders (`WsInbound::SetVisibleProjects`),
-/// and that is the authority for its own viewport. A client that declares
-/// nothing (older build, no viewport yet) simply contributes nothing.
+/// Union of declared viewports (`SetVisibleProjects`). The workspace's own window
+/// state counts only while no connection has declared one: visibility is
+/// client-owned (`window-layout.json`), so the daemon's copy is a stale legacy set.
 fn visible_project_ids(
     workspace: &Workspace,
     remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
 ) -> HashSet<String> {
-    let mut visible = workspace.all_visible_project_ids();
-    if let Ok(declared) = remote_visible_projects.read() {
-        for project_ids in declared.values() {
-            visible.extend(project_ids.iter().cloned());
-        }
+    match remote_visible_projects.read() {
+        Ok(declared) if !declared.is_empty() => declared.values().flatten().cloned().collect(),
+        _ => workspace.all_visible_project_ids(),
     }
-    visible
 }
 
 /// Visible projects plus any owning a terminal streamed by a connection that
@@ -1172,7 +1165,7 @@ mod tests {
         assert_eq!(changed, vec!["hidden".to_string()]);
     }
 
-    fn hidden_project(id: &str, terminal_id: &str) -> okena_state::ProjectData {
+    fn project_with_terminal(id: &str, terminal_id: &str) -> okena_state::ProjectData {
         okena_state::ProjectData {
             id: id.to_string(),
             name: "Project".to_string(),
@@ -1202,16 +1195,29 @@ mod tests {
         }
     }
 
+    fn workspace_data_with_projects(projects: &[(&str, &str)]) -> okena_state::WorkspaceData {
+        let mut data = empty_workspace_data();
+        for (id, terminal_id) in projects {
+            data.projects.push(project_with_terminal(id, terminal_id));
+            data.project_order.push(id.to_string());
+        }
+        data
+    }
+
     /// Every project is hidden in the daemon's own window, so relevance comes
     /// only from what connected clients declare or subscribe to.
     fn workspace_with_hidden_projects(projects: &[(&str, &str)]) -> Workspace {
-        let mut data = empty_workspace_data();
-        for (id, terminal_id) in projects {
-            data.projects.push(hidden_project(id, terminal_id));
-            data.project_order.push(id.to_string());
+        let mut data = workspace_data_with_projects(projects);
+        for (id, _) in projects {
             data.main_window.hidden_project_ids.insert(id.to_string());
         }
         Workspace::new(data)
+    }
+
+    /// Every project is visible in the daemon's own persisted window state —
+    /// the legacy copy a desktop client never updates.
+    fn workspace_with_daemon_visible_projects(projects: &[(&str, &str)]) -> Workspace {
+        Workspace::new(workspace_data_with_projects(projects))
     }
 
     /// The regression this whole path exists for: a desktop client keeps its
@@ -1241,6 +1247,72 @@ mod tests {
         ]));
         let visible = visible_project_ids(&workspace, &declared);
         assert!(visible.contains("desktop") && visible.contains("phone"));
+    }
+
+    /// A desktop client's hides live in its own `window-layout.json`; the
+    /// daemon's persisted window state is a stale copy that must not widen the
+    /// responsive tier once any client has said what it renders.
+    #[test]
+    fn a_declared_viewport_supersedes_the_daemons_own_window_state() {
+        let workspace =
+            workspace_with_daemon_visible_projects(&[("stale", "t-stale"), ("shown", "t-shown")]);
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        assert_eq!(
+            visible_project_ids(&workspace, &declared),
+            HashSet::from(["shown".to_string()])
+        );
+        let no_subscriptions = RwLock::new(HashMap::new());
+        assert_eq!(
+            streaming_project_ids(&workspace, &no_subscriptions, &declared),
+            HashSet::from(["shown".to_string()])
+        );
+
+        declared.write().unwrap().insert(1, HashSet::new());
+        assert!(visible_project_ids(&workspace, &declared).is_empty());
+    }
+
+    /// A headless daemon serving clients that never declare a viewport (TUI,
+    /// CLI, nobody at all) still has only its own window state to go by.
+    #[test]
+    fn the_daemons_own_window_state_counts_while_nobody_has_declared() {
+        let workspace = workspace_with_daemon_visible_projects(&[("stale", "t-stale")]);
+        let nothing_declared = RwLock::new(HashMap::new());
+
+        assert!(visible_project_ids(&workspace, &nothing_declared).contains("stale"));
+    }
+
+    #[test]
+    fn the_gh_fan_out_follows_the_declared_viewport() {
+        let workspace =
+            workspace_with_daemon_visible_projects(&[("stale", "t-stale"), ("shown", "t-shown")]);
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+        let visible = visible_project_ids(&workspace, &declared);
+        let projects: Vec<(String, String)> = workspace
+            .projects()
+            .iter()
+            .map(|project| (project.id.clone(), project.path.clone()))
+            .collect();
+
+        let polls = select_github_polls(
+            &projects,
+            &visible,
+            &GithubPollSchedule::default(),
+            &HashMap::new(),
+            1,
+            true,
+            &HashSet::new(),
+            false,
+        );
+
+        let polled: Vec<&str> = polls.iter().map(|poll| poll.id.as_str()).collect();
+        assert_eq!(polled, ["shown"]);
     }
 
     /// The desktop subscribes to every terminal it mirrors, so its

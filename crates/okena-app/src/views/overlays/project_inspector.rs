@@ -39,8 +39,13 @@ impl InspectorScreen {
     }
 
     fn release_image_assets(&self, cx: &mut App) {
-        if let Self::File(viewer) = self {
-            viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+        match self {
+            Self::File(viewer) => {
+                viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+            }
+            Self::Diff(viewer) => {
+                viewer.update(cx, |viewer, cx| viewer.release_all_image_assets(cx));
+            }
         }
     }
 }
@@ -60,8 +65,8 @@ impl ProjectInspector {
         file_config: FileViewerConfig,
         cx: &mut Context<Self>,
     ) -> Self {
-        let main_file_viewer =
-            cx.new(|cx| FileViewer::new_browse(context.file_scope.clone(), file_config, cx));
+        let main_file_viewer = cx
+            .new(|cx| FileViewer::new_browse(context.file_scope.clone(), file_config.clone(), cx));
         let mut inspector = Self {
             focus_handle: cx.focus_handle(),
             context,
@@ -118,7 +123,7 @@ impl ProjectInspector {
         cx: &mut Context<Self>,
     ) {
         self.context = context;
-        self.file_config = file_config;
+        self.file_config = file_config.clone();
         self.clear_screens(cx);
         let viewer = self.new_diff_viewer(select_file, mode, commit_nav, false, cx);
         self.screens.push(InspectorScreen::Diff(viewer));
@@ -157,9 +162,14 @@ impl ProjectInspector {
         cx: &mut Context<Self>,
     ) {
         self.context = context;
-        self.file_config = file_config;
+        self.file_config = file_config.clone();
         self.main_file_viewer.update(cx, |viewer, cx| {
-            viewer.update_config(file_config.font_size, file_config.is_dark, cx);
+            viewer.update_config(
+                file_config.font_size,
+                file_config.font_family.clone(),
+                file_config.is_dark,
+                cx,
+            );
             viewer.set_can_go_back(false, cx);
             viewer.set_detached(self.is_detached, cx);
             if viewer.is_scope(&self.context.file_scope.project_fs) {
@@ -185,8 +195,14 @@ impl ProjectInspector {
 
     fn push_file(&mut self, target: FileTarget, cx: &mut Context<Self>) {
         let path = target.relative_path.clone();
-        let viewer = cx
-            .new(|cx| FileViewer::new(self.context.file_scope.clone(), self.file_config, path, cx));
+        let viewer = cx.new(|cx| {
+            FileViewer::new(
+                self.context.file_scope.clone(),
+                self.file_config.clone(),
+                path,
+                cx,
+            )
+        });
         viewer.update(cx, |viewer, cx| {
             viewer.set_can_go_back(true, cx);
             viewer.set_detached(self.is_detached, cx);

@@ -30,7 +30,9 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use project::{MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal};
+pub use project::{
+    MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
+};
 
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
@@ -310,6 +312,12 @@ pub fn execute_action(
             file_path,
             mode,
         } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => git::binary_file_contents(ws, project_id, old_path, new_path, mode),
         ActionRequest::GitCommitGraph {
             project_id,
             count,

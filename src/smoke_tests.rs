@@ -74,6 +74,7 @@ mod tests {
                                 diff_view_mode: s.settings.diff_view_mode,
                                 diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
                                 file_font_size: s.settings.file_font_size,
+                                file_font_family: s.settings.file_font_family.clone(),
                                 is_dark: true,
                             })
                             .ok()
@@ -104,6 +105,7 @@ mod tests {
         cx.update(|cx| {
             let settings = okena_views_git::settings::git_settings(cx);
             assert!(settings.file_font_size > 0.0);
+            assert!(!settings.file_font_family.is_empty());
         });
     }
 

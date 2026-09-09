@@ -564,6 +564,7 @@ fn main() {
                             diff_view_mode: s.settings.diff_view_mode,
                             diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
                             file_font_size: s.settings.file_font_size,
+                            file_font_family: s.settings.file_font_family.clone(),
                             is_dark,
                         }).ok()
                     }
@@ -605,6 +606,7 @@ fn main() {
                                 state.settings.diff_view_mode = gs.diff_view_mode;
                                 state.settings.diff_ignore_whitespace = gs.diff_ignore_whitespace;
                                 state.settings.file_font_size = gs.file_font_size;
+                                state.settings.file_font_family = gs.file_font_family;
                                 state.save_and_notify(cx);
                             });
                         }
@@ -677,6 +679,22 @@ fn main() {
         // Register UI font size provider for all crates
         cx.set_global(okena_ui::tokens::GlobalUiFontSize(|cx| {
             settings::settings_entity(cx).read(cx).settings.ui_font_size
+        }));
+        cx.set_global(okena_ui::tokens::GlobalUiFontFamily(|cx| {
+            settings::settings_entity(cx)
+                .read(cx)
+                .settings
+                .ui_font_family
+                .clone()
+                .into()
+        }));
+        cx.set_global(okena_ui::tokens::GlobalFileFontFamily(|cx| {
+            settings::settings_entity(cx)
+                .read(cx)
+                .settings
+                .file_font_family
+                .clone()
+                .into()
         }));
 
         // NOTE: Terminal and git view settings are now served through

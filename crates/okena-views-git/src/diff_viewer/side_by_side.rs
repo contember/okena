@@ -260,7 +260,7 @@ impl DiffViewer {
             .w_full()
             .h(px(line_height))
             .text_size(px(font_size))
-            .font_family("monospace")
+            .font(self.file_font.clone())
             .flex()
             .child(self.render_side_column_content(
                 &left,

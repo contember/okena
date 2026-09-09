@@ -133,7 +133,7 @@ impl ContentSearchDialog {
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(ui_text_ms(cx))
-                    .font_family("monospace")
+                    .font(okena_ui::tokens::file_font(cx))
                     .text_color(rgb(if is_context {
                         t.text_muted
                     } else {

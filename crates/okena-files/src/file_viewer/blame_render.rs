@@ -21,6 +21,7 @@ impl FileViewer {
     pub(super) fn render_blame_cell(
         &self,
         line_number_0_based: usize,
+        show_content: bool,
         line_height: f32,
         char_width: f32,
         t: &ThemeColors,
@@ -31,6 +32,15 @@ impl FileViewer {
         }
         let tab = self.active_tab();
         let col_width = BLAME_COL_CHARS * char_width;
+        if !show_content {
+            return Some(
+                div()
+                    .w(px(col_width + BLAME_COL_PADDING_RIGHT))
+                    .h(px(line_height))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            );
+        }
 
         match &tab.blame {
             BlameLoadState::Error(_) => None,
@@ -163,7 +173,7 @@ fn render_committed_cell(
             div()
                 .w(px(7.0 * 7.0))
                 .text_color(rgb(hash_color))
-                .font_family("monospace")
+                .font(okena_ui::tokens::file_font(cx))
                 .child(hash),
         )
         .child(div().text_color(author_color).child(author))
