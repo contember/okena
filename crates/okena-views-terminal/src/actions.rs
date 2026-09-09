@@ -29,6 +29,8 @@ gpui::actions!(
         CloseSearch,
         SendTab,
         SendBacktab,
+        ScrollUp,
+        ScrollDown,
         ZoomIn,
         ZoomOut,
         ResetZoom,
