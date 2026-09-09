@@ -102,9 +102,9 @@ impl DetachedTerminalView {
         }
     }
 
-    fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         // Forward keys to terminal
-        handle_terminal_key_input(&self.terminal, event);
+        handle_terminal_key_input(&self.terminal, event, cx);
     }
 
     fn handle_reattach(&mut self, cx: &mut Context<Self>) {

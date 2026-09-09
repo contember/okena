@@ -115,8 +115,13 @@ impl TerminalHolder {
                     flags |= 32;
                 }
 
+                // alacritty keeps the zero-width marks beside `cell.c`, so the
+                // base char alone loses the accent of decomposed text.
+                let mut character = String::from(cell.c);
+                character.extend(cell.zerowidth().into_iter().flatten());
+
                 cells.push(CellData {
-                    character: cell.c.to_string(),
+                    character,
                     fg: fg_argb,
                     bg: bg_argb,
                     flags,
@@ -280,6 +285,24 @@ mod tests {
             .map(|c| c.character.as_str())
             .collect();
         assert_eq!(text, "Hello, world!");
+    }
+
+    #[test]
+    fn combining_marks_stay_with_their_base_char() {
+        let holder = TerminalHolder::new(80, 24);
+        holder.process_output("e\u{0301}x".as_bytes());
+        let cells = holder.get_visible_cells(&DARK_THEME);
+        assert_eq!(cells[0].character, "e\u{0301}");
+        assert_eq!(cells[1].character, "x");
+    }
+
+    #[test]
+    fn a_mark_standing_over_a_blank_cell_survives() {
+        let holder = TerminalHolder::new(80, 24);
+        holder.process_output(" \u{0301}x".as_bytes());
+        let cells = holder.get_visible_cells(&DARK_THEME);
+        assert_eq!(cells[0].character, " \u{0301}");
+        assert_eq!(cells[1].character, "x");
     }
 
     #[test]

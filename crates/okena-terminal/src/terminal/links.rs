@@ -6,6 +6,7 @@ use std::hash::{DefaultHasher, Hasher};
 use std::sync::OnceLock;
 
 use super::Terminal;
+use super::search::GridText;
 use super::types::DetectedLink;
 use super::url_detect::{parse_path_line_col, trim_url_trailing};
 
@@ -17,7 +18,7 @@ use super::url_detect::{parse_path_line_col, trim_url_trailing};
 pub struct UrlScanCache {
     cols: usize,
     /// Text of every visual row as of the last scan; buffers are reused.
-    row_texts: Vec<String>,
+    rows: Vec<GridText>,
     row_wrapline: Vec<bool>,
     row_hashes: Vec<u64>,
     lines: Vec<ScannedLine>,
@@ -49,22 +50,21 @@ impl UrlScanCache {
             self.row_hashes.clear();
             self.lines.clear();
         }
-        self.row_texts.resize_with(screen_lines, String::new);
+        self.rows.resize_with(screen_lines, GridText::default);
         self.row_wrapline.resize(screen_lines, false);
 
         let mut hashes = Vec::with_capacity(screen_lines);
         let mut changed = Vec::with_capacity(screen_lines);
-        for (visual_row, text) in self.row_texts.iter_mut().enumerate() {
+        for (visual_row, text) in self.rows.iter_mut().enumerate() {
             let row = &grid[Line(visual_row as i32 - display_offset)];
-            text.clear();
-            for col in 0..cols {
-                text.push(row[Column(col)].c);
-            }
+            text.rebuild(row, cols);
             let wrapline = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
             self.row_wrapline[visual_row] = wrapline;
 
+            // A row's columns follow from its text: a char's cell width is
+            // fixed, so equal text under an unchanged `cols` maps identically.
             let mut hasher = DefaultHasher::new();
-            hasher.write(text.as_bytes());
+            hasher.write(text.text().as_bytes());
             hasher.write_u8(u8::from(wrapline));
             let hash = hasher.finish();
             changed.push(self.row_hashes.get(visual_row) != Some(&hash));
@@ -78,7 +78,7 @@ impl UrlScanCache {
     /// `[start, last_read]` are unchanged, rescans the rest, and renumbers the
     /// wrap groups sequentially so the result matches a full scan.
     fn scan(&mut self, changed: &[bool]) -> Vec<DetectedLink> {
-        let screen_lines = self.row_texts.len();
+        let screen_lines = self.rows.len();
         let mut previous = std::mem::take(&mut self.lines).into_iter().peekable();
         let mut lines = Vec::new();
         let mut phase1 = Vec::new();
@@ -107,7 +107,7 @@ impl UrlScanCache {
                 Some(line) => line,
                 None => {
                     self.recomputed_lines += 1;
-                    scan_logical_line(&self.row_texts, &self.row_wrapline, start, end)
+                    scan_logical_line(&self.rows, &self.row_wrapline, start, end)
                 }
             };
 
@@ -262,20 +262,20 @@ fn url_char(c: char) -> bool {
 
 /// Runs the detection for the logical line at visual rows `start..=end`:
 /// the regex over the joined rows, then the TUI-wrap extension of its URLs.
-fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usize) -> ScannedLine {
+fn scan_logical_line(rows: &[GridText], wrapline: &[bool], start: usize, end: usize) -> ScannedLine {
     let regex = link_regex();
-    let screen_lines = texts.len();
+    let screen_lines = rows.len();
     let mut last_read = end;
 
     let mut combined_text = String::new();
-    // (visual_row, offset_in_combined, leading_spaces_stripped)
+    // (visual_row, offset_in_combined, bytes of leading padding stripped)
     let mut row_offsets: Vec<(usize, usize, usize)> = Vec::new();
 
     // Collect wrapped lines into one logical line
-    for (visual_row, row_text) in texts.iter().enumerate().take(end + 1).skip(start) {
+    for (visual_row, row) in rows.iter().enumerate().take(end + 1).skip(start) {
         // Trim trailing spaces — URLs/paths never end with spaces,
         // and this allows the regex to match across padded line breaks.
-        let rtrimmed = row_text.trim_end_matches(' ');
+        let rtrimmed = row.text().trim_end_matches(' ');
 
         // For continuation rows, also strip leading spaces (TUI padding)
         let (text_to_add, leading_stripped) = if combined_text.is_empty() {
@@ -334,9 +334,12 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
             let seg_start = match_start.max(row_start_offset);
             let seg_end = trimmed_end.min(row_end_offset);
 
-            let col_start =
-                combined_text[row_start_offset..seg_start].chars().count() + leading_stripped;
-            let len = combined_text[seg_start..seg_end].chars().count();
+            // Back to the row's own bytes: the segment was copied verbatim out
+            // of it, past the padding the join stripped.
+            let row = &rows[phys_row];
+            let byte_in_row = |offset: usize| offset - row_start_offset + leading_stripped;
+            let col_start = row.col_at_byte(byte_in_row(seg_start));
+            let len = row.col_at_byte(byte_in_row(seg_end)) - col_start;
 
             if len > 0 {
                 phase1.push(DetectedLink {
@@ -410,13 +413,13 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
             continue;
         }
 
-        let match_rtrimmed = texts[m_row].trim_end();
+        let match_rtrimmed = rows[m_row].text().trim_end();
 
         // A mid-token wrap runs the URL into the layout edge, so the
         // URL is the last thing on its row.  Anything after it — a
         // dash, a bracket, prose — means the row had room left and the
         // break was a word break, not a wrap.
-        if match_rtrimmed.chars().count() != m_col + m_len {
+        if rows[m_row].col_at_byte(match_rtrimmed.len()) != m_col + m_len {
             idx = next_idx;
             continue;
         }
@@ -433,7 +436,8 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
             }
             last_read = last_read.max(next_row);
 
-            let next_rtrimmed = texts[next_row].trim_end();
+            let next_row_text = &rows[next_row];
+            let next_rtrimmed = next_row_text.text().trim_end();
 
             // A mid-token wrap fills the row to the layout edge, so a
             // continuation can never be wider than the row it
@@ -441,13 +445,14 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
             // break — the URL ended on its own line.  No slack: the
             // edge is exact, and slack is what let a 3-column-longer
             // continuation through.
-            if next_rtrimmed.chars().count() > url_end_col {
+            if next_row_text.col_at_byte(next_rtrimmed.len()) > url_end_col {
                 break;
             }
 
             // Strip leading whitespace (TUI indentation).
             let content = next_rtrimmed.trim_start_matches(' ');
-            let indent = next_rtrimmed.len() - content.len();
+            let indent_bytes = next_rtrimmed.len() - content.len();
+            let indent = next_row_text.col_at_byte(indent_bytes);
 
             if content.is_empty() {
                 break;
@@ -488,15 +493,18 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
                 break;
             }
 
-            // Take URL-compatible chars as extension.
-            let ext_char_len = content.chars().take_while(|c| url_char(*c)).count();
-            if ext_char_len == 0 {
+            // Take URL-compatible cells as extension; a cell's zero-width
+            // marks ride along with the base char they stand on.
+            let mut ext_byte_len = 0;
+            for (offset, c) in content.char_indices() {
+                if next_row_text.starts_cell(indent_bytes + offset) && !url_char(c) {
+                    break;
+                }
+                ext_byte_len = offset + c.len_utf8();
+            }
+            if ext_byte_len == 0 {
                 break;
             }
-            let ext_byte_len = content
-                .char_indices()
-                .nth(ext_char_len)
-                .map_or(content.len(), |(b, _)| b);
             let ext_raw = &content[..ext_byte_len];
 
             // Trim the FULL combined URL, not just the fragment,
@@ -542,13 +550,14 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
 
             // Commit extension.
             let ext_trimmed_len = ext_trimmed.len();
-            let ext_trimmed_chars = ext_trimmed.chars().count();
+            let ext_trimmed_cols =
+                next_row_text.col_at_byte(indent_bytes + ext_trimmed_len) - indent;
             extended_url.push_str(ext_trimmed);
 
             phase2.push(DetectedLink {
                 line: next_row as i32,
                 col: indent,
-                len: ext_trimmed_chars,
+                len: ext_trimmed_cols,
                 text: String::new(), // updated below
                 file_line: None,
                 file_col: None,
@@ -568,7 +577,7 @@ fn scan_logical_line(texts: &[String], wrapline: &[bool], start: usize, end: usi
                 break;
             }
 
-            url_end_col = indent + ext_char_len;
+            url_end_col = next_row_text.col_at_byte(indent_bytes + ext_byte_len);
             current_row = next_row;
         }
 
@@ -776,6 +785,44 @@ mod tests {
                 cell_height: 16.0,
             }),
         }
+    }
+
+    fn detected(text: &str, cols: u16) -> Vec<super::DetectedLink> {
+        let terminal = Terminal::new(
+            "links".into(),
+            TerminalSize {
+                cols,
+                rows: 3,
+                cell_width: 8.0,
+                cell_height: 16.0,
+            },
+            Arc::new(NullTransport),
+            "/tmp".into(),
+        );
+        terminal.process_output(text.as_bytes());
+        terminal.detect_urls()
+    }
+
+    #[test]
+    fn a_url_carrying_a_combining_mark_keeps_it_and_its_columns() {
+        let links = detected("see https://example.com/cafe\u{0301}x rest", 60);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "https://example.com/cafe\u{0301}x");
+        assert_eq!(
+            (links[0].col, links[0].len),
+            (4, 25),
+            "the mark rides on its base cell and takes no column"
+        );
+    }
+
+    #[test]
+    fn a_wide_char_before_a_path_shifts_it_by_both_of_its_columns() {
+        let links = detected("\u{65e5}\u{672c} /usr/bin/x", 40);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "/usr/bin/x");
+        assert_eq!((links[0].col, links[0].len), (5, 10));
     }
 
     #[test]

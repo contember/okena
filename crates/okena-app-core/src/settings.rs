@@ -190,6 +190,7 @@ impl SettingsState {
         terminal_double_click_selects_in_mouse_mode,
         bool
     );
+    setting_setter!(set_terminal_option_as_meta, terminal_option_as_meta, bool);
     setting_setter!(set_blame_visible, blame_visible, bool);
 
     /// Master switch for native desktop notifications (opt-in).

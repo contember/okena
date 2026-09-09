@@ -19,7 +19,7 @@ use crossterm::{
     terminal::{self, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use okena_core::api::{ApiLayoutNode, ApiProject, StateResponse};
-use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use okena_terminal::input::{KeyEncodeOptions, KeyEvent, KeyModifiers, key_to_bytes};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_transport::client::{
     ConnectionEvent, ConnectionHandler, ConnectionStatus, LocalEndpoint,
@@ -618,8 +618,12 @@ fn key_bytes(terminal: &Terminal, key: CrosstermKeyEvent) -> Option<Vec<u8>> {
 
     key_to_bytes(
         &event,
-        terminal.is_app_cursor_mode(),
-        terminal.kitty_keyboard_flags(),
+        KeyEncodeOptions {
+            app_cursor_mode: terminal.is_app_cursor_mode(),
+            kitty: terminal.kitty_keyboard_flags(),
+            // crossterm never reports a composed character, so Meta is already the encoding.
+            option_as_meta: false,
+        },
     )
 }
 

@@ -28,22 +28,25 @@ pub struct KittyKeyboardFlags {
     pub disambiguate_escape_codes: bool,
 }
 
+/// Terminal modes and user settings that change how a keystroke is encoded.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KeyEncodeOptions {
+    /// Application cursor keys mode (DECCKM): arrows send SS3 (`\x1bOA`) instead
+    /// of CSI (`\x1b[A`). Set by applications like less, vim and htop.
+    pub app_cursor_mode: bool,
+    /// Active kitty keyboard protocol flags. With `disambiguate_escape_codes`,
+    /// the ambiguous keys (Esc, ctrl/alt+key, modified Enter/Tab/Backspace) are
+    /// reported as `CSI u` sequences before the legacy logic runs.
+    pub kitty: KittyKeyboardFlags,
+    /// macOS only: Option encodes Meta instead of composing a character. Callers
+    /// must pair it with `consumes_composed_text`.
+    pub option_as_meta: bool,
+}
+
 /// Convert a key event to terminal input bytes.
-///
-/// `app_cursor_mode`: When true, arrow keys send SS3 sequences (\x1bOA) instead of CSI (\x1b[A).
-/// This should be true when the terminal is in application cursor keys mode (DECCKM),
-/// which is used by applications like less, vim, htop, etc.
-///
-/// `kitty`: Active kitty keyboard protocol flags. When `disambiguate_escape_codes`
-/// is set, the ambiguous keys (Esc, ctrl/alt+key, modified Enter/Tab/Backspace) are
-/// reported as `CSI u` sequences before the legacy logic runs.
-pub fn key_to_bytes(
-    event: &KeyEvent,
-    app_cursor_mode: bool,
-    kitty: KittyKeyboardFlags,
-) -> Option<Vec<u8>> {
-    if kitty.disambiguate_escape_codes
-        && let Some(bytes) = kitty_disambiguate_bytes(event)
+pub fn key_to_bytes(event: &KeyEvent, options: KeyEncodeOptions) -> Option<Vec<u8>> {
+    if options.kitty.disambiguate_escape_codes
+        && let Some(bytes) = kitty_disambiguate_bytes(event, options)
     {
         return Some(bytes);
     }
@@ -54,7 +57,7 @@ pub fn key_to_bytes(
     // Ctrl+Alt keeps the meta ESC prefix in front of the control character.
     if mods.control
         && !mods.platform
-        && !delivered_as_text(event)
+        && !delivered_as_text(event, options)
         && let Some(byte) = control_byte(&event.key)
     {
         if mods.alt {
@@ -136,7 +139,7 @@ pub fn key_to_bytes(
                 return Some(format!("\x1b[1;{}{}", modifier_code, arrow_char).into_bytes());
             }
             // No modifiers: use SS3 in app cursor mode, CSI otherwise
-            if app_cursor_mode {
+            if options.app_cursor_mode {
                 return Some(format!("\x1bO{}", arrow_char).into_bytes());
             }
             return Some(format!("\x1b[{}", arrow_char).into_bytes());
@@ -146,7 +149,7 @@ pub fn key_to_bytes(
 
     // The platform key drives app shortcuts, never PTY input, and text-producing
     // keystrokes are delivered again through the InputHandler path.
-    if mods.platform || delivered_as_text(event) {
+    if mods.platform || delivered_as_text(event, options) {
         return None;
     }
 
@@ -203,22 +206,41 @@ pub fn key_to_bytes(
 
 /// True when the UI framework also commits this keystroke through the text-input
 /// (InputHandler) path, where encoding it here as well would double-send it.
-fn delivered_as_text(event: &KeyEvent) -> bool {
-    let mods = &event.modifiers;
-    let Some(text) = event.key_char.as_deref() else {
-        return false;
-    };
-    if text.is_empty() || text.chars().any(char::is_control) {
+fn delivered_as_text(event: &KeyEvent, options: KeyEncodeOptions) -> bool {
+    if !committable_text(event) {
         return false;
     }
+    let mods = &event.modifiers;
     match (mods.control, mods.alt) {
         (false, false) => true,
         // Windows AltGr composes a character out of Ctrl+Alt and commits it via WM_CHAR.
         (true, true) => true,
-        // macOS Option composes one (Option+B is `∫`) and commits it via the IME.
-        (false, true) => cfg!(target_os = "macos"),
+        // macOS Option composes one (Option+B is `∫`) and commits it via the IME,
+        // unless the user asked for Meta instead.
+        (false, true) => cfg!(target_os = "macos") && !options.option_as_meta,
         (true, false) => false,
     }
+}
+
+/// True when `key_char` carries a character the platform can commit as text.
+fn committable_text(event: &KeyEvent) -> bool {
+    event
+        .key_char
+        .as_deref()
+        .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
+}
+
+/// True when the encoder claimed a keystroke macOS will *also* commit as text
+/// (Option-as-Meta). Callers must stop propagation for exactly these, or the
+/// composed character is sent on top of the meta sequence.
+pub fn consumes_composed_text(event: &KeyEvent, options: KeyEncodeOptions) -> bool {
+    let mods = &event.modifiers;
+    cfg!(target_os = "macos")
+        && options.option_as_meta
+        && mods.alt
+        && !mods.control
+        && !mods.platform
+        && committable_text(event)
 }
 
 /// The control character a Ctrl-modified key produces in the legacy encoding.
@@ -306,8 +328,9 @@ fn csi_u(code: u32, kmod: u32) -> Vec<u8> {
 /// Esc (always), modified Enter/Tab/Backspace, and ctrl/alt printable keys.
 /// Returns `None` for everything else so the caller falls through to the
 /// legacy logic, which already matches kitty for arrows/Home/End and produces
-/// text for plain keys.
-fn kitty_disambiguate_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
+/// text for plain keys. A printable key the platform commits as text (AltGr,
+/// macOS Option) is declined too, so the protocol never steals a composition.
+fn kitty_disambiguate_bytes(event: &KeyEvent, options: KeyEncodeOptions) -> Option<Vec<u8>> {
     let mods = &event.modifiers;
     // Kitty modifier value: 1 + bitmask (shift=1, alt=2, ctrl=4, super=8).
     let kmod = 1
@@ -331,6 +354,7 @@ fn kitty_disambiguate_bytes(event: &KeyEvent) -> Option<Vec<u8>> {
             // ctrl/alt + a single printable char (ctrl+letter, alt+key,
             // ctrl+alt+key, shift+alt+key). Plain super+key is a higher level.
             if (mods.control || mods.alt)
+                && !delivered_as_text(event, options)
                 && key.chars().count() == 1
                 && let Some(c) = key.chars().next()
                 && !c.is_control()
@@ -381,33 +405,40 @@ mod tests {
         }
     }
 
-    fn on() -> KittyKeyboardFlags {
-        KittyKeyboardFlags {
-            disambiguate_escape_codes: true,
+    fn on() -> KeyEncodeOptions {
+        KeyEncodeOptions {
+            kitty: KittyKeyboardFlags {
+                disambiguate_escape_codes: true,
+            },
+            ..Default::default()
         }
     }
 
-    fn off() -> KittyKeyboardFlags {
-        KittyKeyboardFlags::default()
+    fn off() -> KeyEncodeOptions {
+        KeyEncodeOptions::default()
+    }
+
+    fn meta() -> KeyEncodeOptions {
+        KeyEncodeOptions {
+            option_as_meta: true,
+            ..Default::default()
+        }
     }
 
     fn legacy(key: &str, key_char: Option<&str>, mods: KeyModifiers) -> Option<Vec<u8>> {
-        key_to_bytes(&ev(key, key_char, mods), false, off())
+        key_to_bytes(&ev(key, key_char, mods), off())
     }
 
     #[test]
     fn flag_off_keeps_legacy_bytes() {
-        let off = KittyKeyboardFlags::default();
+        let off = KeyEncodeOptions::default();
+        assert_eq!(key_to_bytes(&ev("a", None, ctrl()), off), Some(vec![0x01]));
         assert_eq!(
-            key_to_bytes(&ev("a", None, ctrl()), false, off),
-            Some(vec![0x01])
-        );
-        assert_eq!(
-            key_to_bytes(&ev("tab", None, KeyModifiers::default()), false, off),
+            key_to_bytes(&ev("tab", None, KeyModifiers::default()), off),
             Some(b"\t".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ev("escape", None, KeyModifiers::default()), false, off),
+            key_to_bytes(&ev("escape", None, KeyModifiers::default()), off),
             Some(b"\x1b".to_vec())
         );
     }
@@ -415,11 +446,11 @@ mod tests {
     #[test]
     fn escape_is_disambiguated() {
         assert_eq!(
-            key_to_bytes(&ev("escape", None, KeyModifiers::default()), false, on()),
+            key_to_bytes(&ev("escape", None, KeyModifiers::default()), on()),
             Some(b"\x1b[27u".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ev("escape", None, ctrl()), false, on()),
+            key_to_bytes(&ev("escape", None, ctrl()), on()),
             Some(b"\x1b[27;5u".to_vec())
         );
     }
@@ -427,11 +458,11 @@ mod tests {
     #[test]
     fn ctrl_letters_are_disambiguated() {
         assert_eq!(
-            key_to_bytes(&ev("i", None, ctrl()), false, on()),
+            key_to_bytes(&ev("i", None, ctrl()), on()),
             Some(b"\x1b[105;5u".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ev("a", None, ctrl()), false, on()),
+            key_to_bytes(&ev("a", None, ctrl()), on()),
             Some(b"\x1b[97;5u".to_vec())
         );
     }
@@ -439,11 +470,11 @@ mod tests {
     #[test]
     fn tab_disambiguation() {
         assert_eq!(
-            key_to_bytes(&ev("tab", None, shift()), false, on()),
+            key_to_bytes(&ev("tab", None, shift()), on()),
             Some(b"\x1b[9;2u".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ev("tab", None, KeyModifiers::default()), false, on()),
+            key_to_bytes(&ev("tab", None, KeyModifiers::default()), on()),
             Some(b"\t".to_vec())
         );
     }
@@ -451,11 +482,11 @@ mod tests {
     #[test]
     fn enter_disambiguation() {
         assert_eq!(
-            key_to_bytes(&ev("enter", None, ctrl()), false, on()),
+            key_to_bytes(&ev("enter", None, ctrl()), on()),
             Some(b"\x1b[13;5u".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ev("enter", None, KeyModifiers::default()), false, on()),
+            key_to_bytes(&ev("enter", None, KeyModifiers::default()), on()),
             Some(b"\r".to_vec())
         );
     }
@@ -463,7 +494,7 @@ mod tests {
     #[test]
     fn ctrl_backspace_is_disambiguated() {
         assert_eq!(
-            key_to_bytes(&ev("backspace", None, ctrl()), false, on()),
+            key_to_bytes(&ev("backspace", None, ctrl()), on()),
             Some(b"\x1b[127;5u".to_vec())
         );
     }
@@ -471,7 +502,7 @@ mod tests {
     #[test]
     fn plain_char_falls_through_to_text() {
         assert_eq!(
-            key_to_bytes(&ev("a", Some("a"), KeyModifiers::default()), false, on()),
+            key_to_bytes(&ev("a", Some("a"), KeyModifiers::default()), on()),
             None
         );
     }
@@ -479,7 +510,7 @@ mod tests {
     #[test]
     fn plain_arrow_is_not_stolen() {
         assert_eq!(
-            key_to_bytes(&ev("up", None, KeyModifiers::default()), false, on()),
+            key_to_bytes(&ev("up", None, KeyModifiers::default()), on()),
             Some(b"\x1b[A".to_vec())
         );
     }
@@ -644,8 +675,137 @@ mod tests {
     #[test]
     fn kitty_disambiguation_still_wins_over_the_legacy_meta_prefix() {
         assert_eq!(
-            key_to_bytes(&ev("b", None, alt()), false, on()),
+            key_to_bytes(&ev("b", None, alt()), on()),
             Some(b"\x1b[98;3u".to_vec())
         );
+    }
+
+    fn ctrl_alt() -> KeyModifiers {
+        KeyModifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        }
+    }
+
+    fn encode(
+        key: &str,
+        key_char: Option<&str>,
+        mods: KeyModifiers,
+        options: KeyEncodeOptions,
+    ) -> Option<Vec<u8>> {
+        key_to_bytes(&ev(key, key_char, mods), options)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kitty_meta() -> KeyEncodeOptions {
+        KeyEncodeOptions {
+            option_as_meta: true,
+            ..on()
+        }
+    }
+
+    /// Windows AltGr arrives as Ctrl+Alt; the kitty path must decline it too,
+    /// or the negotiated protocol swallows every composed character.
+    #[test]
+    fn kitty_leaves_altgr_composition_to_the_text_path() {
+        assert_eq!(encode("q", Some("@"), ctrl_alt(), on()), None);
+    }
+
+    #[test]
+    fn kitty_still_disambiguates_ctrl_alt_that_composes_nothing() {
+        assert_eq!(
+            encode("q", None, ctrl_alt(), on()),
+            Some(b"\x1b[113;7u".to_vec())
+        );
+        assert_eq!(
+            encode("c", Some("\u{3}"), ctrl(), on()),
+            Some(b"\x1b[99;5u".to_vec())
+        );
+    }
+
+    /// Esc/Enter/Tab/Backspace only ever carry a control `key_char`, so the
+    /// text gate must not reach them: their kitty encodings stay unconditional.
+    #[test]
+    fn kitty_control_keys_are_not_gated_by_the_text_path() {
+        assert_eq!(
+            encode("escape", Some("\u{1b}"), KeyModifiers::default(), on()),
+            Some(b"\x1b[27u".to_vec())
+        );
+        assert_eq!(
+            encode("enter", Some("\r"), ctrl(), on()),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        assert_eq!(
+            encode("tab", Some("\t"), shift(), on()),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode("backspace", Some("\u{7f}"), ctrl(), on()),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_option_as_meta_encodes_the_composed_key() {
+        assert_eq!(
+            encode("b", Some("\u{222b}"), alt(), meta()),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            encode("space", Some("\u{a0}"), alt(), meta()),
+            Some(b"\x1b ".to_vec())
+        );
+        assert_eq!(
+            encode("b", Some("\u{222b}"), alt(), kitty_meta()),
+            Some(b"\x1b[98;3u".to_vec())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_option_as_meta_marks_the_keystroke_as_consumed() {
+        assert!(consumes_composed_text(
+            &ev("b", Some("\u{222b}"), alt()),
+            meta()
+        ));
+        assert!(consumes_composed_text(
+            &ev("b", Some("\u{222b}"), alt()),
+            kitty_meta()
+        ));
+        assert!(!consumes_composed_text(
+            &ev("b", Some("\u{222b}"), alt()),
+            off()
+        ));
+    }
+
+    /// Option-as-Meta is a macOS-only escape hatch; elsewhere Alt is already
+    /// encoded and nothing else commits the keystroke.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn option_as_meta_changes_nothing_off_macos() {
+        assert_eq!(
+            encode("b", Some("b"), alt(), off()),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            encode("b", Some("b"), alt(), meta()),
+            Some(b"\x1bb".to_vec())
+        );
+        assert!(!consumes_composed_text(&ev("b", Some("b"), alt()), meta()));
+    }
+
+    #[test]
+    fn nothing_else_is_reported_as_consumed_text() {
+        assert!(!consumes_composed_text(
+            &ev("a", Some("a"), KeyModifiers::default()),
+            meta()
+        ));
+        assert!(!consumes_composed_text(&ev("left", None, alt()), meta()));
+        assert!(!consumes_composed_text(
+            &ev("q", Some("@"), ctrl_alt()),
+            meta()
+        ));
     }
 }
