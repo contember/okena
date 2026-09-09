@@ -1610,6 +1610,126 @@ mod merge_pipeline_tests {
         assert!(history[0].terminal_id.is_none());
     }
 
+    /// The second destination check exists for this: the first one passed, and
+    /// the hook moved HEAD after it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_merge_hook_that_moves_head_is_caught_before_the_merge() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let main_before = rev_parse(&main_repo, "main");
+
+        // Dirty the checkout so the pipeline stashes: the refusal has to hand
+        // the work back, not strand it in the stash list.
+        std::fs::write(worktree.join("wip.txt"), "wip\n").unwrap();
+        git(&["-C", path_str(&worktree), "add", "wip.txt"]);
+
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                pre_merge: Some(
+                    "git -C \"$OKENA_MAIN_REPO_PATH\" checkout -q -b develop".to_string(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = close_worktree_merge_git(
+            true,
+            false,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &hooks,
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        let CloseWorktreeGitOutcome::Err(error) = outcome else {
+            panic!("a hook that moved HEAD must not reach the merge");
+        };
+        assert!(
+            error.contains("'develop'") && error.contains("'main'"),
+            "the refusal must name both branches: {error}"
+        );
+        assert_eq!(
+            rev_parse(&main_repo, "main"),
+            main_before,
+            "nothing may be merged into the branch the hook left behind"
+        );
+        assert_eq!(
+            rev_parse(&main_repo, "develop"),
+            main_before,
+            "nor into the branch the hook switched to"
+        );
+        assert!(
+            worktree.join("wip.txt").exists(),
+            "the stash must be popped back on the refusal"
+        );
+    }
+
+    /// The happy path with every toggle on — the regression control for the
+    /// destination checks above, and the only place `push` is exercised.
+    #[test]
+    fn a_close_with_every_toggle_on_merges_and_reaches_the_remote() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let remote = fixture.root.join("remote.git");
+        git(&["init", "--bare", "-b", "main", path_str(&remote)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "remote",
+            "add",
+            "origin",
+            path_str(&remote),
+        ]);
+        git(&["-C", path_str(&main_repo), "push", "-q", "origin", "main"]);
+        let feature_tip = rev_parse(&worktree, "HEAD");
+
+        let outcome = close_worktree_merge_git(
+            false,
+            true,
+            true,
+            true,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &HooksConfig::default(),
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            outcome,
+            CloseWorktreeGitOutcome::Ok { did_stash: false }
+        ));
+        let merged = rev_parse(&main_repo, "main");
+        assert_ne!(merged, feature_tip, "--no-ff must leave a merge commit");
+        assert_eq!(
+            rev_parse(&main_repo, "main^2"),
+            feature_tip,
+            "the feature tip must be the second parent of the merge"
+        );
+        assert_eq!(
+            rev_parse(&remote, "main"),
+            merged,
+            "push must carry the merge to the remote"
+        );
+    }
+
     #[test]
     fn removal_plan_finishes_close_hooks_while_checkout_exists() {
         let fixture = TestRepo::new();
