@@ -203,9 +203,10 @@ fn a_null_puts_a_setting_back_to_its_default() {
     );
 }
 
-/// The TUI binary, built alongside this test by `cargo test --workspace`.
-/// `CARGO_BIN_EXE_` only covers this package's own binaries, so it is found
-/// next to the test executable instead.
+/// The TUI binary, found next to the test executable: `CARGO_BIN_EXE_` covers
+/// only this package's own binaries, and `cargo test` builds another package's
+/// bin target as a test harness, never as a plain binary. CI runs
+/// `cargo build -p okena-tui` for it; locally, so must you.
 fn tui_binary() -> Option<PathBuf> {
     let mut dir = std::env::current_exe().ok()?;
     dir.pop();
@@ -227,7 +228,7 @@ fn a_tui_that_cannot_connect_leaves_the_host_terminal_alone() {
             std::env::var_os("OKENA_REQUIRE_TUI").is_none(),
             "okena-tui is not built and OKENA_REQUIRE_TUI demands it"
         );
-        eprintln!("skipping: okena-tui is not built (run `cargo test --workspace`)");
+        eprintln!("skipping: run `cargo build -p okena-tui` to cover the tui");
         return;
     };
 
@@ -284,7 +285,7 @@ fn the_tui_hands_the_host_terminal_back_when_it_quits() {
             std::env::var_os("OKENA_REQUIRE_TUI").is_none(),
             "okena-tui is not built and OKENA_REQUIRE_TUI demands it"
         );
-        eprintln!("skipping: okena-tui is not built (run `cargo test --workspace`)");
+        eprintln!("skipping: run `cargo build -p okena-tui` to cover the tui");
         return;
     };
 

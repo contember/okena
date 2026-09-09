@@ -78,6 +78,12 @@ jobs:
             exit 1
           fi
 
+      # `cargo test` builds another package's bin target as a test harness, never
+      # as a plain binary, so the end-to-end tests that drive the TUI would skip
+      # themselves without this.
+      - name: Build the TUI binary the end-to-end tests drive
+        run: cargo build -p okena-tui
+
       # The workspace declares no `default-members`, so a bare `cargo test` would
       # run the root `okena` package alone and skip every member crate's tests.
       - name: Run tests
