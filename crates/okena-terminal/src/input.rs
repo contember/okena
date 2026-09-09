@@ -50,16 +50,17 @@ pub fn key_to_bytes(
 
     let mods = &event.modifiers;
 
-    // Handle Ctrl+key combinations for letters (produces control characters)
-    if mods.control && !mods.shift && !mods.alt && !mods.platform {
-        let key = event.key.as_str();
-        if let Some(c) = key.chars().next()
-            && key.len() == 1
-            && c.is_ascii_alphabetic()
-        {
-            let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
-            return Some(vec![ctrl_char]);
+    // Handle Ctrl+key combinations (produces control characters).
+    // Ctrl+Alt keeps the meta ESC prefix in front of the control character.
+    if mods.control
+        && !mods.platform
+        && !delivered_as_text(event)
+        && let Some(byte) = control_byte(&event.key)
+    {
+        if mods.alt {
+            return Some(vec![0x1b, byte]);
         }
+        return Some(vec![byte]);
     }
 
     // Handle Tab with modifiers
@@ -143,10 +144,9 @@ pub fn key_to_bytes(
         _ => {}
     }
 
-    // If the platform provides `key_char`, the UI framework will also deliver it via the
-    // text-input (InputHandler) path. To avoid double-sending characters, let the InputHandler
-    // handle all text-producing keystrokes.
-    if event.key_char.is_some() {
+    // The platform key drives app shortcuts, never PTY input, and text-producing
+    // keystrokes are delivered again through the InputHandler path.
+    if mods.platform || delivered_as_text(event) {
         return None;
     }
 
@@ -166,33 +166,128 @@ pub fn key_to_bytes(
             }
             return Some(b"\x1b[F".to_vec());
         }
-        "pageup" => return Some(b"\x1b[5~".to_vec()),
-        "pagedown" => return Some(b"\x1b[6~".to_vec()),
-        "delete" => return Some(b"\x1b[3~".to_vec()),
-        "f1" => return Some(b"\x1bOP".to_vec()),
-        "f2" => return Some(b"\x1bOQ".to_vec()),
-        "f3" => return Some(b"\x1bOR".to_vec()),
-        "f4" => return Some(b"\x1bOS".to_vec()),
-        "f5" => return Some(b"\x1b[15~".to_vec()),
-        "f6" => return Some(b"\x1b[17~".to_vec()),
-        "f7" => return Some(b"\x1b[18~".to_vec()),
-        "f8" => return Some(b"\x1b[19~".to_vec()),
-        "f9" => return Some(b"\x1b[20~".to_vec()),
-        "f10" => return Some(b"\x1b[21~".to_vec()),
-        "f11" => return Some(b"\x1b[23~".to_vec()),
-        "f12" => return Some(b"\x1b[24~".to_vec()),
         _ => {}
+    }
+
+    if let Some(code) = tilde_key_code(&event.key) {
+        if modifier_code > 1 {
+            return Some(format!("\x1b[{};{}~", code, modifier_code).into_bytes());
+        }
+        return Some(format!("\x1b[{}~", code).into_bytes());
+    }
+
+    if let Some(final_byte) = ss3_function_key(&event.key) {
+        if modifier_code > 1 {
+            return Some(format!("\x1b[1;{}{}", modifier_code, final_byte).into_bytes());
+        }
+        return Some(format!("\x1bO{}", final_byte).into_bytes());
+    }
+
+    // Legacy meta: ESC prefix in front of the character the key sends on its own.
+    if mods.alt
+        && let Some(c) = meta_char(event)
+    {
+        return Some(format!("\x1b{}", c).into_bytes());
     }
 
     // Single character keys as fallback
     let key = event.key.as_str();
-    if key.len() == 1 {
+    if !mods.control && !mods.alt && key.len() == 1 {
         log::info!("Using key string: {:?}", key);
         return Some(key.as_bytes().to_vec());
     }
 
     log::warn!("No input generated for key: {:?}", event.key);
     None
+}
+
+/// True when the UI framework also commits this keystroke through the text-input
+/// (InputHandler) path, where encoding it here as well would double-send it.
+fn delivered_as_text(event: &KeyEvent) -> bool {
+    let mods = &event.modifiers;
+    let Some(text) = event.key_char.as_deref() else {
+        return false;
+    };
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return false;
+    }
+    match (mods.control, mods.alt) {
+        (false, false) => true,
+        // Windows AltGr composes a character out of Ctrl+Alt and commits it via WM_CHAR.
+        (true, true) => true,
+        // macOS Option composes one (Option+B is `∫`) and commits it via the IME.
+        (false, true) => cfg!(target_os = "macos"),
+        (true, false) => false,
+    }
+}
+
+/// The control character a Ctrl-modified key produces in the legacy encoding.
+fn control_byte(key: &str) -> Option<u8> {
+    if key == "space" {
+        return Some(0x00);
+    }
+    let &[byte] = key.as_bytes() else {
+        return None;
+    };
+    Some(match byte {
+        b'a'..=b'z' | b'A'..=b'Z' => byte.to_ascii_lowercase() - b'a' + 1,
+        b' ' | b'@' => 0x00,
+        b'[' => 0x1b,
+        b'\\' => 0x1c,
+        b']' => 0x1d,
+        b'^' => 0x1e,
+        b'_' | b'/' => 0x1f,
+        b'?' => 0x7f,
+        _ => return None,
+    })
+}
+
+/// Parameter of the xterm `CSI n ~` keys, which take `CSI n ; mod ~` when modified.
+fn tilde_key_code(key: &str) -> Option<u32> {
+    Some(match key {
+        "insert" => 2,
+        "delete" => 3,
+        "pageup" => 5,
+        "pagedown" => 6,
+        "f5" => 15,
+        "f6" => 17,
+        "f7" => 18,
+        "f8" => 19,
+        "f9" => 20,
+        "f10" => 21,
+        "f11" => 23,
+        "f12" => 24,
+        _ => return None,
+    })
+}
+
+/// Final byte of F1-F4, which are SS3 when unmodified and `CSI 1 ; mod X` otherwise.
+fn ss3_function_key(key: &str) -> Option<char> {
+    Some(match key {
+        "f1" => 'P',
+        "f2" => 'Q',
+        "f3" => 'R',
+        "f4" => 'S',
+        _ => return None,
+    })
+}
+
+/// The character an Alt-modified key sends after the meta ESC prefix. Reads `key`,
+/// not `key_char`, so a layout's Alt composition never leaks into the sequence.
+fn meta_char(event: &KeyEvent) -> Option<char> {
+    if event.key == "space" {
+        return Some(' ');
+    }
+    let mut chars = event.key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || c.is_control() {
+        return None;
+    }
+    Some(if event.modifiers.shift {
+        c.to_ascii_uppercase()
+    } else {
+        c
+    })
 }
 
 /// Encode a key as a `CSI u` sequence: `CSI code u` when unmodified, or
@@ -279,10 +374,25 @@ mod tests {
         }
     }
 
+    fn alt() -> KeyModifiers {
+        KeyModifiers {
+            alt: true,
+            ..Default::default()
+        }
+    }
+
     fn on() -> KittyKeyboardFlags {
         KittyKeyboardFlags {
             disambiguate_escape_codes: true,
         }
+    }
+
+    fn off() -> KittyKeyboardFlags {
+        KittyKeyboardFlags::default()
+    }
+
+    fn legacy(key: &str, key_char: Option<&str>, mods: KeyModifiers) -> Option<Vec<u8>> {
+        key_to_bytes(&ev(key, key_char, mods), false, off())
     }
 
     #[test]
@@ -371,6 +481,171 @@ mod tests {
         assert_eq!(
             key_to_bytes(&ev("up", None, KeyModifiers::default()), false, on()),
             Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn alt_printable_gets_the_meta_escape_prefix() {
+        assert_eq!(legacy("b", None, alt()), Some(b"\x1bb".to_vec()));
+        assert_eq!(legacy("f", None, alt()), Some(b"\x1bf".to_vec()));
+        assert_eq!(legacy("space", None, alt()), Some(b"\x1b ".to_vec()));
+        assert_eq!(
+            legacy(
+                "b",
+                None,
+                KeyModifiers {
+                    alt: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            Some(b"\x1bB".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_printable_prefixes_the_control_character() {
+        assert_eq!(
+            legacy(
+                "b",
+                None,
+                KeyModifiers {
+                    control: true,
+                    alt: true,
+                    ..Default::default()
+                }
+            ),
+            Some(vec![0x1b, 0x02])
+        );
+    }
+
+    /// Windows AltGr arrives as Ctrl+Alt and commits its character via WM_CHAR.
+    #[test]
+    fn altgr_composition_is_left_to_the_text_path() {
+        assert_eq!(
+            legacy(
+                "q",
+                Some("@"),
+                KeyModifiers {
+                    control: true,
+                    alt: true,
+                    ..Default::default()
+                }
+            ),
+            None
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_printable_is_encoded_even_when_the_platform_reports_a_char() {
+        assert_eq!(legacy("b", Some("b"), alt()), Some(b"\x1bb".to_vec()));
+    }
+
+    /// macOS Option composes a character and commits it through the IME.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_option_composition_is_left_to_the_text_path() {
+        assert_eq!(legacy("b", Some("\u{222b}"), alt()), None);
+    }
+
+    #[test]
+    fn ctrl_space_is_nul() {
+        assert_eq!(legacy("space", None, ctrl()), Some(vec![0x00]));
+    }
+
+    #[test]
+    fn ctrl_punctuation_maps_to_control_characters() {
+        assert_eq!(legacy("[", None, ctrl()), Some(vec![0x1b]));
+        assert_eq!(legacy("\\", None, ctrl()), Some(vec![0x1c]));
+        assert_eq!(legacy("]", None, ctrl()), Some(vec![0x1d]));
+        assert_eq!(legacy("^", None, ctrl()), Some(vec![0x1e]));
+        assert_eq!(legacy("_", None, ctrl()), Some(vec![0x1f]));
+        assert_eq!(legacy("/", None, ctrl()), Some(vec![0x1f]));
+        assert_eq!(legacy("?", None, ctrl()), Some(vec![0x7f]));
+    }
+
+    #[test]
+    fn ctrl_shift_letter_still_maps_to_its_control_character() {
+        assert_eq!(
+            legacy(
+                "a",
+                None,
+                KeyModifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            Some(vec![0x01])
+        );
+    }
+
+    #[test]
+    fn tilde_keys_carry_their_modifier_parameter() {
+        assert_eq!(legacy("pageup", None, shift()), Some(b"\x1b[5;2~".to_vec()));
+        assert_eq!(legacy("delete", None, ctrl()), Some(b"\x1b[3;5~".to_vec()));
+        assert_eq!(legacy("pagedown", None, alt()), Some(b"\x1b[6;3~".to_vec()));
+        assert_eq!(
+            legacy("pageup", None, KeyModifiers::default()),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            legacy("insert", None, KeyModifiers::default()),
+            Some(b"\x1b[2~".to_vec())
+        );
+    }
+
+    #[test]
+    fn function_keys_keep_their_unmodified_encoding() {
+        assert_eq!(
+            legacy("f1", None, KeyModifiers::default()),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            legacy("f4", None, KeyModifiers::default()),
+            Some(b"\x1bOS".to_vec())
+        );
+        assert_eq!(
+            legacy("f5", None, KeyModifiers::default()),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            legacy("f12", None, KeyModifiers::default()),
+            Some(b"\x1b[24~".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_function_keys_carry_their_modifier_parameter() {
+        assert_eq!(legacy("f1", None, ctrl()), Some(b"\x1b[1;5P".to_vec()));
+        assert_eq!(legacy("f4", None, shift()), Some(b"\x1b[1;2S".to_vec()));
+        assert_eq!(legacy("f5", None, shift()), Some(b"\x1b[15;2~".to_vec()));
+        assert_eq!(legacy("f12", None, alt()), Some(b"\x1b[24;3~".to_vec()));
+    }
+
+    #[test]
+    fn plain_char_is_never_double_sent() {
+        assert_eq!(legacy("a", Some("a"), KeyModifiers::default()), None);
+        assert_eq!(legacy("a", Some("A"), shift()), None);
+        assert_eq!(legacy("space", Some(" "), KeyModifiers::default()), None);
+    }
+
+    #[test]
+    fn platform_modified_keys_stay_out_of_the_pty() {
+        let platform = KeyModifiers {
+            platform: true,
+            ..Default::default()
+        };
+        assert_eq!(legacy("b", Some("b"), platform.clone()), None);
+        assert_eq!(legacy("f5", None, platform), None);
+    }
+
+    #[test]
+    fn kitty_disambiguation_still_wins_over_the_legacy_meta_prefix() {
+        assert_eq!(
+            key_to_bytes(&ev("b", None, alt()), false, on()),
+            Some(b"\x1b[98;3u".to_vec())
         );
     }
 }
