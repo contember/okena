@@ -493,23 +493,25 @@ impl UpdaterSettingsView {
                                         crate::daemon_client::restart_daemon_and_wait,
                                     )
                                     .await;
-                                    match result {
-                                        Ok(()) => {
-                                            let _ = this.update(cx, |_this, cx| {
-                                                crate::installer::restart_app(cx);
+                                    let failure = match result {
+                                        Ok(()) => this
+                                            .update(cx, |_this, cx| {
+                                                crate::installer::restart_app(cx)
+                                            })
+                                            .ok()
+                                            .and_then(Result::err),
+                                        Err(error) => Some(error),
+                                    };
+                                    if let Some(error) = failure {
+                                        if let Some(info) = info {
+                                            info.set_status(UpdateStatus::Failed {
+                                                error: error.to_string(),
                                             });
                                         }
-                                        Err(error) => {
-                                            if let Some(info) = info {
-                                                info.set_status(UpdateStatus::Failed {
-                                                    error: error.to_string(),
-                                                });
-                                            }
-                                            let _ = this.update(cx, |this, cx| {
-                                                this.restarting = false;
-                                                cx.notify();
-                                            });
-                                        }
+                                        let _ = this.update(cx, |this, cx| {
+                                            this.restarting = false;
+                                            cx.notify();
+                                        });
                                     }
                                 })
                                 .detach();

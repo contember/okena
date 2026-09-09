@@ -1,10 +1,13 @@
-//! `POST /v1/restart` — loopback-only daemon self-restart.
+//! `POST /v1/restart` — same-user, same-host daemon self-restart.
 //!
 //! Restarting the daemon ends every PTY (the daemon owns them all), so this is a
 //! deliberate, user-confirmed action surfaced by the desktop GUI ("pick up a
-//! freshly-built daemon binary"). It is loopback-gated exactly like
-//! `/v1/auth/reload`: a same-host client triggers it; off-host callers are
-//! refused.
+//! freshly-built daemon binary"). Access is gated exactly like
+//! `/v1/auth/reload`: off-host callers are refused, and a same-host caller must
+//! arrive on the daemon's local socket or carry a bearer token. Where the daemon
+//! bound no local socket (Windows, or a runtime dir it could not make private)
+//! there is no bootstrap transport, so loopback alone is accepted — see
+//! `management_middleware`.
 //!
 //! Mechanism (a self-restart, so it works whether the GUI spawned the daemon or
 //! merely attached to it):

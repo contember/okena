@@ -11,7 +11,7 @@ Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 ```bash
 cargo build
 cargo run
-cargo test
+cargo test --workspace
 ```
 
 On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid link.exe PATH conflicts with Git for Windows.

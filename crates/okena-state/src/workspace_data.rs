@@ -68,10 +68,9 @@ impl WorkspaceData {
 
 /// Metadata for worktree projects.
 ///
-/// Only `parent_project_id` is actively used. The other fields are kept for
-/// backward-compatible deserialization of old workspace.json files but are no
-/// longer written on save. All derived data (main repo path, branch, worktree
-/// path) is resolved dynamically from the parent project and git at runtime.
+/// `main_repo_path` and `branch_name` are kept only for backward-compatible
+/// deserialization of old workspace.json files; both are resolved dynamically
+/// from the parent project and git at runtime.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorktreeMetadata {
     /// ID of the main repo project
@@ -83,9 +82,10 @@ pub struct WorktreeMetadata {
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
     pub main_repo_path: String,
-    /// Deprecated: same as project.path.
-    #[serde(default, skip_serializing)]
-    #[allow(dead_code)]
+    /// The checkout root. NOT interchangeable with `project.path`: a monorepo
+    /// worktree's project is a subdirectory of it. Empty on rows written before
+    /// it was persisted — `persistence::worktree_checkout_path` handles that.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub worktree_path: String,
     /// Deprecated: read from git at runtime.
     #[serde(default, skip_serializing)]
@@ -456,6 +456,34 @@ mod tests {
 
         assert_eq!(project.id, "p1");
         assert_eq!(project.connection_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn worktree_metadata_round_trips_the_checkout_root() {
+        // A monorepo worktree's `project.path` is a package subdirectory, so the
+        // checkout root cannot be re-derived from it after a reload.
+        let metadata = WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/repo".to_string(),
+            worktree_path: "/worktrees/feature".to_string(),
+            branch_name: "feature".to_string(),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let restored: WorktreeMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.worktree_path, "/worktrees/feature");
+    }
+
+    #[test]
+    fn worktree_metadata_loads_without_a_checkout_root() {
+        // Every workspace.json written while the field was skipped omits it.
+        let json = r#"{ "parent_project_id": "p1" }"#;
+
+        let metadata: WorktreeMetadata = serde_json::from_str(json).unwrap();
+
+        assert_eq!(metadata.worktree_path, "");
     }
 
     #[test]

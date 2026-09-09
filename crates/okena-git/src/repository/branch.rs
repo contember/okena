@@ -149,13 +149,20 @@ pub fn stash_changes(path: &Path) -> GitResult<()> {
     let output =
         safe_output(command("git").args(["-C", p, "stash", "push", "--include-untracked"]))?;
     require_success(output)?;
-    if crate::repository::status::has_uncommitted_changes(path) {
-        return Err(GitError::UnsafeWorktree {
-            path: path.to_path_buf(),
-            reason: "checkout remains dirty after stash; refusing destructive removal".to_string(),
-        });
-    }
-    Ok(())
+    use crate::repository::status::DirtyCheck;
+    let reason = match crate::repository::status::uncommitted_changes(path) {
+        DirtyCheck::Known(true) => {
+            "checkout remains dirty after stash; refusing destructive removal"
+        }
+        DirtyCheck::Unknown => {
+            "could not verify the checkout is clean after stash; refusing destructive removal"
+        }
+        _ => return Ok(()),
+    };
+    Err(GitError::UnsafeWorktree {
+        path: path.to_path_buf(),
+        reason: reason.to_string(),
+    })
 }
 
 /// Pop the most recent stash entry.
@@ -166,28 +173,42 @@ pub fn stash_pop(path: &Path) -> GitResult<()> {
     require_success(output)
 }
 
+/// Run a per-file git mutation from the worktree root.
+///
+/// `file_path` follows the crate-wide diff contract — relative to the worktree
+/// root, not to the (possibly monorepo-subdir) project — so the command must
+/// run there, and `--literal-pathspecs` keeps a filename containing `*` or `?`
+/// from matching its siblings.
+fn file_command(repo_path: &Path, args: &[&str], file_path: &str) -> GitResult<()> {
+    let root = crate::repository::paths::get_repo_root(repo_path)
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let p = path_str(&root)?;
+    let mut argv = vec!["-C", p, "--literal-pathspecs"];
+    argv.extend_from_slice(args);
+    argv.push("--");
+    argv.push(file_path);
+    let output = safe_output(command("git").args(&argv))?;
+    require_success(output)
+}
+
 /// Stage a file (git add -- <file>).
 pub fn stage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
-    let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "add", "--", file_path]))?;
-    require_success(output)
+    file_command(repo_path, &["add"], file_path)
 }
 
 /// Unstage a file from the index (git restore --staged -- <file>).
 /// Works for both modified and newly-added files.
 pub fn unstage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
-    let p = path_str(repo_path)?;
-    let output =
-        safe_output(command("git").args(["-C", p, "restore", "--staged", "--", file_path]))?;
-    require_success(output)
+    file_command(repo_path, &["restore", "--staged"], file_path)
 }
 
-/// Discard working-tree changes for a file (git checkout HEAD -- <file>).
-/// Restores the file to its HEAD state.
+/// Discard working-tree changes for a file, restoring it from the index.
+///
+/// Deliberately not `checkout HEAD --`: that also rewrites the index, so a
+/// partially staged file would silently lose its staged hunks even though the
+/// caller only asked to drop working-tree changes.
 pub fn discard_file_changes(repo_path: &Path, file_path: &str) -> GitResult<()> {
-    let p = path_str(repo_path)?;
-    let output = safe_output(command("git").args(["-C", p, "checkout", "HEAD", "--", file_path]))?;
-    require_success(output)
+    file_command(repo_path, &["restore", "--worktree"], file_path)
 }
 
 /// Fetch from all remotes.
@@ -714,6 +735,19 @@ mod tests {
     }
 
     #[test]
+    fn stashing_a_checkout_gix_cannot_walk_is_not_a_dead_end() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(
+            &repo,
+            &["sparse-checkout", "init", "--cone", "--sparse-index"],
+        );
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+
+        stash_changes(&repo).expect("the post-stash guard must not block a stashable checkout");
+        assert_eq!(std::fs::read_to_string(repo.join("file.txt")).unwrap(), "x");
+    }
+
+    #[test]
     fn stash_pop_returns_err_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(stash_pop(&path).is_err());
@@ -884,5 +918,105 @@ mod tests {
         create_and_checkout_branch(&repo, "feat/x", None).expect("create branch");
         // Review base is the upstream copy the PR really targets, not the fork's.
         assert_eq!(resolve_review_base(&repo).as_deref(), Some("upstream/main"));
+    }
+
+    /// Paths git reports as staged, in the order it prints them.
+    fn staged_paths(repo: &Path) -> Vec<String> {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(repo)
+            .output()
+            .expect("git diff --cached failed");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn discard_keeps_the_staged_version_of_a_partially_staged_file() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "staged").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        std::fs::write(repo.join("file.txt"), "working").unwrap();
+
+        discard_file_changes(&repo, "file.txt").expect("discard working-tree changes");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "staged"
+        );
+        assert_eq!(
+            crate::diff::get_file_from_git(&repo, "", "file.txt").as_deref(),
+            Some("staged"),
+            "the dialog promises a working-tree discard, so the index must survive"
+        );
+        assert_eq!(
+            crate::diff::get_file_from_git(&repo, "HEAD", "file.txt").as_deref(),
+            Some("x")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn per_file_mutations_match_a_wildcard_filename_literally() {
+        let (_tmp, repo) = init_temp_repo();
+        for name in ["glob*.txt", "globA.txt"] {
+            std::fs::write(repo.join(name), "base\n").unwrap();
+        }
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "globs"],
+        );
+        for name in ["glob*.txt", "globA.txt"] {
+            std::fs::write(repo.join(name), "changed\n").unwrap();
+        }
+
+        stage_file(&repo, "glob*.txt").expect("stage the literal name");
+        assert_eq!(staged_paths(&repo), vec!["glob*.txt".to_string()]);
+
+        unstage_file(&repo, "glob*.txt").expect("unstage the literal name");
+        assert!(staged_paths(&repo).is_empty());
+
+        discard_file_changes(&repo, "glob*.txt").expect("discard the literal name");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("glob*.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("globA.txt")).unwrap(),
+            "changed\n",
+            "a wildcard in the name must not reach the sibling"
+        );
+    }
+
+    #[test]
+    fn per_file_mutations_resolve_paths_against_the_worktree_root() {
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("f.txt"), "base\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "package"],
+        );
+        std::fs::write(project.join("f.txt"), "changed\n").unwrap();
+
+        // The diff layer names the file the way `git diff` does — from the
+        // repository root — even when the project is a subdirectory.
+        stage_file(&project, "packages/app/f.txt").expect("stage from a subdirectory project");
+        assert_eq!(staged_paths(&repo), vec!["packages/app/f.txt".to_string()]);
+
+        unstage_file(&project, "packages/app/f.txt").expect("unstage from a subdirectory project");
+        assert!(staged_paths(&repo).is_empty());
+
+        discard_file_changes(&project, "packages/app/f.txt")
+            .expect("discard from a subdirectory project");
+        assert_eq!(
+            std::fs::read_to_string(project.join("f.txt")).unwrap(),
+            "base\n"
+        );
     }
 }

@@ -168,6 +168,9 @@ impl FileViewerTab {
         self.loading = false;
         self.modified_at = modified_at;
         self.markdown_table_scroll_handles.clear();
+        // Offsets are byte-based; the replacing content does not share them.
+        self.selection.clear();
+        self.markdown_selection.clear();
         match result {
             Ok(LoadedContent::Text {
                 source,

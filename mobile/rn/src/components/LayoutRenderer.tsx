@@ -54,6 +54,8 @@ export interface LayoutRendererProps {
   paneRef?: React.Ref<TerminalPaneHandle>;
   /** The terminal id whose pane should receive {@link paneRef}. */
   focusTerminalId?: string | null;
+  /** Called with the terminal id of whichever pane takes keyboard focus. */
+  onSelectTerminal?: (terminalId: string) => void;
   native?: OkenaNative;
 }
 
@@ -65,6 +67,7 @@ export const LayoutRenderer: React.FC<LayoutRendererProps> = ({
   modifiers,
   paneRef,
   focusTerminalId,
+  onSelectTerminal,
   native = getOkenaNative(),
 }) => {
   const { width, height } = useWindowDimensions();
@@ -81,6 +84,7 @@ export const LayoutRenderer: React.FC<LayoutRendererProps> = ({
       isPortrait={isPortrait}
       paneRef={paneRef}
       focusTerminalId={focusTerminalId ?? null}
+      onSelectTerminal={onSelectTerminal}
       native={native}
     />
   );
@@ -98,6 +102,7 @@ interface NodeViewProps {
   isPortrait: boolean;
   paneRef?: React.Ref<TerminalPaneHandle>;
   focusTerminalId: string | null;
+  onSelectTerminal?: (terminalId: string) => void;
   native: OkenaNative;
 }
 
@@ -123,6 +128,7 @@ const TerminalLeaf: React.FC<NodeViewProps & { node: Extract<LayoutNode, { type:
   modifiers,
   paneRef,
   focusTerminalId,
+  onSelectTerminal,
   native,
 }) => {
   const { terminalId, minimized } = node;
@@ -164,6 +170,8 @@ const TerminalLeaf: React.FC<NodeViewProps & { node: Extract<LayoutNode, { type:
         terminalId={terminalId}
         fonts={fonts}
         modifiers={modifiers}
+        onSelect={onSelectTerminal}
+        selected={focusTerminalId === terminalId}
         native={native}
       />
     </View>

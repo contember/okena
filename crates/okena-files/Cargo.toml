@@ -43,7 +43,7 @@ log = "0.4"
 base64 = "0.22"
 usvg = { version = "0.45", default-features = false, optional = true }
 ttf-parser = { version = "0.25", optional = true }
-image = { version = "0.25", default-features = false, optional = true }
+image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
 dirs = "5"
 tempfile = "3"
 

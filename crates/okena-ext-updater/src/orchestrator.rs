@@ -1,6 +1,6 @@
-//! Update orchestration driven by user actions (manual check / install).
+//! Update orchestration driven by a user-initiated check.
 //!
-//! These async routines own the status transitions, download polling, and
+//! This async routine owns the status transitions, download polling, and
 //! error handling. The host view supplies a `notify` callback that is invoked
 //! whenever the UI should re-render (e.g. to call `cx.notify()` on the
 //! observing entity). Keeping this logic here keeps the view thin and makes
@@ -13,13 +13,15 @@ use gpui::AsyncApp;
 /// update is found, download it (with periodic progress refresh) and transition
 /// to `Ready`. `notify` is called whenever the UI should refresh.
 ///
-/// Assumes the caller has already taken the manual-check guard
+/// Assumes the caller has already taken the manual-check reservation
 /// (`UpdateInfo::try_start_manual`), set `Checking` status, and notified once.
-/// This routine calls `finish_manual` when it completes.
+/// This routine adopts the reservation and frees it however the pass ends.
 pub async fn run_manual_check<F>(info: UpdateInfo, token: u64, cx: &mut AsyncApp, notify: F)
 where
     F: Fn(&mut AsyncApp),
 {
+    let _reservation = info.adopt_manual();
+
     match crate::checker::check_for_update(info.app_version()).await {
         Ok(Some(release)) => {
             if info.is_homebrew() {
@@ -92,38 +94,4 @@ where
             notify(cx);
         }
     }
-
-    info.finish_manual();
-}
-
-/// Run the install step for an already-downloaded update at `path`,
-/// transitioning to `ReadyToRestart` on success or `Failed` on error.
-/// `notify` is called once the install completes.
-///
-/// Assumes the caller has already set `Installing` status and notified once.
-pub async fn run_install<F>(
-    info: UpdateInfo,
-    version: String,
-    path: std::path::PathBuf,
-    cx: &mut AsyncApp,
-    notify: F,
-) where
-    F: Fn(&mut AsyncApp),
-{
-    let result = smol::unblock(move || crate::installer::install_update(&path)).await;
-    match result {
-        Ok(_) => {
-            info.set_status(UpdateStatus::ReadyToRestart {
-                version,
-                config_restore: None,
-            });
-        }
-        Err(e) => {
-            log::error!("Install failed: {}", e);
-            info.set_status(UpdateStatus::Failed {
-                error: e.to_string(),
-            });
-        }
-    }
-    notify(cx);
 }

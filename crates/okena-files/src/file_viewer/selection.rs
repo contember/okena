@@ -1,6 +1,6 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
-use crate::code_view::{start_scrollbar_drag, update_scrollbar_drag};
+use crate::code_view::{clamp_to_char_boundary, start_scrollbar_drag, update_scrollbar_drag};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty, copy_to_clipboard};
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
@@ -320,12 +320,12 @@ fn extract_selected_source_text(tab: &FileViewerTab) -> Option<String> {
         }
 
         let start = if row_index == start_row {
-            start_col.min(row_text.len())
+            clamp_to_char_boundary(row_text, start_col)
         } else {
             0
         };
         let end = if row_index == end_row {
-            end_col.min(row_text.len())
+            clamp_to_char_boundary(row_text, end_col)
         } else {
             row_text.len()
         };
@@ -334,4 +334,51 @@ fn extract_selected_source_text(tab: &FileViewerTab) -> Option<String> {
     }
 
     (!output.is_empty()).then_some(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileViewerTab, extract_selected_source_text};
+    use crate::file_viewer::loading::LoadedContent;
+    use crate::syntax::HighlightedLine;
+    use gpui::TestAppContext;
+    use syntect::parsing::SyntaxSet;
+
+    fn single_line(text: &str) -> LoadedContent {
+        LoadedContent::Text {
+            source: text.to_string(),
+            highlighted_lines: vec![HighlightedLine {
+                spans: Vec::new(),
+                plain_text: text.to_string(),
+            }],
+            pretty_json: None,
+        }
+    }
+
+    fn loaded(text: &str, cx: &mut TestAppContext) -> FileViewerTab {
+        let mut tab = FileViewerTab::new_empty();
+        cx.update(|cx| {
+            tab.apply_loaded_content(Ok(single_line(text)), None, &SyntaxSet::new(), true, cx)
+        });
+        tab
+    }
+
+    /// Freshness polling can swap the content under a live selection whose
+    /// columns are byte offsets into the text that is gone.
+    #[gpui::test]
+    fn a_reload_drops_a_selection_the_new_content_cannot_carry(cx: &mut TestAppContext) {
+        let mut tab = loaded("a", cx);
+        tab.selection.start = Some((0, 0));
+        tab.selection.end = Some((0, 1));
+
+        cx.update(|cx| {
+            tab.apply_loaded_content(Ok(single_line("é")), None, &SyntaxSet::new(), true, cx)
+        });
+
+        assert_eq!(extract_selected_source_text(&tab), None);
+        assert!(
+            !tab.selection.has_selection(),
+            "the reload kept the previous content's selection"
+        );
+    }
 }

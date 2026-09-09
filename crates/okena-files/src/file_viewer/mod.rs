@@ -391,6 +391,7 @@ pub struct FileViewer {
     syntax_set: std::sync::Arc<SyntaxSet>,
     /// File font size from settings
     file_font_size: f32,
+    file_line_height: f32,
     /// Monospace font used for source measurement and rendering.
     file_font: Font,
     /// Measured monospace character width (from font metrics)
@@ -499,6 +500,7 @@ impl FileViewerScope {
 #[derive(Clone)]
 pub struct FileViewerConfig {
     pub font_size: f32,
+    pub line_height: f32,
     pub font_family: SharedString,
     pub is_dark: bool,
     pub blame_visible: bool,
@@ -641,6 +643,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            line_height,
             font_family,
             is_dark,
             blame_visible,
@@ -662,6 +665,7 @@ impl FileViewer {
             project_fs,
             syntax_set,
             file_font_size: font_size,
+            file_line_height: line_height,
             file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
@@ -730,6 +734,7 @@ impl FileViewer {
         } = scope;
         let FileViewerConfig {
             font_size,
+            line_height,
             font_family,
             is_dark,
             blame_visible,
@@ -741,6 +746,7 @@ impl FileViewer {
             project_fs,
             syntax_set: load_syntax_set(),
             file_font_size: font_size,
+            file_line_height: line_height,
             file_font: okena_ui::tokens::file_font_for_family(font_family, cx),
             measured_char_width: font_size * 0.6,
             is_dark,
@@ -909,11 +915,20 @@ impl FileViewer {
         &mut self,
         font_size: f32,
         font_family: SharedString,
+        line_height: f32,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) {
         let rehighlight = is_dark != self.is_dark;
+        if self.file_line_height != line_height {
+            for tab in &self.tabs {
+                if let Some(state) = &tab.markdown_list_state {
+                    state.remeasure();
+                }
+            }
+        }
         self.file_font_size = font_size;
+        self.file_line_height = line_height;
         self.file_font = okena_ui::tokens::file_font_for_family(font_family, cx);
         self.is_dark = is_dark;
 
@@ -1615,6 +1630,9 @@ impl FileViewer {
                 );
                 let target_row = tab.target_line.map(|line| tab.source_row_for_line(line));
                 tab.blame = BlameLoadState::NotLoaded;
+                if tab_index == this.active_tab {
+                    this.perform_file_search(cx);
+                }
                 cx.notify();
                 if let Some(row) = target_row {
                     this.active_tab()

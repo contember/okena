@@ -534,7 +534,7 @@ pub fn prepare_content_search(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_content_search_for_path(
+pub fn prepare_content_search_for_path(
     root: &str,
     query: String,
     case_sensitive: bool,
@@ -649,6 +649,44 @@ pub(super) fn search_path_content(
     }
 }
 
+/// Resolve an existing entry and describe it. `resolve_new_project_file` canonicalizes and contains
+/// the parent while the leaf stays lexical, and `symlink_metadata` then describes the link itself —
+/// so a mutation acts on the entry the caller named, never on what it points at.
+fn resolve_entry(root: &str, relative_path: &str) -> Result<(PathBuf, std::fs::Metadata), String> {
+    let path = resolve_new_project_file(root, relative_path)?;
+    let metadata =
+        std::fs::symlink_metadata(&path).map_err(|error| format!("Cannot read path: {error}"))?;
+    Ok((path, metadata))
+}
+
+/// Existence of the entry itself; unlike `Path::exists`, a dangling symlink counts.
+fn entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+#[cfg(windows)]
+fn remove_symlink(target: &Path) -> std::io::Result<()> {
+    // Windows unlinks a directory symlink with `remove_dir`, a file symlink with `remove_file`.
+    std::fs::remove_file(target)
+        .or_else(|file_error| std::fs::remove_dir(target).map_err(|_| file_error))
+}
+
+#[cfg(not(windows))]
+fn remove_symlink(target: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(target)
+}
+
+/// Remove the entry at `target` itself — a symlink is unlinked, never followed into its referent.
+fn remove_entry(target: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        remove_symlink(target)
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(target)
+    } else {
+        std::fs::remove_file(target)
+    }
+}
+
 pub(super) fn rename_file(
     ws: &Workspace,
     project_id: String,
@@ -662,8 +700,8 @@ pub(super) fn rename_file(
         Some(p) => p.path.clone(),
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
     };
-    let old_path = match resolve_project_file(&project_path, &relative_path) {
-        Ok(c) => c,
+    let old_path = match resolve_entry(&project_path, &relative_path) {
+        Ok((path, _)) => path,
         Err(e) => return ActionResult::Err(e),
     };
     let parent = match old_path.parent() {
@@ -671,7 +709,7 @@ pub(super) fn rename_file(
         None => return ActionResult::Err("cannot rename project root".to_string()),
     };
     let new_path = parent.join(&new_name);
-    if new_path.exists() {
+    if entry_exists(&new_path) {
         return ActionResult::Err(format!("target already exists: {}", new_name));
     }
     match std::fs::rename(&old_path, &new_path) {
@@ -689,23 +727,33 @@ pub(super) fn delete_file(
         Some(p) => p.path.clone(),
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
     };
-    let target = match resolve_project_file(&project_path, &relative_path) {
-        Ok(c) => c,
-        Err(e) => return ActionResult::Err(e),
-    };
     let project_root = match std::path::Path::new(&project_path).canonicalize() {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
     };
-    if target == project_root {
+    // The diff viewer is the caller, and its paths share the git surface's worktree-root base.
+    let (git_root, _) = okena_git::resolve_git_root_and_subdir(&project_root);
+    let Some(root) = git_root.to_str() else {
+        return ActionResult::Err("Repository root path is not valid UTF-8".to_string());
+    };
+    let (target, metadata) = match resolve_entry(root, &relative_path) {
+        Ok(entry) => entry,
+        Err(e) => return ActionResult::Err(e),
+    };
+    // Compare on disk: the leaf is lexical, so a case-folding filesystem would slip a byte-unequal
+    // spelling of the project root past equality. A symlink is exempt — unlinking it is not that.
+    if !metadata.file_type().is_symlink()
+        && target
+            .canonicalize()
+            .is_ok_and(|resolved| resolved == project_root)
+    {
         return ActionResult::Err("cannot delete project root".to_string());
     }
-    let result = if target.is_dir() {
-        std::fs::remove_dir_all(&target)
-    } else {
-        std::fs::remove_file(&target)
-    };
-    match result {
+    // The diff viewer, the only producer, never sends a folder; keep `remove_dir_all` off this base.
+    if metadata.is_dir() {
+        return ActionResult::Err("cannot delete a directory".to_string());
+    }
+    match remove_entry(&target, &metadata) {
         Ok(()) => ActionResult::Ok(None),
         Err(e) => ActionResult::Err(format!("Cannot delete: {}", e)),
     }
@@ -719,8 +767,8 @@ pub(super) fn rename_path(root: String, relative_path: String, new_name: String)
         Ok(root) => root,
         Err(error) => return ActionResult::Err(error),
     };
-    let old_path = match resolve_project_file(&root, &relative_path) {
-        Ok(path) => path,
+    let old_path = match resolve_entry(&root, &relative_path) {
+        Ok((path, _)) => path,
         Err(error) => return ActionResult::Err(error),
     };
     if old_path == root_path {
@@ -730,7 +778,7 @@ pub(super) fn rename_path(root: String, relative_path: String, new_name: String)
         return ActionResult::Err("path has no parent".to_string());
     };
     let new_path = parent.join(&new_name);
-    if new_path.exists() {
+    if entry_exists(&new_path) {
         return ActionResult::Err(format!("target already exists: {new_name}"));
     }
     match std::fs::rename(old_path, new_path) {
@@ -744,19 +792,14 @@ pub(super) fn delete_path(root: String, relative_path: String) -> ActionResult {
         Ok(root) => root,
         Err(error) => return ActionResult::Err(error),
     };
-    let target = match resolve_project_file(&root, &relative_path) {
-        Ok(path) => path,
+    let (target, metadata) = match resolve_entry(&root, &relative_path) {
+        Ok(entry) => entry,
         Err(error) => return ActionResult::Err(error),
     };
     if target == root_path {
         return ActionResult::Err("cannot delete browser root".to_string());
     }
-    let result = if target.is_dir() {
-        std::fs::remove_dir_all(target)
-    } else {
-        std::fs::remove_file(target)
-    };
-    match result {
+    match remove_entry(&target, &metadata) {
         Ok(()) => ActionResult::Ok(None),
         Err(error) => ActionResult::Err(format!("Cannot delete: {error}")),
     }
@@ -862,5 +905,308 @@ mod terminal_path_tests {
             .collect();
         assert_eq!(labels, vec!["/", "srv", "apps", "demo"]);
         assert_eq!(breadcrumbs[2].canonical_path, "/srv/apps");
+    }
+}
+
+#[cfg(test)]
+mod entry_mutation_tests {
+    use super::{ActionResult, delete_file, rename_file};
+    #[cfg(unix)]
+    use super::{delete_path, rename_path};
+    use crate::workspace::state::{ProjectData, WindowState, Workspace, WorkspaceData};
+    use okena_core::theme::FolderColor;
+    use okena_workspace::settings::HooksConfig;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// A temp directory removed even when an assertion panics mid-test.
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "okena-files-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&base).expect("create fixture root");
+            Self(base.canonicalize().expect("canonicalize fixture root"))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn expect_ok(result: ActionResult) {
+        if let ActionResult::Err(error) = result {
+            panic!("action failed: {error}");
+        }
+    }
+
+    fn expect_err(result: ActionResult) -> String {
+        match result {
+            ActionResult::Err(error) => error,
+            ActionResult::Ok(_) => panic!("action succeeded but should have been refused"),
+        }
+    }
+
+    fn workspace_with_project(path: &Path) -> Workspace {
+        let project = ProjectData {
+            id: "p1".to_string(),
+            name: "Project".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+            creating_progress: None,
+        };
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["p1".to_string()],
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    /// A repository at `<fixture>/repo` whose project lives in the `packages/app` subdirectory.
+    fn subdirectory_project(fixture: &Fixture) -> PathBuf {
+        let repo = fixture.path().join("repo");
+        let project = repo.join("packages").join("app");
+        fs::create_dir_all(&project).expect("create project dir");
+        let init = Command::new("git")
+            .current_dir(&repo)
+            .args(["init", "--quiet"])
+            .output()
+            .expect("run git init");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        project
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_path_unlinks_a_directory_symlink_and_keeps_its_referent() {
+        let fixture = Fixture::new();
+        let root = fixture.path();
+        let referent = root.join("real");
+        fs::create_dir(&referent).expect("create referent dir");
+        fs::write(referent.join("keep.txt"), "keep").expect("write referent file");
+        std::os::unix::fs::symlink(&referent, root.join("link")).expect("create dir symlink");
+
+        expect_ok(delete_path(
+            root.to_string_lossy().into_owned(),
+            "link".to_string(),
+        ));
+
+        assert!(
+            referent.join("keep.txt").exists(),
+            "the referent tree must survive"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("link")).is_err(),
+            "the link itself must be gone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_path_unlinks_a_file_symlink_and_keeps_its_referent() {
+        let fixture = Fixture::new();
+        let root = fixture.path();
+        let referent = root.join("real.txt");
+        fs::write(&referent, "keep").expect("write referent file");
+        std::os::unix::fs::symlink(&referent, root.join("link.txt")).expect("create file symlink");
+
+        expect_ok(delete_path(
+            root.to_string_lossy().into_owned(),
+            "link.txt".to_string(),
+        ));
+
+        assert_eq!(
+            fs::read_to_string(&referent).expect("referent must survive"),
+            "keep"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("link.txt")).is_err(),
+            "the link itself must be gone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_path_moves_the_link_and_leaves_its_referent_in_place() {
+        let fixture = Fixture::new();
+        let root = fixture.path();
+        let referent = root.join("real.txt");
+        fs::write(&referent, "keep").expect("write referent file");
+        std::os::unix::fs::symlink(&referent, root.join("link.txt")).expect("create file symlink");
+
+        expect_ok(rename_path(
+            root.to_string_lossy().into_owned(),
+            "link.txt".to_string(),
+            "moved.txt".to_string(),
+        ));
+
+        assert!(
+            fs::symlink_metadata(&referent)
+                .expect("referent must survive")
+                .is_file(),
+            "the referent must stay a regular file at its own path"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("moved.txt"))
+                .expect("renamed entry must exist")
+                .is_symlink(),
+            "the renamed entry must still be the link"
+        );
+        assert!(fs::symlink_metadata(root.join("link.txt")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_file_unlinks_a_symlink_instead_of_its_referent() {
+        let fixture = Fixture::new();
+        let root = fixture.path();
+        let referent = root.join("real.txt");
+        fs::write(&referent, "keep").expect("write referent file");
+        std::os::unix::fs::symlink(&referent, root.join("link.txt")).expect("create file symlink");
+        let ws = workspace_with_project(root);
+
+        expect_ok(delete_file(&ws, "p1".to_string(), "link.txt".to_string()));
+
+        assert_eq!(
+            fs::read_to_string(&referent).expect("referent must survive"),
+            "keep"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("link.txt")).is_err(),
+            "the link itself must be gone"
+        );
+    }
+
+    #[test]
+    fn delete_file_resolves_paths_against_the_git_worktree_root() {
+        let fixture = Fixture::new();
+        let project = subdirectory_project(&fixture);
+
+        let intended = project.join("fresh.txt");
+        fs::write(&intended, "intended").expect("write intended file");
+        let decoy_dir = project.join("packages").join("app");
+        fs::create_dir_all(&decoy_dir).expect("create decoy dir");
+        let decoy = decoy_dir.join("fresh.txt");
+        fs::write(&decoy, "decoy").expect("write decoy file");
+
+        let ws = workspace_with_project(&project);
+        expect_ok(delete_file(
+            &ws,
+            "p1".to_string(),
+            "packages/app/fresh.txt".to_string(),
+        ));
+
+        assert!(
+            !intended.exists(),
+            "a diff-viewer path must delete the worktree-root file"
+        );
+        assert!(
+            decoy.exists(),
+            "the project-relative twin must be left untouched"
+        );
+    }
+
+    #[test]
+    fn delete_file_refuses_a_directory_reached_through_the_worktree_root() {
+        let fixture = Fixture::new();
+        let project = subdirectory_project(&fixture);
+        let repo = project
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root")
+            .to_path_buf();
+        let ws = workspace_with_project(&project);
+
+        for (relative_path, directory) in [
+            (".git", repo.join(".git")),
+            ("packages", repo.join("packages")),
+        ] {
+            let error = expect_err(delete_file(
+                &ws,
+                "p1".to_string(),
+                relative_path.to_string(),
+            ));
+            assert!(
+                error.contains("cannot delete"),
+                "{relative_path} gave: {error}"
+            );
+            assert!(
+                directory.is_dir(),
+                "{relative_path} must still exist after the refusal"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_file_refuses_the_project_root_reached_through_the_worktree_root() {
+        let fixture = Fixture::new();
+        let project = subdirectory_project(&fixture);
+        let ws = workspace_with_project(&project);
+
+        let error = expect_err(delete_file(
+            &ws,
+            "p1".to_string(),
+            "packages/app".to_string(),
+        ));
+
+        assert_eq!(error, "cannot delete project root");
+        assert!(project.is_dir(), "the project directory must survive");
+    }
+
+    #[test]
+    fn rename_file_refuses_an_empty_or_dot_leaf() {
+        let fixture = Fixture::new();
+        let root = fixture.path().join("project");
+        fs::create_dir(&root).expect("create project dir");
+        let ws = workspace_with_project(&root);
+
+        for relative_path in ["", "."] {
+            let error = expect_err(rename_file(
+                &ws,
+                "p1".to_string(),
+                relative_path.to_string(),
+                "renamed".to_string(),
+            ));
+            assert!(!error.is_empty(), "{relative_path:?} must be refused");
+            assert!(
+                root.is_dir(),
+                "the project directory must keep its name after {relative_path:?}"
+            );
+        }
     }
 }

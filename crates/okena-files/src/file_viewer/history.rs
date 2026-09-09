@@ -207,6 +207,9 @@ impl FileViewer {
                     Err(error) => Err(error),
                 };
                 tab.apply_loaded_content(content, None, &this.syntax_set, this.is_dark, cx);
+                if this.active_tab().relative_path == relative_path {
+                    this.perform_file_search(cx);
+                }
                 cx.notify();
             });
         })

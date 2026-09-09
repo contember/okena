@@ -472,7 +472,7 @@ fn main() {
         }
 
         if let Err(error) = run_headless(listen_addr) {
-            eprintln!("Failed to start headless daemon: {error:#}");
+            eprintln!("Headless daemon failed: {error:#}");
             std::process::exit(1);
         }
         return;

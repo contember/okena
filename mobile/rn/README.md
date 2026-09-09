@@ -50,8 +50,16 @@ The native chain has been run on both an Android emulator and a physical Android
 connect → pair → workspace → live terminal → input/output. Both ADB-reversed plaintext
 loopback and a real LAN TLS connection have been verified. The TypeScript adapter passes all five
 arguments expected by Rust's `connect(host, port, token, tls, fingerprint)` API, so saved
-certificate pins are enforced. First-use fingerprints are captured by the Rust connection but are
-not yet exposed back through the FFI for persistence in `SavedServer`.
+certificate pins are enforced. First-use fingerprints are read back through `get_cert_fingerprint`
+and persisted onto the `SavedServer` next to the token; a token saved without a pin is withheld on
+reconnect so the server falls back to pairing.
+
+> **Regenerate the bindings after pulling.** `src/generated` and
+> `modules/okena-mobile-ffi/` are gitignored, and `react-native run-android|run-ios` does **not**
+> run ubrn. A tree whose bindings predate a new `#[uniffi::export]` keeps the old JS surface: the
+> app detects that for `get_cert_fingerprint` and logs a one-time warning (pins are then neither
+> read nor persisted), but there is no such fallback for functions added later. Run
+> `npm run ubrn:android` / `npm run ubrn:ios` after any change to `crates/okena-mobile-ffi`.
 
 The generic steps below are correct in spirit but several things needed fixing/wiring that aren't
 obvious — captured here.

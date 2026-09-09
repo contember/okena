@@ -25,4 +25,7 @@ pub struct PendingWorktreeClose {
     /// Data needed for the worktree_removed hook after removal
     pub branch: String,
     pub main_repo_path: String,
+    /// Whether an earlier phase of this close actually stashed. Drives the
+    /// post-stash guard, which must refuse a checkout that turned dirty again.
+    pub did_stash: bool,
 }

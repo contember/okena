@@ -18,8 +18,8 @@ pub use diff::{
 pub use error::{GitError, GitResult};
 pub use file_history::{FileHistoryEntry, get_file_history};
 pub use repository::{
-    BranchDetail, BranchList, CloneProgress, HeadSnapshot, OrphanedWorktree, UpstreamState,
-    VerifiedWorktree, checkout_local_branch, checkout_remote_branch, clone_dir_name,
+    BranchDetail, BranchList, CloneProgress, DirtyCheck, HeadSnapshot, OrphanedWorktree,
+    UpstreamState, VerifiedWorktree, checkout_local_branch, checkout_remote_branch, clone_dir_name,
     clone_repository, compute_target_paths, count_ahead_behind, count_unpushed_commits,
     create_and_checkout_branch, create_worktree, create_worktree_with_start_point,
     delete_local_branch, delete_remote_branch, discard_file_changes, fetch_all,
@@ -30,7 +30,8 @@ pub use repository::{
     parse_clone_progress, project_path_in_worktree, push_branch, rebase_onto,
     remove_orphaned_worktree, remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir,
     resolve_review_base, stage_file, start_clone_repository, stash_changes, stash_pop,
-    unstage_file, validate_clone_url, verify_linked_worktree_fresh, verify_orphaned_worktree,
+    uncommitted_changes, unstage_file, validate_clone_url, verify_linked_worktree_fresh,
+    verify_orphaned_worktree,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look
@@ -279,8 +280,8 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     }
 
     // Untracked files count each line as an addition.
-    for file in diff.untracked {
-        let added = repository::untracked_line_count(path, &file);
+    for file in &diff.untracked {
+        let added = repository::untracked_line_count(path, &diff.root, file);
         summaries.push(FileDiffSummary {
             path: file.clone(),
             added,
@@ -297,6 +298,37 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_file_summary_uses_one_path_base_in_a_subdirectory_project() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("tracked.txt"), "base\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "package"],
+        );
+        std::fs::write(project.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(project.join("fresh.txt"), "new\n").unwrap();
+
+        let summaries = get_diff_file_summary(&project);
+        let paths: Vec<&str> = summaries.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["packages/app/fresh.txt", "packages/app/tracked.txt"],
+            "clicking a summary row selects a diff file by path, so both lists \
+             must name files the same way"
+        );
+        let fresh = summaries
+            .iter()
+            .find(|s| s.path == "packages/app/fresh.txt")
+            .expect("untracked summary");
+        assert_eq!((fresh.added, fresh.is_new), (1, true));
+    }
 
     #[test]
     fn diff_file_summary_matches_git_cli() {
