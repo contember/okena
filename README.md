@@ -140,7 +140,7 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 
 ## Building
 
-Requires Rust toolchain (edition 2021).
+Requires Rust toolchain (edition 2024).
 
 ```bash
 cargo build --release
