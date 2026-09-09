@@ -2479,6 +2479,7 @@ mod workspace_tests {
             branch: "feature".into(),
             main_repo_path: "/tmp".into(),
             did_stash: false,
+            delete_branch: false,
         });
         assert!(workspace.is_project_closing("wt1"));
         assert!(workspace.project("wt1").unwrap().is_closing);

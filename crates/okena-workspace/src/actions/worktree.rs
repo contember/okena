@@ -68,6 +68,11 @@ impl WorktreeRemovalPlan {
         &self.worktree_path
     }
 
+    /// The branch the removed checkout held.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
     /// Whether this plan deletes a checkout Git no longer tracks.
     pub fn is_orphaned(&self) -> bool {
         matches!(self.target, WorktreeRemovalTarget::Orphaned(_))
@@ -212,8 +217,10 @@ fn verify_merge_destination(main_repo_path: &str, default_branch: &str) -> Resul
 }
 
 /// The worktree-close merge pipeline: stash → fetch → pre_merge hook → rebase →
-/// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
-/// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
+/// merge → post_merge hook → push, with stash-pop recovery on any failing step.
+/// Deleting the branch is not part of it — see [`delete_closed_worktree_branch`].
+///
+/// PURE: only git subprocesses + headless hooks (monitor, no PTY
 /// runner), no `&mut Workspace` — so the daemon runs it on a blocking thread with
 /// no lock held. `on_rebase_conflict` is resolved into a deferred plan for the
 /// caller to execute and register on its reactor. Call only when merge is enabled.
@@ -222,7 +229,6 @@ pub fn close_worktree_merge_git(
     stash_enabled: bool,
     fetch_enabled: bool,
     push_enabled: bool,
-    delete_branch_enabled: bool,
     project_id: &str,
     project_name: &str,
     project_path: &str,
@@ -332,16 +338,23 @@ pub fn close_worktree_merge_git(
         log::warn!("Push failed (continuing): {}", e);
     }
 
-    if delete_branch_enabled {
-        if let Err(e) = okena_git::delete_local_branch(Path::new(main_repo_path), branch) {
-            log::warn!("Delete local branch failed (continuing): {}", e);
-        }
-        if let Err(e) = okena_git::delete_remote_branch(Path::new(main_repo_path), branch) {
-            log::warn!("Delete remote branch failed (continuing): {}", e);
-        }
-    }
-
     CloseWorktreeGitOutcome::Ok { did_stash }
+}
+
+/// Delete a closed worktree's branch, local and remote.
+///
+/// Only ever call this once the checkout is gone: `git branch -d` refuses a
+/// branch a worktree still holds, and the refusal is not worth surfacing — the
+/// close itself succeeded. A branch that survives is recoverable; the checkout
+/// this deletes it after is not.
+pub fn delete_closed_worktree_branch(main_repo_path: &str, branch: &str) {
+    let repo = std::path::Path::new(main_repo_path);
+    if let Err(e) = okena_git::delete_local_branch(repo, branch) {
+        log::warn!("Delete local branch failed (continuing): {}", e);
+    }
+    if let Err(e) = okena_git::delete_remote_branch(repo, branch) {
+        log::warn!("Delete remote branch failed (continuing): {}", e);
+    }
 }
 
 impl Workspace {
@@ -1286,7 +1299,10 @@ impl Workspace {
         let stash_enabled = stash && is_dirty;
         let fetch_enabled = fetch;
         let push_enabled = push;
-        let delete_branch_enabled = delete_branch;
+        // A branch may only be deleted once its work is merged and the checkout
+        // holding it is gone: either this call merges, or a caller resuming a
+        // merge it already ran comes in with `merge` off and vouches for it.
+        let delete_branch_enabled = delete_branch && (merge_enabled || !merge);
 
         let folder = self.folder_for_project_or_parent(project_id);
         let folder_id = folder.map(|f| f.id.clone());
@@ -1302,7 +1318,6 @@ impl Workspace {
                 stash_enabled,
                 fetch_enabled,
                 push_enabled,
-                delete_branch_enabled,
                 project_id,
                 &project_name,
                 &project_path,
@@ -1374,6 +1389,7 @@ impl Workspace {
                     branch: branch.clone(),
                     main_repo_path: main_repo_path.clone(),
                     did_stash,
+                    delete_branch: delete_branch_enabled,
                 });
                 Ok(())
             } else {
@@ -1422,13 +1438,24 @@ impl Workspace {
 
             // remove_worktree_project completes close hooks, removes the git
             // worktree, and deletes the project.
-            self.remove_worktree_project(focus_manager, project_id, force_remove, global_hooks, cx)
+            let removed = self.remove_worktree_project(
+                focus_manager,
+                project_id,
+                force_remove,
+                global_hooks,
+                cx,
+            );
+            if removed.is_ok() && delete_branch_enabled {
+                delete_closed_worktree_branch(&main_repo_path, &branch);
+            }
+            removed
         }
     }
 }
 
 #[cfg(test)]
 mod merge_pipeline_tests {
+    use super::delete_closed_worktree_branch;
     use super::{
         CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget, close_dirty_state,
         close_worktree_merge_git,
@@ -1536,7 +1563,6 @@ mod merge_pipeline_tests {
             false,
             false,
             false,
-            false,
             "p1",
             "Project",
             path_str(&worktree),
@@ -1582,7 +1608,6 @@ mod merge_pipeline_tests {
         };
         let monitor = HookMonitor::new();
         let outcome = close_worktree_merge_git(
-            false,
             false,
             false,
             false,
@@ -1638,7 +1663,6 @@ mod merge_pipeline_tests {
             true,
             false,
             false,
-            false,
             "p1",
             "Project",
             path_str(&worktree),
@@ -1675,10 +1699,75 @@ mod merge_pipeline_tests {
         );
     }
 
-    /// The happy path with every toggle on — the regression control for the
-    /// destination checks above, and the only place `push` is exercised.
+    fn local_branches(repo: &Path) -> String {
+        let output = Command::new("git")
+            .args(["-C", path_str(repo), "branch", "--format=%(refname:short)"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The whole reason the deletion left the merge pipeline: Git refuses to
+    /// delete a branch a checkout still holds, and that refusal was only logged.
     #[test]
-    fn a_close_with_every_toggle_on_merges_and_reaches_the_remote() {
+    fn a_branch_is_deleted_only_once_its_checkout_is_gone() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let remote = fixture.root.join("remote.git");
+        git(&["init", "--bare", "-b", "main", path_str(&remote)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "remote",
+            "add",
+            "origin",
+            path_str(&remote),
+        ]);
+        git(&["-C", path_str(&main_repo), "push", "-q", "origin", "main"]);
+        git(&["-C", path_str(&worktree), "push", "-q", "origin", "feature"]);
+        // `git branch -d` also refuses an unmerged branch; the close deletes
+        // one it has just merged.
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge",
+            "feature",
+        ]);
+
+        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+        assert!(
+            local_branches(&main_repo).contains("feature"),
+            "git cannot delete a branch its worktree still holds"
+        );
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+
+        assert!(
+            !local_branches(&main_repo).contains("feature"),
+            "the local branch must be gone once its checkout is"
+        );
+        assert!(
+            !local_branches(&remote).contains("feature"),
+            "and so must the remote one"
+        );
+    }
+
+    /// The happy path with the remaining toggles on — the regression control for
+    /// the destination checks above, and the only place `push` is exercised.
+    #[test]
+    fn a_close_that_fetches_and_pushes_carries_the_merge_to_the_remote() {
         let fixture = TestRepo::new();
         let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
         let remote = fixture.root.join("remote.git");
@@ -1696,7 +1785,6 @@ mod merge_pipeline_tests {
 
         let outcome = close_worktree_merge_git(
             false,
-            true,
             true,
             true,
             "p1",
