@@ -327,11 +327,13 @@ impl Terminal {
                 ..Default::default()
             },
         };
-        if let Some(bytes) = crate::input::key_to_bytes(
-            &event,
-            self.is_app_cursor_mode(),
-            self.kitty_keyboard_flags(),
-        ) {
+        let options = crate::input::KeyEncodeOptions {
+            app_cursor_mode: self.is_app_cursor_mode(),
+            kitty: self.kitty_keyboard_flags(),
+            // Esc / Tab / Shift+Tab never carry Alt, so Option-as-Meta cannot apply.
+            option_as_meta: false,
+        };
+        if let Some(bytes) = crate::input::key_to_bytes(&event, options) {
             self.send_bytes(&bytes);
         }
     }

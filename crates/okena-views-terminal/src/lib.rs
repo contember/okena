@@ -141,6 +141,10 @@ pub struct TerminalViewSettings {
     /// here instead of reaching a mouse-reporting app.
     #[serde(default)]
     pub double_click_selects_in_mouse_mode: bool,
+    /// macOS only: Option+key sends the Meta escape prefix instead of the
+    /// character the layout composes.
+    #[serde(default)]
+    pub option_as_meta: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -171,6 +175,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             right_click_opens_menu: true,
             drag_selects_in_mouse_mode: false,
             double_click_selects_in_mouse_mode: false,
+            option_as_meta: false,
         })
 }
 

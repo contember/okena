@@ -9,8 +9,15 @@
 use super::super::Terminal;
 use super::super::types::TerminalSize;
 use super::{CapturingTransport, NullTransport};
-use crate::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use crate::input::{KeyEncodeOptions, KeyEvent, KeyModifiers, key_to_bytes};
 use std::sync::Arc;
+
+fn encode_options(t: &Terminal) -> KeyEncodeOptions {
+    KeyEncodeOptions {
+        kitty: t.kitty_keyboard_flags(),
+        ..Default::default()
+    }
+}
 
 fn term() -> Terminal {
     Terminal::new(
@@ -55,14 +62,14 @@ fn escape_encodes_as_csi_u_only_after_push() {
 
     // Before the app enables the protocol: legacy bare ESC.
     assert_eq!(
-        key_to_bytes(&esc, false, t.kitty_keyboard_flags()),
+        key_to_bytes(&esc, encode_options(&t)),
         Some(b"\x1b".to_vec())
     );
 
     // After `CSI > 1 u`: the encoder reads the live flag and emits `CSI 27 u`.
     t.process_output(b"\x1b[>1u");
     assert_eq!(
-        key_to_bytes(&esc, false, t.kitty_keyboard_flags()),
+        key_to_bytes(&esc, encode_options(&t)),
         Some(b"\x1b[27u".to_vec())
     );
 }

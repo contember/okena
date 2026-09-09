@@ -413,6 +413,13 @@ pub struct AppSettings {
     #[serde(default)]
     pub terminal_double_click_selects_in_mouse_mode: bool,
 
+    /// macOS only: when true, Option+key sends the Meta escape prefix instead of
+    /// composing a character (Option+B is `∫`). Ignored elsewhere, where Alt
+    /// already encodes Meta.
+    /// Default: false (matches Terminal.app / iTerm2).
+    #[serde(default)]
+    pub terminal_option_as_meta: bool,
+
     /// File finder filter preferences. The "Go to File" dialog reads these
     /// when opened and writes them back when the user toggles a filter, so
     /// the last-used state is also the default for future opens.
@@ -489,6 +496,7 @@ impl Default for AppSettings {
             terminal_right_click_opens_menu: true,
             terminal_drag_selects_in_mouse_mode: false,
             terminal_double_click_selects_in_mouse_mode: false,
+            terminal_option_as_meta: false,
             file_finder: FileFinderSettings::default(),
             header_density: HeaderDensity::default(),
             notifications: NotificationSettings::default(),
@@ -1052,6 +1060,15 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"auto_hide_single_terminal_header":true}"#).unwrap();
         assert!(loaded.auto_hide_single_terminal_header);
+    }
+
+    #[test]
+    fn option_as_meta_is_opt_in() {
+        assert!(!AppSettings::default().terminal_option_as_meta);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"terminal_option_as_meta":true}"#).unwrap();
+        assert!(loaded.terminal_option_as_meta);
     }
 
     #[test]

@@ -84,6 +84,14 @@ impl SettingsPanel {
                     cx,
                 ))
                 .child(self.render_toggle(
+                    "option-as-meta",
+                    "Option as Meta (macOS)",
+                    s.terminal_option_as_meta,
+                    true,
+                    |state, val, cx| state.set_terminal_option_as_meta(val, cx),
+                    cx,
+                ))
+                .child(self.render_toggle(
                     "idle-detection",
                     "Idle Detection",
                     s.idle_timeout_secs > 0,

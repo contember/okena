@@ -98,6 +98,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
 | `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled) |
+| `terminal_option_as_meta` | bool | `false` | macOS only: Option+key sends the Meta escape prefix (`ESC` + character) instead of composing a character (Option+B is `∫`). No effect on Linux/Windows, where Alt already encodes Meta. |
 
 #### Session Backend
 
