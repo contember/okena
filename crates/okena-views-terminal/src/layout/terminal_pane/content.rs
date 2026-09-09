@@ -282,6 +282,26 @@ impl TerminalContent {
         });
     }
 
+    /// Keyboard page scroll behind the `ScrollUp` / `ScrollDown` actions.
+    pub fn scroll_by_page(&mut self, up: bool, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.clone() else {
+            return;
+        };
+        let Ok(lines) = i32::try_from(terminal.screen_lines()) else {
+            return;
+        };
+        if lines <= 0 {
+            return;
+        }
+        if up {
+            terminal.scroll_up(lines);
+        } else {
+            terminal.scroll_down(lines);
+        }
+        self.mark_scroll_activity(cx);
+        cx.notify();
+    }
+
     pub fn handle_scroll(
         &mut self,
         delta: f32,

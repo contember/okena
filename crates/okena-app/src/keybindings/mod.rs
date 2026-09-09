@@ -25,8 +25,6 @@ actions!(
         ClearFocus,
         CloseWindow,
         FocusActiveProject,
-        ScrollUp,
-        ScrollDown,
         ShowKeybindings,
         ShowSessionManager,
         ShowThemeSelector,
@@ -63,9 +61,9 @@ pub use okena_views_terminal::actions::{
     AddTab, CloseSearch, CloseTerminal, Copy, DetachTerminal, ExportTerminalBuffer, FocusDown,
     FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal,
     FullscreenPrevTerminal, JumpToNextFailedCommand, JumpToNextPrompt, JumpToPreviousFailedCommand,
-    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev,
-    SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen,
-    ToggleUnread, ZoomIn, ZoomOut,
+    JumpToPreviousPrompt, MinimizeTerminal, Paste, ResetZoom, ScrollDown, ScrollUp, Search,
+    SearchNext, SearchPrev, SendBacktab, SendEscape, SendTab, SplitHorizontal, SplitVertical,
+    ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)

@@ -132,7 +132,7 @@ jobs:
   # crates/okena-mobile-ffi to an Android NDK .so / iOS xcframework, then
   # `react-native run-*`) needs the mobile toolchain and is NOT yet wired into
   # CI — see mobile/rn/README.md for the device-side steps. Until then CI
-  # type-checks and lints the RN/TS sources; the Rust FFI crate itself is
+  # type-checks, lints and Jest-tests the RN/TS sources; the Rust FFI crate is
   # already covered by the `check` job's workspace build + clippy + tests.
   mobile-rn:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -158,6 +158,9 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Test
+        run: npm test
 
   # Full multi-platform build: tags + manual trigger
   build:
@@ -358,6 +361,16 @@ jobs:
 
           exit "$failed"
 
+      # The in-app updater looks for an asset named exactly `SHA256SUMS` and
+      # silently skips verification when it is absent (checker.rs:204).
+      - name: Generate SHA256SUMS
+        run: |
+          shopt -s nullglob
+          assets=(*.tar.gz *.zip *.dmg *.apk)
+          [[ ${#assets[@]} -gt 0 ]] || { echo "no release assets to checksum"; exit 1; }
+          sha256sum "${assets[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
       # The cask is the stable channel — a prerelease must not overwrite it.
       - name: Generate ContemberBot token
         id: app-token
@@ -407,4 +420,5 @@ jobs:
             *.zip
             *.dmg
             *.apk
+            SHA256SUMS
           generate_release_notes: true

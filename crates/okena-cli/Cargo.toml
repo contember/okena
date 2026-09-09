@@ -1,6 +1,7 @@
 [package]
 name = "okena-cli"
-version = "0.1.0"
+# Workspace version so `okena -V` reports the shipped app version.
+version.workspace = true
 edition = "2024"
 license = "MIT"
 

@@ -344,16 +344,46 @@ pub fn close_worktree_merge_git(
 /// Delete a closed worktree's branch, local and remote.
 ///
 /// Only ever call this once the checkout is gone: `git branch -d` refuses a
-/// branch a worktree still holds, and the refusal is not worth surfacing — the
-/// close itself succeeded. A branch that survives is recoverable; the checkout
-/// this deletes it after is not.
-pub fn delete_closed_worktree_branch(main_repo_path: &str, branch: &str) {
+/// branch a worktree still holds. Returns what survived so the caller can tell
+/// the user the branch outlived the close they asked it to end.
+pub fn delete_closed_worktree_branch(main_repo_path: &str, branch: &str) -> Result<(), String> {
     let repo = std::path::Path::new(main_repo_path);
+    let mut survived = Vec::new();
+
     if let Err(e) = okena_git::delete_local_branch(repo, branch) {
         log::warn!("Delete local branch failed (continuing): {}", e);
+        survived.push(format!("local: {e}"));
     }
     if let Err(e) = okena_git::delete_remote_branch(repo, branch) {
         log::warn!("Delete remote branch failed (continuing): {}", e);
+        if !nothing_to_delete_on_remote(&e.to_string()) {
+            survived.push(format!("remote: {e}"));
+        }
+    }
+
+    if survived.is_empty() {
+        Ok(())
+    } else {
+        Err(survived.join("; "))
+    }
+}
+
+/// A repo without `origin`, or a branch never pushed, leaves nothing on the
+/// remote to delete. `git push --delete` still fails, but reporting it would
+/// put an error in front of every local-only worktree close.
+fn nothing_to_delete_on_remote(error: &str) -> bool {
+    error.contains("remote ref does not exist")
+        || error.contains("does not appear to be a git repository")
+}
+
+/// Warning, not error: the close itself succeeded, only the branch is left.
+pub fn surviving_branch_toast(branch: &str, error: &str) -> okena_state::Toast {
+    okena_state::Toast::warning(format!("Branch '{branch}' was not deleted")).with_detail(error)
+}
+
+fn report_surviving_branch(branch: &str, error: &str, cx: &mut impl WorkspaceCx) {
+    if let Some(monitor) = cx.hook_monitor() {
+        monitor.push_toast(surviving_branch_toast(branch, error));
     }
 }
 
@@ -1445,8 +1475,11 @@ impl Workspace {
                 global_hooks,
                 cx,
             );
-            if removed.is_ok() && delete_branch_enabled {
-                delete_closed_worktree_branch(&main_repo_path, &branch);
+            if removed.is_ok()
+                && delete_branch_enabled
+                && let Err(error) = delete_closed_worktree_branch(&main_repo_path, &branch)
+            {
+                report_surviving_branch(&branch, &error, cx);
             }
             removed
         }
@@ -1455,7 +1488,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod merge_pipeline_tests {
-    use super::delete_closed_worktree_branch;
+    use super::{delete_closed_worktree_branch, surviving_branch_toast};
     use super::{
         CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget, close_dirty_state,
         close_worktree_merge_git,
@@ -1707,6 +1740,52 @@ mod merge_pipeline_tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// `git push --delete` always fails without an `origin`. Reporting that
+    /// would put a warning on every close in a repository that has no remote.
+    #[test]
+    fn a_repository_without_a_remote_reports_a_clean_branch_cleanup() {
+        let tmp = TestRepo::new();
+        let repo = tmp.root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&["-C", path_str(&repo), "init", "-q"]);
+        git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
+        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
+        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["-C", path_str(&repo), "branch", "feature"]);
+
+        assert_eq!(delete_closed_worktree_branch(path_str(&repo), "feature"), Ok(()));
+        assert!(!local_branches(&repo).contains("feature"));
+    }
+
+    /// A branch the close was asked to delete but could not is the one thing
+    /// worth surfacing: the checkout is gone and cannot be got back, the branch
+    /// is still there and the user has to decide what to do with it.
+    #[test]
+    fn an_unmerged_branch_survives_the_close_and_says_so() {
+        let tmp = TestRepo::new();
+        let repo = tmp.root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&["-C", path_str(&repo), "init", "-q"]);
+        git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
+        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
+        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["-C", path_str(&repo), "branch", "feature"]);
+        git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "unmerged"]);
+        git(&["-C", path_str(&repo), "branch", "-f", "feature", "HEAD"]);
+        git(&["-C", path_str(&repo), "reset", "-q", "--hard", "HEAD~1"]);
+
+        let outcome = delete_closed_worktree_branch(path_str(&repo), "feature");
+
+        let error = outcome.expect_err("an unmerged branch is not deleted by `branch -d`");
+        assert!(error.starts_with("local:"), "{error}");
+        assert!(local_branches(&repo).contains("feature"));
+
+        let toast = surviving_branch_toast("feature", &error);
+        assert_eq!(toast.level, okena_state::ToastLevel::Warning);
+        assert!(toast.message.contains("feature"));
+        assert_eq!(toast.detail.as_deref(), Some(error.as_str()));
+    }
+
     /// The whole reason the deletion left the merge pipeline: Git refuses to
     /// delete a branch a checkout still holds, and that refusal was only logged.
     #[test]
@@ -1738,10 +1817,14 @@ mod merge_pipeline_tests {
             "feature",
         ]);
 
-        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+        let held = delete_closed_worktree_branch(path_str(&main_repo), "feature");
         assert!(
             local_branches(&main_repo).contains("feature"),
             "git cannot delete a branch its worktree still holds"
+        );
+        assert!(
+            held.is_err_and(|e| e.starts_with("local:")),
+            "and the caller has to learn the branch survived"
         );
 
         git(&[
@@ -1752,8 +1835,9 @@ mod merge_pipeline_tests {
             "--force",
             path_str(&worktree),
         ]);
-        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+        let cleaned = delete_closed_worktree_branch(path_str(&main_repo), "feature");
 
+        assert_eq!(cleaned, Ok(()));
         assert!(
             !local_branches(&main_repo).contains("feature"),
             "the local branch must be gone once its checkout is"

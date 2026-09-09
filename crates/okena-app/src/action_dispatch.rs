@@ -548,19 +548,42 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
             (config.clone(), config.effective_auth_token()?)
         };
         let action = okena_core::api::ActionRequest::ExportBuffer {
-            terminal_id: remote_terminal_id,
+            terminal_id: remote_terminal_id.clone(),
         };
         let value = okena_transport::remote_action::RemoteActionClient::new(config, token)
             .post_action(action)
             .ok()??;
         let content = value.get("content").and_then(|v| v.as_str())?;
-        // Write the client-side copy (same naming as the in-process capture).
-        let short: String = terminal_id.chars().take(8).collect();
         let mut path = std::env::temp_dir();
-        path.push(format!("terminal-{}.txt", short));
+        path.push(format!(
+            "{}.txt",
+            export_file_stem(connection_id, &remote_terminal_id)
+        ));
         std::fs::write(&path, content).ok()?;
         Some(path)
     }
+}
+
+/// Filename stem for an exported terminal buffer. Both ids are needed: a prefix
+/// of the display id is `remote:l` for every local-daemon terminal, and the
+/// colon it contains is not a portable path character.
+fn export_file_stem(connection_id: &str, terminal_id: &str) -> String {
+    fn sanitize(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+    format!(
+        "terminal-{}-{}",
+        sanitize(connection_id),
+        sanitize(terminal_id)
+    )
 }
 
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
@@ -1307,6 +1330,28 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
 mod tests {
     use super::*;
     use crate::workspace::state::SplitDirection;
+
+    #[test]
+    fn export_stems_are_distinct_per_terminal_and_connection() {
+        let a = export_file_stem("local-daemon", "1111aaaa");
+        let b = export_file_stem("local-daemon", "2222bbbb");
+        let c = export_file_stem("box.lan:8443", "1111aaaa");
+
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, "terminal-local-daemon-1111aaaa");
+    }
+
+    #[test]
+    fn export_stems_contain_only_portable_characters() {
+        let stem = export_file_stem("box.lan:8443", "remote/id with space");
+
+        assert!(
+            stem.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "not portable: {stem}"
+        );
+    }
 
     #[test]
     fn rows_map_visual_split_axis_back_to_canonical_axis() {

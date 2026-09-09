@@ -264,14 +264,14 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             .strip_prefix("rename from ")
             .or_else(|| line.strip_prefix("copy from "))
         {
-            file.old_path = Some(old.to_string());
+            file.old_path = decode_git_path(old);
             continue;
         }
         if let Some(new) = line
             .strip_prefix("rename to ")
             .or_else(|| line.strip_prefix("copy to "))
         {
-            file.new_path = Some(new.to_string());
+            file.new_path = decode_git_path(new);
             continue;
         }
 
@@ -287,28 +287,14 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
         // Parse old file path. These lines are authoritative and override the
         // `diff --git` header fallback (e.g. /dev/null clears the path for an
         // added file even though the header carried a fake `a/<new>`).
-        if line.starts_with("--- ") {
-            let path = line.strip_prefix("--- ").unwrap_or("");
-            if path == "/dev/null" {
-                file.old_path = None;
-            } else {
-                // Strip "a/" prefix if present
-                let path = path.strip_prefix("a/").unwrap_or(path);
-                file.old_path = Some(path.to_string());
-            }
+        if let Some(raw) = line.strip_prefix("--- ") {
+            file.old_path = parse_diff_path_line(raw, "a/");
             continue;
         }
 
         // Parse new file path
-        if line.starts_with("+++ ") {
-            let path = line.strip_prefix("+++ ").unwrap_or("");
-            if path == "/dev/null" {
-                file.new_path = None;
-            } else {
-                // Strip "b/" prefix if present
-                let path = path.strip_prefix("b/").unwrap_or(path);
-                file.new_path = Some(path.to_string());
-            }
+        if let Some(raw) = line.strip_prefix("+++ ") {
+            file.new_path = parse_diff_path_line(raw, "b/");
             continue;
         }
 
@@ -365,39 +351,122 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
 /// authoritative paths come from `rename from`/`rename to` or `---`/`+++`
 /// lines when present, which override this.
 ///
-/// Caveat: when paths contain spaces the `a/… b/…` form is ambiguous and git
-/// quotes them or relies on the explicit headers instead, so this helper only
-/// reliably handles unquoted, space-free paths. Returns `(None, None)` if the
-/// header can't be split unambiguously.
+/// Caveat: git quotes each side independently, so both forms can share one
+/// header. Two unquoted paths stay ambiguous when the old one contains " b/";
+/// returns `(None, None)` if the header can't be split unambiguously.
 fn parse_diff_git_header(line: &str) -> (Option<String>, Option<String>) {
-    let rest = match line.strip_prefix("diff --git ") {
-        Some(r) => r,
-        None => return (None, None),
+    let Some(rest) = line.strip_prefix("diff --git ") else {
+        return (None, None);
+    };
+    let Some((old, new)) = split_diff_git_paths(rest) else {
+        return (None, None);
     };
 
-    // Quoted paths (contain spaces / special chars) are not handled here; defer
-    // to the explicit rename/`---`/`+++` headers.
+    match (
+        decode_git_path(old).and_then(|path| strip_path_prefix(&path, "a/")),
+        decode_git_path(new).and_then(|path| strip_path_prefix(&path, "b/")),
+    ) {
+        (Some(old), Some(new)) => (Some(old), Some(new)),
+        _ => (None, None),
+    }
+}
+
+/// The path a `---`/`+++` line names, or `None` for `/dev/null`.
+///
+/// Git terminates the name with a tab whenever it contains a space, so the
+/// token ends at the closing quote or at the first tab — never at end of line.
+fn parse_diff_path_line(raw: &str, prefix: &str) -> Option<String> {
+    let token = if raw.starts_with('"') {
+        raw.get(..quoted_token_end(raw)?)?
+    } else {
+        raw.split('\t').next()?
+    };
+
+    let path = decode_git_path(token)?;
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(path.strip_prefix(prefix).unwrap_or(&path).to_string())
+}
+
+/// Split a `diff --git` header's two path tokens, each possibly C-quoted.
+fn split_diff_git_paths(rest: &str) -> Option<(&str, &str)> {
     if rest.starts_with('"') {
-        return (None, None);
+        let (old, tail) = rest.split_at(quoted_token_end(rest)?);
+        return Some((old, tail.strip_prefix(' ')?));
     }
 
-    let a = match rest.strip_prefix("a/") {
-        Some(a) => a,
-        None => return (None, None),
+    // An unquoted old path cannot contain `"`, so a trailing one means the new
+    // side is quoted; otherwise the last " b/" is the least-bad guess.
+    let at = if rest.ends_with('"') {
+        rest.rfind(" \"")?
+    } else {
+        rest.rfind(" b/")?
+    };
+    Some((&rest[..at], &rest[at + 1..]))
+}
+
+/// Byte index just past the closing `"` of the quoted token starting at 0.
+fn quoted_token_end(token: &str) -> Option<usize> {
+    let bytes = token.as_bytes();
+    let mut index = 1;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\\' => index += 2,
+            b'"' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Strip a `a/`-style diff prefix, rejecting a path that is nothing but it.
+fn strip_path_prefix(path: &str, prefix: &str) -> Option<String> {
+    let stripped = path.strip_prefix(prefix)?;
+    (!stripped.is_empty()).then(|| stripped.to_string())
+}
+
+/// Decode git's C-quoting (`core.quotePath`): `\NNN` escapes are *bytes*, so
+/// they decode into a byte buffer before the UTF-8 check. A malformed escape
+/// or a non-UTF-8 result yields `None` — a lossy name is a wrong identity.
+fn decode_git_path(raw: &str) -> Option<String> {
+    let Some(inner) = raw
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return Some(raw.to_string());
     };
 
-    // Split on the " b/" that separates the two paths. Use the last occurrence
-    // so directory components named "b" earlier in the old path don't trip us.
-    let (old, new) = match a.rsplit_once(" b/") {
-        Some(pair) => pair,
-        None => return (None, None),
-    };
-
-    if old.is_empty() || new.is_empty() {
-        return (None, None);
+    let mut decoded = Vec::with_capacity(inner.len());
+    let mut rest = inner.bytes();
+    while let Some(byte) = rest.next() {
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        decoded.push(match rest.next()? {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'v' => 0x0b,
+            verbatim @ (b'"' | b'\\') => verbatim,
+            first @ b'0'..=b'7' => {
+                // Git always writes three octal digits, and never above \377.
+                let mut value = u32::from(first - b'0');
+                for _ in 0..2 {
+                    let digit = rest.next().filter(|d| (b'0'..=b'7').contains(d))?;
+                    value = value * 8 + u32::from(digit - b'0');
+                }
+                u8::try_from(value).ok()?
+            }
+            _ => return None,
+        });
     }
 
-    (Some(old.to_string()), Some(new.to_string()))
+    String::from_utf8(decoded).ok()
 }
 
 /// Parse a hunk header into `(old_start, old_count, new_start, new_count)`.
@@ -1374,13 +1443,179 @@ rename to src/new.rs
             parse_diff_git_header("diff --git a/old.rs b/new.rs"),
             (Some("old.rs".to_string()), Some("new.rs".to_string()))
         );
-        // Quoted (special-char) paths are deferred to explicit headers.
+        // Quoted (special-char) paths are decoded, both sides independently.
         assert_eq!(
             parse_diff_git_header("diff --git \"a/has space.rs\" \"b/has space.rs\""),
-            (None, None)
+            (
+                Some("has space.rs".to_string()),
+                Some("has space.rs".to_string())
+            )
+        );
+        assert_eq!(
+            parse_diff_git_header(r#"diff --git a/plain.rs "b/p\303\251.rs""#),
+            (Some("plain.rs".to_string()), Some("pé.rs".to_string()))
+        );
+        assert_eq!(
+            parse_diff_git_header(r#"diff --git "a/p\303\251.rs" b/plain.rs"#),
+            (Some("pé.rs".to_string()), Some("plain.rs".to_string()))
         );
         // Non-header input.
         assert_eq!(parse_diff_git_header("@@ -1 +1 @@"), (None, None));
+    }
+
+    #[test]
+    fn decode_git_path_follows_gits_byte_escapes() {
+        // Octal escapes are bytes, so `\305\231` is the single char `ř`.
+        assert_eq!(
+            decode_git_path(r#""sekce/p\305\231ehled.md""#).as_deref(),
+            Some("sekce/přehled.md")
+        );
+        assert_eq!(
+            decode_git_path(r#""a\tb.txt""#).as_deref(),
+            Some("a\tb.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""q\"uote.txt""#).as_deref(),
+            Some("q\"uote.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""back\\slash.txt""#).as_deref(),
+            Some(r"back\slash.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""nl\n.txt""#).as_deref(),
+            Some("nl\n.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""bell\a.txt""#).as_deref(),
+            Some("bell\u{7}.txt")
+        );
+
+        // Only a fully double-quoted string is quoted; the rest passes through.
+        assert_eq!(
+            decode_git_path("src/main.rs").as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(decode_git_path(r"a\303b").as_deref(), Some(r"a\303b"));
+        assert_eq!(decode_git_path("\"").as_deref(), Some("\""));
+
+        // Bytes that are not UTF-8, and malformed escapes, have no path form.
+        assert_eq!(decode_git_path(r#""\377.txt""#), None);
+        assert_eq!(decode_git_path(r#""\q""#), None);
+        assert_eq!(decode_git_path(r#""\30""#), None);
+    }
+
+    #[test]
+    fn quoted_paths_decode_across_the_whole_file_section() {
+        let diff = "diff --git \"a/sekce/p\\305\\231ehled.md\" \"b/sekce/p\\305\\231ehled.md\"\n\
+                    --- \"a/sekce/p\\305\\231ehled.md\"\n\
+                    +++ \"b/sekce/p\\305\\231ehled.md\"\n\
+                    @@ -1,1 +1,1 @@\n\
+                    -a\n\
+                    +b\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(
+            result.files[0].old_path.as_deref(),
+            Some("sekce/přehled.md")
+        );
+        assert_eq!(
+            result.files[0].new_path.as_deref(),
+            Some("sekce/přehled.md")
+        );
+        // display_name feeds content loading, stage and discard.
+        assert_eq!(result.files[0].display_name(), "sekce/přehled.md");
+    }
+
+    #[test]
+    fn quoted_rename_decodes_both_sides() {
+        let diff = "diff --git \"a/st\\303\\241r\\303\\251.md\" \"b/nov\\303\\251 \\\"one\\\".md\"\n\
+                    similarity index 100%\n\
+                    rename from \"st\\303\\241r\\303\\251.md\"\n\
+                    rename to \"nov\\303\\251 \\\"one\\\".md\"\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("stáré.md"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("nové \"one\".md"));
+    }
+
+    #[test]
+    fn tabs_and_backslashes_in_a_new_file_path_decode() {
+        let diff = "diff --git \"a/od\\\\tud\\there.md\" \"b/od\\\\tud\\there.md\"\n\
+                    new file mode 100644\n\
+                    --- /dev/null\n\
+                    +++ \"b/od\\\\tud\\there.md\"\n\
+                    @@ -0,0 +1,1 @@\n\
+                    +x\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path, None);
+        assert_eq!(
+            result.files[0].new_path.as_deref(),
+            Some("od\\tud\there.md")
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_space_drops_gits_tab_terminator() {
+        // git ends a `---`/`+++` name containing a space with a tab, quoted or
+        // not — keeping it would put the tab in the file identity.
+        let diff = "diff --git a/has space.md b/has space.md\n\
+                    --- a/has space.md\t\n\
+                    +++ b/has space.md\t\n\
+                    @@ -1,1 +1,1 @@\n\
+                    -a\n\
+                    +b\n";
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("has space.md"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("has space.md"));
+
+        let quoted = "diff --git \"a/sekce/nov\\303\\251 jm\\303\\251no.md\" \"b/sekce/nov\\303\\251 jm\\303\\251no.md\"\n\
+                      --- \"a/sekce/nov\\303\\251 jm\\303\\251no.md\"\t\n\
+                      +++ \"b/sekce/nov\\303\\251 jm\\303\\251no.md\"\t\n\
+                      @@ -1,1 +1,1 @@\n\
+                      -a\n\
+                      +b\n";
+        let result = parse_unified_diff(quoted);
+        assert_eq!(
+            result.files[0].old_path.as_deref(),
+            Some("sekce/nové jméno.md")
+        );
+        assert_eq!(result.files[0].display_name(), "sekce/nové jméno.md");
+    }
+
+    #[test]
+    fn an_accented_path_survives_a_real_git_diff() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // Accent (quoting) plus a space (tab terminator) in one real name.
+        let (_tmp, repo) = init_temp_repo();
+        let name = "sekce/nové jméno.md";
+        std::fs::create_dir_all(repo.join("sekce")).unwrap();
+        std::fs::write(repo.join(name), "a\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "accented"],
+        );
+        std::fs::write(repo.join(name), "b\n").unwrap();
+
+        let result = get_diff_with_options(&repo, DiffMode::WorkingTree, false)
+            .expect("diff an accented path");
+        let names: Vec<&str> = result.files.iter().map(|f| f.display_name()).collect();
+        assert_eq!(names, vec![name]);
+        // The name is a file identity, not just a label: it has to resolve.
+        assert_eq!(
+            get_file_from_working_tree(&repo, result.files[0].display_name()).as_deref(),
+            Some("b\n")
+        );
+        assert_eq!(
+            get_file_from_git(&repo, "HEAD", result.files[0].display_name()).as_deref(),
+            Some("a\n")
+        );
     }
 
     #[test]

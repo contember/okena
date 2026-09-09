@@ -6,8 +6,8 @@ use crate::actions::{
     ExportTerminalBuffer, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal, Paste,
-    ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape, SendTab, SplitHorizontal,
-    SplitVertical, ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
+    ResetZoom, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
+    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
 };
 use crate::layout::navigation::NavigationDirection;
 use crate::terminal_view_settings;
@@ -242,6 +242,14 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_escape();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ScrollUp, _window, cx| {
+                this.content
+                    .update(cx, |content, cx| content.scroll_by_page(true, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ScrollDown, _window, cx| {
+                this.content
+                    .update(cx, |content, cx| content.scroll_by_page(false, cx));
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| {
                 let current = this

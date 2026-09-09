@@ -125,14 +125,13 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
                 current = desired;
             }
 
-            // Write the character
-            let c = cell.c;
-            if c == '\0' || c == ' ' {
-                buf.push(b' ');
-            } else {
-                let mut utf8_buf = [0u8; 4];
-                let encoded = c.encode_utf8(&mut utf8_buf);
-                buf.extend_from_slice(encoded.as_bytes());
+            // Write the cell's glyph: base char, then the zero-width marks
+            // stacked on it. The marks advance no column on the replaying end.
+            let mut utf8_buf = [0u8; 4];
+            let base = if cell.c == '\0' { ' ' } else { cell.c };
+            buf.extend_from_slice(base.encode_utf8(&mut utf8_buf).as_bytes());
+            for mark in cell.zerowidth().into_iter().flatten() {
+                buf.extend_from_slice(mark.encode_utf8(&mut utf8_buf).as_bytes());
             }
 
             col_idx += 1;
@@ -353,6 +352,60 @@ mod tests {
         assert!(host.is_alt_screen(), "host left the alternate screen");
         assert!(host.is_mouse_mode(), "host lost mouse reporting");
         assert_eq!(first_row(&host), "remote output");
+    }
+
+    /// The mark of a decomposed grapheme lives beside `cell.c`, not in it.
+    fn first_row_cells(terminal: &Terminal, count: usize) -> Vec<(char, Vec<char>)> {
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        terminal.with_content(|term| {
+            let grid = term.grid();
+            (0..count)
+                .map(|col| {
+                    let cell = &grid[Point::new(Line(0), Column(col))];
+                    (cell.c, cell.zerowidth().unwrap_or_default().to_vec())
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_snapshot_carries_combining_marks_and_their_columns() {
+        let source = terminal("source");
+        source.process_output("e\u{0301}x".as_bytes());
+        assert_eq!(
+            first_row_cells(&source, 2),
+            vec![('e', vec!['\u{0301}']), ('x', Vec::new())],
+            "alacritty stores the mark beside the base char"
+        );
+
+        let bytes = source.render_snapshot();
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("e\u{0301}x"),
+            "the snapshot dropped the combining mark"
+        );
+
+        let mirror = terminal("mirror");
+        mirror.process_output(&bytes);
+        assert_eq!(
+            first_row_cells(&mirror, 2),
+            vec![('e', vec!['\u{0301}']), ('x', Vec::new())],
+            "the mirror lost the mark or shifted a column"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_carries_a_mark_standing_over_a_blank_cell() {
+        let source = terminal("source");
+        source.process_output(" \u{0301}x".as_bytes());
+
+        let mirror = terminal("mirror");
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(
+            first_row_cells(&mirror, 2),
+            vec![(' ', vec!['\u{0301}']), ('x', Vec::new())]
+        );
     }
 
     #[test]
