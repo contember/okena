@@ -150,8 +150,9 @@ pub fn get_visible_cells(conn_id: String, terminal_id: String) -> Vec<CellData> 
 ///   cols : u16 LE
 ///   rows : u16 LE
 /// Then cols*rows cells, row-major, 13 bytes each:
-///   codepoint : u32 LE   Unicode scalar of the cell's primary char
-///                        (0x20 / space for empty or wide-char-spacer cells)
+///   codepoint : u32 LE   Unicode scalar of the cell's base char, without its
+///                        zero-width marks — a fixed-width cell cannot carry
+///                        them (0x20 for empty or wide-char-spacer cells)
 ///   fg        : u32 LE   ARGB
 ///   bg        : u32 LE   ARGB
 ///   flags     : u8       bold(1)|italic(2)|underline(4)|strikethrough(8)|
@@ -187,7 +188,8 @@ pub fn get_visible_cells_packed(conn_id: String, terminal_id: String) -> Vec<u8>
     buf.extend_from_slice(&cols.to_le_bytes());
     buf.extend_from_slice(&rows.to_le_bytes());
     for cell in &cells {
-        // Primary scalar; empty (wide-char spacer) or space → 0x20.
+        // Base scalar only: one fixed u32 per cell has no room for the cell's
+        // zero-width marks, so decomposed text reaches the canvas unaccented.
         let codepoint: u32 = cell
             .character
             .chars()

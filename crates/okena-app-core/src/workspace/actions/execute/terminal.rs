@@ -9,8 +9,10 @@ use super::{ActionResult, ensure_terminal, find_terminal_path, spawn_uninitializ
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::Workspace;
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::Term;
 use okena_core::keys::SpecialKey;
 use okena_core::types::SplitDirection;
 use okena_terminal::TerminalsRegistry;
@@ -327,30 +329,35 @@ pub(super) fn read_content(
     settings: &AppSettings,
 ) -> ActionResult {
     with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
-        let content = term.with_content(|term| {
-            let grid = term.grid();
-            let screen_lines = grid.screen_lines();
-            let cols = grid.columns();
-            let mut lines = Vec::with_capacity(screen_lines);
-
-            for row in 0..screen_lines as i32 {
-                let mut line = String::with_capacity(cols);
-                for col in 0..cols {
-                    let cell = &grid[Point::new(Line(row), Column(col))];
-                    line.push(cell.c);
-                }
-                let trimmed = line.trim_end().to_string();
-                lines.push(trimmed);
-            }
-
-            while lines.last().is_some_and(|l| l.is_empty()) {
-                lines.pop();
-            }
-
-            lines.join("\n")
-        });
+        let content = term.with_content(screen_text);
         ActionResult::Ok(Some(serde_json::json!({"content": content})))
     })
+}
+
+/// alacritty keeps a cell's zero-width marks beside `cell.c`, so the base char
+/// alone loses the accent of decomposed text.
+fn screen_text<T: EventListener>(term: &Term<T>) -> String {
+    let grid = term.grid();
+    let screen_lines = grid.screen_lines();
+    let cols = grid.columns();
+    let mut lines = Vec::with_capacity(screen_lines);
+
+    for row in 0..screen_lines as i32 {
+        let mut line = String::with_capacity(cols);
+        for col in 0..cols {
+            let cell = &grid[Point::new(Line(row), Column(col))];
+            line.push(cell.c);
+            line.extend(cell.zerowidth().into_iter().flatten());
+        }
+        let trimmed = line.trim_end().to_string();
+        lines.push(trimmed);
+    }
+
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
 }
 
 pub(super) fn export_buffer(terminal_id: String, backend: &dyn TerminalBackend) -> ActionResult {
@@ -366,5 +373,37 @@ pub(super) fn export_buffer(terminal_id: String, backend: &dyn TerminalBackend) 
         None => {
             ActionResult::Err("buffer capture unavailable (requires a tmux session backend)".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screen_text;
+    use alacritty_terminal::event::{Event, EventListener};
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::term::{Config, Term};
+    use alacritty_terminal::vte::ansi::Processor;
+
+    struct NoopListener;
+
+    impl EventListener for NoopListener {
+        fn send_event(&self, _event: Event) {}
+    }
+
+    fn screen(output: &str) -> String {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 3), NoopListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, output.as_bytes());
+        screen_text(&term)
+    }
+
+    #[test]
+    fn a_screen_read_keeps_a_combining_mark_with_its_base_char() {
+        assert_eq!(screen("e\u{0301}x"), "e\u{0301}x");
+    }
+
+    #[test]
+    fn a_screen_read_keeps_a_mark_standing_over_a_blank_cell() {
+        assert_eq!(screen(" \u{0301}x"), " \u{0301}x");
     }
 }
