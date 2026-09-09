@@ -2279,6 +2279,7 @@ pub(crate) fn spawn_background_worktree_removal(
                     plan,
                     Err("terminal teardown did not release the worktree in time; checkout preserved".to_string()),
                     None,
+                    None,
                 );
             }
             let worktree_path = plan.worktree_path.clone();
@@ -2299,21 +2300,34 @@ pub(crate) fn spawn_background_worktree_removal(
             } else {
                 plan.remove_fast().map_err(|error| error.to_string())
             };
-            if delete_branch && removal.is_ok() {
+            let surviving_branch = if delete_branch && removal.is_ok() {
                 okena_workspace::actions::worktree::delete_closed_worktree_branch(
                     &plan.main_repo_path,
                     plan.branch(),
-                );
-            }
-            (plan, removal, dirty_hook)
+                )
+                .err()
+                .map(|error| (plan.branch().to_string(), error))
+            } else {
+                None
+            };
+            (plan, removal, dirty_hook, surviving_branch)
         })
         .await;
         match outcome {
-            Ok((plan, removal, dirty_hook)) => {
+            Ok((plan, removal, dirty_hook, surviving_branch)) => {
                 if let Some(Err(error)) = dirty_hook {
                     log::error!(
                         "worktree-close: dirty-close hook failed for {}: {error}",
                         plan.project_id
+                    );
+                }
+                if let Some((branch, error)) = surviving_branch
+                    && let Some(hm) = &hook_monitor
+                {
+                    hm.push_toast(
+                        okena_workspace::actions::worktree::surviving_branch_toast(
+                            &branch, &error,
+                        ),
                     );
                 }
                 match removal {
