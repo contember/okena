@@ -1,5 +1,5 @@
 use okena_core::theme::ThemeMode;
-pub use okena_core::types::DiffViewMode;
+pub use okena_core::types::{DiffViewMode, StatusBarStyle};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -212,6 +212,30 @@ impl Default for SidebarSettings {
     }
 }
 
+/// Status bar appearance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusBarSettings {
+    /// How much text the bar spells out — see [`StatusBarStyle`].
+    #[serde(default)]
+    pub style: StatusBarStyle,
+    /// Draw CPU/MEM as a short history graph instead of a single-value bar.
+    #[serde(default = "default_status_bar_metrics_graph")]
+    pub metrics_graph: bool,
+}
+
+impl Default for StatusBarSettings {
+    fn default() -> Self {
+        Self {
+            style: StatusBarStyle::default(),
+            metrics_graph: default_status_bar_metrics_graph(),
+        }
+    }
+}
+
+fn default_status_bar_metrics_graph() -> bool {
+    true
+}
+
 /// Current settings schema version - increment when making breaking changes
 pub const SETTINGS_VERSION: u32 = 3;
 
@@ -416,6 +440,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub header_density: HeaderDensity,
 
+    /// Status bar appearance: how verbose it is, and whether CPU/MEM render
+    /// as a history graph.
+    #[serde(default)]
+    pub status_bar: StatusBarSettings,
+
     /// Native desktop notifications for background-terminal activity
     /// (OSC 9/777 alerts and the bell). Opt-in — see [`NotificationSettings`].
     #[serde(default)]
@@ -480,6 +509,7 @@ impl Default for AppSettings {
             terminal_double_click_selects_in_mouse_mode: false,
             file_finder: FileFinderSettings::default(),
             header_density: HeaderDensity::default(),
+            status_bar: StatusBarSettings::default(),
             notifications: NotificationSettings::default(),
             allow_clipboard_read: false,
         }
