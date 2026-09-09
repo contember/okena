@@ -2,7 +2,7 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::SimpleInput;
-use crate::workspace::settings::HeaderDensity;
+use crate::workspace::settings::{HeaderDensity, StatusBarStyle};
 use gpui::prelude::*;
 use gpui::*;
 use okena_transport::client::tls::format_fingerprint;
@@ -25,6 +25,11 @@ impl SettingsPanel {
                 |state, val, cx| state.set_color_tinted_background(val, cx), cx,
             ))
             .child(self.render_header_density_row(s.header_density, cx))
+            .child(self.render_status_bar_style_row(s.status_bar.style, cx))
+            .child(self.render_toggle(
+                "status-bar-graphs", "Status Bar CPU/Memory Graph", s.status_bar.metrics_graph, true,
+                |state, val, cx| state.set_status_bar_metrics_graph(val, cx), cx,
+            ))
             .child(self.render_toggle(
                 "detached-by-default", "Detached Overlays by Default", s.detached_overlays_by_default, true,
                 |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
@@ -148,6 +153,35 @@ impl SettingsPanel {
                 |state, val, cx| state.set_allow_clipboard_read(val, cx),
                 cx,
             )))
+    }
+
+    /// Detailed vs. minimal status bar. Minimal drops the numbers next to the
+    /// CPU/MEM graphs and usage bars and the "OK" next to each service name;
+    /// the exact figures stay one hover away.
+    fn render_status_bar_style_row(
+        &self,
+        current: StatusBarStyle,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let variants = StatusBarStyle::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|style| Segment {
+                id: format!("{:?}", style).into(),
+                label: style.display_name(),
+                selected: *style == current,
+            })
+            .collect();
+
+        settings_row("status-bar-style".to_string(), "Status Bar", &t, cx, true).child(
+            segmented_control("status-bar-style", &segments, &t, cx, move |i, _, cx| {
+                let style = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_status_bar_style(style, cx);
+                });
+            }),
+        )
     }
 
     fn render_header_density_row(
