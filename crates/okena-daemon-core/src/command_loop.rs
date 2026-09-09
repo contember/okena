@@ -2212,6 +2212,7 @@ pub(crate) fn spawn_background_worktree_removal(
     plan: WorktreeRemovalPlan,
     operation_epoch: u64,
     did_stash: bool,
+    delete_branch: bool,
     extra_teardown_terminal_ids: &[String],
     global_hooks: &okena_workspace::persistence::HooksConfig,
     workspace: &Arc<Mutex<Workspace>>,
@@ -2298,6 +2299,12 @@ pub(crate) fn spawn_background_worktree_removal(
             } else {
                 plan.remove_fast().map_err(|error| error.to_string())
             };
+            if delete_branch && removal.is_ok() {
+                okena_workspace::actions::worktree::delete_closed_worktree_branch(
+                    &plan.main_repo_path,
+                    plan.branch(),
+                );
+            }
             (plan, removal, dirty_hook)
         })
         .await;
@@ -2499,6 +2506,7 @@ fn abort_background_worktree_close(
 fn resume_worktree_close_after_merge(
     project_id: &str,
     did_stash: bool,
+    delete_branch: bool,
     global_hooks: &okena_workspace::persistence::HooksConfig,
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
@@ -2521,7 +2529,7 @@ fn resume_worktree_close_after_merge(
             false,
             false,
             false,
-            false,
+            delete_branch,
             did_stash,
             global_hooks,
             &mut cx,
@@ -2633,12 +2641,11 @@ fn spawn_merge_worktree_close(
                 let is_dirty = okena_git::has_uncommitted_changes(Path::new(&project_path));
                 let merge_enabled =
                     (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
-                if merge_enabled {
+                let outcome = if merge_enabled {
                     close_worktree_merge_git(
                         stash && is_dirty,
                         fetch,
                         push,
-                        delete_branch,
                         &blocking_project_id,
                         &project_name,
                         &project_path,
@@ -2653,7 +2660,8 @@ fn spawn_merge_worktree_close(
                     )
                 } else {
                     CloseWorktreeGitOutcome::Ok { did_stash: false }
-                }
+                };
+                (outcome, merge_enabled)
             })
             .await;
 
@@ -2662,7 +2670,7 @@ fn spawn_merge_worktree_close(
             return;
         }
 
-        let did_stash = match outcome {
+        let (did_stash, merged) = match outcome {
             Err(error) => {
                 abort_background_worktree_close(
                     &project_id,
@@ -2675,7 +2683,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::Err(error)) => {
+            Ok((CloseWorktreeGitOutcome::Err(error), _)) => {
                 abort_background_worktree_close(
                     &project_id,
                     operation_epoch,
@@ -2687,7 +2695,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }) => {
+            Ok((CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }, _)) => {
                 if let Some(hook_plan) = hook_plan {
                     let outcome = okena_hooks::execute_hook_action_plan(
                         hook_plan,
@@ -2725,7 +2733,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::Ok { did_stash }) => did_stash,
+            Ok((CloseWorktreeGitOutcome::Ok { did_stash }, merged)) => (did_stash, merged),
         };
 
         let plan = {
@@ -2749,6 +2757,7 @@ fn spawn_merge_worktree_close(
                         plan,
                         operation_epoch,
                         did_stash,
+                        delete_branch && merged,
                         &[],
                         &global_hooks,
                         &workspace,
@@ -2785,6 +2794,7 @@ fn spawn_merge_worktree_close(
         let result = resume_worktree_close_after_merge(
             &project_id,
             did_stash,
+            delete_branch && merged,
             &global_hooks,
             &workspace,
             &workspace_tick,
@@ -3865,6 +3875,7 @@ pub async fn daemon_command_loop(
                                     spawn_background_worktree_removal(
                                         plan,
                                         operation_epoch,
+                                        false,
                                         false,
                                         &[],
                                         &global_hooks,
@@ -9394,6 +9405,7 @@ mod tests {
         let result = resume_worktree_close_after_merge(
             "wt1",
             true,
+            false,
             &Default::default(),
             &workspace,
             &workspace_tick,
@@ -9518,6 +9530,7 @@ mod tests {
                 let result = spawn_background_worktree_removal(
                     plan,
                     operation_epoch,
+                    false,
                     false,
                     &[],
                     &Default::default(),
@@ -9689,6 +9702,7 @@ mod tests {
                 let result = spawn_background_worktree_removal(
                     plan,
                     operation_epoch,
+                    false,
                     false,
                     &[],
                     &global_hooks,

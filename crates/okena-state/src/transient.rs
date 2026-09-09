@@ -28,4 +28,7 @@ pub struct PendingWorktreeClose {
     /// Whether an earlier phase of this close actually stashed. Drives the
     /// post-stash guard, which must refuse a checkout that turned dirty again.
     pub did_stash: bool,
+    /// Whether the merge phase was asked to delete the branch. Git refuses
+    /// while the checkout still holds it, so it happens after the removal.
+    pub delete_branch: bool,
 }

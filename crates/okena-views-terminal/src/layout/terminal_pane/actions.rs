@@ -868,4 +868,70 @@ mod tests {
         assert!(unquoted(r"C:\Users\me-1_2.txt", PathQuoting::Cmd));
         assert!(unquoted(r"C:\Users\me-1_2.txt", PathQuoting::PowerShell));
     }
+
+    /// Names a shell must hand back byte for byte. Control characters are
+    /// refused outright, so none appears here.
+    const ROUND_TRIP_PATHS: [&str; 13] = [
+        "/tmp/a b.txt",
+        "/tmp/it's.txt",
+        "/tmp/$HOME.txt",
+        "/tmp/back\\slash.txt",
+        "/tmp/semi;colon.txt",
+        "/tmp/amp&pipe|.txt",
+        "/tmp/star*.txt",
+        "/tmp/brack[et].txt",
+        "/tmp/qu\"ote.txt",
+        "/tmp/(paren).txt",
+        "/tmp/{brace}.txt",
+        "/tmp/back`tick.txt",
+        "/tmp/hacek ěščřž.txt",
+    ];
+
+    /// Asserting the quoted string only against another string proves nothing
+    /// about the shell that parses it — so parse it with the real one. A shell
+    /// that is not installed is skipped, unless `OKENA_REQUIRE_SHELLS` is set.
+    #[cfg(unix)]
+    fn round_trips_through(program: &str, args: &[&str], quoting: PathQuoting) {
+        let mut probe = std::process::Command::new(program);
+        if probe.args(args).arg("exit 0").output().is_err() {
+            assert!(
+                std::env::var_os("OKENA_REQUIRE_SHELLS").is_none(),
+                "{program} is not installed and OKENA_REQUIRE_SHELLS demands it"
+            );
+            return;
+        }
+        for path in ROUND_TRIP_PATHS {
+            let quoted =
+                quote(path, quoting).unwrap_or_else(|| panic!("{quoting:?} refused {path}"));
+            let output = std::process::Command::new(program)
+                .args(args)
+                .arg(format!("printf %s {quoted}"))
+                .output()
+                .unwrap_or_else(|error| panic!("{program} failed to run: {error}"));
+            assert!(
+                output.status.success(),
+                "{program} rejected `printf %s {quoted}`: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                path,
+                "{program} did not reconstruct the name from {quoted}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_quoting_round_trips_through_the_posix_shells() {
+        round_trips_through("sh", &["-c"], PathQuoting::Posix);
+        round_trips_through("bash", &["--norc", "--noprofile", "-c"], PathQuoting::Posix);
+        round_trips_through("zsh", &["-f", "-c"], PathQuoting::Posix);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fish_quoting_round_trips_through_fish() {
+        round_trips_through("fish", &["--no-config", "-c"], PathQuoting::Fish);
+    }
 }

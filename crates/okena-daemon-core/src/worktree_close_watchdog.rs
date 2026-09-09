@@ -142,6 +142,7 @@ mod tests {
             branch: "feature".into(),
             main_repo_path: std::env::temp_dir().to_string_lossy().into_owned(),
             did_stash: false,
+            delete_branch: false,
         });
         workspace
     }
@@ -211,6 +212,7 @@ mod tests {
                 branch: "feature".into(),
                 main_repo_path: std::env::temp_dir().to_string_lossy().into_owned(),
                 did_stash: false,
+                delete_branch: false,
             });
         assert!(
             workspace.lock().is_project_closing("worktree"),

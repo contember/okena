@@ -1365,6 +1365,141 @@ impl Workspace {
 }
 
 #[cfg(test)]
+mod worktree_rename_tests {
+    use crate::settings::HooksConfig;
+    use crate::state::{Workspace, WorkspaceData};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    struct TestRoot(PathBuf);
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().expect("test path is utf-8")
+    }
+
+    fn project(id: &str, path: &Path) -> okena_state::ProjectData {
+        okena_state::ProjectData {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+            pinned: false,
+            last_activity_at: None,
+            is_creating: false,
+            is_closing: false,
+            creating_progress: None,
+        }
+    }
+
+    /// A plain project directory holding a linked worktree checkout, whose own
+    /// project row points at a package inside that checkout — the monorepo
+    /// shape, with the package missing because the branch no longer has it.
+    fn workspace_over_a_held_checkout(root: &Path, recorded_root: &str) -> Workspace {
+        let main_repo = root.join("main");
+        let holder = root.join("holder");
+        let checkout = holder.join("wt");
+        std::fs::create_dir_all(&holder).unwrap();
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&checkout),
+        ]);
+
+        let mut worktree_project = project("wt", &checkout.join("packages/app"));
+        worktree_project.worktree_info = Some(okena_state::WorktreeMetadata {
+            parent_project_id: "main".to_string(),
+            color_override: None,
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+            worktree_path: recorded_root.to_string(),
+            branch_name: "feature".to_string(),
+        });
+
+        let mut data = WorkspaceData::empty();
+        data.projects = vec![
+            project("main", &main_repo),
+            project("holder", &holder),
+            worktree_project,
+        ];
+        Workspace::new(data)
+    }
+
+    /// `worktree_path` is what makes the checkout visible here: the project row
+    /// points at a package that a branch switch removed, so nothing else in the
+    /// tree can say a worktree lives under the directory being renamed.
+    #[test]
+    fn renaming_a_directory_that_holds_a_recorded_worktree_root_is_refused() {
+        let root = TestRoot(
+            std::env::temp_dir().join(format!("okena-held-checkout-{}", uuid::Uuid::new_v4())),
+        );
+        let checkout = root.0.join("holder/wt");
+        let workspace = workspace_over_a_held_checkout(&root.0, path_str(&checkout));
+
+        let Err(error) = workspace.prepare_project_directory_rename(
+            "holder",
+            root.0.join("renamed").to_string_lossy().into_owned(),
+            "renamed".to_string(),
+        ) else {
+            panic!("a directory holding a checkout must not be renamed");
+        };
+
+        assert!(
+            error.contains("recorded worktree root"),
+            "the refusal must name what it is protecting: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{expand_tilde, pick_focus_replacement};
     use crate::context::WorkspaceCx;

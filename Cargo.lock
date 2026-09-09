@@ -6010,6 +6010,7 @@ dependencies = [
  "okena-views-git",
  "okena-views-terminal",
  "okena-workspace",
+ "portable-pty",
  "rust-embed",
  "serde_json",
  "tikv-jemallocator",

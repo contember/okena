@@ -417,6 +417,7 @@ fn resolve_osc_worktree_closes(
                         plan,
                         operation_epoch,
                         pending.did_stash,
+                        pending.delete_branch,
                         std::slice::from_ref(terminal_id),
                         &global_hooks,
                         &reactor.workspace,
@@ -762,6 +763,7 @@ fn handle_hook_terminal_exits(
                             plan,
                             operation_epoch,
                             pending.did_stash,
+                            pending.delete_branch,
                             std::slice::from_ref(&tid),
                             &global_hooks,
                             &context.reactor.workspace,
@@ -1116,6 +1118,7 @@ mod tests {
             branch: "feature".into(),
             main_repo_path: main_repo.to_string_lossy().into_owned(),
             did_stash,
+            delete_branch: false,
         });
         workspace
     }

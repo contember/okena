@@ -165,6 +165,7 @@ mod tests {
             branch: "main".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             did_stash: false,
+            delete_branch: false,
         }
     }
 
