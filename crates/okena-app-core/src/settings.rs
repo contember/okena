@@ -122,6 +122,22 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set the status bar style (Detailed, Minimal)
+    pub fn set_status_bar_style(
+        &mut self,
+        value: crate::workspace::settings::StatusBarStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.status_bar.style = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Toggle the CPU/MEM history graph in the status bar.
+    pub fn set_status_bar_metrics_graph(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_bar.metrics_graph = value;
+        self.save_and_notify(cx);
+    }
+
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(

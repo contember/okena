@@ -3,6 +3,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_extensions::ThemeColors;
+use okena_ui::metrics::service_status_items;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -361,6 +362,7 @@ impl Render for GitHubStatus {
             Some(_) => ("Unknown", t.text_muted),
             None => ("...", t.text_muted),
         };
+        let healthy = label == "OK";
         let has_incidents = data
             .as_ref()
             .map(|d| !d.incidents.is_empty())
@@ -379,8 +381,9 @@ impl Render for GitHubStatus {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .child(div().text_color(rgb(t.text_muted)).child("GitHub"))
-                    .child(div().text_color(rgb(color)).child(label))
+                    .children(service_status_items(
+                        "GitHub", label, color, healthy, &t, cx,
+                    ))
                     .child(
                         canvas(
                             move |bounds, _window, app| {

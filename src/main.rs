@@ -699,6 +699,12 @@ fn main() {
                 .into()
         }));
 
+        // Status bar verbosity, read by the status-bar widgets that live in
+        // other crates (usage bars, extension status pills).
+        cx.set_global(okena_ui::metrics::GlobalStatusBarStyle(|cx| {
+            settings::settings_entity(cx).read(cx).settings.status_bar.style
+        }));
+
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 

@@ -668,6 +668,7 @@ pub fn execute_action(
         | ActionRequest::GetThemes
         | ActionRequest::GetTheme { .. }
         | ActionRequest::SetTheme { .. }
+        | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. } => {
