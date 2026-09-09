@@ -52,6 +52,12 @@ jobs:
             pkg-config \
             cmake
 
+      # Test dependencies, not build ones: dtach backs the session-teardown
+      # tests, zsh and fish the dropped-path quoting round-trip. Without them
+      # those tests skip themselves and the job stays green having proved less.
+      - name: Install test dependencies
+        run: sudo apt-get install -y dtach zsh fish
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
@@ -75,6 +81,9 @@ jobs:
       # The workspace declares no `default-members`, so a bare `cargo test` would
       # run the root `okena` package alone and skip every member crate's tests.
       - name: Run tests
+        env:
+          # Turn a missing shell from a silent skip into a failure.
+          OKENA_REQUIRE_SHELLS: 1
         run: cargo test --workspace --no-fail-fast
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so
