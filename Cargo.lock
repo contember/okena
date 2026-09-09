@@ -6088,7 +6088,7 @@ dependencies = [
 
 [[package]]
 name = "okena-cli"
-version = "0.1.0"
+version = "0.31.0"
 dependencies = [
  "base64",
  "clap",
