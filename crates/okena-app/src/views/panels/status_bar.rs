@@ -2,6 +2,7 @@ use crate::keybindings::ToggleSidebar;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::settings_entity;
 use crate::theme::theme;
+use crate::ui::metrics::{SparklineStyle, StatusBarStyle, metric_bar, sparkline};
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
@@ -21,12 +22,33 @@ use time::OffsetDateTime;
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How many samples of CPU/MEM history the graphs keep. At [`REFRESH_INTERVAL`]
+/// this is a little under a minute — enough to see a spike come and go.
+const HISTORY_LEN: usize = 24;
+
 /// Cached system stats
 #[derive(Clone, Default)]
 struct SystemStats {
     cpu_usage: f32,
     memory_used_gb: f32,
     memory_total_gb: f32,
+    /// Recent CPU load, oldest first, each 0.0..=1.0.
+    cpu_history: Vec<f32>,
+    /// Recent memory pressure, oldest first, each 0.0..=1.0.
+    memory_history: Vec<f32>,
+}
+
+/// Everything the status bar needs to draw one system metric (CPU or MEM).
+struct SystemMetric {
+    id: &'static str,
+    label: &'static str,
+    value_text: String,
+    tooltip: String,
+    /// Current value as 0.0..=1.0, for the bar.
+    fraction: f32,
+    /// Recent values as 0.0..=1.0, oldest first, for the graph.
+    history: Vec<f32>,
+    color: u32,
 }
 
 #[derive(Clone)]
@@ -76,17 +98,37 @@ impl SystemInfoCache {
 
         let memory_used = self.system.used_memory() as f64 / 1_073_741_824.0; // bytes to GB
         let memory_total = self.system.total_memory() as f64 / 1_073_741_824.0;
+        let memory_fraction = if memory_total > 0.0 {
+            (memory_used / memory_total) as f32
+        } else {
+            0.0
+        };
+
+        let mut cpu_history = std::mem::take(&mut self.stats.cpu_history);
+        let mut memory_history = std::mem::take(&mut self.stats.memory_history);
+        push_sample(&mut cpu_history, cpu_usage / 100.0);
+        push_sample(&mut memory_history, memory_fraction);
 
         self.stats = SystemStats {
             cpu_usage,
             memory_used_gb: memory_used as f32,
             memory_total_gb: memory_total as f32,
+            cpu_history,
+            memory_history,
         };
     }
 
     fn stats(&self) -> SystemStats {
         self.stats.clone()
     }
+}
+
+/// Append a sample to a history buffer, dropping the oldest past [`HISTORY_LEN`].
+fn push_sample(history: &mut Vec<f32>, value: f32) {
+    if history.len() >= HISTORY_LEN {
+        history.remove(0);
+    }
+    history.push(value.clamp(0.0, 1.0));
 }
 
 /// Status bar component showing system info and time
@@ -404,6 +446,67 @@ impl StatusBar {
         t.text_muted
     }
 
+    /// One system metric (CPU or MEM) as the status bar draws it.
+    fn render_system_metric(
+        metric: SystemMetric,
+        style: StatusBarStyle,
+        graph: bool,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let SystemMetric {
+            id,
+            label,
+            value_text,
+            tooltip,
+            fraction,
+            history,
+            color,
+        } = metric;
+
+        let label_el = div().text_color(rgb(t.text_muted)).child(label);
+
+        let body = if style.is_minimal() {
+            // No number — the graph (or bar) carries the value, the tooltip
+            // carries the exact figure.
+            h_flex()
+                .gap(px(4.0))
+                .text_size(ui_text_sm(cx))
+                .child(label_el)
+                .child(if graph {
+                    sparkline(&history, SparklineStyle::tall(), color, t).into_any_element()
+                } else {
+                    div()
+                        .w(px(34.0))
+                        .child(metric_bar(fraction, color, t))
+                        .into_any_element()
+                })
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap(px(1.0))
+                .child(
+                    h_flex()
+                        .gap(px(3.0))
+                        .text_size(ui_text_sm(cx))
+                        .child(label_el)
+                        .child(div().text_color(rgb(color)).child(value_text)),
+                )
+                .child(if graph {
+                    sparkline(&history, SparklineStyle::compact(), color, t).into_any_element()
+                } else {
+                    metric_bar(fraction, color, t).into_any_element()
+                })
+                .into_any_element()
+        };
+
+        div()
+            .id(id)
+            .child(body)
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .into_any_element()
+    }
+
     fn render_remote_status_popover(
         &self,
         snapshots: &[RemoteStatusSnapshot],
@@ -620,23 +723,32 @@ impl Render for StatusBar {
             0
         };
 
-        let cpu_color = if stats.cpu_usage > 80.0 {
-            t.metric_critical
-        } else if stats.cpu_usage > 50.0 {
-            t.metric_warning
-        } else {
-            t.metric_normal
-        };
+        // Same thresholds as the remote rows in the popover.
+        let cpu_color = Self::cpu_metric_color(stats.cpu_usage, &t);
+        let mem_color = Self::memory_metric_color(memory_percent as u64, &t);
 
-        let mem_color = if memory_percent > 80 {
-            t.metric_critical
-        } else if memory_percent > 60 {
-            t.metric_warning
-        } else {
-            t.metric_normal
+        let status_bar = settings_entity(cx).read(cx).settings.status_bar.clone();
+        let bar_style = status_bar.style;
+        let graphs = status_bar.metrics_graph;
+
+        let cpu_metric = SystemMetric {
+            id: "cpu-status-metric",
+            label: "CPU",
+            value_text: format!("{:02.0}%", stats.cpu_usage),
+            tooltip: format!("CPU {:.0}%", stats.cpu_usage),
+            fraction: (stats.cpu_usage / 100.0).clamp(0.0, 1.0),
+            history: stats.cpu_history.clone(),
+            color: cpu_color,
         };
-        let mut metric_track_color = rgb(t.text_muted);
-        metric_track_color.a = 0.55;
+        let memory_metric = SystemMetric {
+            id: "memory-status-metric",
+            label: "MEM",
+            value_text: format!("{memory_percent}%"),
+            tooltip: format!("MEM {memory_percent}% — {memory_detail}"),
+            fraction: memory_percent.min(100) as f32 / 100.0,
+            history: stats.memory_history.clone(),
+            color: mem_color,
+        };
 
         // Collect widgets in stable registry order from active extensions
         let left_widgets: Vec<&Vec<AnyView>> = self
@@ -691,70 +803,16 @@ impl Render for StatusBar {
                                 }),
                         )
                     })
-                    // CPU
-                    .child(
-                        v_flex()
-                            .gap(px(1.0))
-                            .child(
-                                h_flex()
-                                    .gap(px(3.0))
-                                    .text_size(ui_text_sm(cx))
-                                    .child(div().text_color(rgb(t.text_muted)).child("CPU"))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(cpu_color))
-                                            .child(format!("{:02.0}%", stats.cpu_usage)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(2.0))
-                                    .w_full()
-                                    .rounded_full()
-                                    .bg(metric_track_color)
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(relative((stats.cpu_usage / 100.0).clamp(0.0, 1.0)))
-                                            .rounded_full()
-                                            .bg(rgb(cpu_color)),
-                                    ),
-                            ),
-                    )
-                    // Memory
-                    .child(
-                        v_flex()
-                            .id("memory-status-metric")
-                            .gap(px(1.0))
-                            .child(
-                                h_flex()
-                                    .gap(px(3.0))
-                                    .text_size(ui_text_sm(cx))
-                                    .child(div().text_color(rgb(t.text_muted)).child("MEM"))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(mem_color))
-                                            .child(format!("{memory_percent}%")),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(2.0))
-                                    .w_full()
-                                    .rounded_full()
-                                    .bg(metric_track_color)
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(relative(memory_percent.min(100) as f32 / 100.0))
-                                            .rounded_full()
-                                            .bg(rgb(mem_color)),
-                                    ),
-                            )
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(memory_detail.clone()).build(window, cx)
-                            }),
-                    );
+                    .child(Self::render_system_metric(
+                        cpu_metric, bar_style, graphs, &t, cx,
+                    ))
+                    .child(Self::render_system_metric(
+                        memory_metric,
+                        bar_style,
+                        graphs,
+                        &t,
+                        cx,
+                    ));
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {
