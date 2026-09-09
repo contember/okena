@@ -1748,6 +1748,8 @@ mod merge_pipeline_tests {
         let repo = tmp.root.join("repo");
         std::fs::create_dir(&repo).unwrap();
         git(&["-C", path_str(&repo), "init", "-q"]);
+        git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
+        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
         git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
         git(&["-C", path_str(&repo), "branch", "feature"]);
 
@@ -1764,6 +1766,8 @@ mod merge_pipeline_tests {
         let repo = tmp.root.join("repo");
         std::fs::create_dir(&repo).unwrap();
         git(&["-C", path_str(&repo), "init", "-q"]);
+        git(&["-C", path_str(&repo), "config", "user.name", "Test"]);
+        git(&["-C", path_str(&repo), "config", "user.email", "test@example.com"]);
         git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "root"]);
         git(&["-C", path_str(&repo), "branch", "feature"]);
         git(&["-C", path_str(&repo), "commit", "-q", "--allow-empty", "-m", "unmerged"]);
