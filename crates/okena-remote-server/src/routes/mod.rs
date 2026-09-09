@@ -53,12 +53,14 @@ pub struct AppState {
     /// actions and consumed by connected desktop clients.
     pub terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
-    /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
+    /// Puts the owning projects on the git poller's responsive tier, but only for
+    /// connections with no entry in `remote_visible_projects`.
     pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     /// Per-connection set of project IDs each client currently renders
     /// (connection_id → project_ids), declared via [`WsInbound::SetVisibleProjects`].
-    /// The `gh` PR/CI fan-out unions this with the server's own visible set —
-    /// see [`WsInbound::SetVisibleProjects`] for why it can't be derived here.
+    /// The `gh` PR/CI fan-out unions this with the server's own visible set, and
+    /// the git poller trusts it over that connection's subscriptions — see
+    /// [`WsInbound::SetVisibleProjects`] for why it can't be derived here.
     pub remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     /// Optional wake-up path for the host git poller when a WS client starts
     /// viewing terminals.

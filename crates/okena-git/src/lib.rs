@@ -280,10 +280,7 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
 
     // Untracked files count each line as an addition.
     for file in diff.untracked {
-        let file_path = path.join(&file);
-        let added = std::fs::read_to_string(&file_path)
-            .map(|c| c.lines().count())
-            .unwrap_or(0);
+        let added = repository::untracked_line_count(path, &file);
         summaries.push(FileDiffSummary {
             path: file.clone(),
             added,

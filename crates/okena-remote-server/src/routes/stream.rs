@@ -260,14 +260,10 @@ async fn handle_ws(
                                 }
                             }
                             Ok(WsInbound::SetVisibleProjects { project_ids }) => {
-                                // Full replacement set, so a project leaving the
-                                // client's viewport drops out of the `gh` scope.
+                                // Full replacement set, kept even when empty: the git
+                                // poller trusts a declared viewport over subscriptions.
                                 if let Ok(mut map) = state.remote_visible_projects.write() {
-                                    if project_ids.is_empty() {
-                                        map.remove(&connection_id);
-                                    } else {
-                                        map.insert(connection_id, project_ids.into_iter().collect());
-                                    }
+                                    map.insert(connection_id, project_ids.into_iter().collect());
                                 }
                                 if let Some(tx) = &state.git_poll_trigger_tx {
                                     let _ = tx.send(GitPollTrigger::visibility_changed());
