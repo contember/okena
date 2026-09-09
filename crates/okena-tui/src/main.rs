@@ -534,8 +534,11 @@ fn handle_key(
         return Ok(LoopControl::Continue);
     }
 
+    // Ctrl+] is the byte 0x1D, which crossterm reports as Ctrl+'5' — the whole
+    // 0x1C..=0x1F range maps onto '4'..='7'. Matching only ']' left the TUI with
+    // no reachable way out at all.
     if key.modifiers.contains(CrosstermKeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(']'))
+        && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
     {
         return Ok(LoopControl::Quit);
     }

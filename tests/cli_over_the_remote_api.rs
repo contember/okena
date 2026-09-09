@@ -88,6 +88,15 @@ impl Daemon {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// The bearer token the first CLI call registered for this daemon.
+    fn cli_token(&self) -> String {
+        let path = self.root.join("cfg/okena/profiles/default/cli.json");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("cli.json"))
+                .expect("cli.json is JSON");
+        config["token"].as_str().expect("a token").to_string()
+    }
+
     fn overview(&self) -> serde_json::Value {
         serde_json::from_str(&self.ok(&["ls", "--json"])).expect("`ls --json` emits JSON")
     }
@@ -259,6 +268,106 @@ fn a_tui_that_cannot_connect_leaves_the_host_terminal_alone() {
         assert!(
             !host.contains(sequence),
             "{what} was switched on before the connection existed: {}",
+            host.escape_debug()
+        );
+    }
+}
+
+/// The other half of the guard's contract: what it turned on, it turns back off.
+/// `Drop` runs only when the event loop returns, so this also pins that the quit
+/// binding stays reachable — it was unreachable until the byte Ctrl+] actually
+/// sends was matched.
+#[test]
+fn the_tui_hands_the_host_terminal_back_when_it_quits() {
+    let Some(tui) = tui_binary() else {
+        assert!(
+            std::env::var_os("OKENA_REQUIRE_TUI").is_none(),
+            "okena-tui is not built and OKENA_REQUIRE_TUI demands it"
+        );
+        eprintln!("skipping: okena-tui is not built (run `cargo test --workspace`)");
+        return;
+    };
+
+    let daemon = Daemon::start();
+    // Registers the token this run reuses; the TUI does no pairing of its own.
+    daemon.ok(&["ls"]);
+
+    let pty = portable_pty::native_pty_system()
+        .openpty(portable_pty::PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pty");
+
+    let mut command = portable_pty::CommandBuilder::new(tui);
+    command.env("XDG_CONFIG_HOME", daemon.root.join("cfg"));
+    command.env("XDG_RUNTIME_DIR", daemon.root.join("run"));
+    command.env("HOME", daemon.root.join("home"));
+    command.env("OKENA_TOKEN", daemon.cli_token());
+    command.env("TERM", "xterm-256color");
+    let mut child = pty.slave.spawn_command(command).expect("spawn the tui");
+    drop(pty.slave);
+
+    let mut reader = pty.master.try_clone_reader().expect("pty reader");
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = collected.clone();
+    let pump = std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = std::io::Read::read(&mut reader, &mut buffer) {
+            if read == 0 {
+                break;
+            }
+            sink.lock()
+                .expect("sink")
+                .extend_from_slice(&buffer[..read]);
+        }
+    });
+    let host = || String::from_utf8_lossy(&collected.lock().expect("sink")).into_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !host().contains("\x1b[?1049h") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        host().contains("\x1b[?1049h"),
+        "the tui never reached the alternate screen: {}",
+        host().escape_debug()
+    );
+
+    let mut writer = pty.master.take_writer().expect("pty writer");
+    // The byte Ctrl+] sends. Anything the TUI does not recognise as quit goes
+    // to the remote terminal instead, and it would run until killed.
+    std::io::Write::write_all(&mut writer, b"\x1d").expect("send ctrl-]");
+    std::io::Write::flush(&mut writer).expect("flush ctrl-]");
+    drop(writer);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait().expect("poll the tui") {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                panic!("the tui did not quit on ctrl-]: {}", host().escape_debug());
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    drop(pty.master);
+    let _ = pump.join();
+
+    assert!(status.success(), "quitting must exit 0, got {status:?}");
+    let host = host();
+    for (sequence, what) in [
+        ("\x1b[?1049l", "the alternate screen"),
+        ("\x1b[?7h", "autowrap"),
+        ("\x1b[?25h", "the cursor"),
+        ("\x1b[?2004l", "bracketed paste"),
+    ] {
+        assert!(
+            host.contains(sequence),
+            "{what} was never restored: {}",
             host.escape_debug()
         );
     }
