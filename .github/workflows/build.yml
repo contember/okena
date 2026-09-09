@@ -82,8 +82,9 @@ jobs:
       # run the root `okena` package alone and skip every member crate's tests.
       - name: Run tests
         env:
-          # Turn a missing shell from a silent skip into a failure.
+          # Turn a missing prerequisite from a silent skip into a failure.
           OKENA_REQUIRE_SHELLS: 1
+          OKENA_REQUIRE_TUI: 1
         run: cargo test --workspace --no-fail-fast
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so

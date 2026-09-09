@@ -118,6 +118,10 @@ strip = false
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
 
+# The end-to-end tests drive the shipped binaries the way a user does: the TUI
+# needs a real terminal to enter raw mode at all.
+portable-pty = "0.9"
+
 # jemalloc is the default allocator on Unix (Linux + macOS). Kept Unix-only
 # because tikv-jemalloc-sys doesn't build under MSVC; Windows uses mimalloc.
 # Enabled by the `jemalloc` feature (in `default`); installed by src/main.rs.
