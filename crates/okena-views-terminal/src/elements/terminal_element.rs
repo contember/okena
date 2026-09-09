@@ -1,6 +1,7 @@
 use crate::terminal_view_settings;
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
@@ -40,7 +41,7 @@ mod tests {
     use super::super::terminal_rendering::BatchedTextLine;
     use super::{
         RowHasher, RowLayout, TerminalElementState, TerminalGridLayout, TerminalRenderCache,
-        TerminalRenderCacheKey, build_terminal_grid_layout, changed_cells,
+        TerminalRenderCacheKey, build_terminal_grid_layout, changed_cells, cursor_paints,
         deregister_resize_viewer, selected_columns, shared_resize_target,
     };
     use gpui::{Font, FontFeatures, FontStyle, FontWeight, TextRun, px};
@@ -130,6 +131,7 @@ mod tests {
             display_offset: 0,
             cursor_col: 0,
             cursor_visual_line: 0,
+            cursor_mode_visible: true,
             cells_scanned: 0,
         }
     }
@@ -156,9 +158,10 @@ mod tests {
                     .chars()
                     .next()
                     .map(|first| {
-                        let mut line = BatchedTextLine::new(row as i32, 0, first, style.clone());
+                        let mut line =
+                            BatchedTextLine::new(row as i32, 0, first, &[], style.clone());
                         for (offset, c) in text.chars().skip(1).enumerate() {
-                            line.append(offset as i32 + 1, c, style.clone());
+                            line.append(offset as i32 + 1, c, &[], style.clone());
                         }
                         line
                     })
@@ -177,6 +180,7 @@ mod tests {
             display_offset: 0,
             cursor_col: 0,
             cursor_visual_line: 0,
+            cursor_mode_visible: true,
             cells_scanned: texts.len() * cols,
         }
     }
@@ -459,6 +463,104 @@ mod tests {
             "the rebuilt row carries the new underline colour"
         );
     }
+
+    #[test]
+    fn a_decomposed_grapheme_is_shaped_with_its_combining_mark() {
+        let terminal = terminal_showing(10, 1, "e\u{0301}".as_bytes());
+
+        let layout = build(&terminal, None, None);
+
+        assert_eq!(layout.rows[0].text_lines[0].text, "e\u{0301}");
+        assert_eq!(
+            layout.rows[0].text_lines[0].styles[0].len,
+            "e\u{0301}".len(),
+            "the run length must cover the mark's bytes too"
+        );
+    }
+
+    #[test]
+    fn a_combining_mark_does_not_consume_a_column() {
+        let plain = terminal_showing(10, 1, b"e\x1b[1;6Hx");
+        let decomposed = terminal_showing(10, 1, "e\u{0301}\x1b[1;6Hx".as_bytes());
+
+        let plain_layout = build(&plain, None, None);
+        let plain_line = &plain_layout.rows[0].text_lines[0];
+        let layout = build(&decomposed, None, None);
+        let line = &layout.rows[0].text_lines[0];
+
+        assert_eq!(plain_line.text, "e    x");
+        assert_eq!(line.text, "e\u{0301}    x", "the gap absorbed a column");
+        assert_eq!(line.start_col, plain_line.start_col);
+        assert_eq!(
+            line.styles.iter().map(|run| run.len).sum::<usize>(),
+            line.text.len()
+        );
+    }
+
+    #[test]
+    fn adding_a_combining_mark_rebuilds_the_row() {
+        let terminal = terminal_showing(10, 2, b"e\r\nx");
+        let first = build(&terminal, None, None);
+
+        // A bare mark lands on the cell left of the cursor, so park it after `e`.
+        terminal.process_output("\x1b[1;2H\u{0301}".as_bytes());
+        let second = build(&terminal, None, Some(&first));
+
+        assert_eq!(reused_rows(&first, &second), vec![false, true]);
+        assert_eq!(second.rows[0].text_lines[0].text, "e\u{0301}");
+    }
+
+    #[test]
+    fn a_mark_over_a_blank_cell_still_paints() {
+        let terminal = terminal_showing(10, 1, " \u{0301}".as_bytes());
+
+        let layout = build(&terminal, None, None);
+
+        assert_eq!(layout.rows[0].text_lines[0].text, " \u{0301}");
+    }
+
+    #[test]
+    fn the_layout_follows_the_applications_cursor_visibility_mode() {
+        let terminal = terminal_showing(10, 3, b"hi");
+        assert!(build(&terminal, None, None).cursor_mode_visible);
+
+        terminal.process_output(b"\x1b[?25l");
+        let hidden = build(&terminal, None, None);
+        assert!(!hidden.cursor_mode_visible);
+        assert_eq!(
+            (hidden.cursor_col, hidden.cursor_visual_line),
+            (2, 0),
+            "hiding the cursor must not move it"
+        );
+
+        terminal.process_output(b"\x1b[?25h");
+        assert!(build(&terminal, None, None).cursor_mode_visible);
+    }
+
+    #[test]
+    fn an_application_hidden_cursor_is_never_painted() {
+        let mut layout = layout_of(3, 10, &["a", "b", "c"]);
+        assert!(cursor_paints(true, &layout));
+
+        layout.cursor_mode_visible = false;
+        assert!(!cursor_paints(true, &layout));
+        assert!(!cursor_paints(false, &layout));
+    }
+
+    #[test]
+    fn the_blink_phase_and_the_viewport_still_gate_a_shown_cursor() {
+        let mut layout = layout_of(3, 10, &["a", "b", "c"]);
+        assert!(layout.cursor_mode_visible);
+
+        assert!(!cursor_paints(false, &layout), "blinked off");
+        assert!(cursor_paints(true, &layout), "blinked on");
+
+        layout.cursor_visual_line = 3;
+        assert!(
+            !cursor_paints(true, &layout),
+            "scrolled out of the viewport"
+        );
+    }
 }
 
 pub(crate) fn deregister_resize_viewer(terminal_id: &str, viewer_id: u64) {
@@ -734,6 +836,9 @@ struct TerminalGridLayout {
     display_offset: i32,
     cursor_col: usize,
     cursor_visual_line: i32,
+    /// DECTCEM (`CSI ?25h` / `?25l`): the app hides its own cursor while the
+    /// pane keeps focus, so this is independent of the pane's blink state.
+    cursor_mode_visible: bool,
     /// Cells of the rows this build actually rebuilt; reused rows cost none.
     cells_scanned: usize,
 }
@@ -859,6 +964,7 @@ fn build_terminal_grid_layout(
             display_offset,
             cursor_col: cursor_point.column.0,
             cursor_visual_line: cursor_point.line.0 + display_offset,
+            cursor_mode_visible: term.mode().contains(TermMode::SHOW_CURSOR),
             cells_scanned: rebuilt_rows.saturating_mul(cols),
         };
         (content_generation, layout)
@@ -895,14 +1001,20 @@ fn selected_columns(
 }
 
 /// Everything that decides how a row paints besides the theme and fonts the cache
-/// key pins: each cell's glyph, colours, flags and underline colour, plus the
-/// selection span. Zero-width chars and hyperlinks are not painted by the grid.
+/// key pins: each cell's glyph (base char plus its zero-width marks), colours,
+/// flags and underline colour, plus the selection span. Hyperlinks are not painted.
 fn row_hash(cells: &Row<Cell>, cols: usize, selected: Option<(usize, usize)>) -> u64 {
     let mut hasher = RowHasher::default();
     selected.hash(&mut hasher);
     for col in 0..cols {
         let cell = &cells[Column(col)];
+        let marks = cell.zerowidth().unwrap_or_default();
         hasher.write_u32(u32::from(cell.c));
+        // Unconditional, so a mark can never be mistaken for the next field.
+        hasher.write_usize(marks.len());
+        for mark in marks {
+            hasher.write_u32(u32::from(*mark));
+        }
         hasher.write_u16(cell.flags.bits());
         hash_color(&cell.fg, &mut hasher);
         hash_color(&cell.bg, &mut hasher);
@@ -1036,7 +1148,11 @@ fn build_row(
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue;
         }
-        if cell.c == ' ' && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT) {
+        let marks = cell.zerowidth().unwrap_or_default();
+        if cell.c == ' '
+            && marks.is_empty()
+            && !cell.flags.intersects(Flags::UNDERLINE | Flags::STRIKEOUT)
+        {
             continue;
         }
 
@@ -1060,7 +1176,7 @@ fn build_row(
         };
 
         let text_style = TextRun {
-            len: cell.c.len_utf8(),
+            len: cell.c.len_utf8() + marks.iter().map(|mark| mark.len_utf8()).sum::<usize>(),
             font,
             color: fg_color,
             background_color: None,
@@ -1095,15 +1211,17 @@ fn build_row(
                 visual_line,
                 col_i32,
                 cell.c,
+                marks,
                 text_style,
             ));
         } else if let Some(line) = current_line.as_mut() {
-            line.append(col_i32, cell.c, text_style);
+            line.append(col_i32, cell.c, marks, text_style);
         } else {
             current_line = Some(BatchedTextLine::new(
                 visual_line,
                 col_i32,
                 cell.c,
+                marks,
                 text_style,
             ));
         }
@@ -1169,6 +1287,16 @@ fn changed_cells(
 /// Vertical shift the scroll-aware measurement searches. Wide enough for the
 /// usual streaming case (a few lines at a time), cheap enough to run per paint.
 const MAX_TRACKED_SCROLL: i32 = 8;
+
+/// Three independent reasons to skip the cursor: the pane's blink phase or
+/// focus (`blink_visible`), the app's own DECTCEM hide, and a cursor scrolled
+/// out of the viewport.
+fn cursor_paints(blink_visible: bool, layout: &TerminalGridLayout) -> bool {
+    blink_visible
+        && layout.cursor_mode_visible
+        && layout.cursor_visual_line >= 0
+        && layout.cursor_visual_line < layout.screen_lines() as i32
+}
 
 impl Element for TerminalElement {
     type RequestLayoutState = TerminalElementState;
@@ -1562,10 +1690,7 @@ impl Element for TerminalElement {
         });
 
         // Phase 4: Paint cursor
-        if cursor_visible
-            && layout.cursor_visual_line >= 0
-            && layout.cursor_visual_line < layout.screen_lines() as i32
-        {
+        if cursor_paints(cursor_visible, &layout) {
             let cursor_x =
                 px((f32::from(bounds.origin.x) + layout.cursor_col as f32 * cell_width_f).floor());
             let cursor_y = px((f32::from(bounds.origin.y)

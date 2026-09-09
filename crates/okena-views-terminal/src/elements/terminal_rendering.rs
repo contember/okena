@@ -17,22 +17,23 @@ pub(crate) struct BatchedTextLine {
 }
 
 impl BatchedTextLine {
-    pub fn new(line: i32, start_col: i32, c: char, style: TextRun) -> Self {
-        let mut text = String::with_capacity(100);
-        text.push(c);
-        let mut style = style;
-        style.len = c.len_utf8();
-        Self {
+    /// `marks` are the cell's zero-width characters, stacked on `c`. They are
+    /// part of the cell's glyph, so they add bytes but never a column.
+    pub fn new(line: i32, start_col: i32, c: char, marks: &[char], style: TextRun) -> Self {
+        let mut result = Self {
             line,
             start_col,
-            text,
-            styles: vec![style],
+            text: String::with_capacity(100),
+            styles: Vec::new(),
             next_col: start_col + 1,
             shaped: OnceLock::new(),
-        }
+        };
+        result.push_cell(c, marks, style);
+        result
     }
 
-    pub fn append(&mut self, col: i32, c: char, style: TextRun) {
+    /// See [`Self::new`] for `marks`.
+    pub fn append(&mut self, col: i32, c: char, marks: &[char], style: TextRun) {
         debug_assert!(col >= self.next_col);
         if col > self.next_col {
             let gap = " ".repeat((self.next_col..col).count());
@@ -42,9 +43,21 @@ impl BatchedTextLine {
             gap_style.strikethrough = None;
             self.append_text(&gap, gap_style);
         }
-        let mut encoded = [0; 4];
-        self.append_text(c.encode_utf8(&mut encoded), style);
+        self.push_cell(c, marks, style);
         self.next_col = col + 1;
+    }
+
+    /// One cell's whole glyph as a single style run; the caller owns the column.
+    fn push_cell(&mut self, c: char, marks: &[char], style: TextRun) {
+        if marks.is_empty() {
+            let mut encoded = [0; 4];
+            self.append_text(c.encode_utf8(&mut encoded), style);
+            return;
+        }
+        let mut text = String::with_capacity((marks.len() + 1) * 4);
+        text.push(c);
+        text.extend(marks.iter().copied());
+        self.append_text(&text, style);
     }
 
     fn append_text(&mut self, text: &str, mut style: TextRun) {
@@ -114,9 +127,9 @@ mod tests {
     #[test]
     fn adjacent_cells_with_the_same_style_share_one_run() {
         let text_style = style(0x11_22_33);
-        let mut line = BatchedTextLine::new(2, 3, 'a', text_style.clone());
+        let mut line = BatchedTextLine::new(2, 3, 'a', &[], text_style.clone());
 
-        line.append(4, 'b', text_style);
+        line.append(4, 'b', &[], text_style);
 
         assert_eq!(line.line, 2);
         assert_eq!(line.start_col, 3);
@@ -129,9 +142,9 @@ mod tests {
     #[test]
     fn skipped_cells_become_spaces_without_an_extra_paint_run() {
         let text_style = style(0x11_22_33);
-        let mut line = BatchedTextLine::new(0, 1, 'a', text_style.clone());
+        let mut line = BatchedTextLine::new(0, 1, 'a', &[], text_style.clone());
 
-        line.append(4, 'b', text_style);
+        line.append(4, 'b', &[], text_style);
 
         assert_eq!(line.text, "a  b");
         assert_eq!(line.styles.len(), 1);
@@ -143,9 +156,9 @@ mod tests {
     fn style_changes_remain_separate_inside_one_line() {
         let first = style(0x11_22_33);
         let second = style(0x44_55_66);
-        let mut line = BatchedTextLine::new(0, 0, 'a', first);
+        let mut line = BatchedTextLine::new(0, 0, 'a', &[], first);
 
-        line.append(1, 'b', second);
+        line.append(1, 'b', &[], second);
 
         assert_eq!(line.text, "ab");
         assert_eq!(line.styles.len(), 2);
@@ -165,9 +178,9 @@ mod tests {
             color: None,
             thickness: px(1.0),
         });
-        let mut line = BatchedTextLine::new(0, 0, 'a', decorated.clone());
+        let mut line = BatchedTextLine::new(0, 0, 'a', &[], decorated.clone());
 
-        line.append(2, 'b', decorated);
+        line.append(2, 'b', &[], decorated);
 
         assert_eq!(line.text, "a b");
         assert_eq!(line.styles.len(), 3);
@@ -180,12 +193,40 @@ mod tests {
     #[test]
     fn a_wide_character_gap_preserves_following_column_alignment() {
         let text_style = style(0x11_22_33);
-        let mut line = BatchedTextLine::new(0, 0, '界', text_style.clone());
+        let mut line = BatchedTextLine::new(0, 0, '界', &[], text_style.clone());
 
-        line.append(2, 'x', text_style);
+        line.append(2, 'x', &[], text_style);
 
         assert_eq!(line.text, "界 x");
         assert_eq!(line.styles.iter().map(|run| run.len).sum::<usize>(), 5);
+        assert_eq!(line.next_col, 3);
+    }
+
+    #[test]
+    fn a_combining_mark_joins_its_base_run_without_taking_a_column() {
+        let text_style = style(0x11_22_33);
+        let mut line = BatchedTextLine::new(0, 0, 'e', &['\u{0301}'], text_style.clone());
+
+        line.append(1, 'x', &[], text_style);
+
+        assert_eq!(line.text, "e\u{0301}x");
+        assert_eq!(line.styles.len(), 1);
+        assert_eq!(line.styles[0].len, "e\u{0301}x".len());
+        assert_eq!(line.next_col, 2, "the mark shares its base cell's column");
+    }
+
+    #[test]
+    fn marks_on_a_gapped_cell_keep_the_run_lengths_in_bytes() {
+        let text_style = style(0x11_22_33);
+        let mut line = BatchedTextLine::new(0, 0, 'a', &[], text_style.clone());
+
+        line.append(2, 'e', &['\u{0301}', '\u{0308}'], text_style);
+
+        assert_eq!(line.text, "a e\u{0301}\u{0308}");
+        assert_eq!(
+            line.styles.iter().map(|run| run.len).sum::<usize>(),
+            line.text.len()
+        );
         assert_eq!(line.next_col, 3);
     }
 
