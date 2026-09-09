@@ -3,6 +3,8 @@
 //! Provides a read-only view of git diffs with working/staged toggle,
 //! file tree sidebar, syntax highlighting, and selection support.
 
+mod composition;
+mod composition_render;
 mod context_menu;
 mod data;
 mod line_render;
@@ -148,6 +150,8 @@ pub struct DiffViewer {
     pub(super) search: Option<okena_files::in_page_search::InPageSearch>,
     /// See [`DiffSearchSig`].
     pub(super) search_sig: Option<DiffSearchSig>,
+    /// What the comparison is made of, and the role filter over the file tree.
+    pub(super) composition: composition::CompositionState,
 }
 
 pub(super) struct BinaryDiffPreview {
@@ -258,6 +262,7 @@ impl DiffViewer {
             selection_context_menu: None,
             search: None,
             search_sig: None,
+            composition: composition::CompositionState::default(),
         };
 
         if !provider.is_git_repo() {

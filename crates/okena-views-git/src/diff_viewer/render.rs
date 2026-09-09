@@ -644,6 +644,8 @@ impl DiffViewer {
             .text_color(rgb(t.text_muted))
             .line_height(px(11.0))
             .child("Files");
+        let composition = self.render_composition(t, cx);
+        let filter_footer = self.render_composition_footer(t, cx);
         let tree = div()
             .id("file-tree")
             .flex_1()
@@ -659,7 +661,11 @@ impl DiffViewer {
             t.bg_primary,
             t.border,
             t.border_active,
-            vec![header.into_any_element(), tree.into_any_element()],
+            composition
+                .into_iter()
+                .chain([header.into_any_element(), tree.into_any_element()])
+                .chain(filter_footer)
+                .collect(),
             move |mouse_pos, cx| {
                 if let Some(entity) = entity.upgrade() {
                     entity.update(cx, |this, _| {
