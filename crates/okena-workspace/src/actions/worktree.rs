@@ -47,9 +47,30 @@ enum WorktreeRemovalTarget {
     Orphaned(okena_git::OrphanedWorktree),
 }
 
+/// Dirty state for a close decision, refusing rather than guessing.
+///
+/// The caller turns `true` into a force-remove, so "we could not read the
+/// status" must not collapse into it — that is the one case where git's own
+/// dirty refusal is the last thing standing.
+fn close_dirty_state(project_path: &str) -> Result<bool, String> {
+    match okena_git::uncommitted_changes(std::path::Path::new(project_path)) {
+        okena_git::DirtyCheck::Known(dirty) => Ok(dirty),
+        okena_git::DirtyCheck::NotRepo => Ok(false),
+        okena_git::DirtyCheck::Unknown => Err(
+            "could not determine whether the worktree has uncommitted changes; refusing to close it"
+                .to_string(),
+        ),
+    }
+}
+
 impl WorktreeRemovalPlan {
     pub fn worktree_path(&self) -> &std::path::Path {
         &self.worktree_path
+    }
+
+    /// The branch the removed checkout held.
+    pub fn branch(&self) -> &str {
+        &self.branch
     }
 
     /// Whether this plan deletes a checkout Git no longer tracks.
@@ -62,15 +83,19 @@ impl WorktreeRemovalPlan {
     pub fn preflight_remove(&self, force: bool) -> Result<(), String> {
         // An orphan has no Git to consult about dirty state, and reaching this
         // plan already required an explicit force-remove.
-        if self.is_orphaned() {
+        if self.is_orphaned() || force {
             return Ok(());
         }
-        if !force && okena_git::has_uncommitted_changes(&self.worktree_path) {
-            return Err(
-                "worktree has uncommitted changes; pass force=true to remove it".to_string(),
-            );
+        match okena_git::uncommitted_changes(&self.worktree_path) {
+            okena_git::DirtyCheck::Known(true) => {
+                Err("worktree has uncommitted changes; pass force=true to remove it".to_string())
+            }
+            okena_git::DirtyCheck::Unknown => Err(
+                "could not determine whether the worktree has uncommitted changes; refusing to remove it"
+                    .to_string(),
+            ),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     pub fn remove(&self, force: bool) -> Result<(), String> {
@@ -174,9 +199,28 @@ fn stash_pop_recover(did_stash: bool, project_path: &str, branch: &str, step: &s
     }
 }
 
+/// The parent checkout must already sit on the branch the merge targets — a
+/// merge lands in whatever HEAD points at, so a parent on `develop` would take
+/// the work while the pipeline pushes and cleans up `main`.
+fn verify_merge_destination(main_repo_path: &str, default_branch: &str) -> Result<(), String> {
+    match okena_git::get_current_branch(std::path::Path::new(main_repo_path)) {
+        Some(current) if current == default_branch => Ok(()),
+        Some(current) => Err(format!(
+            "the checkout at {} is on '{}', not the merge target '{}'; refusing to merge",
+            main_repo_path, current, default_branch
+        )),
+        None => Err(format!(
+            "could not read the current branch of {}; refusing to merge into '{}'",
+            main_repo_path, default_branch
+        )),
+    }
+}
+
 /// The worktree-close merge pipeline: stash → fetch → pre_merge hook → rebase →
-/// merge → post_merge hook → push → delete-branch, with stash-pop recovery on any
-/// failing step. PURE: only git subprocesses + headless hooks (monitor, no PTY
+/// merge → post_merge hook → push, with stash-pop recovery on any failing step.
+/// Deleting the branch is not part of it — see [`delete_closed_worktree_branch`].
+///
+/// PURE: only git subprocesses + headless hooks (monitor, no PTY
 /// runner), no `&mut Workspace` — so the daemon runs it on a blocking thread with
 /// no lock held. `on_rebase_conflict` is resolved into a deferred plan for the
 /// caller to execute and register on its reactor. Call only when merge is enabled.
@@ -185,7 +229,6 @@ pub fn close_worktree_merge_git(
     stash_enabled: bool,
     fetch_enabled: bool,
     push_enabled: bool,
-    delete_branch_enabled: bool,
     project_id: &str,
     project_name: &str,
     project_path: &str,
@@ -200,6 +243,11 @@ pub fn close_worktree_merge_git(
 ) -> CloseWorktreeGitOutcome {
     use std::path::Path;
     let mut did_stash = false;
+
+    // Refuse before anything is stashed, fetched or rebased.
+    if let Err(e) = verify_merge_destination(main_repo_path, default_branch) {
+        return CloseWorktreeGitOutcome::Err(e);
+    }
 
     if stash_enabled {
         if let Err(e) = okena_git::stash_changes(Path::new(project_path)) {
@@ -256,7 +304,13 @@ pub fn close_worktree_merge_git(
         };
     }
 
-    // Merge (ff-only) in the main repo.
+    // Re-check: a hook, or anything else holding the repo, may have moved HEAD.
+    if let Err(e) = verify_merge_destination(main_repo_path, default_branch) {
+        stash_pop_recover(did_stash, project_path, branch, "merge destination check");
+        return CloseWorktreeGitOutcome::Err(e);
+    }
+
+    // Merge the worktree branch into the parent checkout, keeping a merge commit.
     if let Err(e) = okena_git::merge_branch(Path::new(main_repo_path), branch, true) {
         stash_pop_recover(did_stash, project_path, branch, "merge");
         return CloseWorktreeGitOutcome::Err(format!("Merge failed: {}", e));
@@ -284,16 +338,23 @@ pub fn close_worktree_merge_git(
         log::warn!("Push failed (continuing): {}", e);
     }
 
-    if delete_branch_enabled {
-        if let Err(e) = okena_git::delete_local_branch(Path::new(main_repo_path), branch) {
-            log::warn!("Delete local branch failed (continuing): {}", e);
-        }
-        if let Err(e) = okena_git::delete_remote_branch(Path::new(main_repo_path), branch) {
-            log::warn!("Delete remote branch failed (continuing): {}", e);
-        }
-    }
-
     CloseWorktreeGitOutcome::Ok { did_stash }
+}
+
+/// Delete a closed worktree's branch, local and remote.
+///
+/// Only ever call this once the checkout is gone: `git branch -d` refuses a
+/// branch a worktree still holds, and the refusal is not worth surfacing — the
+/// close itself succeeded. A branch that survives is recoverable; the checkout
+/// this deletes it after is not.
+pub fn delete_closed_worktree_branch(main_repo_path: &str, branch: &str) {
+    let repo = std::path::Path::new(main_repo_path);
+    if let Err(e) = okena_git::delete_local_branch(repo, branch) {
+        log::warn!("Delete local branch failed (continuing): {}", e);
+    }
+    if let Err(e) = okena_git::delete_remote_branch(repo, branch) {
+        log::warn!("Delete remote branch failed (continuing): {}", e);
+    }
 }
 
 impl Workspace {
@@ -1169,6 +1230,39 @@ impl Workspace {
         global_hooks: &HooksConfig,
         cx: &mut impl WorkspaceCx,
     ) -> Result<(), String> {
+        self.close_worktree_after_merge(
+            focus_manager,
+            project_id,
+            merge,
+            stash,
+            fetch,
+            push,
+            delete_branch,
+            false,
+            global_hooks,
+            cx,
+        )
+    }
+
+    /// [`close_worktree`](Self::close_worktree) for a close whose merge phase
+    /// already ran elsewhere: `did_stash` is that phase's real stash outcome.
+    /// This pass runs with `merge` off and so cannot recompute it, and a stash
+    /// the pass cannot see would drop the post-stash guard that protects
+    /// changes made after it.
+    #[allow(clippy::too_many_arguments)] // cohesive close-pipeline toggle flags
+    pub fn close_worktree_after_merge(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        merge: bool,
+        stash: bool,
+        fetch: bool,
+        push: bool,
+        delete_branch: bool,
+        did_stash: bool,
+        global_hooks: &HooksConfig,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<(), String> {
         // Reject up front while the worktree is still being created — before a
         // before_remove hook is spawned and a pending close (with its mirrored
         // `is_closing` marker) is registered. `begin_worktree_removal` has the
@@ -1194,14 +1288,21 @@ impl Workspace {
             okena_git::get_current_branch(std::path::Path::new(&project_path)).unwrap_or_default();
         let default_branch = okena_git::get_default_branch(std::path::Path::new(&main_repo_path))
             .unwrap_or_default();
-        let is_dirty = okena_git::has_uncommitted_changes(std::path::Path::new(&project_path));
+        // Refuse before any hook runs: below, `force_remove` is derived from
+        // this, and an unknown status must never become `git worktree remove
+        // --force` — that would strip git's own refusal exactly when we cannot
+        // see what it is protecting.
+        let is_dirty = close_dirty_state(&project_path)?;
 
         let merge_enabled =
             merge && (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
         let stash_enabled = stash && is_dirty;
         let fetch_enabled = fetch;
         let push_enabled = push;
-        let delete_branch_enabled = delete_branch;
+        // A branch may only be deleted once its work is merged and the checkout
+        // holding it is gone: either this call merges, or a caller resuming a
+        // merge it already ran comes in with `merge` off and vouches for it.
+        let delete_branch_enabled = delete_branch && (merge_enabled || !merge);
 
         let folder = self.folder_for_project_or_parent(project_id);
         let folder_id = folder.map(|f| f.id.clone());
@@ -1212,12 +1313,11 @@ impl Workspace {
 
         // Step 1: If merge enabled, run the merge pipeline (pure git + headless
         // hooks — see `close_worktree_merge_git`; the daemon runs it off-reactor).
-        let did_stash = if merge_enabled {
+        let merge_did_stash = if merge_enabled {
             match close_worktree_merge_git(
                 stash_enabled,
                 fetch_enabled,
                 push_enabled,
-                delete_branch_enabled,
                 project_id,
                 &project_name,
                 &project_path,
@@ -1249,6 +1349,8 @@ impl Workspace {
         } else {
             false
         };
+        // A stash taken by an earlier phase of this same close counts as well.
+        let did_stash = did_stash || merge_did_stash;
 
         let force_remove = is_dirty && !did_stash;
 
@@ -1286,6 +1388,8 @@ impl Workspace {
                     hook_terminal_id,
                     branch: branch.clone(),
                     main_repo_path: main_repo_path.clone(),
+                    did_stash,
+                    delete_branch: delete_branch_enabled,
                 });
                 Ok(())
             } else {
@@ -1334,15 +1438,26 @@ impl Workspace {
 
             // remove_worktree_project completes close hooks, removes the git
             // worktree, and deletes the project.
-            self.remove_worktree_project(focus_manager, project_id, force_remove, global_hooks, cx)
+            let removed = self.remove_worktree_project(
+                focus_manager,
+                project_id,
+                force_remove,
+                global_hooks,
+                cx,
+            );
+            if removed.is_ok() && delete_branch_enabled {
+                delete_closed_worktree_branch(&main_repo_path, &branch);
+            }
+            removed
         }
     }
 }
 
 #[cfg(test)]
 mod merge_pipeline_tests {
+    use super::delete_closed_worktree_branch;
     use super::{
-        CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget,
+        CloseWorktreeGitOutcome, WorktreeRemovalPlan, WorktreeRemovalTarget, close_dirty_state,
         close_worktree_merge_git,
     };
     use crate::hook_monitor::{HookMonitor, HookStatus};
@@ -1383,9 +1498,24 @@ mod merge_pipeline_tests {
         path.to_str().expect("test path is utf-8")
     }
 
-    #[test]
-    fn post_merge_is_finished_before_merge_pipeline_returns() {
-        let fixture = TestRepo::new();
+    fn rev_parse(repo: &Path, rev: &str) -> String {
+        let output = Command::new("git")
+            .args(["-C", path_str(repo), "rev-parse", rev])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git rev-parse {} failed: {}",
+            rev,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A main repo with one commit on `main` and a `feature` worktree ahead of it.
+    fn main_repo_with_feature_worktree(
+        fixture: &TestRepo,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let main_repo = fixture.root.join("main");
         let worktree = fixture.root.join("worktree");
         git(&["init", "-b", "main", path_str(&main_repo)]);
@@ -1418,6 +1548,56 @@ mod merge_pipeline_tests {
         std::fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
         git(&["-C", path_str(&worktree), "add", "feature.txt"]);
         git(&["-C", path_str(&worktree), "commit", "-m", "feature"]);
+        (main_repo, worktree)
+    }
+
+    #[test]
+    fn merge_refuses_a_parent_checkout_on_another_branch() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        git(&["-C", path_str(&main_repo), "checkout", "-b", "develop"]);
+        let main_before = rev_parse(&main_repo, "main");
+        let develop_before = rev_parse(&main_repo, "develop");
+
+        let outcome = close_worktree_merge_git(
+            false,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &HooksConfig::default(),
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        match outcome {
+            CloseWorktreeGitOutcome::Err(error) => assert!(
+                error.contains("is on 'develop'") && error.contains("'main'"),
+                "unexpected error: {error}"
+            ),
+            other => panic!(
+                "expected a refusal, got {}",
+                match other {
+                    CloseWorktreeGitOutcome::Ok { .. } => "Ok",
+                    CloseWorktreeGitOutcome::RebaseConflict { .. } => "RebaseConflict",
+                    CloseWorktreeGitOutcome::Err(_) => unreachable!(),
+                }
+            ),
+        }
+        assert_eq!(rev_parse(&main_repo, "develop"), develop_before);
+        assert_eq!(rev_parse(&main_repo, "main"), main_before);
+    }
+
+    #[test]
+    fn post_merge_is_finished_before_merge_pipeline_returns() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
 
         let hooks = HooksConfig {
             worktree: WorktreeHooks {
@@ -1428,7 +1608,6 @@ mod merge_pipeline_tests {
         };
         let monitor = HookMonitor::new();
         let outcome = close_worktree_merge_git(
-            false,
             false,
             false,
             false,
@@ -1454,6 +1633,189 @@ mod merge_pipeline_tests {
         assert_eq!(history[0].hook_type, "post_merge");
         assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
         assert!(history[0].terminal_id.is_none());
+    }
+
+    /// The second destination check exists for this: the first one passed, and
+    /// the hook moved HEAD after it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_merge_hook_that_moves_head_is_caught_before_the_merge() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let main_before = rev_parse(&main_repo, "main");
+
+        // Dirty the checkout so the pipeline stashes: the refusal has to hand
+        // the work back, not strand it in the stash list.
+        std::fs::write(worktree.join("wip.txt"), "wip\n").unwrap();
+        git(&["-C", path_str(&worktree), "add", "wip.txt"]);
+
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                pre_merge: Some(
+                    "git -C \"$OKENA_MAIN_REPO_PATH\" checkout -q -b develop".to_string(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = close_worktree_merge_git(
+            true,
+            false,
+            false,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &hooks,
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        let CloseWorktreeGitOutcome::Err(error) = outcome else {
+            panic!("a hook that moved HEAD must not reach the merge");
+        };
+        assert!(
+            error.contains("'develop'") && error.contains("'main'"),
+            "the refusal must name both branches: {error}"
+        );
+        assert_eq!(
+            rev_parse(&main_repo, "main"),
+            main_before,
+            "nothing may be merged into the branch the hook left behind"
+        );
+        assert_eq!(
+            rev_parse(&main_repo, "develop"),
+            main_before,
+            "nor into the branch the hook switched to"
+        );
+        assert!(
+            worktree.join("wip.txt").exists(),
+            "the stash must be popped back on the refusal"
+        );
+    }
+
+    fn local_branches(repo: &Path) -> String {
+        let output = Command::new("git")
+            .args(["-C", path_str(repo), "branch", "--format=%(refname:short)"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The whole reason the deletion left the merge pipeline: Git refuses to
+    /// delete a branch a checkout still holds, and that refusal was only logged.
+    #[test]
+    fn a_branch_is_deleted_only_once_its_checkout_is_gone() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let remote = fixture.root.join("remote.git");
+        git(&["init", "--bare", "-b", "main", path_str(&remote)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "remote",
+            "add",
+            "origin",
+            path_str(&remote),
+        ]);
+        git(&["-C", path_str(&main_repo), "push", "-q", "origin", "main"]);
+        git(&["-C", path_str(&worktree), "push", "-q", "origin", "feature"]);
+        // `git branch -d` also refuses an unmerged branch; the close deletes
+        // one it has just merged.
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge",
+            "feature",
+        ]);
+
+        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+        assert!(
+            local_branches(&main_repo).contains("feature"),
+            "git cannot delete a branch its worktree still holds"
+        );
+
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "remove",
+            "--force",
+            path_str(&worktree),
+        ]);
+        delete_closed_worktree_branch(path_str(&main_repo), "feature");
+
+        assert!(
+            !local_branches(&main_repo).contains("feature"),
+            "the local branch must be gone once its checkout is"
+        );
+        assert!(
+            !local_branches(&remote).contains("feature"),
+            "and so must the remote one"
+        );
+    }
+
+    /// The happy path with the remaining toggles on — the regression control for
+    /// the destination checks above, and the only place `push` is exercised.
+    #[test]
+    fn a_close_that_fetches_and_pushes_carries_the_merge_to_the_remote() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = main_repo_with_feature_worktree(&fixture);
+        let remote = fixture.root.join("remote.git");
+        git(&["init", "--bare", "-b", "main", path_str(&remote)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "remote",
+            "add",
+            "origin",
+            path_str(&remote),
+        ]);
+        git(&["-C", path_str(&main_repo), "push", "-q", "origin", "main"]);
+        let feature_tip = rev_parse(&worktree, "HEAD");
+
+        let outcome = close_worktree_merge_git(
+            false,
+            true,
+            true,
+            "p1",
+            "Project",
+            path_str(&worktree),
+            "feature",
+            "main",
+            path_str(&main_repo),
+            &HooksConfig::default(),
+            &HooksConfig::default(),
+            None,
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            outcome,
+            CloseWorktreeGitOutcome::Ok { did_stash: false }
+        ));
+        let merged = rev_parse(&main_repo, "main");
+        assert_ne!(merged, feature_tip, "--no-ff must leave a merge commit");
+        assert_eq!(
+            rev_parse(&main_repo, "main^2"),
+            feature_tip,
+            "the feature tip must be the second parent of the merge"
+        );
+        assert_eq!(
+            rev_parse(&remote, "main"),
+            merged,
+            "push must carry the merge to the remote"
+        );
     }
 
     #[test]
@@ -1526,5 +1888,99 @@ mod merge_pipeline_tests {
                 .iter()
                 .all(|entry| matches!(entry.status, HookStatus::Succeeded { .. }))
         );
+    }
+
+    /// A main repo with one linked worktree holding uncommitted work, plus the
+    /// name of the worktree's admin directory.
+    fn dirty_linked_worktree(fixture: &TestRepo) -> (std::path::PathBuf, std::path::PathBuf) {
+        let main_repo = fixture.root.join("main");
+        let worktree = fixture.root.join("worktree");
+        git(&["init", "-b", "main", path_str(&main_repo)]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.email",
+            "okena@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "user.name",
+            "Okena Test",
+        ]);
+        std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
+        git(&["-C", path_str(&main_repo), "add", "base.txt"]);
+        git(&["-C", path_str(&main_repo), "commit", "-m", "base"]);
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            path_str(&worktree),
+        ]);
+        std::fs::write(worktree.join("base.txt"), "uncommitted work\n").unwrap();
+        (main_repo, worktree)
+    }
+
+    /// Make the checkout's index unreadable, so neither gix nor git can say
+    /// whether it is dirty.
+    fn break_worktree_index(main_repo: &Path, name: &str) {
+        let index = main_repo
+            .join(".git")
+            .join("worktrees")
+            .join(name)
+            .join("index");
+        std::fs::remove_file(&index).unwrap();
+        std::fs::create_dir(&index).unwrap();
+    }
+
+    #[test]
+    fn close_refuses_a_checkout_whose_dirty_state_cannot_be_read() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = dirty_linked_worktree(&fixture);
+
+        assert_eq!(close_dirty_state(path_str(&worktree)), Ok(true));
+
+        break_worktree_index(&main_repo, "worktree");
+
+        // The boolean the close path used to read: it says "dirty", which the
+        // caller turns into `git worktree remove --force`.
+        assert!(okena_git::has_uncommitted_changes(&worktree));
+        let error = close_dirty_state(path_str(&worktree))
+            .expect_err("an unreadable status must not decide a force-remove");
+        assert!(error.contains("could not determine"), "{error}");
+    }
+
+    #[test]
+    fn preflight_refuses_a_checkout_whose_dirty_state_cannot_be_read() {
+        let fixture = TestRepo::new();
+        let (main_repo, worktree) = dirty_linked_worktree(&fixture);
+        let verified_worktree =
+            okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
+        let plan = WorktreeRemovalPlan {
+            project_id: "p1".to_string(),
+            worktree_path: worktree.clone(),
+            main_repo_path: main_repo.to_string_lossy().into_owned(),
+            target: WorktreeRemovalTarget::Linked(verified_worktree),
+            branch: "feature".to_string(),
+            project_hooks: HooksConfig::default(),
+            project_name: "Project".to_string(),
+            project_path: worktree.to_string_lossy().into_owned(),
+            folder_id: None,
+            folder_name: None,
+        };
+
+        break_worktree_index(&main_repo, "worktree");
+
+        let error = plan
+            .preflight_remove(false)
+            .expect_err("an unreadable status must block removal");
+        assert!(error.contains("could not determine"), "{error}");
+        // An explicit force is the user's own decision and still passes.
+        assert_eq!(plan.preflight_remove(true), Ok(()));
     }
 }

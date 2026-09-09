@@ -1,17 +1,23 @@
 //! GPUI-free git-status polling for the headless daemon.
 //!
-//! Projects visible in any window, or owning a terminal subscribed by a remote
-//! client, stay on the responsive tier: HEAD every 250ms and full status every
-//! 5s. Hidden, unsubscribed repositories use bounded fallback cadences (2s HEAD,
-//! 30s full status). Explicit actions and detected HEAD changes still trigger an
-//! immediate targeted refresh. Cached statuses for projects not selected in a
-//! cycle remain published, so tiering changes freshness rather than visibility.
+//! Projects in a client's declared viewport (`SetVisibleProjects`), or owning a
+//! terminal streamed by a client that never declared one, stay on the
+//! responsive tier: HEAD every 250ms and full status every 5s. A declared
+//! viewport is the whole truth for that client — the desktop subscribes to
+//! every terminal it mirrors, so its subscriptions say nothing about what is
+//! on screen — and any declared viewport supersedes the workspace's own window
+//! state: visibility is client-owned (`window-layout.json`), so the daemon's
+//! copy is a stale legacy set, consulted only while nobody has declared one.
+//! Everything else uses bounded fallback cadences (2s HEAD, 30s full status).
+//! Explicit actions and detected HEAD changes still trigger an immediate
+//! targeted refresh. Cached statuses for projects not selected in a cycle
+//! remain published, so tiering changes freshness rather than visibility.
 //!
-//! The `gh` PR/CI fan-out is deliberately *narrower* than the local tier: it
-//! covers only projects visible in a window (plus explicitly requested ones),
-//! is scheduled per project by [`GithubPollSchedule`], skips any project whose
-//! upstream commit hasn't moved since its last settled result, and parks itself
-//! when GitHub reports the API rate limit as exhausted.
+//! The GitHub PR/CI fan-out is deliberately *narrower* than the local tier: it
+//! covers only that visible set (plus explicitly requested ones), is scheduled
+//! per project by [`GithubPollSchedule`], skips any project whose upstream
+//! commit hasn't moved since its last settled result, and parks itself when
+//! GitHub reports the API rate limit as exhausted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -27,18 +33,18 @@ use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc, watch};
 
-/// Responsive full-status cadence for visible or remotely subscribed projects.
+/// Responsive full-status cadence for projects on the responsive tier.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Hidden projects receive a full fallback scan every 6 responsive cycles (30s).
 const HIDDEN_GIT_POLL_EVERY_N_CYCLES: u64 = 6;
-/// Responsive HEAD cadence for visible or remotely subscribed projects.
+/// Responsive HEAD cadence for projects on the responsive tier.
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Hidden projects receive a cheap HEAD fallback scan every 8 ticks (2s).
 const HIDDEN_HEAD_POLL_EVERY_N_TICKS: u64 = 8;
-/// How many projects the `gh` fan-out talks to at once. Matches the process
-/// bus's `Lane::Poll` worker count — going wider just queues on the bus, going
-/// narrower (the previous strictly sequential loop) made a full pass outlast
-/// its own cadence and let passes pile up on top of each other.
+/// How many projects the GitHub fan-out talks to at once. Going wider only
+/// parks more blocking-pool threads on the network; going narrower (the
+/// previous strictly sequential loop) made a full pass outlast its own cadence
+/// and let passes pile up on top of each other.
 const GH_FANOUT_CONCURRENCY: usize = 4;
 
 /// Project the local [`GitStatus`] onto the slimmer wire type pushed to remote
@@ -62,7 +68,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
 struct TriggerAccumulator {
     /// HEAD changed locally; invalidates in-flight results from the old commit.
     head_change_ids: HashSet<String>,
-    /// Unconditional `gh` refreshes. Used when existing PR/CI cache is invalid.
+    /// Unconditional GitHub refreshes. Used when existing PR/CI cache is invalid.
     force_gh_ids: HashSet<String>,
     /// Conditional refreshes. These become forced only if PR/CI cache is absent.
     candidate_gh_ids: HashSet<String>,
@@ -102,11 +108,11 @@ impl TriggerAccumulator {
     }
 }
 
-/// A message from a running `gh` pass back to the poll loop.
+/// A message from a running GitHub pass back to the poll loop.
 enum GithubPassMessage {
     /// One project's outcome, sent the moment that project finishes. A pass
     /// used to publish nothing until its slowest repo returned, so a 0.4s PR
-    /// lookup could sit behind another project's 15s `gh` timeout.
+    /// lookup could sit behind another project's 15s request timeout.
     Project(GithubPollResult),
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
@@ -124,7 +130,7 @@ struct GithubPollResult {
     reached_github: bool,
 }
 
-/// One project's slot in a `gh` pass.
+/// One project's slot in a GitHub pass.
 struct ProjectPoll {
     id: String,
     path: String,
@@ -137,48 +143,41 @@ struct ProjectPoll {
     cached_pr_number: Option<u32>,
 }
 
-/// Projects the user can currently see. The `gh` fan-out is scoped to these:
-/// a badge nobody is looking at is not worth GitHub API budget.
-///
-/// Two sources, unioned. The workspace's own hidden set covers a daemon driving
-/// its own surface, but for a desktop client it is a stale copy that the client
-/// never writes to — visibility is client-owned presentation state, persisted
-/// client-side in `window-layout.json` under different window ids. So each
-/// connected client declares what it renders (`WsInbound::SetVisibleProjects`),
-/// and that is the authority for its own viewport. A client that declares
-/// nothing (older build, no viewport yet) simply contributes nothing.
+/// Union of declared viewports (`SetVisibleProjects`). The workspace's own window
+/// state counts only while no connection has declared one: visibility is
+/// client-owned (`window-layout.json`), so the daemon's copy is a stale legacy set.
 fn visible_project_ids(
     workspace: &Workspace,
     remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
 ) -> HashSet<String> {
-    let mut visible = workspace.all_visible_project_ids();
-    if let Ok(declared) = remote_visible_projects.read() {
-        for project_ids in declared.values() {
-            visible.extend(project_ids.iter().cloned());
-        }
+    match remote_visible_projects.read() {
+        Ok(declared) if !declared.is_empty() => declared.values().flatten().cloned().collect(),
+        _ => workspace.all_visible_project_ids(),
     }
-    visible
 }
 
-/// Visible projects plus any owning a terminal a remote client is streaming.
-///
-/// This is the *local* status tier only. Clients subscribe to every terminal in
-/// the daemon's state — not just the ones they render — so folding subscriptions
-/// into the `gh` set would put every project that merely owns a terminal on the
-/// responsive GitHub cadence, which is how a machine with a few dozen projects
-/// burns an hourly API budget without displaying a single extra badge.
+/// Visible projects plus any owning a terminal streamed by a connection that
+/// has not declared a viewport. A declared viewport is the whole truth for that
+/// connection, so its subscriptions are ignored (see the module docs).
 fn streaming_project_ids(
     workspace: &Workspace,
     remote_subscribed_terminals: &RwLock<HashMap<u64, HashSet<String>>>,
     remote_visible_projects: &RwLock<HashMap<u64, HashSet<String>>>,
 ) -> HashSet<String> {
     let mut relevant = visible_project_ids(workspace, remote_visible_projects);
-    if let Ok(subscribed) = remote_subscribed_terminals.read() {
-        for terminal_ids in subscribed.values() {
-            for terminal_id in terminal_ids {
-                if let Some(project) = workspace.find_project_for_terminal(terminal_id) {
-                    relevant.insert(project.id.clone());
-                }
+    let (Ok(subscribed), Ok(declared)) = (
+        remote_subscribed_terminals.read(),
+        remote_visible_projects.read(),
+    ) else {
+        return relevant;
+    };
+    let undeclared = subscribed
+        .iter()
+        .filter(|(connection_id, _)| !declared.contains_key(connection_id));
+    for (_, terminal_ids) in undeclared {
+        for terminal_id in terminal_ids {
+            if let Some(project) = workspace.find_project_for_terminal(terminal_id) {
+                relevant.insert(project.id.clone());
             }
         }
     }
@@ -313,7 +312,7 @@ fn update_head_snapshots<T: PartialEq>(
         .collect()
 }
 
-/// Pick this cycle's `gh` slots.
+/// Pick this cycle's GitHub slots.
 ///
 /// Rules: a project earns a slot only if it is *visible* (or explicitly asked
 /// for), only when its own schedule says it is due — one repo with running CI
@@ -358,7 +357,7 @@ fn select_github_polls(
         .collect()
 }
 
-/// What one project's `gh` slot produced.
+/// What one project's GitHub slot produced.
 struct ProjectOutcome {
     pr: Option<PrFetch>,
     ci: Option<CiFetch>,
@@ -373,7 +372,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
     with_lane(Lane::Poll, || {
         let path = Path::new(&poll.path);
         // Repos with no GitHub remote can never have PRs or checks; skipping
-        // them here keeps the whole `gh` machinery off non-GitHub projects.
+        // them here keeps the whole GitHub machinery off non-GitHub projects.
         if !git::repository::has_github_remote(path) {
             return ProjectOutcome {
                 pr: poll.want_pr.then_some(PrFetch::Fetched(None)),
@@ -403,11 +402,11 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
     })
 }
 
-/// Run one `gh` pass, emitting each project's outcome on `result_tx` as soon as
+/// Run one GitHub pass, emitting each project's outcome on `result_tx` as soon as
 /// that project returns and a [`GithubPassMessage::Finished`] when all have.
 ///
-/// Streaming rather than returning one aggregate is deliberate: `gh` per repo
-/// ranges from ~0.4s to the 15s [`GH_TIMEOUT`](okena_git::repository) cap, and
+/// Streaming rather than returning one aggregate is deliberate: a GitHub round
+/// trip per repo ranges from well under a second to the 15s request cap, and
 /// an aggregate held every badge in the pass hostage to its slowest repo.
 async fn poll_github(
     polls: Vec<ProjectPoll>,
@@ -438,7 +437,7 @@ async fn poll_github(
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                log::warn!("gh poll task failed for {id}: {error}");
+                log::warn!("GitHub poll task failed for {id}: {error}");
                 continue;
             }
         };
@@ -594,17 +593,17 @@ pub async fn run_git_poll(
     let mut last: HashMap<String, GitStatus> = HashMap::new();
 
     // Across-cycle PR/CI caches keyed by project ID, mirroring the GUI watcher's
-    // `pr_infos` / `ci_checks`. The expensive `gh` fan-out only runs on the
+    // `pr_infos` / `ci_checks`. The expensive GitHub fan-out only runs on the
     // cadence below; between those cycles the cached values are merged into every
     // status so the badges don't blank. Merge (not replace) on update so a
     // project that drops out of the visible set keeps its last-known PR/CI.
     let mut pr_infos: HashMap<String, Option<git::PrInfo>> = HashMap::new();
     let mut ci_checks: HashMap<String, Option<git::CiCheckSummary>> = HashMap::new();
-    // Per-project `gh` cadence, commit-level result caching and the rate-limit
+    // Per-project GitHub cadence, commit-level result caching and the rate-limit
     // gate. Replaces the old global "is anything pending?" flag, which put every
     // project on the fast cadence as soon as one repo had CI running.
     let mut schedule = GithubPollSchedule::default();
-    // Projects a running `gh` pass currently holds. Passes used to be spawned
+    // Projects a running GitHub pass currently holds. Passes used to be spawned
     // unconditionally, so a fan-out slower than its own cadence stacked copies
     // of itself; tracking the ids (rather than a bare flag) keeps that
     // protection while letting an explicitly forced project start its own pass
@@ -679,7 +678,7 @@ pub async fn run_git_poll(
             poll_hidden,
         );
 
-        // Explicit actions steer the `gh` schedule: a branch switch invalidates
+        // Explicit actions steer the GitHub schedule: a branch switch invalidates
         // what we hold, while merely showing a project is only worth a fetch
         // when we hold no PR/CI result for it yet.
         for id in &trigger_acc.invalidate_gh_ids {
@@ -705,7 +704,7 @@ pub async fn run_git_poll(
             match status {
                 Ok(Some(mut status)) => {
                     // Inject whatever PR/CI we already have cached so a still-fresh
-                    // badge doesn't blank between `gh` cadence cycles.
+                    // badge doesn't blank between GitHub cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
                     status.ci_checks = ci_checks.get(&id).cloned().flatten();
                     attempted.insert(id, Some(status));
@@ -740,10 +739,10 @@ pub async fn run_git_poll(
             }
         }
 
-        // ── 3. Publish the basic status map on change — BEFORE the slow `gh` ──
-        // git status comes from gix (fast, in-process); PR/CI come from `gh`
-        // (network, and can hang). Publishing here means a stuck `gh` can never
-        // block the branch/diff badge from appearing.
+        // ── 3. Publish the basic status map on change — BEFORE the slow GitHub calls
+        // git status comes from gix (fast, in-process); PR/CI come from the GitHub
+        // API (network, and can stall). Publishing here means a stuck request can
+        // never block the branch/diff badge from appearing.
         publish(&mut last, &new_statuses, &git_status_tx, &state_version);
 
         // Stop once every external `watch` receiver is gone (the server is down).
@@ -752,7 +751,7 @@ pub async fn run_git_poll(
             return;
         }
 
-        // ── 4. Start `gh` PR/CI fan-out without blocking local git refreshes ─
+        // ── 4. Start GitHub PR/CI fan-out without blocking local git refreshes ─
         // Only visible projects (plus anything explicitly asked for) and only
         // while no pass is already running and GitHub isn't refusing us.
         if !schedule.is_rate_limited(cycle) {
@@ -772,7 +771,7 @@ pub async fn run_git_poll(
             );
 
             log::trace!(
-                "gh poll cycle={cycle}: {} projects, {} visible, {} due",
+                "GitHub poll cycle={cycle}: {} projects, {} visible, {} due",
                 projects.len(),
                 visible_ids.len(),
                 polls.len()
@@ -1166,13 +1165,18 @@ mod tests {
         assert_eq!(changed, vec!["hidden".to_string()]);
     }
 
-    fn workspace_with_hidden_project(id: &str) -> Workspace {
-        let mut data = empty_workspace_data();
-        data.projects.push(okena_state::ProjectData {
+    fn project_with_terminal(id: &str, terminal_id: &str) -> okena_state::ProjectData {
+        okena_state::ProjectData {
             id: id.to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),
-            layout: None,
+            layout: Some(okena_state::LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -1188,10 +1192,32 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
-        });
-        data.project_order.push(id.to_string());
-        data.main_window.hidden_project_ids.insert(id.to_string());
+        }
+    }
+
+    fn workspace_data_with_projects(projects: &[(&str, &str)]) -> okena_state::WorkspaceData {
+        let mut data = empty_workspace_data();
+        for (id, terminal_id) in projects {
+            data.projects.push(project_with_terminal(id, terminal_id));
+            data.project_order.push(id.to_string());
+        }
+        data
+    }
+
+    /// Every project is hidden in the daemon's own window, so relevance comes
+    /// only from what connected clients declare or subscribe to.
+    fn workspace_with_hidden_projects(projects: &[(&str, &str)]) -> Workspace {
+        let mut data = workspace_data_with_projects(projects);
+        for (id, _) in projects {
+            data.main_window.hidden_project_ids.insert(id.to_string());
+        }
         Workspace::new(data)
+    }
+
+    /// Every project is visible in the daemon's own persisted window state —
+    /// the legacy copy a desktop client never updates.
+    fn workspace_with_daemon_visible_projects(projects: &[(&str, &str)]) -> Workspace {
+        Workspace::new(workspace_data_with_projects(projects))
     }
 
     /// The regression this whole path exists for: a desktop client keeps its
@@ -1200,7 +1226,7 @@ mod tests {
     /// one on screen. The client's declaration has to win.
     #[test]
     fn client_declared_projects_enter_the_gh_scope() {
-        let workspace = workspace_with_hidden_project("on-screen");
+        let workspace = workspace_with_hidden_projects(&[("on-screen", "t-on-screen")]);
 
         let nothing_declared = RwLock::new(HashMap::new());
         assert!(!visible_project_ids(&workspace, &nothing_declared).contains("on-screen"));
@@ -1221,6 +1247,154 @@ mod tests {
         ]));
         let visible = visible_project_ids(&workspace, &declared);
         assert!(visible.contains("desktop") && visible.contains("phone"));
+    }
+
+    /// A desktop client's hides live in its own `window-layout.json`; the
+    /// daemon's persisted window state is a stale copy that must not widen the
+    /// responsive tier once any client has said what it renders.
+    #[test]
+    fn a_declared_viewport_supersedes_the_daemons_own_window_state() {
+        let workspace =
+            workspace_with_daemon_visible_projects(&[("stale", "t-stale"), ("shown", "t-shown")]);
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        assert_eq!(
+            visible_project_ids(&workspace, &declared),
+            HashSet::from(["shown".to_string()])
+        );
+        let no_subscriptions = RwLock::new(HashMap::new());
+        assert_eq!(
+            streaming_project_ids(&workspace, &no_subscriptions, &declared),
+            HashSet::from(["shown".to_string()])
+        );
+
+        declared.write().unwrap().insert(1, HashSet::new());
+        assert!(visible_project_ids(&workspace, &declared).is_empty());
+    }
+
+    /// A headless daemon serving clients that never declare a viewport (TUI,
+    /// CLI, nobody at all) still has only its own window state to go by.
+    #[test]
+    fn the_daemons_own_window_state_counts_while_nobody_has_declared() {
+        let workspace = workspace_with_daemon_visible_projects(&[("stale", "t-stale")]);
+        let nothing_declared = RwLock::new(HashMap::new());
+
+        assert!(visible_project_ids(&workspace, &nothing_declared).contains("stale"));
+    }
+
+    #[test]
+    fn the_gh_fan_out_follows_the_declared_viewport() {
+        let workspace =
+            workspace_with_daemon_visible_projects(&[("stale", "t-stale"), ("shown", "t-shown")]);
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+        let visible = visible_project_ids(&workspace, &declared);
+        let projects: Vec<(String, String)> = workspace
+            .projects()
+            .iter()
+            .map(|project| (project.id.clone(), project.path.clone()))
+            .collect();
+
+        let polls = select_github_polls(
+            &projects,
+            &visible,
+            &GithubPollSchedule::default(),
+            &HashMap::new(),
+            1,
+            true,
+            &HashSet::new(),
+            false,
+        );
+
+        let polled: Vec<&str> = polls.iter().map(|poll| poll.id.as_str()).collect();
+        assert_eq!(polled, ["shown"]);
+    }
+
+    /// The desktop subscribes to every terminal it mirrors, so its
+    /// subscriptions must not drag hidden projects onto the responsive tier.
+    #[test]
+    fn a_declared_viewport_silences_that_connections_subscriptions() {
+        let workspace =
+            workspace_with_hidden_projects(&[("shown", "t-shown"), ("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-shown".to_string(), "t-background".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert_eq!(relevant, HashSet::from(["shown".to_string()]));
+    }
+
+    #[test]
+    fn an_empty_declared_viewport_still_counts_as_declared() {
+        let workspace = workspace_with_hidden_projects(&[("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-background".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(1u64, HashSet::new())]));
+
+        assert!(streaming_project_ids(&workspace, &subscribed, &declared).is_empty());
+    }
+
+    /// TUI/CLI streaming clients have no viewport to declare; what they stream
+    /// is what they show.
+    #[test]
+    fn subscriptions_promote_projects_for_undeclared_connections() {
+        let workspace =
+            workspace_with_hidden_projects(&[("shown", "t-shown"), ("background", "t-background")]);
+        let subscribed = RwLock::new(HashMap::from([
+            (
+                1u64,
+                HashSet::from(["t-shown".to_string(), "t-background".to_string()]),
+            ),
+            (2u64, HashSet::from(["t-background".to_string()])),
+        ]));
+        let declared = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["shown".to_string()]),
+        )]));
+
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert_eq!(
+            relevant,
+            HashSet::from(["shown".to_string(), "background".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_project_entering_a_viewport_is_fetched_off_cadence() {
+        let workspace = workspace_with_hidden_projects(&[("shown", "t-shown")]);
+        let active = HashSet::from(["shown".to_string()]);
+        let subscribed = RwLock::new(HashMap::from([(
+            1u64,
+            HashSet::from(["t-shown".to_string()]),
+        )]));
+        let declared = RwLock::new(HashMap::from([(1u64, HashSet::new())]));
+
+        let known = streaming_project_ids(&workspace, &subscribed, &declared);
+        assert!(known.is_empty());
+
+        declared
+            .write()
+            .unwrap()
+            .insert(1, HashSet::from(["shown".to_string()]));
+        let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
+        let newly_relevant: HashSet<String> = relevant.difference(&known).cloned().collect();
+        let empty = HashSet::new();
+        assert_eq!(
+            select_status_poll_ids(&active, &relevant, &empty, &newly_relevant, false, false),
+            HashSet::from(["shown".to_string()])
+        );
     }
 
     /// Build an `apply_github_result` fixture: one project, one CI outcome.

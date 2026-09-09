@@ -760,6 +760,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
             ignore_whitespace,
         },
+        ActionRequest::ReviewComposition {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => ActionRequest::ReviewComposition {
+            project_id: s(&project_id),
+            mode,
+            ignore_whitespace,
+        },
         ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
             project_id: s(&project_id),
         },
@@ -776,6 +785,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         } => ActionRequest::GitFileContents {
             project_id: s(&project_id),
             file_path,
+            mode,
+        },
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => ActionRequest::GitBinaryFileContents {
+            project_id: s(&project_id),
+            old_path,
+            new_path,
             mode,
         },
         ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
@@ -1276,6 +1296,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::GetThemes
         | ActionRequest::GetTheme { .. }
         | ActionRequest::SetTheme { .. }
+        | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. }) => a,

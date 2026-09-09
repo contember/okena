@@ -10,8 +10,9 @@
 //! theme **preference** (the data — `theme_mode` + `custom_theme_id`, persisted
 //! to settings.json) and the custom-theme files on disk. It does NOT own an
 //! `AppTheme` entity, because applying colors to pixels is the client's job.
-//! So `apply_active_theme` is a no-op here and `active_theme_colors` derives the
-//! editable blob's colors straight from the persisted `theme_mode`.
+//! The daemon still publishes the palette used for terminal color queries.
+//! Auto uses the local desktop's reported appearance, with a dark fallback
+//! until a desktop connects. Appearance is transient, not a saved preference.
 //!
 //! State is shared through a single `Arc<parking_lot::Mutex<AppSettings>>`,
 //! loaded once at daemon startup via [`load_settings`]. [`DaemonConfig`] is the
@@ -39,6 +40,8 @@ type SettingsPersister = Arc<dyn Fn(&AppSettings) -> Result<(), String> + Send +
 pub struct DaemonConfig {
     settings: Arc<Mutex<AppSettings>>,
     persist_settings: SettingsPersister,
+    system_is_dark: bool,
+    publish_palette: Arc<dyn Fn(ThemeColors) + Send + Sync>,
 }
 
 impl DaemonConfig {
@@ -53,6 +56,8 @@ impl DaemonConfig {
             persist_settings: Arc::new(|settings| {
                 save_settings(settings).map_err(|error| error.to_string())
             }),
+            system_is_dark: true,
+            publish_palette: Arc::new(okena_terminal::terminal::set_process_palette),
         }
     }
 
@@ -64,7 +69,23 @@ impl DaemonConfig {
         Self {
             settings,
             persist_settings,
+            system_is_dark: true,
+            publish_palette: Arc::new(okena_terminal::terminal::set_process_palette),
         }
+    }
+
+    /// Update Auto's resolved appearance without changing the saved theme.
+    pub fn set_system_appearance(&mut self, is_dark: bool) -> CommandResult {
+        self.system_is_dark = is_dark;
+        self.refresh_palette();
+        CommandResult::Ok(None)
+    }
+
+    fn refresh_palette(&mut self) {
+        let settings = self.settings.lock().clone();
+        let colors =
+            self.active_theme_colors(settings.theme_mode, settings.custom_theme_id.as_deref());
+        (self.publish_palette)(colors);
     }
 
     /// Return the full current settings as JSON.
@@ -132,6 +153,7 @@ impl ConfigBackend for DaemonConfig {
         // save failure leaves the in-memory settings unchanged.
         (self.persist_settings)(new)?;
         *self.settings.lock() = new.clone();
+        self.refresh_palette();
         Ok(())
     }
 
@@ -143,14 +165,14 @@ impl ConfigBackend for DaemonConfig {
             Some(colors) => colors,
             None => self.active_theme_colors(mode, None),
         };
-        okena_terminal::terminal::set_process_palette(colors);
+        (self.publish_palette)(colors);
     }
 
     fn active_theme_colors(&mut self, mode: ThemeMode, custom_id: Option<&str>) -> ThemeColors {
-        // No AppTheme entity here: derive the editable blob's colors straight
-        // from the held `theme_mode`. The daemon has no windowing system to
-        // detect light/dark, so Auto defaults to dark for this editable blob.
+        // The desktop reports system appearance without adding a windowing
+        // dependency to the daemon. Explicit themes ignore that report.
         match mode {
+            ThemeMode::Auto if !self.system_is_dark => LIGHT_THEME,
             ThemeMode::Dark | ThemeMode::Auto => DARK_THEME,
             ThemeMode::Light => LIGHT_THEME,
             ThemeMode::PastelDark => PASTEL_DARK_THEME,
@@ -183,6 +205,66 @@ mod tests {
 
     fn config_with(settings: AppSettings) -> DaemonConfig {
         DaemonConfig::new(Arc::new(Mutex::new(settings)))
+    }
+
+    #[test]
+    fn terminal_palette_tracks_settings_and_transient_system_appearance() {
+        let settings = Arc::new(Mutex::new(default_settings()));
+        settings.lock().theme_mode = ThemeMode::Auto;
+        let mut cfg = DaemonConfig::with_persistence(settings.clone(), Arc::new(|_| Ok(())));
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let captured = published.clone();
+        cfg.publish_palette = Arc::new(move |colors| {
+            captured
+                .lock()
+                .push((colors.term_foreground, colors.term_background));
+        });
+
+        // Headless fallback, then the light desktop's initial report.
+        cfg.refresh_palette();
+        cfg.set_system_appearance(false);
+        assert_eq!(settings.lock().theme_mode, ThemeMode::Auto);
+
+        // The GUI uses SetSettings, not SetTheme. Explicit themes must win
+        // over OS appearance, including an OS change while Dark is selected.
+        assert!(matches!(
+            cfg.set_settings(json!({"theme_mode": "dark"})),
+            CommandResult::Ok(_)
+        ));
+        cfg.set_system_appearance(true);
+        assert!(matches!(
+            cfg.set_settings(json!({"theme_mode": "light"})),
+            CommandResult::Ok(_)
+        ));
+        assert!(matches!(
+            cfg.set_settings(json!({"theme_mode": "auto"})),
+            CommandResult::Ok(_)
+        ));
+        cfg.set_system_appearance(false);
+
+        let dark = (DARK_THEME.term_foreground, DARK_THEME.term_background);
+        let light = (LIGHT_THEME.term_foreground, LIGHT_THEME.term_background);
+        assert_eq!(
+            *published.lock(),
+            vec![dark, light, dark, dark, light, dark, light]
+        );
+    }
+
+    #[test]
+    fn failed_settings_save_keeps_terminal_palette_and_preference() {
+        let mut settings = default_settings();
+        settings.theme_mode = ThemeMode::Dark;
+        let settings = Arc::new(Mutex::new(settings));
+        let mut cfg = DaemonConfig::with_persistence(
+            settings.clone(),
+            Arc::new(|_| Err("disk unavailable".into())),
+        );
+        cfg.publish_palette = Arc::new(|_| panic!("failed save must not publish a palette"));
+        assert!(matches!(
+            cfg.set_settings(json!({"theme_mode": "light"})),
+            CommandResult::Err(_)
+        ));
+        assert_eq!(settings.lock().theme_mode, ThemeMode::Dark);
     }
 
     #[test]

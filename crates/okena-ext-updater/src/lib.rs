@@ -29,7 +29,9 @@ pub use installer::restart_app;
 #[cfg(feature = "gpui-ui")]
 pub use local_build::{GlobalLocalBuild, LocalBuildState, LocalBuildStatus};
 pub use local_build::{LocalCheckout, detect_local_checkout};
-pub use status::{GlobalUpdateInfo, UpdateInfo, UpdateStatus, UpdateStatusSnapshot};
+pub use status::{
+    GlobalUpdateInfo, UpdateInfo, UpdateReservation, UpdateStatus, UpdateStatusSnapshot,
+};
 
 #[cfg(feature = "gpui-ui")]
 gpui::actions!(updater, [RebuildLocal, RestartLocalBuild]);
@@ -60,6 +62,9 @@ pub fn register() -> ExtensionRegistration {
 /// `app_version` should be the host application's version (from root Cargo.toml).
 #[cfg(feature = "gpui-ui")]
 pub fn init(app_version: &str, cx: &mut gpui::App) {
+    if let Err(error) = installer::remember_launch_path() {
+        log::warn!("Failed to resolve the launch path; restart may fail: {error}");
+    }
     installer::cleanup_old_binary();
 
     let update_info = UpdateInfo::new(app_version.to_string());

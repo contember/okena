@@ -385,12 +385,20 @@ async fn autosave_task(
 ) {
     // Tracks the `data_version` last persisted, so UI-only changes skip the save.
     let last_saved_version = Arc::new(AtomicU64::new(0));
+    let mut reported_suppression = false;
     loop {
         if tick_rx.changed().await.is_err() {
             // All senders dropped — the reactor is gone; stop the task.
             return;
         }
-        autosave(&workspace, &runtime, &last_saved_version, &tracker).await;
+        autosave(
+            &workspace,
+            &runtime,
+            &last_saved_version,
+            &tracker,
+            &mut reported_suppression,
+        )
+        .await;
     }
 }
 
@@ -404,7 +412,24 @@ async fn autosave(
     runtime: &tokio::runtime::Handle,
     last_saved_version: &Arc<AtomicU64>,
     tracker: &Arc<AutosaveTracker>,
+    reported_suppression: &mut bool,
 ) {
+    // A save that cannot succeed still costs a debounce, a full data clone under
+    // the lock and a blocking dispatch — on every tick, presentation-only ones
+    // included. Say so once instead of failing several times a second.
+    if persistence::workspace_save_suppressed() {
+        if !*reported_suppression {
+            *reported_suppression = true;
+            log::error!(
+                "workspace autosave disabled — this session started from a fallback default \
+                 because the workspace file could not be read; load a session or import a \
+                 workspace to resume saving"
+            );
+        }
+        return;
+    }
+    *reported_suppression = false;
+
     // Skip UI-only changes: the persistent `data_version` is unchanged.
     let current_version = {
         let workspace = workspace.lock();
@@ -1172,11 +1197,14 @@ mod tests {
         let last_saved_version = Arc::new(AtomicU64::new(0));
         let tracker = Arc::new(AutosaveTracker::default());
 
+        let mut reported_suppression = false;
+
         autosave(
             &workspace,
             &tokio::runtime::Handle::current(),
             &last_saved_version,
             &tracker,
+            &mut reported_suppression,
         )
         .await;
 

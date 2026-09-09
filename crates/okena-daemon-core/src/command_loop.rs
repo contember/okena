@@ -56,8 +56,9 @@ use okena_app_core::workspace::actions::execute::{
     execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
     materialize_prepared_terminal_launches, materialize_workspace_replacement,
-    prepare_content_search, prepare_workspace_replacement, publish_prepared_terminal_launches,
-    reserve_uninitialized_terminal_launches, spawn_uninitialized_terminals,
+    prepare_content_search, prepare_content_search_for_path, prepare_workspace_replacement,
+    publish_prepared_terminal_launches, reserve_uninitialized_terminal_launches,
+    spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
@@ -290,6 +291,109 @@ fn spawn_content_search(
     spawn_content_search_with(search, reply, runtime, permits, |search, cancelled| {
         execute_prepared_content_search_with_cancellation(search, cancelled).into_command_result()
     });
+}
+
+/// Run an owned physical-project operation (checkout removal, directory rename)
+/// as its own LocalSet task and reply when it finishes.
+///
+/// There is one bridge consumer: awaiting a multi-second checkout removal in the
+/// loop body queues every unrelated key and resize behind it. The operation keeps
+/// its authoritative reply; its own `is_closing` / quiesce claim is what fences a
+/// second command for the same project.
+fn spawn_owned_project_operation<Operation>(
+    reply: Option<oneshot::Sender<CommandResult>>,
+    operation: Operation,
+) where
+    Operation: std::future::Future<Output = CommandResult> + 'static,
+{
+    let task = tokio::task::spawn_local(async move {
+        let result = operation.await;
+        if let Some(reply) = reply {
+            let _ = reply.send(result);
+        }
+    });
+    // The loop no longer awaits this future, so nothing would surface a panic in
+    // it: the caller would see only a dropped reply.
+    let _watcher = tokio::task::spawn_local(async move {
+        if let Err(error) = task.await
+            && error.is_panic()
+        {
+            log::error!("detached project operation failed: {error}");
+        }
+    });
+}
+
+/// Run one command body on the blocking pool and reply from there, so unbounded
+/// filesystem or subprocess work never occupies the reactor **thread**. The body
+/// still takes the workspace lock for its duration — see issue 06, CORR-3.
+fn spawn_blocking_command_with<Run>(
+    reply: Option<oneshot::Sender<CommandResult>>,
+    runtime: &tokio::runtime::Handle,
+    run: Run,
+) where
+    Run: FnOnce() -> CommandResult + Send + 'static,
+{
+    let task = runtime.spawn_blocking(move || {
+        let result = run();
+        if let Some(reply) = reply {
+            let _ = reply.send(result);
+        }
+    });
+    let _watcher = runtime.spawn(async move {
+        if let Err(error) = task.await
+            && error.is_panic()
+        {
+            log::error!("detached blocking command failed: {error}");
+        }
+    });
+}
+
+/// Actions whose generic handler walks the filesystem or shells out: a recursive
+/// scan, a directory delete/rename, or `gh`. Slow storage would otherwise stall
+/// every other daemon task for their duration. (Both content searches are routed
+/// earlier, through the cancellable capped search executor.)
+fn is_blocking_filesystem_action(action: &ActionRequest) -> bool {
+    matches!(
+        action,
+        ActionRequest::ListFiles { .. }
+            | ActionRequest::ListPathFiles { .. }
+            | ActionRequest::RenameFile { .. }
+            | ActionRequest::DeleteFile { .. }
+            | ActionRequest::RenamePath { .. }
+            | ActionRequest::DeletePath { .. }
+            | ActionRequest::GitListPullRequests { .. }
+    )
+}
+
+/// Claim a project on the command loop for an owned physical operation, BEFORE
+/// detaching it.
+///
+/// Every competing path (`CloseWorktree`, a second removal, a rename) gates on
+/// `is_project_closing`, so the claim has to exist before the preflight awaits,
+/// not after them — otherwise a close can slip into the window and remove the
+/// checkout while the caller who asked first is told it is busy.
+///
+/// The lifecycle marker is taken without the wire-facing `is_closing` flag: a
+/// preflight refusal (a dirty checkout without `force`) is an ordinary outcome
+/// and must not flash "Closing…" on every client first.
+fn claim_owned_project_operation(ws: &mut Workspace, project_id: &str) -> Result<(), String> {
+    if ws.is_creating_project(project_id) {
+        return Err("project is still being created".to_string());
+    }
+    if ws.is_project_closing(project_id) {
+        return Err("project operation is already in progress".to_string());
+    }
+    ws.mark_closing_project(project_id);
+    Ok(())
+}
+
+/// Release a [`claim_owned_project_operation`] claim: on any exit before the
+/// runtime quiesce, and once immediately before it — the quiesce takes its own
+/// claim and refuses a project that is already marked closing. Both run on the
+/// LocalSet, which is what makes that hand-off atomic against every competing
+/// close. Idempotent, so a direct caller that never claimed is unaffected.
+fn release_owned_project_claim(workspace: &Arc<Mutex<Workspace>>, project_id: &str) {
+    workspace.lock().finish_closing_project(project_id);
 }
 
 /// Run destructive cleanup only while no current project occupies the physical
@@ -1432,6 +1536,40 @@ fn apply_deferred_hook_actions(
     }
 }
 
+/// Synchronous phase 1 of a direct worktree removal: validate, snapshot the
+/// removal plan, and claim the project. Runs on the command loop so the claim is
+/// in place before the operation detaches (see [`claim_owned_project_operation`]).
+fn claim_worktree_removal(
+    project_id: &str,
+    global_hooks: &okena_workspace::persistence::HooksConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+) -> Result<(WorktreeRemovalPlan, String), String> {
+    let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+    let mut ws = workspace.lock();
+    claim_owned_project_operation(&mut ws, project_id)?;
+    let project_path = ws.project(project_id).map(|project| project.path.clone());
+    match (
+        ws.begin_worktree_removal(project_id, global_hooks, &mut cx),
+        project_path,
+    ) {
+        (Ok(plan), Some(project_path)) => Ok((plan, project_path)),
+        (Err(error), _) => {
+            ws.finish_closing_project(project_id);
+            Err(error)
+        }
+        (Ok(_), None) => {
+            ws.finish_closing_project(project_id);
+            Err(format!("project not found: {project_id}"))
+        }
+    }
+}
+
+/// Claim + run in one call. The loop splits the two around its detach point, so
+/// this is the direct-call entry the removal tests drive.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn remove_worktree_project_off_reactor_with<Inspect, Remove>(
     project_id: String,
@@ -1456,20 +1594,16 @@ where
     Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
     Remove: FnOnce(&WorktreeRemovalPlan, bool) -> Result<(), String> + Send + 'static,
 {
-    let (plan, project_path) = {
-        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
-        let mut workspace = workspace.lock();
-        let project_path = workspace
-            .project(&project_id)
-            .map(|project| project.path.clone());
-        match (
-            workspace.begin_worktree_removal(&project_id, &global_hooks, &mut cx),
-            project_path,
-        ) {
-            (Ok(plan), Some(project_path)) => (plan, project_path),
-            (Err(error), _) => return CommandResult::Err(error),
-            (Ok(_), None) => return CommandResult::Err(format!("project not found: {project_id}")),
-        }
+    let (plan, project_path) = match claim_worktree_removal(
+        &project_id,
+        &global_hooks,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+    ) {
+        Ok(claimed) => claimed,
+        Err(error) => return CommandResult::Err(error),
     };
     run_worktree_removal_plan(
         plan,
@@ -1533,8 +1667,12 @@ where
         .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return CommandResult::Err(error),
+        Ok(Err(error)) => {
+            release_owned_project_claim(workspace, &project_id);
+            return CommandResult::Err(error);
+        }
         Err(error) => {
+            release_owned_project_claim(workspace, &project_id);
             return CommandResult::Err(format!("worktree removal preflight failed: {error}"));
         }
     }
@@ -1554,8 +1692,10 @@ where
     )
     .await
     {
+        release_owned_project_claim(workspace, &project_id);
         return CommandResult::Err(error);
     }
+    release_owned_project_claim(workspace, &project_id);
     let quiesced = match begin_project_runtimes_quiesce(
         std::slice::from_ref(&project_id),
         false,
@@ -1690,6 +1830,47 @@ where
     CommandResult::Ok(None)
 }
 
+/// What [`claim_project_directory_rename`] snapshots under its single lock.
+struct ClaimedDirectoryRename {
+    workspace_data: okena_state::WorkspaceData,
+    owner_epoch: u64,
+    old_path: PathBuf,
+    new_path: PathBuf,
+}
+
+/// Synchronous phase 1 of a directory rename: validate, snapshot the planning
+/// inputs, and claim the project. Runs on the command loop so the claim is in
+/// place before the operation detaches (see [`claim_owned_project_operation`]).
+fn claim_project_directory_rename(
+    project_id: &str,
+    new_name: &str,
+    workspace: &Arc<Mutex<Workspace>>,
+) -> Result<ClaimedDirectoryRename, String> {
+    let mut ws = workspace.lock();
+    claim_owned_project_operation(&mut ws, project_id)?;
+    let claimed = (|| {
+        let Some(project) = ws.project(project_id) else {
+            return Err(format!("project not found: {project_id}"));
+        };
+        let old_path = std::path::PathBuf::from(&project.path);
+        let Some(parent) = old_path.parent() else {
+            return Err("cannot determine parent directory".to_string());
+        };
+        Ok(ClaimedDirectoryRename {
+            new_path: parent.join(new_name),
+            workspace_data: ws.data().clone(),
+            owner_epoch: ws.data_replacement_epoch(),
+            old_path,
+        })
+    })();
+    if claimed.is_err() {
+        ws.finish_closing_project(project_id);
+    }
+    claimed
+}
+
+/// Claim + run in one call, as [`remove_worktree_project_off_reactor_with`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn rename_project_directory_off_reactor_with<Inspect, Move>(
     project_id: String,
@@ -1717,28 +1898,67 @@ where
         + Send
         + 'static,
 {
-    let (workspace_data, owner_epoch, old_path, new_path) = {
-        let workspace = workspace.lock();
-        if workspace.is_creating_project(&project_id) {
-            return CommandResult::Err("project is still being created".to_string());
-        }
-        if workspace.is_project_closing(&project_id) {
-            return CommandResult::Err("project operation is already in progress".to_string());
-        }
-        let Some(project) = workspace.project(&project_id) else {
-            return CommandResult::Err(format!("project not found: {project_id}"));
-        };
-        let old_path = std::path::PathBuf::from(&project.path);
-        let Some(parent) = old_path.parent() else {
-            return CommandResult::Err("cannot determine parent directory".to_string());
-        };
-        (
-            workspace.data().clone(),
-            workspace.data_replacement_epoch(),
-            old_path.clone(),
-            parent.join(&new_name),
-        )
+    let claimed = match claim_project_directory_rename(&project_id, &new_name, workspace) {
+        Ok(claimed) => claimed,
+        Err(error) => return CommandResult::Err(error),
     };
+    run_project_directory_rename(
+        claimed,
+        project_id,
+        new_name,
+        workspace,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        backend,
+        terminals,
+        settings,
+        service_manager,
+        service_tick,
+        deadlines,
+        runtime,
+        inspect_compose_containers,
+        move_directory,
+    )
+    .await
+}
+
+/// Everything a directory rename does once it owns its claim: plan off the
+/// reactor, preflight, quiesce, move the directory, then retarget state.
+#[allow(clippy::too_many_arguments)]
+async fn run_project_directory_rename<Inspect, Move>(
+    claimed: ClaimedDirectoryRename,
+    project_id: String,
+    new_name: String,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    service_manager: &Arc<Mutex<ServiceManager>>,
+    service_tick: &watch::Sender<u64>,
+    deadlines: &SoftCloseDeadlines,
+    runtime: &tokio::runtime::Handle,
+    inspect_compose_containers: Inspect,
+    move_directory: Move,
+) -> CommandResult
+where
+    Inspect: FnOnce(Vec<PathBuf>) -> Result<(), String> + Send + 'static,
+    Move: FnOnce(
+            &ProjectDirectoryRenamePlan,
+        )
+            -> Result<okena_workspace::actions::project::ProjectDirectoryRenameResult, String>
+        + Send
+        + 'static,
+{
+    let ClaimedDirectoryRename {
+        workspace_data,
+        owner_epoch,
+        old_path,
+        new_path,
+    } = claimed;
     let plan_project_id = project_id.clone();
     let plan_new_name = new_name.clone();
     let plan_new_path = new_path.to_string_lossy().into_owned();
@@ -1767,19 +1987,25 @@ where
         .await
     {
         Ok(Ok(plan)) => plan,
-        Ok(Err(error)) => return CommandResult::Err(error),
+        Ok(Err(error)) => {
+            release_owned_project_claim(workspace, &project_id);
+            return CommandResult::Err(error);
+        }
         Err(error) => {
+            release_owned_project_claim(workspace, &project_id);
             return CommandResult::Err(format!("directory rename preparation failed: {error}"));
         }
     };
 
     {
-        let workspace = workspace.lock();
-        if workspace.data_replacement_epoch() != owner_epoch
-            || workspace
+        let ws = workspace.lock();
+        if ws.data_replacement_epoch() != owner_epoch
+            || ws
                 .project(&project_id)
                 .is_none_or(|project| std::path::Path::new(&project.path) != old_path)
         {
+            drop(ws);
+            release_owned_project_claim(workspace, &project_id);
             return CommandResult::Err(format!(
                 "project changed while its directory rename was being prepared: {project_id}"
             ));
@@ -1815,8 +2041,10 @@ where
     )
     .await
     {
+        release_owned_project_claim(workspace, &project_id);
         return CommandResult::Err(error);
     }
+    release_owned_project_claim(workspace, &project_id);
     let quiesced = match begin_project_runtimes_quiesce(
         &affected_project_ids,
         true,
@@ -1984,6 +2212,7 @@ pub(crate) fn spawn_background_worktree_removal(
     plan: WorktreeRemovalPlan,
     operation_epoch: u64,
     did_stash: bool,
+    delete_branch: bool,
     extra_teardown_terminal_ids: &[String],
     global_hooks: &okena_workspace::persistence::HooksConfig,
     workspace: &Arc<Mutex<Workspace>>,
@@ -2070,6 +2299,12 @@ pub(crate) fn spawn_background_worktree_removal(
             } else {
                 plan.remove_fast().map_err(|error| error.to_string())
             };
+            if delete_branch && removal.is_ok() {
+                okena_workspace::actions::worktree::delete_closed_worktree_branch(
+                    &plan.main_repo_path,
+                    plan.branch(),
+                );
+            }
             (plan, removal, dirty_hook)
         })
         .await;
@@ -2261,6 +2496,58 @@ fn abort_background_worktree_close(
     }
 }
 
+/// Re-enter the close pipeline after its merge phase already ran off-reactor.
+///
+/// Calls the workspace API directly rather than dispatching an
+/// `ActionRequest::CloseWorktree`: the wire action cannot carry `did_stash`, and
+/// this pass (with `merge` off) cannot recompute it, so routing through the
+/// action would register a pending close claiming nothing was stashed.
+#[allow(clippy::too_many_arguments)]
+fn resume_worktree_close_after_merge(
+    project_id: &str,
+    did_stash: bool,
+    delete_branch: bool,
+    global_hooks: &okena_workspace::persistence::HooksConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+) -> CommandResult {
+    let (result, queued_terminal_ids) = {
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        let mut ws = workspace.lock();
+        if ws.project(project_id).is_none() {
+            return CommandResult::Err(format!("project not found: {project_id}"));
+        }
+        let mut focus_manager = FocusManager::new();
+        let result = ws.close_worktree_after_merge(
+            &mut focus_manager,
+            project_id,
+            false,
+            false,
+            false,
+            false,
+            delete_branch,
+            did_stash,
+            global_hooks,
+            &mut cx,
+        );
+        (result, ws.drain_pending_terminal_kills())
+    };
+    // Mirrors `run_main_workspace_action`: PTY teardown only after the
+    // authoritative state lock is released.
+    for terminal_id in queued_terminal_ids {
+        backend.kill(&terminal_id);
+        terminals.lock().remove(&terminal_id);
+    }
+    match result {
+        Ok(()) => CommandResult::Ok(None),
+        Err(error) => CommandResult::Err(error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_merge_worktree_close(
     project_id: String,
@@ -2354,12 +2641,11 @@ fn spawn_merge_worktree_close(
                 let is_dirty = okena_git::has_uncommitted_changes(Path::new(&project_path));
                 let merge_enabled =
                     (!is_dirty || stash) && !branch.is_empty() && !default_branch.is_empty();
-                if merge_enabled {
+                let outcome = if merge_enabled {
                     close_worktree_merge_git(
                         stash && is_dirty,
                         fetch,
                         push,
-                        delete_branch,
                         &blocking_project_id,
                         &project_name,
                         &project_path,
@@ -2374,7 +2660,8 @@ fn spawn_merge_worktree_close(
                     )
                 } else {
                     CloseWorktreeGitOutcome::Ok { did_stash: false }
-                }
+                };
+                (outcome, merge_enabled)
             })
             .await;
 
@@ -2383,7 +2670,7 @@ fn spawn_merge_worktree_close(
             return;
         }
 
-        let did_stash = match outcome {
+        let (did_stash, merged) = match outcome {
             Err(error) => {
                 abort_background_worktree_close(
                     &project_id,
@@ -2396,7 +2683,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::Err(error)) => {
+            Ok((CloseWorktreeGitOutcome::Err(error), _)) => {
                 abort_background_worktree_close(
                     &project_id,
                     operation_epoch,
@@ -2408,7 +2695,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }) => {
+            Ok((CloseWorktreeGitOutcome::RebaseConflict { error, hook_plan }, _)) => {
                 if let Some(hook_plan) = hook_plan {
                     let outcome = okena_hooks::execute_hook_action_plan(
                         hook_plan,
@@ -2446,7 +2733,7 @@ fn spawn_merge_worktree_close(
                 );
                 return;
             }
-            Ok(CloseWorktreeGitOutcome::Ok { did_stash }) => did_stash,
+            Ok((CloseWorktreeGitOutcome::Ok { did_stash }, merged)) => (did_stash, merged),
         };
 
         let plan = {
@@ -2470,6 +2757,7 @@ fn spawn_merge_worktree_close(
                         plan,
                         operation_epoch,
                         did_stash,
+                        delete_branch && merged,
                         &[],
                         &global_hooks,
                         &workspace,
@@ -2497,34 +2785,24 @@ fn spawn_merge_worktree_close(
             return;
         }
 
-        let result = {
-            let app_settings = settings.lock().clone();
-            {
-                let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-                let mut ws = workspace.lock();
-                ws.finish_closing_project(&project_id);
-                cx.notify();
-            }
-            let mut focus_manager = FocusManager::new();
-            run_main_workspace_action(
-                ActionRequest::CloseWorktree {
-                    project_id: project_id.clone(),
-                    merge: false,
-                    stash: false,
-                    fetch: false,
-                    push: false,
-                    delete_branch: false,
-                },
-                &workspace,
-                &mut focus_manager,
-                &backend,
-                &terminals,
-                &app_settings,
-                &workspace_tick,
-                &hook_runner,
-                &hook_monitor,
-            )
-        };
+        {
+            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+            let mut ws = workspace.lock();
+            ws.finish_closing_project(&project_id);
+            cx.notify();
+        }
+        let result = resume_worktree_close_after_merge(
+            &project_id,
+            did_stash,
+            delete_branch && merged,
+            &global_hooks,
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &backend,
+            &terminals,
+        );
         if let CommandResult::Err(error) = result {
             abort_background_worktree_close(
                 &project_id,
@@ -2648,6 +2926,71 @@ pub async fn daemon_command_loop(
                 }
                 continue;
             }
+            // The path-scoped twin runs the same executor and is the one the
+            // remote file search fires per keystroke, so it needs the same
+            // concurrency cap and drop-cancellation, not a bare offload.
+            RemoteCommand::Action(ActionRequest::SearchPathContent {
+                root,
+                query,
+                case_sensitive,
+                mode,
+                max_results,
+                file_glob,
+                context_lines,
+                show_ignored,
+            }) => {
+                match prepare_content_search_for_path(
+                    &root,
+                    query,
+                    case_sensitive,
+                    mode,
+                    max_results,
+                    file_glob,
+                    context_lines,
+                    show_ignored,
+                ) {
+                    Ok(search) => spawn_content_search(
+                        search,
+                        reply,
+                        &runtime,
+                        content_search_permits.clone(),
+                    ),
+                    Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(CommandResult::Err(error));
+                        }
+                    }
+                }
+                continue;
+            }
+            command => command,
+        };
+
+        let command = match command {
+            RemoteCommand::Action(action) if is_blocking_filesystem_action(&action) => {
+                let app_settings = settings.lock().clone();
+                let workspace = workspace.clone();
+                let workspace_tick = workspace_tick.clone();
+                let hook_runner = hook_runner.clone();
+                let hook_monitor = hook_monitor.clone();
+                let backend = backend.clone();
+                let terminals = terminals.clone();
+                spawn_blocking_command_with(reply, &runtime, move || {
+                    let mut focus_manager = FocusManager::new();
+                    run_main_workspace_action(
+                        action,
+                        &workspace,
+                        &mut focus_manager,
+                        &backend,
+                        &terminals,
+                        &app_settings,
+                        &workspace_tick,
+                        &hook_runner,
+                        &hook_monitor,
+                    )
+                });
+                continue;
+            }
             command => command,
         };
 
@@ -2732,6 +3075,9 @@ pub async fn daemon_command_loop(
                     }
                     ActionRequest::GetThemes => daemon_config.get_themes(),
                     ActionRequest::GetTheme { id } => daemon_config.get_theme(id),
+                    ActionRequest::SetSystemAppearance { is_dark } => {
+                        daemon_config.set_system_appearance(is_dark)
+                    }
                     ActionRequest::SetTheme { id } => {
                         let result = daemon_config.set_theme(id);
                         publish_config_change_after_success(&result, &state_version);
@@ -3530,6 +3876,7 @@ pub async fn daemon_command_loop(
                                         plan,
                                         operation_epoch,
                                         false,
+                                        false,
                                         &[],
                                         &global_hooks,
                                         &workspace,
@@ -3548,7 +3895,7 @@ pub async fn daemon_command_loop(
                         }
                     }
 
-                    // ── Direct worktree removal: preserve its synchronous reply ──
+                    // ── Direct worktree removal: keeps its authoritative reply ──
                     ActionRequest::RemoveWorktreeProject { project_id, force } => {
                         let trigger =
                             git_poll_trigger_for_action(&ActionRequest::RemoveWorktreeProject {
@@ -3557,33 +3904,67 @@ pub async fn daemon_command_loop(
                             });
                         let global_hooks = settings.lock().hooks.clone();
                         let app_settings = settings.lock().clone();
-                        let result = remove_worktree_project_off_reactor_with(
-                            project_id,
-                            force,
-                            global_hooks,
+                        // Claim + plan under one lock HERE, on the loop: the
+                        // operation detaches next, and a close arriving during
+                        // its preflight must lose to the caller who asked first.
+                        let claimed = claim_worktree_removal(
+                            &project_id,
+                            &global_hooks,
                             &workspace,
                             &workspace_tick,
                             &hook_runner,
                             &hook_monitor,
-                            &mut focus_manager,
-                            &backend,
-                            &terminals,
-                            &app_settings,
-                            &service_manager,
-                            &service_tick,
-                            &deadlines,
-                            &runtime,
-                            |roots| {
-                                okena_services::docker_compose::ensure_no_compose_containers_under(
-                                    &roots,
-                                )
-                                .map_err(|error| error.to_string())
-                            },
-                            |plan, force| plan.remove(force),
-                        )
-                        .await;
-                        send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
-                        result
+                        );
+                        match claimed {
+                            Err(error) => CommandResult::Err(error),
+                            Ok((plan, project_path)) => {
+                                let workspace = workspace.clone();
+                                let workspace_tick = workspace_tick.clone();
+                                let hook_runner = hook_runner.clone();
+                                let hook_monitor = hook_monitor.clone();
+                                let backend = backend.clone();
+                                let terminals = terminals.clone();
+                                let service_manager = service_manager.clone();
+                                let service_tick = service_tick.clone();
+                                let deadlines = deadlines.clone();
+                                let runtime = runtime.clone();
+                                let git_poll_trigger_tx = git_poll_trigger_tx.clone();
+                                spawn_owned_project_operation(reply, async move {
+                                    let mut focus_manager = FocusManager::new();
+                                    let result = run_worktree_removal_plan(
+                                        plan,
+                                        project_path,
+                                        force,
+                                        global_hooks,
+                                        &workspace,
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                        &mut focus_manager,
+                                        &backend,
+                                        &terminals,
+                                        &app_settings,
+                                        &service_manager,
+                                        &service_tick,
+                                        &deadlines,
+                                        &runtime,
+                                        |roots| {
+                                            okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
+                                                .map_err(|error| error.to_string())
+                                        },
+                                        |plan, force| plan.remove(force),
+                                    )
+                                    .await;
+                                    send_git_poll_trigger_after_success(
+                                        &result,
+                                        trigger,
+                                        &git_poll_trigger_tx,
+                                    );
+                                    result
+                                });
+                                continue;
+                            }
+                        }
                     }
 
                     // ── Force-remove a checkout Git no longer tracks ──
@@ -3591,49 +3972,71 @@ pub async fn daemon_command_loop(
                     // only the plan differs, because no Git operation can reach
                     // an orphaned checkout.
                     ActionRequest::ForceRemoveWorktreeProject { project_id } => {
+                        let global_hooks = settings.lock().hooks.clone();
+                        let app_settings = settings.lock().clone();
+                        let workspace = workspace.clone();
+                        let workspace_tick = workspace_tick.clone();
+                        let hook_runner = hook_runner.clone();
+                        let hook_monitor = hook_monitor.clone();
+                        let backend = backend.clone();
+                        let terminals = terminals.clone();
+                        let service_manager = service_manager.clone();
+                        let service_tick = service_tick.clone();
+                        let deadlines = deadlines.clone();
+                        let runtime = runtime.clone();
+                        // Claim + plan on the loop, as the standard removal does.
                         let planned = {
-                            let mut workspace = workspace.lock();
-                            let project_path = workspace
-                                .project(&project_id)
-                                .map(|project| project.path.clone());
-                            match (
-                                workspace.begin_orphaned_worktree_removal(&project_id),
-                                project_path,
-                            ) {
-                                (Ok(plan), Some(project_path)) => Ok((plan, project_path)),
-                                (Err(error), _) => Err(error),
-                                (Ok(_), None) => Err(format!("project not found: {project_id}")),
-                            }
+                            let mut ws = workspace.lock();
+                            claim_owned_project_operation(&mut ws, &project_id).and_then(|()| {
+                                let project_path =
+                                    ws.project(&project_id).map(|project| project.path.clone());
+                                let planned = match (
+                                    ws.begin_orphaned_worktree_removal(&project_id),
+                                    project_path,
+                                ) {
+                                    (Ok(plan), Some(project_path)) => Ok((plan, project_path)),
+                                    (Err(error), _) => Err(error),
+                                    (Ok(_), None) => {
+                                        Err(format!("project not found: {project_id}"))
+                                    }
+                                };
+                                if planned.is_err() {
+                                    ws.finish_closing_project(&project_id);
+                                }
+                                planned
+                            })
                         };
                         match planned {
                             Err(error) => CommandResult::Err(error),
                             Ok((plan, project_path)) => {
-                                let global_hooks = settings.lock().hooks.clone();
-                                let app_settings = settings.lock().clone();
-                                run_worktree_removal_plan(
-                                    plan,
-                                    project_path,
-                                    true,
-                                    global_hooks,
-                                    &workspace,
-                                    &workspace_tick,
-                                    &hook_runner,
-                                    &hook_monitor,
-                                    &mut focus_manager,
-                                    &backend,
-                                    &terminals,
-                                    &app_settings,
-                                    &service_manager,
-                                    &service_tick,
-                                    &deadlines,
-                                    &runtime,
-                                    |roots| {
-                                        okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
-                                            .map_err(|error| error.to_string())
-                                    },
-                                    |plan, force| plan.remove(force),
-                                )
-                                .await
+                                spawn_owned_project_operation(reply, async move {
+                                    let mut focus_manager = FocusManager::new();
+                                    run_worktree_removal_plan(
+                                        plan,
+                                        project_path,
+                                        true,
+                                        global_hooks,
+                                        &workspace,
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                        &mut focus_manager,
+                                        &backend,
+                                        &terminals,
+                                        &app_settings,
+                                        &service_manager,
+                                        &service_tick,
+                                        &deadlines,
+                                        &runtime,
+                                        |roots| {
+                                            okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
+                                                .map_err(|error| error.to_string())
+                                        },
+                                        |plan, force| plan.remove(force),
+                                    )
+                                    .await
+                                });
+                                continue;
                             }
                         }
                     }
@@ -3648,31 +4051,62 @@ pub async fn daemon_command_loop(
                                 new_name: new_name.clone(),
                             });
                         let app_settings = settings.lock().clone();
-                        let result = rename_project_directory_off_reactor_with(
-                            project_id,
-                            new_name,
-                            &workspace,
-                            &workspace_tick,
-                            &hook_runner,
-                            &hook_monitor,
-                            &backend,
-                            &terminals,
-                            &app_settings,
-                            &service_manager,
-                            &service_tick,
-                            &deadlines,
-                            &runtime,
-                            |roots| {
-                                okena_services::docker_compose::ensure_no_compose_containers_under(
-                                    &roots,
-                                )
-                                .map_err(|error| error.to_string())
-                            },
-                            |plan| plan.execute(),
-                        )
-                        .await;
-                        send_git_poll_trigger_after_success(&result, trigger, &git_poll_trigger_tx);
-                        result
+                        // Claim + snapshot on the loop, before detaching.
+                        let claimed =
+                            claim_project_directory_rename(&project_id, &new_name, &workspace);
+                        let claimed = match claimed {
+                            Ok(claimed) => claimed,
+                            Err(error) => {
+                                if let Some(reply) = reply {
+                                    let _ = reply.send(CommandResult::Err(error));
+                                }
+                                continue;
+                            }
+                        };
+                        let workspace = workspace.clone();
+                        let workspace_tick = workspace_tick.clone();
+                        let hook_runner = hook_runner.clone();
+                        let hook_monitor = hook_monitor.clone();
+                        let backend = backend.clone();
+                        let terminals = terminals.clone();
+                        let service_manager = service_manager.clone();
+                        let service_tick = service_tick.clone();
+                        let deadlines = deadlines.clone();
+                        let runtime = runtime.clone();
+                        let git_poll_trigger_tx = git_poll_trigger_tx.clone();
+                        spawn_owned_project_operation(reply, async move {
+                            let result = run_project_directory_rename(
+                                claimed,
+                                project_id,
+                                new_name,
+                                &workspace,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                                &backend,
+                                &terminals,
+                                &app_settings,
+                                &service_manager,
+                                &service_tick,
+                                &deadlines,
+                                &runtime,
+                                |roots| {
+                                    okena_services::docker_compose::ensure_no_compose_containers_under(
+                                        &roots,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                },
+                                |plan| plan.execute(),
+                            )
+                            .await;
+                            send_git_poll_trigger_after_success(
+                                &result,
+                                trigger,
+                                &git_poll_trigger_tx,
+                            );
+                            result
+                        });
+                        continue;
                     }
 
                     // ── Default: workspace-scoped action ─────────────────────────
@@ -6343,6 +6777,372 @@ mod tests {
         std::fs::remove_dir_all(fixture).expect("remove content search fixture");
     }
 
+    /// An owned project operation runs as its own task: the caller keeps making
+    /// progress while it is parked, and the reply still arrives when it ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_project_operation_leaves_its_caller_free_and_keeps_its_reply() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (release_tx, release_rx) = oneshot::channel::<()>();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                spawn_owned_project_operation(Some(reply_tx), async move {
+                    release_rx.await.expect("operation released");
+                    CommandResult::Err("checkout preserved".to_string())
+                });
+
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    matches!(
+                        reply_rx.try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ),
+                    "the operation is still running, so its reply is still owed"
+                );
+
+                release_tx.send(()).expect("release operation");
+                assert!(matches!(
+                    reply_rx.await.expect("owned operation reply"),
+                    CommandResult::Err(error) if error == "checkout preserved"
+                ));
+            })
+            .await;
+    }
+
+    /// Detaching the owned worktree/rename operations must not drop their
+    /// replies: each still answers its bridge caller authoritatively.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detached_project_operations_still_reply_through_the_bridge() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (bridge_tx, bridge_rx) = bridge_channel();
+                let handle = harness().spawn_loop(bridge_rx);
+                for (command, label) in [
+                    (
+                        RemoteCommand::Action(ActionRequest::RemoveWorktreeProject {
+                            project_id: "missing".to_string(),
+                            force: false,
+                        }),
+                        "remove worktree project",
+                    ),
+                    (
+                        RemoteCommand::Action(ActionRequest::ForceRemoveWorktreeProject {
+                            project_id: "missing".to_string(),
+                        }),
+                        "force remove worktree project",
+                    ),
+                    (
+                        RemoteCommand::Action(ActionRequest::RenameProjectDirectory {
+                            project_id: "missing".to_string(),
+                            new_name: "renamed".to_string(),
+                        }),
+                        "rename project directory",
+                    ),
+                ] {
+                    assert!(
+                        matches!(
+                            request(&bridge_tx, command, label).await,
+                            CommandResult::Err(_)
+                        ),
+                        "{label} keeps its authoritative reply"
+                    );
+                }
+                drop(bridge_tx);
+                handle.await.expect("command loop joins");
+            })
+            .await;
+    }
+
+    /// The blocking command body runs on the blocking pool, never on the thread
+    /// driving the LocalSet, and its reply is delivered from there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_command_runs_off_the_reactor_thread() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let reactor_thread = std::thread::current().id();
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                spawn_blocking_command_with(
+                    Some(reply_tx),
+                    &tokio::runtime::Handle::current(),
+                    move || {
+                        started_tx
+                            .send(std::thread::current().id())
+                            .expect("signal blocking body started");
+                        release_rx.recv().expect("release blocking body");
+                        CommandResult::Ok(None)
+                    },
+                );
+
+                let body_thread = started_rx.recv().expect("blocking body started");
+                assert_ne!(
+                    body_thread, reactor_thread,
+                    "the blocking body must not run on the reactor thread"
+                );
+                assert!(
+                    matches!(
+                        reply_rx.try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ),
+                    "the reply waits for the blocking body"
+                );
+
+                release_tx.send(()).expect("release blocking body");
+                assert!(matches!(
+                    reply_rx.await.expect("blocking command reply"),
+                    CommandResult::Ok(None)
+                ));
+            })
+            .await;
+    }
+
+    /// The offloaded filesystem actions keep producing their authoritative
+    /// results through the real bridge, error replies included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_filesystem_actions_reply_through_the_bridge() {
+        let fixture =
+            std::env::temp_dir().join(format!("okena-blocking-actions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).expect("create fixture");
+        std::fs::write(fixture.join("needle.txt"), "needle\n").expect("write fixture file");
+        let root = fixture.to_string_lossy().into_owned();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (bridge_tx, bridge_rx) = bridge_channel();
+                let handle = harness().spawn_loop(bridge_rx);
+
+                let listed = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::ListPathFiles {
+                        root: root.clone(),
+                        show_ignored: false,
+                    }),
+                    "list path files",
+                )
+                .await;
+                let CommandResult::Ok(Some(listed)) = listed else {
+                    panic!("list path files must reply with a listing");
+                };
+                assert!(listed.to_string().contains("needle.txt"));
+
+                let found = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::SearchPathContent {
+                        root: root.clone(),
+                        query: "needle".to_string(),
+                        case_sensitive: false,
+                        mode: "literal".to_string(),
+                        max_results: 10,
+                        file_glob: None,
+                        context_lines: 0,
+                        show_ignored: false,
+                    }),
+                    "search path content",
+                )
+                .await;
+                let CommandResult::Ok(Some(found)) = found else {
+                    panic!("path content search must reply with results");
+                };
+                assert!(found.to_string().contains("needle.txt"));
+
+                let deleted = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::DeletePath {
+                        root: root.clone(),
+                        relative_path: "needle.txt".to_string(),
+                    }),
+                    "delete path",
+                )
+                .await;
+                assert!(matches!(deleted, CommandResult::Ok(_)));
+                assert!(!fixture.join("needle.txt").exists());
+
+                assert!(
+                    matches!(
+                        request(
+                            &bridge_tx,
+                            RemoteCommand::Action(ActionRequest::GitListPullRequests {
+                                project_id: "missing".to_string(),
+                                limit: 5,
+                            }),
+                            "list pull requests",
+                        )
+                        .await,
+                        CommandResult::Err(_)
+                    ),
+                    "an offloaded failure still replies"
+                );
+
+                drop(bridge_tx);
+                handle.await.expect("command loop joins");
+            })
+            .await;
+
+        std::fs::remove_dir_all(&fixture).expect("remove fixture");
+    }
+
+    /// The acceptance for CORR-2: a worktree removal parked in its physical
+    /// phase must not hold the sole bridge consumer. The removal's own
+    /// `on_worktree_close` hook is the park — it runs inside the removal's
+    /// blocking phase and waits for the test — and terminal input for an
+    /// unrelated live terminal must be answered while it waits.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parked_worktree_removal_still_serves_terminal_input() {
+        let (fixture, workspace) = direct_removal_fixture("responsive");
+        let started = fixture.join("close-hook-started");
+        let release = fixture.join("close-hook-release");
+
+        let mut h = harness();
+        h.workspace = workspace.clone();
+        h.settings.lock().hooks.worktree.on_close = Some(format!(
+            "touch '{}'; for _ in $(seq 1 300); do [ -e '{}' ] && break; sleep 0.02; done",
+            started.display(),
+            release.display(),
+        ));
+        // A live terminal in the OTHER project: nothing about it is torn down by
+        // the worktree removal, so its input has no reason to wait.
+        h.terminals.lock().insert(
+            "unrelated-terminal".to_string(),
+            Arc::new(Terminal::new(
+                "unrelated-terminal".to_string(),
+                TerminalSize::default(),
+                h.backend.transport(),
+                fixture.join("main").to_string_lossy().into_owned(),
+            )),
+        );
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let (bridge_tx, bridge_rx) = bridge_channel();
+                let handle = h.spawn_loop(bridge_rx);
+
+                let (remove_reply_tx, mut remove_reply_rx) = oneshot::channel();
+                bridge_tx
+                    .send(BridgeMessage {
+                        command: RemoteCommand::Action(ActionRequest::RemoveWorktreeProject {
+                            project_id: "wt1".to_string(),
+                            force: true,
+                        }),
+                        reply: Some(remove_reply_tx),
+                    })
+                    .await
+                    .expect("send worktree removal");
+
+                let parked = tokio::time::timeout(Duration::from_secs(20), async {
+                    while !started.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                assert!(
+                    parked.is_ok(),
+                    "the removal never reached its close hook (a refused Compose preflight gets here first)"
+                );
+
+                let input = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    request(
+                        &bridge_tx,
+                        RemoteCommand::Action(ActionRequest::SendBytes {
+                            terminal_id: "unrelated-terminal".to_string(),
+                            data: b"ls\n".to_vec(),
+                        }),
+                        "SendBytes during removal",
+                    ),
+                )
+                .await
+                .expect("input is served while the removal is parked");
+                assert!(matches!(input, CommandResult::Ok(_)));
+                assert!(
+                    matches!(
+                        remove_reply_rx.try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ),
+                    "the removal is still parked, so the input overtook it"
+                );
+
+                std::fs::write(&release, b"").expect("release the close hook");
+                let removed = tokio::time::timeout(Duration::from_secs(20), remove_reply_rx)
+                    .await
+                    .expect("removal reply timeout")
+                    .expect("removal reply");
+                assert!(
+                    matches!(removed, CommandResult::Ok(_)),
+                    "the detached removal still finishes and answers its caller"
+                );
+
+                drop(bridge_tx);
+                handle.await.expect("command loop joins");
+            })
+            .await;
+
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
+    /// The claim is taken on the command loop, before the operation detaches: a
+    /// close arriving during the removal's preflight must lose to the caller who
+    /// asked first, instead of removing the checkout out from under it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_detached_removal_claims_its_project_before_a_racing_close() {
+        let (fixture, workspace) = direct_removal_fixture("claim");
+        let mut h = harness();
+        h.workspace = workspace.clone();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let (bridge_tx, bridge_rx) = bridge_channel();
+                let handle = h.spawn_loop(bridge_rx);
+
+                let (remove_reply_tx, remove_reply_rx) = oneshot::channel();
+                bridge_tx
+                    .send(BridgeMessage {
+                        command: RemoteCommand::Action(ActionRequest::RemoveWorktreeProject {
+                            project_id: "wt1".to_string(),
+                            force: true,
+                        }),
+                        reply: Some(remove_reply_tx),
+                    })
+                    .await
+                    .expect("send worktree removal");
+
+                let close = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::CloseWorktree {
+                        project_id: "wt1".to_string(),
+                        merge: false,
+                        stash: false,
+                        fetch: false,
+                        push: false,
+                        delete_branch: false,
+                    }),
+                    "CloseWorktree racing the removal",
+                )
+                .await;
+                assert!(
+                    matches!(&close, CommandResult::Err(error) if error.contains("already closing")),
+                    "a racing close must see the removal's claim"
+                );
+
+                // Let the removal finish either way — its own result is not what
+                // this test is about.
+                let _ = tokio::time::timeout(Duration::from_secs(20), remove_reply_rx).await;
+                drop(bridge_tx);
+                handle.await.expect("command loop joins");
+            })
+            .await;
+
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
     /// `materialize_uninitialized_terminals` assigns a real `terminal_id` to a
     /// restored `terminal_id: None` slot, creates the backing PTY (so it lands
     /// in the registry), bumps `data_version` (so the autosave observer persists
@@ -8529,6 +9329,114 @@ mod tests {
         );
     }
 
+    /// The merge phase runs off-reactor, so the close that fires the
+    /// `before_remove` hook is a second pass with `merge` off. That pass cannot
+    /// recompute the stash, so the resume must carry it into the pending record
+    /// — otherwise the hook exit removes the checkout with the post-stash guard
+    /// disarmed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_after_merge_carries_the_real_stash_into_the_pending_close() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use std::process::Command;
+
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-resume-stash-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let repo = fixture.join("main");
+        let checkout = fixture.join("worktree");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        std::fs::create_dir_all(&repo).expect("create repository");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@okena.local"]);
+        git(&repo, &["config", "user.name", "Okena Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
+        git(&repo, &["add", "base.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                checkout.to_str().expect("utf-8 worktree path"),
+            ],
+        );
+
+        let mut data = workspace_with_worktree_child();
+        data.projects[0].path = repo.to_string_lossy().into_owned();
+        data.projects[1].path = checkout.to_string_lossy().into_owned();
+        data.projects[1].hooks.worktree.before_remove = Some("true".to_string());
+        let metadata = data.projects[1]
+            .worktree_info
+            .as_mut()
+            .expect("worktree metadata");
+        metadata.worktree_path = checkout.to_string_lossy().into_owned();
+        metadata.main_repo_path = repo.to_string_lossy().into_owned();
+        metadata.branch_name = "feature".to_string();
+
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let pty_manager = Arc::new(pty_manager);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager.clone()));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let hook_runner = Some(okena_hooks::HookRunner::new(
+            backend.clone(),
+            terminals.clone(),
+        ));
+        let hook_monitor = Some(okena_hooks::HookMonitor::new());
+        let (workspace_tick, _receiver) = watch::channel(0u64);
+
+        let result = resume_worktree_close_after_merge(
+            "wt1",
+            true,
+            false,
+            &Default::default(),
+            &workspace,
+            &workspace_tick,
+            &hook_runner,
+            &hook_monitor,
+            &backend,
+            &terminals,
+        );
+        assert!(
+            matches!(result, CommandResult::Ok(_)),
+            "resume must defer removal to the before_remove hook: {result:?}"
+        );
+
+        let pending = {
+            let mut ws = workspace.lock();
+            let ids = ws.pending_worktree_close_terminal_ids();
+            assert_eq!(ids.len(), 1, "the before_remove hook registered one close");
+            ws.take_pending_worktree_close(&ids[0])
+                .expect("pending close is registered under its hook terminal")
+        };
+        assert!(
+            pending.did_stash,
+            "the merge phase stashed; the pending close must say so"
+        );
+
+        for terminal_id in terminals.lock().keys() {
+            pty_manager.kill(terminal_id);
+        }
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_removal_failure_restores_authoritative_project() {
         use std::process::Command;
@@ -8622,6 +9530,7 @@ mod tests {
                 let result = spawn_background_worktree_removal(
                     plan,
                     operation_epoch,
+                    false,
                     false,
                     &[],
                     &Default::default(),
@@ -8793,6 +9702,7 @@ mod tests {
                 let result = spawn_background_worktree_removal(
                     plan,
                     operation_epoch,
+                    false,
                     false,
                     &[],
                     &global_hooks,

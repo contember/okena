@@ -56,6 +56,16 @@ struct Args {
     #[arg(long)]
     tls: bool,
 
+    /// Expected SHA-256 fingerprint of the remote TLS certificate, as printed
+    /// by `okena pair` on the host. Colons and spaces are ignored.
+    #[arg(long, env = "OKENA_CERT_SHA256")]
+    cert_fingerprint: Option<String>,
+
+    /// Send credentials to a TCP remote whose certificate is not pinned. The
+    /// first handshake is then trusted blindly and can be intercepted.
+    #[arg(long)]
+    insecure_no_cert_pin: bool,
+
     /// Connect over a same-user Unix socket.
     #[arg(long)]
     socket: Option<PathBuf>,
@@ -293,6 +303,8 @@ impl TuiState {
     }
 }
 
+/// Owns every host terminal mode the TUI changes, so exiting restores the shell
+/// exactly as it was found. Nothing else may write mode control to the host.
 struct TerminalGuard;
 
 impl TerminalGuard {
@@ -305,6 +317,11 @@ impl TerminalGuard {
             EnableBracketedPaste,
             cursor::Hide
         )?;
+        // Absolute row addressing needs origin mode off, and no-wrap stops an
+        // oversized snapshot row from scrolling the screen. DECOM stays off on
+        // exit: only xterm-class hosts restore it with the alt-screen cursor.
+        stdout.write_all(b"\x1b[?6l\x1b[?7l")?;
+        stdout.flush()?;
         Ok(Self)
     }
 }
@@ -313,8 +330,11 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
         let mut stdout = io::stdout();
+        // Autowrap is the default everywhere and `\x1b[?1049l` does not restore it.
+        let _ = stdout.write_all(b"\x1b[?7h");
         let _ = execute!(
             stdout,
+            SetAttribute(Attribute::Reset),
             cursor::Show,
             DisableBracketedPaste,
             LeaveAlternateScreen
@@ -514,8 +534,11 @@ fn handle_key(
         return Ok(LoopControl::Continue);
     }
 
+    // Ctrl+] is the byte 0x1D, which crossterm reports as Ctrl+'5' — the whole
+    // 0x1C..=0x1F range maps onto '4'..='7'. Matching only ']' left the TUI with
+    // no reachable way out at all.
     if key.modifiers.contains(CrosstermKeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(']'))
+        && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
     {
         return Ok(LoopControl::Quit);
     }
@@ -625,7 +648,7 @@ fn render(
         let prefixed = make_prefixed_id(connection_id, active);
         let terminal = terminals.read().get(&prefixed).cloned();
         if let Some(terminal) = terminal {
-            stdout.write_all(&terminal.render_snapshot())?;
+            stdout.write_all(&terminal.render_snapshot_for_host_screen())?;
         } else {
             queue!(
                 stdout,
@@ -791,9 +814,21 @@ fn connection_config(args: &Args) -> Result<RemoteConnectionConfig> {
         .port
         .or_else(|| discovered.as_ref().map(|discovered| discovered.port))
         .ok_or_else(|| anyhow!("missing --port and no local remote.json was discovered"))?;
-    let tls = args.tls || discovered.as_ref().is_some_and(|discovered| discovered.tls);
+    let pinned_cert_sha256 = args
+        .cert_fingerprint
+        .as_deref()
+        .map(normalize_cert_fingerprint)
+        .transpose()?;
+    if pinned_cert_sha256.is_some() && uses_local_socket(local_endpoint.as_ref()) {
+        bail!("--cert-fingerprint applies to TCP remotes; the local socket transport has no TLS");
+    }
+    // A pin only binds a TLS handshake: without forcing TLS the client would
+    // fall back to plain http and send the token in the clear.
+    let tls = args.tls
+        || pinned_cert_sha256.is_some()
+        || discovered.as_ref().is_some_and(|discovered| discovered.tls);
 
-    Ok(RemoteConnectionConfig {
+    let config = RemoteConnectionConfig {
         id: uuid::Uuid::new_v4().to_string(),
         name: "Okena TUI".to_string(),
         host,
@@ -801,9 +836,68 @@ fn connection_config(args: &Args) -> Result<RemoteConnectionConfig> {
         saved_token: args.token.clone(),
         token_obtained_at: None,
         tls,
-        pinned_cert_sha256: None,
+        pinned_cert_sha256,
         local_endpoint,
-    })
+    };
+    check_credential_exposure(
+        &config,
+        args.token.is_some() || args.pair.is_some(),
+        args.insecure_no_cert_pin,
+    )?;
+    Ok(config)
+}
+
+/// Whether the connection task will really bypass TCP. Mirrors `local_unix_path`
+/// in `okena-transport`: any other endpoint still dials host:port, so the pin
+/// and credential rules must apply to it.
+fn uses_local_socket(endpoint: Option<&LocalEndpoint>) -> bool {
+    cfg!(unix) && matches!(endpoint, Some(LocalEndpoint::UnixSocket { .. }))
+}
+
+/// Refuse to hand a credential to a TCP peer whose certificate is not pinned.
+fn check_credential_exposure(
+    config: &RemoteConnectionConfig,
+    has_credentials: bool,
+    insecure: bool,
+) -> Result<()> {
+    if !has_credentials
+        || insecure
+        || config.pinned_cert_sha256.is_some()
+        || uses_local_socket(config.local_endpoint.as_ref())
+        || is_loopback_host(&config.host)
+    {
+        return Ok(());
+    }
+    bail!(
+        "refusing to send credentials to {}:{} without a pinned certificate. \
+         Pass --cert-fingerprint <sha256> (run `okena pair` on the host to read it), \
+         or --insecure-no-cert-pin to accept any certificate",
+        config.host,
+        config.port
+    );
+}
+
+/// Accept the `aa:bb:cc:dd ee:ff …` form `okena pair` prints, and plain hex.
+fn normalize_cert_fingerprint(value: &str) -> Result<String> {
+    let hex: String = value
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect();
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("--cert-fingerprint must be a 64-character hex SHA-256, got {value:?}");
+    }
+    Ok(hex.to_ascii_lowercase())
+}
+
+/// A same-host daemon needs no pin: intercepting loopback already requires
+/// running code as this user.
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 struct DiscoveredDaemon {
@@ -872,4 +966,136 @@ fn parse_remote_json(path: &Path) -> Result<DiscoveredDaemon> {
         tls,
         local_endpoint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tcp_args(host: &str) -> Args {
+        Args {
+            host: Some(host.to_string()),
+            port: Some(19100),
+            token: None,
+            pair: None,
+            tls: false,
+            cert_fingerprint: None,
+            insecure_no_cert_pin: false,
+            socket: None,
+            profile: None,
+            terminal: None,
+        }
+    }
+
+    const FINGERPRINT: &str = "aa:bb:cc:dd ee:ff:00:11 22:33:44:55 66:77:88:99 \
+                               aa:bb:cc:dd ee:ff:00:11 22:33:44:55 66:77:88:99";
+
+    #[test]
+    fn cert_fingerprint_accepts_the_printed_format() {
+        assert_eq!(
+            normalize_cert_fingerprint(FINGERPRINT).expect("valid fingerprint"),
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+        );
+        assert_eq!(
+            normalize_cert_fingerprint(&"AB".repeat(32)).expect("valid fingerprint"),
+            "ab".repeat(32)
+        );
+    }
+
+    #[test]
+    fn cert_fingerprint_rejects_malformed_input() {
+        assert!(normalize_cert_fingerprint("ab:cd").is_err());
+        assert!(normalize_cert_fingerprint(&"zz".repeat(32)).is_err());
+        assert!(normalize_cert_fingerprint(&"ab".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn token_to_a_remote_host_requires_a_pin() {
+        let mut args = tcp_args("10.0.0.5");
+        args.token = Some("secret".into());
+        assert!(connection_config(&args).is_err());
+
+        args.tls = true;
+        assert!(connection_config(&args).is_err());
+    }
+
+    #[test]
+    fn pair_code_to_a_remote_host_requires_a_pin() {
+        let mut args = tcp_args("10.0.0.5");
+        args.pair = Some("123456".into());
+        assert!(connection_config(&args).is_err());
+    }
+
+    #[test]
+    fn pin_is_applied_and_forces_tls() {
+        let mut args = tcp_args("10.0.0.5");
+        args.token = Some("secret".into());
+        args.cert_fingerprint = Some(FINGERPRINT.into());
+
+        let config = connection_config(&args).expect("pinned config");
+        assert_eq!(
+            config.pinned_cert_sha256.as_deref(),
+            Some("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+        );
+        assert!(config.tls);
+    }
+
+    #[test]
+    fn explicit_opt_out_connects_without_a_pin() {
+        let mut args = tcp_args("10.0.0.5");
+        args.token = Some("secret".into());
+        args.insecure_no_cert_pin = true;
+
+        let config = connection_config(&args).expect("unpinned config");
+        assert!(config.pinned_cert_sha256.is_none());
+    }
+
+    #[test]
+    fn loopback_and_credential_free_remotes_need_no_pin() {
+        let mut loopback = tcp_args("127.0.0.1");
+        loopback.token = Some("secret".into());
+        assert!(connection_config(&loopback).is_ok());
+
+        let mut ipv6 = tcp_args("::1");
+        ipv6.pair = Some("123456".into());
+        assert!(connection_config(&ipv6).is_ok());
+
+        assert!(connection_config(&tcp_args("10.0.0.5")).is_ok());
+    }
+
+    #[test]
+    fn only_a_real_local_socket_exempts_a_credential() {
+        let config = |endpoint: LocalEndpoint| RemoteConnectionConfig {
+            id: "id".into(),
+            name: "Okena TUI".into(),
+            host: "10.0.0.5".into(),
+            port: 19100,
+            saved_token: Some("secret".into()),
+            token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
+            local_endpoint: Some(endpoint),
+        };
+
+        let pipe = config(LocalEndpoint::NamedPipe {
+            name: "okena".into(),
+        });
+        assert!(check_credential_exposure(&pipe, true, false).is_err());
+
+        let socket = config(LocalEndpoint::UnixSocket {
+            path: "/tmp/okena.sock".into(),
+        });
+        assert_eq!(
+            check_credential_exposure(&socket, true, false).is_ok(),
+            cfg!(unix)
+        );
+    }
+
+    #[test]
+    fn pin_is_rejected_for_socket_transport() {
+        let mut args = tcp_args("10.0.0.5");
+        args.socket = Some(PathBuf::from("/tmp/okena.sock"));
+        args.cert_fingerprint = Some(FINGERPRINT.into());
+        assert_eq!(connection_config(&args).is_err(), cfg!(unix));
+    }
 }

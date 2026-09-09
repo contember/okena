@@ -15,6 +15,8 @@ pub struct GitViewSettings {
     pub diff_view_mode: DiffViewMode,
     pub diff_ignore_whitespace: bool,
     pub file_font_size: f32,
+    #[serde(default = "default_file_font_family")]
+    pub file_font_family: String,
     pub is_dark: bool,
 }
 
@@ -24,9 +26,14 @@ impl Default for GitViewSettings {
             diff_view_mode: DiffViewMode::default(),
             diff_ignore_whitespace: false,
             file_font_size: 13.0,
+            file_font_family: default_file_font_family(),
             is_dark: true,
         }
     }
+}
+
+fn default_file_font_family() -> String {
+    "JetBrains Mono".to_string()
 }
 
 /// Read current git view settings from ExtensionSettingsStore.

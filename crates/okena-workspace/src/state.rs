@@ -41,6 +41,13 @@ struct FocusAnchor {
     replacement: Option<String>,
 }
 
+/// The project layouts as they stood before the reconciliation numbered
+/// `generation` reshaped them. See `Workspace::focus_reference_layout`.
+struct SyncLayoutPreimage {
+    generation: u64,
+    layouts: HashMap<String, LayoutNode>,
+}
+
 /// The terminal slot at `path`: `Some(None)` for a pane whose PTY is still
 /// spawning, `None` when the path doesn't name a pane at all.
 fn terminal_slot_at<'a>(layout: &'a LayoutNode, path: &[usize]) -> Option<Option<&'a str>> {
@@ -303,6 +310,14 @@ pub struct Workspace {
     /// Ownership retained after a terminal leaves the layout but before its PTY
     /// exit is processed, so daemon lifecycle hooks still have project context.
     pub(crate) closing_terminal_owners: HashMap<String, ClosingTerminalOwner>,
+    /// Counter for reconciliations that reshaped a layout, and the tree from
+    /// just before the latest one. Windows sync one after another against this
+    /// shared data, so a window that has not synced yet must resolve its focus
+    /// against the pre-image, not against what an earlier window already applied.
+    sync_generation: u64,
+    sync_layout_preimage: Option<SyncLayoutPreimage>,
+    /// The generation each window has already seen.
+    window_sync_generation: HashMap<WindowId, u64>,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -506,6 +521,9 @@ impl Workspace {
             pending_closes: Vec::new(),
             restored_closes: Vec::new(),
             closing_terminal_owners: HashMap::new(),
+            sync_generation: 0,
+            sync_layout_preimage: None,
+            window_sync_generation: HashMap::new(),
         }
     }
 
@@ -2191,7 +2209,11 @@ impl Workspace {
     ) {
         // Capture what this window is looking at before reconciliation reshapes
         // the tree — see `reanchor_focus`.
-        let anchor = self.capture_focus_anchor(focus_manager);
+        let last_seen = self.window_sync_generation.get(&window_id).copied();
+        let anchor = self.capture_focus_anchor(focus_manager, last_seen);
+
+        let before = self.project_layouts();
+        let taken_at = self.sync_generation;
 
         let outcome = crate::remote_apply::apply_remote_snapshot(
             &mut self.data,
@@ -2199,6 +2221,18 @@ impl Workspace {
             snapshots,
             window_id,
         );
+
+        if self.project_layouts_differ_from(&before) {
+            self.sync_generation = self.sync_generation.wrapping_add(1);
+            self.sync_layout_preimage = Some(SyncLayoutPreimage {
+                generation: taken_at,
+                layouts: before,
+            });
+        }
+        self.window_sync_generation
+            .insert(window_id, self.sync_generation);
+        self.window_sync_generation
+            .retain(|id, _| self.data.window(*id).is_some());
 
         // Heal the optimistic client-side "closing" flag against the daemon's
         // authoritative mirror. The dialog marks a project closing locally before
@@ -2227,12 +2261,53 @@ impl Workspace {
         self.notify_ui_only(cx);
     }
 
+    /// Every project's layout, keyed by project id.
+    fn project_layouts(&self) -> HashMap<String, LayoutNode> {
+        self.data
+            .projects
+            .iter()
+            .filter_map(|p| p.layout.as_ref().map(|l| (p.id.clone(), l.clone())))
+            .collect()
+    }
+
+    fn project_layouts_differ_from(&self, other: &HashMap<String, LayoutNode>) -> bool {
+        self.data
+            .projects
+            .iter()
+            .filter(|p| p.layout.is_some())
+            .count()
+            != other.len()
+            || self
+                .data
+                .projects
+                .iter()
+                .any(|p| p.layout.as_ref() != other.get(&p.id))
+    }
+
+    /// The tree a window was last looking at for `project_id`: the pre-image
+    /// while an earlier window in this batch has already applied the change,
+    /// otherwise the live layout.
+    fn focus_reference_layout(
+        &self,
+        project_id: &str,
+        last_seen: Option<u64>,
+    ) -> Option<&LayoutNode> {
+        match self.sync_layout_preimage.as_ref() {
+            Some(pre) if last_seen == Some(pre.generation) => pre.layouts.get(project_id),
+            _ => self.project(project_id)?.layout.as_ref(),
+        }
+    }
+
     /// Record which terminal a window is focused on, before a sync reshapes the
     /// layout under it. `None` when the window has no focus, or its path no
     /// longer names a pane (already orphaned — nothing to follow).
-    fn capture_focus_anchor(&self, focus_manager: &FocusManager) -> Option<FocusAnchor> {
+    fn capture_focus_anchor(
+        &self,
+        focus_manager: &FocusManager,
+        last_seen: Option<u64>,
+    ) -> Option<FocusAnchor> {
         let previous = focus_manager.focused_terminal_state()?;
-        let layout = self.project(&previous.project_id)?.layout.as_ref()?;
+        let layout = self.focus_reference_layout(&previous.project_id, last_seen)?;
         let terminal_id = terminal_slot_at(layout, &previous.layout_path)??.to_string();
         // Computed on the pre-sync tree, while the focused pane's position is
         // still known: where focus goes if this sync took that pane away.
@@ -2403,6 +2478,8 @@ mod workspace_tests {
             hook_terminal_id: "hook-1".into(),
             branch: "feature".into(),
             main_repo_path: "/tmp".into(),
+            did_stash: false,
+            delete_branch: false,
         });
         assert!(workspace.is_project_closing("wt1"));
         assert!(workspace.project("wt1").unwrap().is_closing);
@@ -3742,7 +3819,7 @@ mod gpui_tests {
         fm.focus_terminal("p1".to_string(), focus_path);
 
         workspace.update(cx, |ws: &mut Workspace, _cx| {
-            let anchor = ws.capture_focus_anchor(&fm);
+            let anchor = ws.capture_focus_anchor(&fm, None);
             ws.project_mut("p1").unwrap().layout = Some(after);
             ws.reanchor_focus(&mut fm, anchor.as_ref());
         });
@@ -3809,7 +3886,7 @@ mod gpui_tests {
         fm.focus_terminal("p1".to_string(), vec![0]);
 
         workspace.update(cx, |ws: &mut Workspace, _cx| {
-            let anchor = ws.capture_focus_anchor(&fm);
+            let anchor = ws.capture_focus_anchor(&fm, None);
             ws.project_mut("p1").unwrap().layout = Some(tabs_of(&["t1", "t2", "t3"], 2));
             fm.focus_terminal("p1".to_string(), vec![2]);
             ws.reanchor_focus(&mut fm, anchor.as_ref());
@@ -3884,9 +3961,13 @@ mod gpui_tests {
     }
 
     fn api_split(ids: [&str; 2]) -> ApiLayoutNode {
+        api_split_of(&ids)
+    }
+
+    fn api_split_of(ids: &[&str]) -> ApiLayoutNode {
         ApiLayoutNode::Split {
             direction: crate::state::SplitDirection::Horizontal,
-            sizes: vec![0.5, 0.5],
+            sizes: vec![1.0 / ids.len() as f32; ids.len()],
             children: ids.iter().map(|id| api_terminal(id)).collect(),
         }
     }
@@ -3915,6 +3996,55 @@ mod gpui_tests {
         sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
         fm.focus_terminal("remote:c1:p1".to_string(), vec![1]);
         (workspace, fm)
+    }
+
+    #[gpui::test]
+    fn each_window_follows_its_own_terminal_across_a_shared_sync(cx: &mut gpui::TestAppContext) {
+        // Three windows, all focused on t2 in [t1, t2, t3], reconcile the same
+        // remote close of t1 one after another against the same data. Every
+        // window after the first must still follow t2, not inherit t3's slot.
+        let extra_state = WindowState::default();
+        let third_state = WindowState::default();
+        let extra = WindowId::Extra(extra_state.id);
+        let third = WindowId::Extra(third_state.id);
+        let mut data = make_workspace_data(vec![], vec![]);
+        data.extra_windows.push(extra_state);
+        data.extra_windows.push(third_state);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut main_fm = crate::focus::FocusManager::new();
+        let mut extra_fm = crate::focus::FocusManager::new();
+        let mut third_fm = crate::focus::FocusManager::new();
+
+        let sync = |ws: &gpui::Entity<Workspace>,
+                    fm: &mut crate::focus::FocusManager,
+                    window_id: WindowId,
+                    cx: &mut gpui::TestAppContext,
+                    layout: ApiLayoutNode| {
+            let snapshots = [snapshot_of(layout)];
+            ws.update(cx, |ws: &mut Workspace, cx| {
+                ws.apply_remote_snapshot(&snapshots, window_id, fm, cx);
+            });
+        };
+
+        let three = || api_split_of(&["t1", "t2", "t3"]);
+        sync(&workspace, &mut main_fm, WindowId::Main, cx, three());
+        sync(&workspace, &mut extra_fm, extra, cx, three());
+        sync(&workspace, &mut third_fm, third, cx, three());
+        for fm in [&mut main_fm, &mut extra_fm, &mut third_fm] {
+            fm.focus_terminal("remote:c1:p1".to_string(), vec![1]);
+        }
+
+        let two = || api_split_of(&["t2", "t3"]);
+        sync(&workspace, &mut main_fm, WindowId::Main, cx, two());
+        sync(&workspace, &mut extra_fm, extra, cx, two());
+        sync(&workspace, &mut third_fm, third, cx, two());
+
+        for fm in [&main_fm, &extra_fm, &third_fm] {
+            assert_eq!(
+                fm.focused_terminal_state().map(|f| f.layout_path),
+                Some(vec![0])
+            );
+        }
     }
 
     #[gpui::test]
@@ -4102,7 +4232,10 @@ mod gpui_tests {
         }
     }
 
-    fn finished_hook_entry(status: HookTerminalStatus, finished_at: Option<u64>) -> HookTerminalEntry {
+    fn finished_hook_entry(
+        status: HookTerminalStatus,
+        finished_at: Option<u64>,
+    ) -> HookTerminalEntry {
         HookTerminalEntry {
             status,
             finished_at,
@@ -4133,9 +4266,18 @@ mod gpui_tests {
             project_with_hooks(
                 "p1",
                 vec![
-                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
-                    ("mid", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
-                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(300))),
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "mid",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(300)),
+                    ),
                 ],
             ),
             2,
@@ -4153,8 +4295,14 @@ mod gpui_tests {
                 "p1",
                 vec![
                     ("running", make_hook_entry("on_project_open")),
-                    ("old", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100))),
-                    ("new", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "old",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                    ),
+                    (
+                        "new",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4175,7 +4323,10 @@ mod gpui_tests {
                         "failed",
                         finished_hook_entry(HookTerminalStatus::Failed { exit_code: 1 }, Some(100)),
                     ),
-                    ("succeeded", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "succeeded",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4191,8 +4342,14 @@ mod gpui_tests {
             project_with_hooks(
                 "p1",
                 vec![
-                    ("legacy", finished_hook_entry(HookTerminalStatus::Succeeded, None)),
-                    ("recent", finished_hook_entry(HookTerminalStatus::Succeeded, Some(200))),
+                    (
+                        "legacy",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, None),
+                    ),
+                    (
+                        "recent",
+                        finished_hook_entry(HookTerminalStatus::Succeeded, Some(200)),
+                    ),
                 ],
             ),
             1,
@@ -4206,7 +4363,10 @@ mod gpui_tests {
         let stale = evict_from(
             project_with_hooks(
                 "p1",
-                vec![("only", finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)))],
+                vec![(
+                    "only",
+                    finished_hook_entry(HookTerminalStatus::Succeeded, Some(100)),
+                )],
             ),
             5,
         );

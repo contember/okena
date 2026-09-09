@@ -402,8 +402,11 @@ impl DaemonCore {
                 &no_hook_monitor,
             );
             let mut ws = reactor.workspace.lock();
-            let project_ids: Vec<String> =
-                ws.projects().iter().map(|project| project.id.clone()).collect();
+            let project_ids: Vec<String> = ws
+                .projects()
+                .iter()
+                .map(|project| project.id.clone())
+                .collect();
             for project_id in project_ids {
                 for terminal_id in ws.finished_hook_terminals_to_evict(
                     &project_id,
@@ -699,7 +702,7 @@ impl DaemonCore {
         // window can't attach, spawns a fresh daemon that collides on the lock,
         // and surfaces "Another Okena instance is already running". The command
         // loop is already gone (drop(local)), so no client can mutate state
-        // during the flush; `stop()` (below) removes the discovery file last,
+        // during the flush; the stop below removes the discovery file last,
         // right before the instance lock drops as `run()` returns.
         flush_shutdown_state(
             &shutdown_workspace,
@@ -716,9 +719,8 @@ impl DaemonCore {
                 }
             },
             persistence::save_workspace,
-        )?;
-        remote_server.stop();
-        Ok(())
+            || remote_server.stop(),
+        )
     }
 }
 
@@ -729,6 +731,7 @@ fn flush_shutdown_state(
     flush_autosaves: impl FnOnce(),
     flush_teardown: impl FnOnce(),
     save: impl FnOnce(&WorkspaceData) -> anyhow::Result<()>,
+    stop_server: impl FnOnce(),
 ) -> anyhow::Result<()> {
     flush_autosaves();
     let (data, terminal_ids) = {
@@ -752,7 +755,12 @@ fn flush_shutdown_state(
     }
     flush_teardown();
 
-    save(&data)
+    // The server stops even when the save failed: `_instance_lock` is bound
+    // after `remote_server` and so drops first, and a GUI that takes the freed
+    // lock while `remote.json` still names this daemon attaches to a corpse.
+    let saved = save(&data);
+    stop_server();
+    saved
 }
 
 #[cfg(test)]
@@ -1005,6 +1013,7 @@ mod shutdown_tests {
                 saved.store(true, Ordering::Relaxed);
                 Ok(())
             },
+            || {},
         )
         .unwrap();
 
@@ -1094,8 +1103,44 @@ mod shutdown_tests {
                 ));
                 Ok(())
             },
+            || {},
         )
         .expect("save restored workspace");
+    }
+
+    #[test]
+    fn shutdown_stops_the_server_even_when_the_final_save_fails() {
+        // `_instance_lock` is bound after `remote_server`, so it drops first.
+        // Returning the save error before the stop frees the lock while
+        // `remote.json` still names a daemon that is already going away.
+        let workspace = Arc::new(Mutex::new(Workspace::new(WorkspaceData::empty())));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let backend = RecordingBackend {
+            killed: Arc::new(Mutex::new(Vec::new())),
+            routed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let save_events = events.clone();
+        let stop_events = events.clone();
+
+        let result = flush_shutdown_state(
+            &workspace,
+            &backend,
+            &terminals,
+            || {},
+            || {},
+            |_| {
+                save_events.lock().push("save");
+                Err(anyhow::anyhow!("workspace not saved"))
+            },
+            || stop_events.lock().push("stop"),
+        );
+
+        assert_eq!(&*events.lock(), &["save", "stop"]);
+        assert!(
+            result.is_err_and(|error| error.to_string().contains("workspace not saved")),
+            "the failed save is still reported to the caller"
+        );
     }
 
     #[test]
@@ -1139,6 +1184,7 @@ mod shutdown_tests {
                         shutdown_events.lock().push("final");
                         Ok(())
                     },
+                    || {},
                 )
             });
 

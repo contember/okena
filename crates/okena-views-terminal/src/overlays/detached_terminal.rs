@@ -157,6 +157,7 @@ impl Render for DetachedTerminalView {
 
         div()
             .track_focus(&focus_handle)
+            .font_family(okena_ui::tokens::ui_font_family(cx))
             .key_context("DetachedTerminal")
             .on_mouse_down(
                 MouseButton::Left,

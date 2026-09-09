@@ -12,6 +12,7 @@
 mod files;
 mod git;
 mod project;
+mod review;
 mod session;
 mod tab;
 mod terminal;
@@ -30,11 +31,14 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use project::{MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal};
+pub use project::{
+    MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
+};
 
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
     execute_prepared_content_search_with_cancellation, prepare_content_search,
+    prepare_content_search_for_path,
 };
 pub use session::{
     apply_imported_workspace, apply_loaded_session, begin_workspace_replacement,
@@ -301,6 +305,11 @@ pub fn execute_action(
             mode,
             ignore_whitespace,
         } => git::diff(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::ReviewComposition {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => review::composition(ws, project_id, mode, ignore_whitespace),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
         ActionRequest::GitListPullRequests { project_id, limit } => {
             git::list_pull_requests(ws, project_id, limit)
@@ -310,6 +319,12 @@ pub fn execute_action(
             file_path,
             mode,
         } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => git::binary_file_contents(ws, project_id, old_path, new_path, mode),
         ActionRequest::GitCommitGraph {
             project_id,
             count,
@@ -653,6 +668,7 @@ pub fn execute_action(
         | ActionRequest::GetThemes
         | ActionRequest::GetTheme { .. }
         | ActionRequest::SetTheme { .. }
+        | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
         | ActionRequest::InvokeAction { .. } => {

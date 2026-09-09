@@ -91,25 +91,26 @@ async fn handle_ws(
 ) {
     // ── Auth phase ──────────────────────────────────────────────────────
     // Unix socket clients are same-user local clients; bearer auth is for TCP.
-    let authenticated = if matches!(peer, PeerInfo::Local) {
-        true
+    // A bearer session keeps its token identity so revocation and expiry can end
+    // the connection, not just refuse the next handshake. The receiver comes
+    // back with the session so a revocation racing the handshake is not lost.
+    let local_peer = matches!(peer, PeerInfo::Local);
+    let (mut auth_revocations, session) = if local_peer {
+        (state.auth_store.subscribe_revocations(), None)
     } else if let Some(token) = query_token {
-        state.auth_store.validate_token(&token)
+        state.auth_store.authenticate_watched(&token)
     } else {
         // Wait for first-message auth (2 second timeout)
         match tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(WsInbound::Auth { token }) = serde_json::from_str::<WsInbound>(&text) {
-                    state.auth_store.validate_token(&token)
-                } else {
-                    false
-                }
-            }
-            _ => false,
+            Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<WsInbound>(&text) {
+                Ok(WsInbound::Auth { token }) => state.auth_store.authenticate_watched(&token),
+                _ => (state.auth_store.subscribe_revocations(), None),
+            },
+            _ => (state.auth_store.subscribe_revocations(), None),
         }
     };
 
-    if !authenticated {
+    if !local_peer && session.is_none() {
         let msg = serde_json::to_string(&WsOutbound::AuthFailed {
             error: "authentication required".into(),
         })
@@ -157,6 +158,8 @@ async fn handle_ws(
     // resolve `Err(Closed)` instantly and busy-spin the loop.
     let mut toast_open = true;
     let mut terminal_focus_open = true;
+    let mut auth_watch_open = session.is_some();
+    let mut auth_deadline = session_deadline(session.as_ref());
     let mut system_stats = SystemStatsCache::new();
     let mut system_stats_interval = tokio::time::interval(SYSTEM_STATS_REFRESH_INTERVAL);
     system_stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -260,14 +263,10 @@ async fn handle_ws(
                                 }
                             }
                             Ok(WsInbound::SetVisibleProjects { project_ids }) => {
-                                // Full replacement set, so a project leaving the
-                                // client's viewport drops out of the `gh` scope.
+                                // Full replacement set, kept even when empty: the git
+                                // poller trusts a declared viewport over subscriptions.
                                 if let Ok(mut map) = state.remote_visible_projects.write() {
-                                    if project_ids.is_empty() {
-                                        map.remove(&connection_id);
-                                    } else {
-                                        map.insert(connection_id, project_ids.into_iter().collect());
-                                    }
+                                    map.insert(connection_id, project_ids.into_iter().collect());
                                 }
                                 if let Some(tx) = &state.git_poll_trigger_tx {
                                     let _ = tx.send(GitPollTrigger::visibility_changed());
@@ -627,6 +626,35 @@ async fn handle_ws(
                 }
             }
 
+            // The token behind this connection was revoked, reloaded away, or evicted.
+            result = auth_revocations.changed(), if auth_watch_open => {
+                match (result, session.as_ref()) {
+                    (Err(_), _) => auth_watch_open = false,
+                    (Ok(()), Some(session)) if !state.auth_store.session_is_live(session) => {
+                        log::info!("Closing WS connection {connection_id}: its token is no longer valid");
+                        send_auth_lost(&out_tx);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // The token behind this connection reached its expiry. The monotonic
+            // timer does not advance across host suspend, so the wall clock — the
+            // one `validate_token` uses — decides.
+            _ = sleep_until(auth_deadline) => {
+                match session.as_ref() {
+                    Some(session) if std::time::SystemTime::now() < session.expires_at => {
+                        auth_deadline = session_deadline(Some(session));
+                    }
+                    _ => {
+                        log::info!("Closing WS connection {connection_id}: its token expired");
+                        send_auth_lost(&out_tx);
+                        break;
+                    }
+                }
+            }
+
             // Writer task died (socket write error) — stop the reader too
             _ = &mut writer_handle => {
                 writer_finished = true;
@@ -663,6 +691,34 @@ async fn handle_ws(
     if !writer_finished {
         let _ = writer_handle.await;
     }
+}
+
+/// Deadline at which a connection's bearer token expires. `None` for the local
+/// socket, which carries no token.
+fn session_deadline(session: Option<&crate::auth::AuthSession>) -> Option<tokio::time::Instant> {
+    let remaining = session?
+        .expires_at
+        .duration_since(std::time::SystemTime::now())
+        .unwrap_or_default();
+    Some(tokio::time::Instant::now() + remaining)
+}
+
+/// Never resolves without a deadline, so the select arm stays idle.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Non-blocking: a revoked client that stopped reading must not be able to hold
+/// the connection — and its `active_connections` slot — open.
+fn send_auth_lost(out_tx: &mpsc::Sender<Message>) {
+    let msg = serde_json::to_string(&WsOutbound::AuthFailed {
+        error: "authentication no longer valid".into(),
+    })
+    .expect("BUG: WsOutbound must serialize");
+    let _ = out_tx.try_send(Message::Text(msg.into()));
 }
 
 /// Writer task: pumps messages from the mpsc channel to the WebSocket sink.

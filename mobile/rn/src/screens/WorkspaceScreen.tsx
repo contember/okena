@@ -85,8 +85,10 @@ export const WorkspaceScreen: React.FC = () => {
   const selectedProjectId = useWorkspaceStore((s) => s.selectedProjectId);
   const selectedTerminalId = useWorkspaceStore((s) => s.selectedTerminalId);
   const fullscreenTerminal = useWorkspaceStore((s) => s.fullscreenTerminal);
+  const layoutJson = useWorkspaceStore((s) => s.projectLayoutJson);
   const secondsSinceActivity = useWorkspaceStore((s) => s.secondsSinceActivity);
   const selectProject = useWorkspaceStore((s) => s.selectProject);
+  const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
     if (selectedProjectId === null) return projects[0] ?? null;
@@ -99,13 +101,13 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
 
-  // Layout JSON for the selected project, parsed.
-  const layoutNode = useMemo(() => {
-    const json = useWorkspaceStore.getState().getProjectLayoutJson();
-    return json ? parseLayout(json) : null;
-    // re-parse whenever the project or its terminal set changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id, project?.terminalIds.join(','), fullscreenTerminal?.terminalId]);
+  // Layout tree for the selected project. Keyed on the authoritative JSON, so
+  // tab switches, minimizes and split changes re-render even though they leave
+  // the terminal id set untouched.
+  const layoutNode = useMemo(
+    () => (layoutJson ? parseLayout(layoutJson) : null),
+    [layoutJson],
+  );
 
   const dotColor =
     secondsSinceActivity < 3
@@ -162,6 +164,8 @@ export const WorkspaceScreen: React.FC = () => {
           terminalId={fullscreenTerminal.terminalId}
           fonts={fonts}
           modifiers={modifiers}
+          onSelect={selectTerminal}
+          selected={selectedTerminalId === fullscreenTerminal.terminalId}
           native={native}
         />
       );
@@ -187,6 +191,7 @@ export const WorkspaceScreen: React.FC = () => {
           terminalIds={project.terminalIds}
           paneRef={paneRef}
           focusTerminalId={selectedTerminalId}
+          onSelectTerminal={selectTerminal}
           native={native}
         />
       );
@@ -200,6 +205,8 @@ export const WorkspaceScreen: React.FC = () => {
         terminalId={tid}
         fonts={fonts}
         modifiers={modifiers}
+        onSelect={selectTerminal}
+        selected={selectedTerminalId === tid}
         native={native}
       />
     );

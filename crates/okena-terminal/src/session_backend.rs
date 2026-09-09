@@ -1426,6 +1426,134 @@ fn get_wsl_dtach_socket_path(session_name: &str) -> String {
     format!("{}/{}.sock", WSL_DTACH_SOCKET_DIR, session_name)
 }
 
+/// The verified tree teardown of [`terminate_dtach_process_tree`], expressed in
+/// POSIX `sh` so it can run inside WSL in one round trip.
+///
+/// Expects `SOCK` (the dtach socket) and a `holders` function printing the live
+/// socket-holder PIDs. Freezes the holders and their descendants, kills the
+/// descendants before the master, verifies both, and unlinks the socket only
+/// after that. Exits non-zero with the socket intact when anything survives, so
+/// a leaked tree stays discoverable for a retry.
+///
+/// A zombie counts as dead: a killed descendant is not reaped until its stopped
+/// dtach parent resumes. `lsof` is a hard requirement of the WSL dtach backend
+/// (see `wsl_dtach_available`), so an empty holder list means nothing holds the
+/// socket — that is what stands in for the native `connect` probe.
+#[allow(dead_code)]
+const WSL_DTACH_TEARDOWN_ALGORITHM: &str = r#"
+set -u
+snooze() { sleep 0.05 2>/dev/null || sleep 1; }
+# "<pid>:<starttime>" for a live process; empty when it is gone or a zombie.
+# starttime pins PID identity so a recycled number is never signalled.
+marker() {
+  __pid=$1
+  read -r __stat 2>/dev/null < /proc/"$__pid"/stat || return 0
+  set -- ${__stat##*") "}
+  [ "${1:-Z}" = Z ] && return 0
+  printf '%s:%s' "$__pid" "${20:-}"
+}
+children_of() {
+  __parents=" $* "
+  for __proc in /proc/[0-9]*; do
+    read -r __stat 2>/dev/null < "$__proc/stat" || continue
+    __child=${__proc#/proc/}
+    set -- ${__stat##*") "}
+    case $__parents in *" ${2:-0} "*) printf '%s\n' "$__child" ;; esac
+  done
+}
+resume_all() {
+  for __m in $descendants; do kill -CONT "${__m%%:*}" 2>/dev/null; done
+  for __p in $live; do kill -CONT "$__p" 2>/dev/null; done
+}
+
+frozen=
+for pid in $(holders); do
+  m=$(marker "$pid")
+  [ -n "$m" ] || continue
+  kill -STOP "$pid" 2>/dev/null
+  frozen="$frozen $m"
+done
+snooze
+live=
+for m in $frozen; do
+  [ "$(marker "${m%%:*}")" = "$m" ] || continue
+  live="$live ${m%%:*}"
+done
+if [ -z "$live" ]; then
+  [ -z "$(holders)" ] || exit 1
+  rm -f "$SOCK" || exit 1
+  exit 0
+fi
+
+# Freeze the descendant tree parent-first until two snapshots are stable. Once
+# every anchored process is stopped, none can fork during the destructive pass.
+descendants=
+seen=" $live "
+stable=0
+round=0
+while [ "$round" -lt 8 ]; do
+  round=$((round + 1))
+  parents=$live
+  for m in $descendants; do parents="$parents ${m%%:*}"; done
+  fresh=
+  for pid in $(children_of $parents); do
+    case "$seen" in *" $pid "*) continue ;; esac
+    seen="$seen$pid "
+    m=$(marker "$pid")
+    [ -n "$m" ] || continue
+    kill -STOP "$pid" 2>/dev/null
+    fresh="$fresh $m"
+  done
+  if [ -z "$fresh" ]; then
+    stable=$((stable + 1))
+    if [ "$stable" -ge 2 ]; then break; fi
+  else
+    stable=0
+    descendants="$descendants$fresh"
+  fi
+  snooze
+done
+if [ "$stable" -lt 2 ]; then
+  resume_all
+  exit 1
+fi
+
+for m in $descendants; do kill -KILL "${m%%:*}" 2>/dev/null; done
+snooze
+survivors=
+for m in $descendants; do
+  [ "$(marker "${m%%:*}")" = "$m" ] && survivors="$survivors ${m%%:*}"
+done
+if [ -n "$survivors" ]; then
+  resume_all
+  exit 1
+fi
+
+# SIGTERM is queued while the holders are stopped; SIGCONT lets dtach run its
+# normal exit path. Escalate only what still holds the socket afterwards.
+for pid in $live; do kill -TERM "$pid" 2>/dev/null; done
+for pid in $live; do kill -CONT "$pid" 2>/dev/null; done
+snooze
+remaining=$(holders)
+if [ -n "$remaining" ]; then
+  for pid in $remaining; do kill -KILL "$pid" 2>/dev/null; done
+  snooze
+fi
+[ -z "$(holders)" ] || exit 1
+rm -f "$SOCK" || exit 1
+exit 0
+"#;
+
+/// Bind [`WSL_DTACH_TEARDOWN_ALGORITHM`] to one socket and `lsof` holder lookup.
+#[allow(dead_code)]
+fn wsl_dtach_teardown_script(socket_path: &str) -> String {
+    format!(
+        "SOCK={}\nholders() {{ lsof -t \"$SOCK\" 2>/dev/null; }}\n{}",
+        shell_escape(socket_path),
+        WSL_DTACH_TEARDOWN_ALGORITHM
+    )
+}
+
 impl ResolvedBackend {
     /// Build a session command wrapped through `wsl.exe` for running inside WSL.
     /// Returns `("wsl.exe", [args...])` or `None` for `ResolvedBackend::None`.
@@ -1512,12 +1640,20 @@ impl ResolvedBackend {
 }
 
 /// Kill a session backend running inside WSL.
+///
+/// `false` means a verified failure: the dtach tree did not terminate and its
+/// socket was deliberately kept as a retry handle. Only the dtach path is
+/// verified — tmux and screen keep their unverified kill and report `true`.
 #[cfg(windows)]
-pub fn kill_wsl_session(backend: ResolvedBackend, distro: Option<&str>, session_name: &str) {
+pub fn kill_wsl_session(
+    backend: ResolvedBackend,
+    distro: Option<&str>,
+    session_name: &str,
+) -> bool {
     let kill_cmd = match backend {
         // Psmux is host-Windows only; resolve_for_wsl never returns it,
         // and kill_wsl_session is only called for WSL terminals.
-        ResolvedBackend::None | ResolvedBackend::Psmux => return,
+        ResolvedBackend::None | ResolvedBackend::Psmux => return true,
         ResolvedBackend::Tmux => {
             format!("tmux kill-session -t {}", shell_escape(session_name))
         }
@@ -1525,12 +1661,7 @@ pub fn kill_wsl_session(backend: ResolvedBackend, distro: Option<&str>, session_
             format!("screen -S {} -X quit", shell_escape(session_name))
         }
         ResolvedBackend::Dtach => {
-            let socket = get_wsl_dtach_socket_path(session_name);
-            format!(
-                "lsof -t {} 2>/dev/null | xargs -r kill; rm -f {}",
-                shell_escape(&socket),
-                shell_escape(&socket)
-            )
+            wsl_dtach_teardown_script(&get_wsl_dtach_socket_path(session_name))
         }
     };
 
@@ -1539,8 +1670,36 @@ pub fn kill_wsl_session(backend: ResolvedBackend, distro: Option<&str>, session_
         cmd.args(["-d", d]);
     }
     cmd.args(["--", "sh", "-c", &kill_cmd]);
-    let _ = crate::process::safe_output(&mut cmd);
-    log::debug!("Killed WSL session {} ({:?})", session_name, backend);
+    let result = crate::process::safe_output(&mut cmd);
+    // tmux and screen exit non-zero for a session that is merely already gone,
+    // so only the dtach script's status is a verified answer.
+    if backend != ResolvedBackend::Dtach {
+        log::debug!("Killed WSL session {} ({:?})", session_name, backend);
+        return true;
+    }
+    match result {
+        Ok(output) if output.status.success() => {
+            log::debug!("Killed WSL dtach session {}", session_name);
+            true
+        }
+        Ok(output) => {
+            log::error!(
+                "WSL dtach session {} did not terminate ({}); socket kept for retry: {}",
+                session_name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            false
+        }
+        Err(error) => {
+            log::error!(
+                "WSL dtach session {} teardown could not run: {}",
+                session_name,
+                error
+            );
+            false
+        }
+    }
 }
 
 /// Escape a string for safe use in shell commands
@@ -2278,6 +2437,145 @@ mod tests {
             !socket_path.exists(),
             "a dead socket should be removed once liveness is verified"
         );
+    }
+
+    /// Run the ported WSL teardown against a real process tree. WSL is Linux, so
+    /// the script under test here is byte-for-byte the one that runs in the
+    /// distro; only `wsl.exe` and the `lsof` holder lookup are stubbed.
+    #[cfg(target_os = "linux")]
+    fn run_wsl_teardown_fixture(prelude: &str, root: u32, socket: &std::path::Path) -> bool {
+        // A zombie holds no descriptors, so lsof would not list it either.
+        let script = format!(
+            r#"SOCK={}
+holders() {{
+  read -r __s 2>/dev/null < /proc/{root}/stat || return 0
+  set -- ${{__s##*") "}}
+  [ "${{1:-Z}}" = Z ] && return 0
+  echo {root}
+}}
+{prelude}
+{}"#,
+            shell_escape(&socket.to_string_lossy()),
+            WSL_DTACH_TEARDOWN_ALGORITHM
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .expect("teardown script runs")
+            .success()
+    }
+
+    /// Every pid of a `sh -> {sh -> sleep, sleep}` tree, once it is fully spawned.
+    #[cfg(target_os = "linux")]
+    fn wsl_teardown_fixture_tree(root: u32) -> Vec<i32> {
+        let root_pid = i32::try_from(root).expect("pid fits in i32");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let children = tracked_descendants(&[tracked_process(root_pid).expect("root is live")]);
+            if children.len() >= 3 {
+                let mut pids: Vec<i32> = children.iter().map(|process| process.pid).collect();
+                pids.push(root_pid);
+                return pids;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture tree did not reach three descendants"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_wsl_teardown_fixture() -> std::process::Child {
+        std::process::Command::new("sh")
+            .args(["-c", "sh -c 'sleep 300 & wait' & sleep 300"])
+            .spawn()
+            .expect("spawn fixture tree")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_dtach_teardown_kills_the_descendant_tree_and_unlinks_the_socket() {
+        let socket = std::env::temp_dir().join(format!(
+            "okena-wsl-teardown-ok-{}-{}.sock",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&socket, b"").expect("socket placeholder");
+        let mut root = spawn_wsl_teardown_fixture();
+        let pids = wsl_teardown_fixture_tree(root.id());
+
+        let verified = run_wsl_teardown_fixture("", root.id(), &socket);
+        let _ = root.wait();
+
+        assert!(verified, "a fully reaped tree must report success");
+        assert!(!socket.exists(), "a verified teardown unlinks the socket");
+        for pid in pids {
+            assert!(
+                tracked_process(pid).is_none_or(|process| !same_process_is_alive(process)),
+                "pid {pid} survived the teardown"
+            );
+        }
+    }
+
+    /// Descendants that shrug off every signal — the HUP-ignoring case the old
+    /// `lsof … | xargs kill; rm -f` never noticed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_dtach_teardown_keeps_the_socket_when_the_tree_survives() {
+        let socket = std::env::temp_dir().join(format!(
+            "okena-wsl-teardown-survivor-{}-{}.sock",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&socket, b"").expect("socket placeholder");
+        let mut root = spawn_wsl_teardown_fixture();
+        let pids = wsl_teardown_fixture_tree(root.id());
+
+        let verified = run_wsl_teardown_fixture("kill() { return 0; }", root.id(), &socket);
+
+        assert!(!verified, "a surviving tree must report failure");
+        assert!(
+            socket.exists(),
+            "a failed teardown keeps the socket as a retry handle"
+        );
+        assert!(
+            pids.iter()
+                .all(|pid| tracked_process(*pid).is_some_and(same_process_is_alive)),
+            "the fixture tree must still be intact for the retry"
+        );
+
+        for pid in &pids {
+            // SAFETY: every pid came from this test's own fixture tree.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        let _ = root.wait();
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_dtach_teardown_unlinks_a_socket_nothing_holds() {
+        let socket = std::env::temp_dir().join(format!(
+            "okena-wsl-teardown-empty-{}-{}.sock",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&socket, b"").expect("socket placeholder");
+
+        // A pid that cannot exist stands in for "lsof found no holder".
+        assert!(run_wsl_teardown_fixture("", u32::MAX, &socket));
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn wsl_dtach_teardown_script_binds_the_socket_and_the_lsof_lookup() {
+        let script = wsl_dtach_teardown_script("/tmp/okena-dtach/tm-x'y.sock");
+
+        assert!(script.starts_with("SOCK='/tmp/okena-dtach/tm-x'\\''y.sock'\n"));
+        assert!(script.contains("holders() { lsof -t \"$SOCK\" 2>/dev/null; }"));
+        assert!(script.ends_with(WSL_DTACH_TEARDOWN_ALGORITHM));
     }
 
     #[cfg(unix)]

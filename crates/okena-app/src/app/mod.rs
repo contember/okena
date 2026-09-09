@@ -203,6 +203,10 @@ pub struct Okena {
     /// be wired with the same singleton main was wired with at startup
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
     remote_manager: Entity<RemoteConnectionManager>,
+    /// The settings this client last mirrored to the daemon (minus the
+    /// client-local `remote_connections`). Local edits are sent as a delta
+    /// against it, so a stale field never overwrites another client's change.
+    last_settings_sent: serde_json::Value,
     /// Exact terminal panes dirtied during the current app-wide frame window.
     /// The idle-to-active edge is presented immediately; sustained activity is
     /// coalesced while parsing and notification handling remain immediate.
@@ -232,6 +236,15 @@ pub struct Okena {
     /// Deferred forgets for OS-closed extra windows — see
     /// `extras.rs::handle_extra_window_os_close` for the quit-vs-close story.
     pending_extra_forgets: extras::PendingExtraForgets,
+}
+
+/// Serialize the settings this client mirrors to the daemon. On failure the
+/// baseline becomes `Null`, which makes the next delta the full settings.
+fn mirrored_settings(settings: &crate::workspace::persistence::AppSettings) -> serde_json::Value {
+    okena_app_core::remote_config::shared_settings_value(settings).unwrap_or_else(|error| {
+        log::error!("Failed to encode settings update: {error}");
+        serde_json::Value::Null
+    })
 }
 
 impl Okena {
@@ -333,6 +346,7 @@ impl Okena {
             scrollback_visible_projects: parking_lot::Mutex::new(None),
             opened_detached_windows: HashSet::new(),
             remote_manager: remote_manager.clone(),
+            last_settings_sent: mirrored_settings(&crate::settings::settings(cx)),
             terminal_activity_repaints: ActivityRepaintBatch::default(),
             sidebar_activity_repaints: ActivityRepaintThrottle::default(),
             notification_jump_tx,
@@ -346,6 +360,22 @@ impl Okena {
         // Route clicked desktop notifications back to their originating pane.
         manager.start_notification_click_loop(notification_jump_rx, cx);
 
+        // Only the PTY-owning daemon answers OSC color queries. Share the
+        // resolved OS appearance with our local daemon so Auto matches the
+        // desktop, including OS appearance changes. Never persist this as a
+        // theme preference or send it to user-managed remote connections.
+        let theme = crate::theme::theme_entity(cx);
+        let mut last_is_dark = theme.read(cx).system_is_dark();
+        manager.sync_system_appearance(cx);
+        cx.observe(&theme, move |this, theme, cx| {
+            let is_dark = theme.read(cx).system_is_dark();
+            if is_dark != last_is_dark {
+                last_is_dark = is_dark;
+                this.sync_system_appearance(cx);
+            }
+        })
+        .detach();
+
         // Fire OS notifications for remote (daemon-served) terminals. Their PTY
         // output never reaches the local PTY event loop above — it arrives over
         // the WS and is only parsed by the remote activity pump, which drains
@@ -358,25 +388,22 @@ impl Okena {
         {
             let remote_manager = remote_manager.clone();
             let settings = crate::settings::settings_entity(cx);
-            cx.subscribe(&settings, move |_this, _settings, event, cx| {
+            cx.subscribe(&settings, move |this, _settings, event, cx| {
                 let crate::settings::SettingsEvent::Changed(settings) = event;
-                match serde_json::to_value(settings) {
-                    Ok(mut patch) => {
-                        if let Some(object) = patch.as_object_mut() {
-                            object.remove("remote_connections");
-                        }
-                        remote_manager.update(cx, |manager, cx| {
-                            manager.send_action(
-                                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
-                                okena_core::api::ActionRequest::SetSettings { patch },
-                                cx,
-                            );
-                        });
-                    }
-                    Err(error) => {
-                        log::error!("Failed to encode settings update: {error}");
-                    }
+                let next = mirrored_settings(settings);
+                let patch =
+                    okena_app_core::remote_config::settings_delta(&this.last_settings_sent, &next);
+                this.last_settings_sent = next;
+                if patch.as_object().is_some_and(|fields| fields.is_empty()) {
+                    return;
                 }
+                remote_manager.update(cx, |manager, cx| {
+                    manager.send_action(
+                        okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                        okena_core::api::ActionRequest::SetSettings { patch },
+                        cx,
+                    );
+                });
             })
             .detach();
         }
@@ -416,9 +443,15 @@ impl Okena {
                 this.recover_local_daemon(cx);
             }
             RemoteManagerEvent::SettingsChanged(settings) => {
+                // Initial/reconnected daemon snapshots also restore the
+                // transient appearance after a daemon restart.
+                this.sync_system_appearance(cx);
                 let settings = settings.as_ref().clone();
                 let mode = settings.theme_mode;
                 let custom_id = settings.custom_theme_id.clone();
+                // The daemon's copy is now this client's baseline, so the next
+                // local edit diffs against it instead of re-sending its fields.
+                this.last_settings_sent = mirrored_settings(&settings);
                 this.apply_scrollback_setting(settings.scrollback_lines, cx);
                 crate::settings::settings_entity(cx).update(cx, |state, cx| {
                     state.replace_from_daemon(settings.clone(), cx);
@@ -951,6 +984,17 @@ impl Okena {
         // should hold just did — clear the memo so the sync actually runs.
         self.scrollback_visible_projects.lock().take();
         self.publish_visible_projects(cx);
+    }
+
+    fn sync_system_appearance(&self, cx: &mut Context<Self>) {
+        let is_dark = crate::theme::theme_entity(cx).read(cx).system_is_dark();
+        self.remote_manager.update(cx, |manager, cx| {
+            manager.send_action(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                okena_core::api::ActionRequest::SetSystemAppearance { is_dark },
+                cx,
+            );
+        });
     }
 
     fn recover_local_daemon(&mut self, cx: &mut Context<Self>) {

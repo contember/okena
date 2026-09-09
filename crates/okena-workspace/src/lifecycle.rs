@@ -164,6 +164,8 @@ mod tests {
             hook_terminal_id: hook_terminal_id.to_string(),
             branch: "main".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
+            did_stash: false,
+            delete_branch: false,
         }
     }
 

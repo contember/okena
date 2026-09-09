@@ -226,6 +226,24 @@ export interface OkenaNative {
   /** Current auth token for a connection, if paired. */
   getToken(connId: ConnId): string | undefined;
 
+  /**
+   * The server certificate fingerprint this connection is pinned to, if any.
+   * `undefined` means no TLS identity was established, so a token obtained here
+   * was accepted trust-on-first-use and must not be treated as pinned. Only
+   * meaningful when {@link canReportCertFingerprint} is true.
+   */
+  getCertFingerprint(connId: ConnId): string | undefined;
+
+  /**
+   * Whether this binding build implements {@link getCertFingerprint}.
+   *
+   * Adapter-provided, NOT a Rust export: `src/generated` is gitignored, so a
+   * tree built before `get_cert_fingerprint` existed keeps working with an
+   * older binding. Callers must not treat a missing pin as "no pin" — that
+   * would force a re-pair on every launch without buying any protection.
+   */
+  canReportCertFingerprint(): boolean;
+
   /** Pair with the server using a pairing code (async — awaits the server). */
   pair(connId: ConnId, code: string): Promise<void>;
 
@@ -494,6 +512,20 @@ function toProjectInfo(p: ProjectInfo & {terminalNames: unknown}): ProjectInfo {
   };
 }
 
+/** Warn once per process, not once per `getOkenaNative()` caller. */
+let staleBindingWarned = false;
+
+function warnStaleBinding(): void {
+  if (staleBindingWarned) return;
+  staleBindingWarned = true;
+  console.warn(
+    'okena native bindings predate `get_cert_fingerprint`: TLS certificate ' +
+      'pins cannot be read, so they are not persisted and saved tokens are ' +
+      'reused unpinned. Run `npm run ubrn:android` or `npm run ubrn:ios` to ' +
+      'regenerate src/generated. See mobile/rn/README.md.',
+  );
+}
+
 export function getOkenaNative(): OkenaNative {
   try {
     // The local `okena-mobile-ffi` package entry (src/index.tsx) installs the
@@ -502,6 +534,8 @@ export function getOkenaNative(): OkenaNative {
     // satisfy `OkenaNative` structurally as-is; the wrapper below only overrides
     // the ones whose enum shapes need translating (see adapters above).
     const gen = require('okena-mobile-ffi');
+    const pinsReadable = typeof gen.getCertFingerprint === 'function';
+    if (!pinsReadable) warnStaleBinding();
     return {
       ...gen,
       connectionStatus: (connId: ConnId) =>
@@ -512,6 +546,9 @@ export function getOkenaNative(): OkenaNative {
         (gen.getProjects(connId) as Array<ProjectInfo & {terminalNames: unknown}>).map(
           toProjectInfo,
         ),
+      canReportCertFingerprint: () => pinsReadable,
+      getCertFingerprint: (connId: ConnId) =>
+        pinsReadable ? gen.getCertFingerprint(connId) : undefined,
     } as OkenaNative;
   } catch (e) {
     throw new Error(

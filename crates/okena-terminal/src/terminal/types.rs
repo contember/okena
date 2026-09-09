@@ -185,7 +185,7 @@ pub struct SelectionState {
 }
 
 /// A detected link in terminal content (URL or file path)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetectedLink {
     pub line: i32,
     pub col: usize,

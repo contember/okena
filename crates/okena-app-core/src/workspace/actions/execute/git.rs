@@ -119,6 +119,45 @@ pub(super) fn file_contents(
     }
 }
 
+pub(super) fn binary_file_contents(
+    ws: &Workspace,
+    project_id: String,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    mode: DiffMode,
+) -> ActionResult {
+    use base64::Engine as _;
+
+    match ws.project(&project_id) {
+        Some(project) => {
+            let (old, new) = okena_git::get_file_bytes_for_diff(
+                std::path::Path::new(&project.path),
+                old_path.as_deref(),
+                new_path.as_deref(),
+                mode,
+            );
+            const MAX_BINARY_PREVIEW_SIZE: usize = 20 * 1024 * 1024;
+            if old
+                .as_ref()
+                .into_iter()
+                .chain(new.as_ref())
+                .any(|content| content.len() > MAX_BINARY_PREVIEW_SIZE)
+            {
+                return ActionResult::Err(
+                    "Binary file is too large to preview (maximum size is 20 MB)".to_string(),
+                );
+            }
+            let encode =
+                |content: Vec<u8>| base64::engine::general_purpose::STANDARD.encode(content);
+            ActionResult::Ok(Some(serde_json::json!({
+                "old_content_b64": old.map(encode),
+                "new_content_b64": new.map(encode),
+            })))
+        }
+        None => ActionResult::Err(format!("project not found: {project_id}")),
+    }
+}
+
 pub(super) fn commit_graph(
     ws: &Workspace,
     project_id: String,

@@ -444,7 +444,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         .bg(with_alpha(t.border_active, 0.1))
                         .text_size(ui_text_sm(cx))
                         .text_color(rgb(t.text_primary))
-                        .hover(|style| style.bg(highlight))
+                        .opacity(0.0)
+                        .hover(|style| style.opacity(1.0).bg(highlight))
                         .child(zone_label)
                         .on_click(cx.listener(move |_this, _, _window, cx| {
                             if let Some(ref target_id) = this_tid

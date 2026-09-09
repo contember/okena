@@ -2069,6 +2069,8 @@ impl OverlayManager {
             .clone();
         FileViewerConfig {
             font_size: settings.file_font_size,
+            line_height: settings.file_line_height,
+            font_family: settings.file_font_family.into(),
             is_dark: crate::theme::theme(cx).is_dark(),
             blame_visible: settings.blame_visible,
         }
@@ -2077,7 +2079,7 @@ impl OverlayManager {
     /// Show file browser for a project (no pre-selected file).
     pub fn show_file_browser(&mut self, context: ProjectInspectorContext, cx: &mut Context<Self>) {
         let config = self.file_viewer_config(cx);
-        let inspector = self.project_inspector(context.clone(), config, cx);
+        let inspector = self.project_inspector(context.clone(), config.clone(), cx);
         inspector.update(cx, |inspector, cx| {
             inspector.show_browse(context, config, cx)
         });
@@ -2122,7 +2124,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let config = self.file_viewer_config(cx);
-        let inspector = self.project_inspector(context.clone(), config, cx);
+        let inspector = self.project_inspector(context.clone(), config.clone(), cx);
         inspector.update(cx, |inspector, cx| {
             inspector.show_file(context, config, target, cx)
         });
@@ -2229,7 +2231,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let config = self.file_viewer_config(cx);
-        let inspector = self.project_inspector(context.clone(), config, cx);
+        let inspector = self.project_inspector(context.clone(), config.clone(), cx);
         inspector.update(cx, |inspector, cx| {
             inspector.show_diff(context, config, select_file, mode, commit_nav, cx)
         });

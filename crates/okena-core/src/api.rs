@@ -770,6 +770,15 @@ pub enum ActionRequest {
         #[serde(default)]
         ignore_whitespace: bool,
     },
+    /// What the comparison is made of: every changed file's role, and how much
+    /// of the implementation volume is tests written inside implementation files.
+    ReviewComposition {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
     GitBranches {
         project_id: String,
     },
@@ -781,6 +790,13 @@ pub enum ActionRequest {
     GitFileContents {
         project_id: String,
         file_path: String,
+        #[serde(default)]
+        mode: DiffMode,
+    },
+    GitBinaryFileContents {
+        project_id: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
         #[serde(default)]
         mode: DiffMode,
     },
@@ -1215,6 +1231,11 @@ pub enum ActionRequest {
     /// `custom:` prefix).
     SetTheme {
         id: String,
+    },
+    /// Report the local desktop's system appearance for Auto terminal colors.
+    /// Transient: does not change the persisted theme preference.
+    SetSystemAppearance {
+        is_dark: bool,
     },
     /// Write a custom theme JSON file (a full `CustomThemeConfig`) and,
     /// when `activate`, switch to it.
@@ -1689,6 +1710,12 @@ mod tests {
             ActionRequest::GitFileContents {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
+                mode: DiffMode::Staged,
+            },
+            ActionRequest::GitBinaryFileContents {
+                project_id: "p1".into(),
+                old_path: Some("old.png".into()),
+                new_path: Some("new.png".into()),
                 mode: DiffMode::Staged,
             },
             ActionRequest::GitStageFile {
