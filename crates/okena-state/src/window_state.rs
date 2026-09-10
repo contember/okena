@@ -191,6 +191,14 @@ pub struct WindowState {
     /// means "all of them" rather than "all the ones I haven't touched".
     #[serde(default)]
     pub agents_show_info: bool,
+    /// Whether project columns open on their info instead of their terminal.
+    ///
+    /// The projects overview's counterpart to `agents_show_info`, and separate
+    /// from it for the same reason the two overviews keep their own
+    /// orientation: reading an agent's context and reading a repo's are
+    /// different habits, and turning one on should not flip the other.
+    #[serde(default)]
+    pub projects_show_info: bool,
     /// Whether the main area is showing every agent session at once.
     ///
     /// The agents-tab counterpart to clearing the folder filter: it is what
@@ -235,10 +243,34 @@ impl Default for WindowState {
             agent_layout: ProjectLayoutMode::default(),
             agents_overview: false,
             agents_show_info: false,
+            projects_show_info: false,
             show_attention_section: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
+        }
+    }
+}
+
+impl WindowState {
+    /// Whether the grid this window is showing opens its columns on their info.
+    ///
+    /// Picks by what is on screen, the way the grid's orientation does, so the
+    /// control above the grid and every column in it read the same switch.
+    pub fn grid_show_info(&self) -> bool {
+        if self.agents_overview {
+            self.agents_show_info
+        } else {
+            self.projects_show_info
+        }
+    }
+
+    /// Set the info switch of whichever grid this window is showing.
+    pub fn set_grid_show_info(&mut self, on: bool) {
+        if self.agents_overview {
+            self.agents_show_info = on;
+        } else {
+            self.projects_show_info = on;
         }
     }
 }
@@ -282,6 +314,7 @@ mod tests {
             agent_layout: ProjectLayoutMode::Rows,
             agents_overview: true,
             agents_show_info: true,
+            projects_show_info: true,
             show_attention_section: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
@@ -303,6 +336,8 @@ mod tests {
         assert_eq!(reloaded.project_width_scale, original.project_width_scale);
         assert_eq!(reloaded.project_layout, original.project_layout);
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
+        assert_eq!(reloaded.agents_show_info, original.agents_show_info);
+        assert_eq!(reloaded.projects_show_info, original.projects_show_info);
         assert_eq!(
             reloaded.show_attention_section,
             original.show_attention_section
@@ -359,6 +394,34 @@ mod tests {
         assert_eq!(s.project_layout, ProjectLayoutMode::Columns);
         assert_eq!(s.project_sort_mode, ProjectSortMode::Manual);
         assert!(!s.show_attention_section);
+    }
+
+    #[test]
+    fn the_info_switch_follows_the_grid_on_screen() {
+        // Each overview keeps its own switch; the one read and written is
+        // whichever grid is showing, so the view bar never flips a grid you
+        // are not looking at.
+        let mut s = WindowState::default();
+        assert!(!s.grid_show_info(), "terminals by default");
+
+        s.set_grid_show_info(true);
+        assert!(s.projects_show_info);
+        assert!(!s.agents_show_info, "the agents overview is untouched");
+
+        s.agents_overview = true;
+        assert!(!s.grid_show_info(), "the agents overview reads its own");
+        s.set_grid_show_info(true);
+        assert!(s.agents_show_info);
+
+        s.set_grid_show_info(false);
+        assert!(!s.agents_show_info);
+        assert!(s.projects_show_info, "and leaves the projects one alone");
+    }
+
+    #[test]
+    fn an_older_window_state_opens_projects_on_their_terminals() {
+        let s: WindowState = serde_json::from_str(r#"{"agents_show_info":true}"#).unwrap();
+        assert!(!s.projects_show_info);
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! Shared chrome plus the still-stubbed views.
 //!
-//! Tasks, Projects, Agents and Specs are implemented in their own modules;
-//! Knowledge remains a placeholder that states what will live there rather than
-//! inventing content that looks real.
+//! Tasks and Specs are implemented in their own modules; Knowledge remains a
+//! placeholder that states what will live there rather than inventing content
+//! that looks real.
 
 use crate::theme::{theme, with_alpha};
-use crate::ui::tokens::{ui_text, ui_text_md, ui_text_sm};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -23,6 +23,24 @@ impl HarnessPane {
     /// must route it through here.
     pub(super) fn daemon_id(&self, id: &str) -> String {
         okena_transport::client::strip_prefix(id, self.client.connection_id())
+    }
+
+    /// A small coloured label.
+    pub(super) fn chip(&self, text: String, color: u32, cx: &Context<Self>) -> AnyElement {
+        div()
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded(px(3.0))
+            .bg(with_alpha(color, 0.15))
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(color))
+            .child(text)
+            .into_any_element()
+    }
+
+    /// Show what changed in a worktree.
+    pub(super) fn open_diff(&self, project_id: &str, cx: &mut App) {
+        crate::views::components::project_nav::open_diff(&self.request_broker, project_id, cx);
     }
 
     /// A small secondary button, used across the harness views.
@@ -160,7 +178,7 @@ impl HarnessPane {
                 "Git-backed, with PR / branch support for changes.",
             ],
             // These are real views; they never reach here.
-            HarnessSection::Tasks | HarnessSection::Projects | HarnessSection::Specs => vec![],
+            HarnessSection::Tasks | HarnessSection::Specs => vec![],
         };
 
         v_flex()
@@ -188,7 +206,6 @@ impl Render for HarnessPane {
         let t = theme(cx);
         let body = match self.section {
             HarnessSection::Tasks => self.render_tasks_view(cx),
-            HarnessSection::Projects => self.render_projects_view(cx),
             HarnessSection::Specs => self.render_specs_view(cx),
             other => self.render_stub(other, cx),
         };

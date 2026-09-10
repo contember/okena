@@ -66,21 +66,8 @@ impl AgentSessionPanel {
     /// is waiting, which is the state you actually need to act on.
     fn status_pill(&self, info: &AgentSessionInfo, cx: &App) -> AnyElement {
         let t = theme(cx);
-        let (color, label) = if !info.running {
-            (t.text_muted, "stopped".to_string())
-        } else if info.waiting {
-            (
-                t.warning,
-                if info.idle.is_empty() {
-                    "waiting".to_string()
-                } else {
-                    format!("waiting · {}", info.idle)
-                },
-            )
-        } else {
-            (t.success, "running".to_string())
-        };
-        self.chip(label, color, cx)
+        let activity = info.activity();
+        self.chip(activity.label(), activity.color(&t), cx)
     }
 
     fn asset_row(&self, asset: &okena_core::harness::AgentAsset, cx: &App) -> AnyElement {

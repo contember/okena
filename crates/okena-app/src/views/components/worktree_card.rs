@@ -9,7 +9,7 @@
 //! owns no state, and the three hosts are different types that each want their
 //! own click behaviour.
 
-use crate::theme::{theme, with_alpha};
+use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::ui_text_ms;
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
@@ -118,7 +118,36 @@ impl PushState {
     }
 }
 
-fn chip(text: String, color: u32, cx: &App) -> AnyElement {
+/// Colour and label for a pull request.
+///
+/// Coloured by state so a merged or closed PR does not read as work still
+/// waiting on you.
+pub fn pr_chip_style(number: u32, state: &PrState, t: &ThemeColors) -> (u32, String) {
+    match state {
+        PrState::Open => (t.success, format!("PR #{number}")),
+        PrState::Draft => (t.text_muted, format!("PR #{number} draft")),
+        PrState::Merged => (t.button_primary_bg, format!("PR #{number} merged")),
+        PrState::Closed => (t.text_muted, format!("PR #{number} closed")),
+    }
+}
+
+/// Colour and label for a pipeline's checks.
+pub fn ci_chip_style(
+    status: &CiStatus,
+    passed: usize,
+    failed: usize,
+    pending: usize,
+    t: &ThemeColors,
+) -> (u32, String) {
+    match status {
+        CiStatus::Success => (t.success, format!("checks {passed}/{}", passed + failed)),
+        CiStatus::Failure => (t.error, format!("{failed} failing")),
+        CiStatus::Pending => (t.warning, format!("{pending} pending")),
+    }
+}
+
+/// A small coloured label, the unit every checkout fact is shown in.
+pub fn chip(text: String, color: u32, cx: &App) -> AnyElement {
     div()
         .flex_shrink_0()
         .px(px(5.0))
@@ -163,22 +192,11 @@ pub fn render_worktree_card<V: 'static>(
         cx,
     ));
     if let Some((number, state)) = &w.pr {
-        // Coloured by state so a merged or closed PR does not read as work
-        // still waiting on you.
-        let (color, label) = match state {
-            PrState::Open => (t.success, format!("PR #{number}")),
-            PrState::Draft => (t.text_muted, format!("PR #{number} draft")),
-            PrState::Merged => (t.button_primary_bg, format!("PR #{number} merged")),
-            PrState::Closed => (t.text_muted, format!("PR #{number} closed")),
-        };
+        let (color, label) = pr_chip_style(*number, state, &t);
         chips.push(chip(label, color, cx));
     }
     if let Some((status, passed, failed, pending)) = &w.ci {
-        let (color, label) = match status {
-            CiStatus::Success => (t.success, format!("checks {passed}/{}", passed + failed)),
-            CiStatus::Failure => (t.error, format!("{failed} failing")),
-            CiStatus::Pending => (t.warning, format!("{pending} pending")),
-        };
+        let (color, label) = ci_chip_style(status, *passed, *failed, *pending, &t);
         chips.push(chip(label, color, cx));
     }
 

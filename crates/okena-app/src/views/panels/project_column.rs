@@ -170,32 +170,32 @@ pub struct ProjectColumn {
     /// (`must call prepaint before paint`) — the hover state can differ between
     /// prepaint and paint. State + `notify` re-renders a consistent tree.
     header_hovered: bool,
-    /// Everything the agent panel needs, supplied by the window once the daemon
+    /// Everything the info panels need, supplied by the window once the daemon
     /// connection is up. `None` in a column that cannot show one.
-    agent_panel_ctx: Option<crate::views::agent_session::AgentPanelContext>,
-    /// The agent panel for this column, built on first use.
-    agent_panel: Option<Entity<crate::views::agent_session::AgentSessionPanel>>,
+    info_panel_ctx: Option<crate::views::agent_session::InfoPanelContext>,
+    /// The info panel for this column, built on first use.
+    info_panel: Option<InfoPanel>,
     /// This column's own choice of info vs terminal, when it has made one.
     /// `None` follows the window-wide switch.
-    show_agent_info: Option<bool>,
+    show_info: Option<bool>,
     /// The window switch as this column last saw it. When it changes, the
-    /// column drops its override and follows — so "show info for all agents"
-    /// means all of them, not just the ones you had not touched.
+    /// column drops its override and follows — so "show info" means every
+    /// column, not just the ones you had not touched.
     last_window_info: bool,
     /// This column's rendered width, captured each frame. Drives whether the
     /// info panel can sit beside the terminal or has to replace it.
     column_width: f32,
     /// Width of the info panel when it sits beside the terminal.
-    agent_panel_width: f32,
+    info_panel_width: f32,
 }
 
-/// Default width of the session-info panel when it sits beside the terminal.
-const DEFAULT_AGENT_PANEL_WIDTH: f32 = 320.0;
+/// Default width of the info panel when it sits beside the terminal.
+const DEFAULT_INFO_PANEL_WIDTH: f32 = 320.0;
 /// Bounds on the drag. Narrower and the sections are unreadable; wider and the
 /// terminal it sits beside stops being usable, which is the thing you are
 /// actually working in.
-const MIN_AGENT_PANEL_WIDTH: f32 = 240.0;
-const MAX_AGENT_PANEL_WIDTH: f32 = 560.0;
+const MIN_INFO_PANEL_WIDTH: f32 = 240.0;
+const MAX_INFO_PANEL_WIDTH: f32 = 560.0;
 /// Below this column width the panel takes the whole column instead of sitting
 /// beside the terminal.
 ///
@@ -203,41 +203,86 @@ const MAX_AGENT_PANEL_WIDTH: f32 = 560.0;
 /// subtracted — a terminal squeezed under ~40 columns is worse than no terminal
 /// at all, which is what the side-by-side layout would otherwise produce in a
 /// narrow overview column.
-const AGENT_PANEL_SPLIT_MIN_COLUMN: f32 = MIN_AGENT_PANEL_WIDTH + 420.0;
+const INFO_PANEL_SPLIT_MIN_COLUMN: f32 = MIN_INFO_PANEL_WIDTH + 420.0;
 
 // Compile-time invariants for the constants above. Asserted rather than tested
 // because they are facts about the numbers, not behaviour: getting one wrong
 // should fail the build, not a test run.
 const _: () = {
-    assert!(MIN_AGENT_PANEL_WIDTH < DEFAULT_AGENT_PANEL_WIDTH);
-    assert!(DEFAULT_AGENT_PANEL_WIDTH < MAX_AGENT_PANEL_WIDTH);
+    assert!(MIN_INFO_PANEL_WIDTH < DEFAULT_INFO_PANEL_WIDTH);
+    assert!(DEFAULT_INFO_PANEL_WIDTH < MAX_INFO_PANEL_WIDTH);
     // A column at the threshold must fit the panel's default width, not just
     // its minimum.
-    assert!(AGENT_PANEL_SPLIT_MIN_COLUMN > DEFAULT_AGENT_PANEL_WIDTH);
+    assert!(INFO_PANEL_SPLIT_MIN_COLUMN > DEFAULT_INFO_PANEL_WIDTH);
     // And still leave the terminal beside it usable — otherwise the split
     // produces a terminal too narrow to work in, which is the whole reason a
     // narrow column takes the panel full-width instead.
-    assert!(AGENT_PANEL_SPLIT_MIN_COLUMN - MIN_AGENT_PANEL_WIDTH >= 400.0);
+    assert!(INFO_PANEL_SPLIT_MIN_COLUMN - MIN_INFO_PANEL_WIDTH >= 400.0);
 };
+
+/// Which info panel a column shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InfoKind {
+    /// An agent session: what it was started to do and what it produced.
+    Agent,
+    /// A repo or worktree: its git state, its worktrees, the agents on it.
+    Project,
+}
+
+/// Pick the info panel for a project.
+///
+/// Decided by what the project is, never by which overview it sits in. A
+/// session shown among the projects is still a session: the project panel
+/// would describe the directory it runs in rather than the work it is doing.
+fn info_kind(project: &ProjectData) -> InfoKind {
+    if crate::views::agent_session::session_kind(project).is_some() {
+        InfoKind::Agent
+    } else {
+        InfoKind::Project
+    }
+}
+
+/// A column's built info panel.
+#[derive(Clone)]
+enum InfoPanel {
+    Agent(Entity<crate::views::agent_session::AgentSessionPanel>),
+    Project(Entity<crate::views::project_info::ProjectInfoPanel>),
+}
+
+impl InfoPanel {
+    fn kind(&self) -> InfoKind {
+        match self {
+            InfoPanel::Agent(_) => InfoKind::Agent,
+            InfoPanel::Project(_) => InfoKind::Project,
+        }
+    }
+
+    fn view(&self) -> AnyView {
+        match self {
+            InfoPanel::Agent(panel) => panel.clone().into(),
+            InfoPanel::Project(panel) => panel.clone().into(),
+        }
+    }
+}
 
 /// Resolve info-vs-terminal for one column.
 ///
-/// Only a session has info to show: an ordinary project or a plain worktree
-/// keeps its terminal whatever the switch says. The check lives here rather
-/// than at the call site so it cannot be dropped by an edit to the caller —
-/// which is exactly how the switch once blanked every project's terminal.
+/// Only a column that can show a panel follows the switch. One without a panel
+/// context, or with nothing settled to describe (a worktree still being created
+/// or torn down), keeps its own content whatever the switch says. The check
+/// lives here rather than at the call site so an edit to the caller cannot drop
+/// it — which is exactly how a switch once blanked columns it had no panel for.
 ///
 /// Otherwise: a change to the window-wide switch wins and clears the column's
-/// override, so "show info for all agents" means all of them rather than all
-/// the ones you had not touched. While the switch holds still, the column's own
-/// choice wins.
-fn reconcile_agent_info(
-    is_session: bool,
+/// override, so "show info" means every column rather than every one you had
+/// not touched. While the switch holds still, the column's own choice wins.
+fn reconcile_info(
+    available: bool,
     column_choice: &mut Option<bool>,
     last_window: &mut bool,
     window: bool,
 ) -> bool {
-    if !is_session {
+    if !available {
         return false;
     }
     if window != *last_window {
@@ -366,12 +411,12 @@ impl ProjectColumn {
             hook_panel,
             tip_index: crate::views::tips::next_start_index(),
             header_hovered: false,
-            agent_panel_ctx: None,
-            agent_panel: None,
-            show_agent_info: None,
+            info_panel_ctx: None,
+            info_panel: None,
+            show_info: None,
             last_window_info: false,
             column_width: 0.0,
-            agent_panel_width: DEFAULT_AGENT_PANEL_WIDTH,
+            info_panel_width: DEFAULT_INFO_PANEL_WIDTH,
         }
     }
 
@@ -401,45 +446,60 @@ impl ProjectColumn {
         self.action_dispatcher = dispatcher;
     }
 
-    /// Supply what the agent panel needs. Called by the window once the daemon
+    /// Supply what the info panels need. Called by the window once the daemon
     /// connection is up; until then the column simply offers no info toggle.
-    pub fn set_agent_panel_context(&mut self, ctx: crate::views::agent_session::AgentPanelContext) {
-        self.agent_panel_ctx = Some(ctx);
+    pub fn set_info_panel_context(&mut self, ctx: crate::views::agent_session::InfoPanelContext) {
+        self.info_panel_ctx = Some(ctx);
     }
 
-    /// The agent panel for this column, built on first use.
-    fn agent_panel(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<crate::views::agent_session::AgentSessionPanel>> {
-        if let Some(panel) = self.agent_panel.clone() {
-            return Some(panel);
+    /// The info panel for this column, built on first use.
+    ///
+    /// Rebuilt when the project's kind no longer matches the panel built for
+    /// it, so a column never goes on describing what its project used to be.
+    fn info_panel(&mut self, project: &ProjectData, cx: &mut Context<Self>) -> Option<InfoPanel> {
+        let kind = info_kind(project);
+        if let Some(panel) = self.info_panel.as_ref().filter(|p| p.kind() == kind) {
+            return Some(panel.clone());
         }
-        let ctx = self.agent_panel_ctx.clone()?;
+        let ctx = self.info_panel_ctx.clone()?;
         let id = self.project_id.clone();
-        let panel = cx.new(|cx| {
-            crate::views::agent_session::AgentSessionPanel::new(
-                id,
-                crate::views::agent_session::PanelDensity::Embedded,
-                ctx,
-                cx,
-            )
-        });
-        self.agent_panel = Some(panel.clone());
+        let panel = match kind {
+            InfoKind::Agent => InfoPanel::Agent(cx.new(|cx| {
+                crate::views::agent_session::AgentSessionPanel::new(
+                    id,
+                    crate::views::agent_session::PanelDensity::Embedded,
+                    ctx,
+                    cx,
+                )
+            })),
+            InfoKind::Project => InfoPanel::Project(
+                cx.new(|cx| crate::views::project_info::ProjectInfoPanel::new(id, ctx, cx)),
+            ),
+        };
+        self.info_panel = Some(panel.clone());
         Some(panel)
+    }
+
+    /// Whether this column can show its info at all right now.
+    ///
+    /// A worktree being created or torn down has neither content for a panel
+    /// to sit beside nor anything settled to describe.
+    fn info_available(&self, content: ColumnContent) -> bool {
+        self.info_panel_ctx.is_some()
+            && matches!(content, ColumnContent::Layout | ColumnContent::Empty)
     }
 
     /// Whether this column is currently showing info rather than its terminal.
     ///
-    /// Reconciles the window-wide switch with this column's own override: a
-    /// change to the switch wins and clears the override, so flipping it always
-    /// affects every column.
-    fn resolve_show_agent_info(&mut self, cx: &App) -> bool {
-        let is_session = self.is_agent_session(cx);
-        let window_flag = self.workspace.read(cx).agents_show_info(self.window_id);
-        reconcile_agent_info(
-            is_session,
-            &mut self.show_agent_info,
+    /// Reconciles the switch of the grid on screen with this column's own
+    /// override: a change to the switch wins and clears the override, so
+    /// flipping it always affects every column.
+    fn resolve_show_info(&mut self, content: ColumnContent, cx: &App) -> bool {
+        let available = self.info_available(content);
+        let window_flag = self.workspace.read(cx).grid_show_info(self.window_id);
+        reconcile_info(
+            available,
+            &mut self.show_info,
             &mut self.last_window_info,
             window_flag,
         )
@@ -447,28 +507,28 @@ impl ProjectColumn {
 
     /// Whether the info panel has room to sit beside the terminal rather than
     /// replace it.
-    fn agent_panel_fits_beside(&self) -> bool {
-        self.column_width >= AGENT_PANEL_SPLIT_MIN_COLUMN
+    fn info_panel_fits_beside(&self) -> bool {
+        self.column_width >= INFO_PANEL_SPLIT_MIN_COLUMN
     }
 
     /// Apply an info-panel drag. Clamped so it can neither vanish nor swallow
     /// the terminal beside it.
-    pub fn set_agent_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let clamped = width.clamp(MIN_AGENT_PANEL_WIDTH, MAX_AGENT_PANEL_WIDTH);
-        if (self.agent_panel_width - clamped).abs() > f32::EPSILON {
-            self.agent_panel_width = clamped;
+    pub fn set_info_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let clamped = width.clamp(MIN_INFO_PANEL_WIDTH, MAX_INFO_PANEL_WIDTH);
+        if (self.info_panel_width - clamped).abs() > f32::EPSILON {
+            self.info_panel_width = clamped;
             cx.notify();
         }
     }
 
     /// Drag handle between the terminal and the info panel.
-    fn render_agent_panel_handle(&self, cx: &Context<Self>) -> AnyElement {
+    fn render_info_panel_handle(&self, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         let project_id = self.project_id.clone();
-        let width = self.agent_panel_width;
+        let width = self.info_panel_width;
         let active_drag = self.active_drag.clone();
         div()
-            .id("agent-panel-resize")
+            .id("info-panel-resize")
             .w(px(4.0))
             .h_full()
             .flex_shrink_0()
@@ -477,7 +537,7 @@ impl ProjectColumn {
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, _window, _cx| {
-                    *active_drag.borrow_mut() = Some(DragState::AgentPanel {
+                    *active_drag.borrow_mut() = Some(DragState::InfoPanel {
                         project_id: project_id.clone(),
                         initial_mouse_x: f32::from(event.position.x),
                         initial_width: width,
@@ -487,25 +547,51 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    /// The resolved state, without reconciling.
+    /// The column's content with its info panel.
     ///
-    /// `render` reconciles once per frame before anything reads this, so the
-    /// header sees the same answer the body did.
-    fn agent_info_showing(&self, cx: &App) -> bool {
-        self.is_agent_session(cx)
-            && self
-                .show_agent_info
-                .unwrap_or_else(|| self.workspace.read(cx).agents_show_info(self.window_id))
-    }
+    /// With room, the panel sits beside the content so you can watch the
+    /// terminal while you read the context; in a narrow column it takes the
+    /// whole width, since a terminal squeezed to a handful of columns is worse
+    /// than none. `main` is only built when it will actually be shown.
+    fn render_with_info(
+        &mut self,
+        project: &ProjectData,
+        main: impl FnOnce(&mut Self, &mut Context<Self>) -> Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let beside = self.info_panel_fits_beside();
+        let width = self.info_panel_width;
+        let panel = self.info_panel(project, cx).map(|panel| {
+            div()
+                .id("project-column-info")
+                .when(beside, |d| {
+                    d.w(px(width))
+                        .flex_shrink_0()
+                        .border_l_1()
+                        .border_color(rgb(t.border))
+                })
+                .when(!beside, |d| d.flex_1())
+                .h_full()
+                .min_h_0()
+                .overflow_hidden()
+                .child(panel.view())
+                .into_any_element()
+        });
 
-    /// Whether this column's project is an agent session, and so has info worth
-    /// showing in place of its terminal.
-    fn is_agent_session(&self, cx: &App) -> bool {
-        self.workspace
-            .read(cx)
-            .project(&self.project_id)
-            .and_then(crate::views::agent_session::session_kind)
-            .is_some()
+        let mut row = div()
+            .id("project-column-content")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .overflow_hidden();
+        if beside && let Some(main) = main(self, cx) {
+            row = row
+                .child(div().flex_1().min_w_0().h_full().child(main))
+                .child(self.render_info_panel_handle(cx));
+        }
+        row.children(panel).into_any_element()
     }
 
     /// Sync the action dispatcher to the service panel entity.
@@ -805,7 +891,14 @@ impl ProjectColumn {
             })
     }
 
-    fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `info` is whether the column is showing its info, or `None` when it
+    /// cannot show any — the toggle only exists where it would do something.
+    fn render_header(
+        &self,
+        project: &ProjectData,
+        info: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
@@ -1058,14 +1151,17 @@ impl ProjectColumn {
             .into_any_element()
         });
 
-        // Agent sessions get an always-visible info toggle rather than one that
-        // appears on hover: in the agents overview it is the only way to reach
-        // the session's context, and a control you have to discover by hovering
-        // is one most people never find.
-        let agent_info_toggle: Option<AnyElement> = self.is_agent_session(cx).then(|| {
-            let showing = self.agent_info_showing(cx);
+        // An always-visible info toggle rather than one that appears on hover:
+        // it is the way to a project's or session's context from its column,
+        // and a control you have to discover by hovering is one most people
+        // never find.
+        let info_toggle: Option<AnyElement> = info.map(|showing| {
+            let (show_tip, hide_tip) = match info_kind(project) {
+                InfoKind::Agent => ("Show session info", "Hide session info"),
+                InfoKind::Project => ("Show project info", "Hide project info"),
+            };
             div()
-                .id("agent-info-toggle")
+                .id("info-toggle")
                 .cursor_pointer()
                 .px(px(5.0))
                 .h(px(24.0))
@@ -1082,7 +1178,7 @@ impl ProjectColumn {
                     cx.stop_propagation();
                     // An explicit override for this column only; it goes back
                     // to following the switch the next time that moves.
-                    this.show_agent_info = Some(!showing);
+                    this.show_info = Some(!showing);
                     cx.notify();
                 }))
                 .child(
@@ -1096,12 +1192,7 @@ impl ProjectColumn {
                         })),
                 )
                 .tooltip(move |window, cx| {
-                    Tooltip::new(if showing {
-                        "Show the terminal"
-                    } else {
-                        "Show session info"
-                    })
-                    .build(window, cx)
+                    Tooltip::new(if showing { hide_tip } else { show_tip }).build(window, cx)
                 })
                 .into_any_element()
         });
@@ -1117,7 +1208,7 @@ impl ProjectColumn {
                     // controls into the git row (to the left of here), so any
                     // earlier position would put this before them in one column
                     // and after them in another.
-                    .when_some(agent_info_toggle, |d, control| d.child(control))
+                    .when_some(info_toggle, |d, control| d.child(control))
                     .child({
                         self.hook_panel
                             .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))
@@ -1500,8 +1591,11 @@ impl Render for ProjectColumn {
                 // initiating client's optimistic tracker — same pair the sidebar
                 // row reads for its "Closing…" label.
                 let is_closing = project.is_closing || workspace.is_project_closing(&project.id);
-                let show_agent_info = self.resolve_show_agent_info(cx);
                 let content_kind = column_content(&project, is_closing);
+                // Reconciled once per frame, before the header reads it, so
+                // the toggle and the body always agree.
+                let show_info = self.resolve_show_info(content_kind, cx);
+                let info_state = self.info_available(content_kind).then_some(show_info);
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
@@ -1521,53 +1615,29 @@ impl Render for ProjectColumn {
 
                 // Content: layout, closing/creating placeholder, or empty bookmark state
                 let content = match content_kind {
-                    // An agent session showing its info. With room, the panel
-                    // sits beside the terminal so you can watch the agent work
-                    // while you read its context; in a narrow column it takes
-                    // the whole width, since a terminal squeezed to a handful
-                    // of columns is worse than none.
-                    ColumnContent::Layout if show_agent_info => {
-                        let beside = self.agent_panel_fits_beside();
-                        let panel = self.agent_panel(cx).map(|panel| {
-                            div()
-                                .id("project-column-agent-info")
-                                .when(beside, |d| {
-                                    d.w(px(self.agent_panel_width))
-                                        .flex_shrink_0()
-                                        .border_l_1()
-                                        .border_color(rgb(t.border))
+                    // Showing its info: the panel beside the terminal, or in
+                    // place of it when the column is too narrow for both.
+                    ColumnContent::Layout if show_info => {
+                        let path = project.path.clone();
+                        self.render_with_info(
+                            &project,
+                            move |this, cx| {
+                                this.ensure_layout_container(path, cx);
+                                this.layout_container.clone().map(|container| {
+                                    AnyView::from(container)
+                                        .cached(StyleRefinement::default().size_full())
+                                        .into_any_element()
                                 })
-                                .when(!beside, |d| d.flex_1())
-                                .h_full()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .child(panel)
-                                .into_any_element()
-                        });
-
-                        let mut row = div()
-                            .id("project-column-content")
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_row()
-                            .overflow_hidden();
-
-                        if beside {
-                            self.ensure_layout_container(project.path.clone(), cx);
-                            row = row
-                                .when_some(self.layout_container.clone(), |d, container| {
-                                    d.child(
-                                        div().flex_1().min_w_0().h_full().child(
-                                            AnyView::from(container)
-                                                .cached(StyleRefinement::default().size_full()),
-                                        ),
-                                    )
-                                })
-                                .child(self.render_agent_panel_handle(cx));
-                        }
-                        row.children(panel).into_any_element()
+                            },
+                            cx,
+                        )
                     }
+                    // A project with no terminal still has a repo to describe.
+                    ColumnContent::Empty if show_info => self.render_with_info(
+                        &project,
+                        |this, cx| Some(this.render_empty_state(cx).into_any_element()),
+                        cx,
+                    ),
                     ColumnContent::Layout => {
                         self.ensure_layout_container(project.path.clone(), cx);
 
@@ -1633,7 +1703,7 @@ impl Render for ProjectColumn {
                         .absolute()
                         .size_full(),
                     )
-                    .child(self.render_header(&project, cx))
+                    .child(self.render_header(&project, info_state, cx))
                     .child(content)
                     // Hook panel (delegated to HookPanel entity)
                     .child(self.hook_panel.update(cx, |hp, cx| hp.render_panel(&t, cx)))
@@ -1944,10 +2014,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod agent_info_tests {
+mod info_tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::reconcile_agent_info;
+    use super::{InfoKind, info_kind, reconcile_info};
 
     /// Run the real rule and report what it left behind.
     fn resolve(
@@ -1959,24 +2029,58 @@ mod agent_info_tests {
     }
 
     fn resolve_for(
-        is_session: bool,
+        available: bool,
         column_choice: Option<bool>,
         last_window: bool,
         window: bool,
     ) -> (bool, Option<bool>, bool) {
         let mut choice = column_choice;
         let mut last = last_window;
-        let showing = reconcile_agent_info(is_session, &mut choice, &mut last, window);
+        let showing = reconcile_info(available, &mut choice, &mut last, window);
         (showing, choice, last)
     }
 
+    fn project(json: serde_json::Value) -> crate::workspace::state::ProjectData {
+        serde_json::from_value(json).unwrap()
+    }
+
     #[test]
-    fn an_ordinary_project_never_shows_the_panel() {
-        // The regression: the overview-wide switch replaced every project's
-        // terminal with an empty session panel, including the repos and plain
-        // worktrees that have no session at all.
+    fn a_column_with_no_panel_to_show_never_shows_one() {
+        // The regression: the overview-wide switch replaced terminals with an
+        // empty panel in columns that had nothing to put there.
         assert!(!resolve_for(false, None, false, true).0);
         assert!(!resolve_for(false, Some(true), true, true).0);
+    }
+
+    #[test]
+    fn a_session_gets_the_session_panel_wherever_it_is_shown() {
+        let spec = project(serde_json::json!({
+            "id": "s1", "name": "add-login (spec)", "path": "/specs",
+            "spec_change": "add-login",
+        }));
+        assert_eq!(info_kind(&spec), InfoKind::Agent);
+    }
+
+    #[test]
+    fn repos_and_worktrees_get_the_project_panel() {
+        let repo = project(serde_json::json!({ "id": "p1", "name": "okena", "path": "/p" }));
+        assert_eq!(info_kind(&repo), InfoKind::Project);
+
+        // A worktree carries its task, but it is a checkout, not a session.
+        let worktree = project(serde_json::json!({
+            "id": "wt1", "name": "okena (QBL-1)", "path": "/p/wt",
+            "worktree_info": {
+                "parent_project_id": "p1",
+                "main_repo_path": "/p",
+                "worktree_path": "/p/wt",
+                "branch_name": "feat/x",
+            },
+            "task_ref": {
+                "id": { "provider": "linear", "external_id": "u1" },
+                "display_key": "QBL-1", "title": "t", "url": "http://x",
+            },
+        }));
+        assert_eq!(info_kind(&worktree), InfoKind::Project);
     }
 
     #[test]

@@ -103,6 +103,42 @@ pub struct AgentSessionInfo {
     pub workspaces: Vec<RelatedWorkspace>,
 }
 
+/// What a session is doing right now, as its terminal shows it.
+///
+/// The terminal's word rather than the agent's: an agent that stopped reporting
+/// still shows as waiting when its prompt is waiting, which is the state you
+/// actually need to act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionActivity {
+    /// No agent running — the session is on a bare shell, or has no terminal.
+    Stopped,
+    /// Sitting at a prompt, idle for `idle` (pre-formatted, possibly empty).
+    Waiting {
+        idle: String,
+    },
+    Running,
+}
+
+impl SessionActivity {
+    pub fn label(&self) -> String {
+        match self {
+            SessionActivity::Stopped => "stopped".to_string(),
+            SessionActivity::Waiting { idle } if idle.is_empty() => "waiting".to_string(),
+            SessionActivity::Waiting { idle } => format!("waiting · {idle}"),
+            SessionActivity::Running => "running".to_string(),
+        }
+    }
+
+    /// Chip colour: muted when nothing runs, a warning when it wants you.
+    pub fn color(&self, t: &crate::theme::ThemeColors) -> u32 {
+        match self {
+            SessionActivity::Stopped => t.text_muted,
+            SessionActivity::Waiting { .. } => t.warning,
+            SessionActivity::Running => t.success,
+        }
+    }
+}
+
 /// Whether `candidate` belongs to the same task as the session, and isn't the
 /// session itself.
 ///
@@ -262,6 +298,20 @@ impl AgentSessionInfo {
         (None, false, false, String::new())
     }
 
+    /// What the session is doing right now. Stopped wins over waiting: a
+    /// prompt with no agent behind it is a shell, not an agent waiting on you.
+    pub fn activity(&self) -> SessionActivity {
+        if !self.running {
+            SessionActivity::Stopped
+        } else if self.waiting {
+            SessionActivity::Waiting {
+                idle: self.idle.clone(),
+            }
+        } else {
+            SessionActivity::Running
+        }
+    }
+
     /// The terminal to show for this session, if any.
     pub fn visible_terminal_id(ws: &Workspace, project_id: &str) -> Option<String> {
         ws.project(project_id)?
@@ -273,8 +323,37 @@ impl AgentSessionInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentSessionKind, is_related, session_kind};
+    use super::{AgentSessionInfo, AgentSessionKind, SessionActivity, is_related, session_kind};
     use okena_core::tasks::{TaskId, TaskRef};
+
+    fn info(running: bool, waiting: bool, idle: &str) -> AgentSessionInfo {
+        AgentSessionInfo {
+            project_id: "s1".into(),
+            name: "s".into(),
+            kind: AgentSessionKind::Plain,
+            root: "/p".into(),
+            agent: None,
+            mcp: false,
+            running,
+            waiting,
+            idle: idle.into(),
+            status: None,
+            assets: Vec::new(),
+            workspaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_prompt_with_no_agent_behind_it_is_stopped_not_waiting() {
+        assert_eq!(info(false, true, "3m").activity(), SessionActivity::Stopped);
+    }
+
+    #[test]
+    fn a_waiting_agent_says_how_long_it_has_waited() {
+        assert_eq!(info(true, true, "3m").activity().label(), "waiting · 3m");
+        assert_eq!(info(true, true, "").activity().label(), "waiting");
+        assert_eq!(info(true, false, "").activity(), SessionActivity::Running);
+    }
 
     fn task(external: &str, key: &str) -> TaskRef {
         TaskRef {

@@ -484,6 +484,26 @@ impl Sidebar {
                                 cx,
                             ));
                 }
+                let showing_info = self
+                    .workspace
+                    .read(cx)
+                    .data()
+                    .window(window_id)
+                    .is_some_and(|w| w.projects_show_info);
+                panel = panel
+                    .child(okena_ui::menu::menu_separator(&t))
+                    .child(self.menu_toggle(
+                        "project-show-info",
+                        "Show project info",
+                        showing_info,
+                        "icons/panel-right.svg",
+                        move |this, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.set_projects_show_info(window_id, !showing_info, cx);
+                            });
+                        },
+                        cx,
+                    ));
             }
             SidebarList::Agents => {
                 let by_activity = self

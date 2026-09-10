@@ -439,14 +439,13 @@ impl HarnessPane {
 
     /// Focus an existing session for a task and leave the harness view.
     pub(super) fn open_session(&mut self, project_id: String, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-            });
-            cx.notify();
-        });
-        okena_workspace::harness_state::set_active_harness(self.window_id, None, cx);
+        crate::views::components::project_nav::focus_project(
+            &self.workspace,
+            &self.focus_manager,
+            self.window_id,
+            &project_id,
+            cx,
+        );
         cx.notify();
     }
 
@@ -1319,21 +1318,7 @@ impl HarnessPane {
 
         // Terminal state, not the agent's claim: one that stopped reporting
         // still shows as waiting when its prompt is waiting.
-        let (status_color, status) = if !info.running {
-            (t.text_muted, "stopped".to_string())
-        } else if info.waiting {
-            (
-                t.warning,
-                if info.idle.is_empty() {
-                    "waiting".to_string()
-                } else {
-                    format!("waiting · {}", info.idle)
-                },
-            )
-        } else {
-            (t.success, "running".to_string())
-        };
-
+        let activity = info.activity();
         let mut chips = vec![
             self.chip(
                 if is_work { "work" } else { "breakdown" }.to_string(),
@@ -1344,7 +1329,7 @@ impl HarnessPane {
                 },
                 cx,
             ),
-            self.chip(status, status_color, cx),
+            self.chip(activity.label(), activity.color(&t), cx),
         ];
         if let Some(agent) = &info.agent {
             chips.push(self.chip(agent.clone(), t.text_secondary, cx));
