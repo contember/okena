@@ -171,6 +171,8 @@ impl SettingsPanel {
                 id: format!("{:?}", style).into(),
                 label: style.display_name(),
                 selected: *style == current,
+                disabled: false,
+                tooltip: None,
             })
             .collect();
 
@@ -197,6 +199,8 @@ impl SettingsPanel {
                 id: format!("{:?}", density).into(),
                 label: density.display_name(),
                 selected: *density == current,
+                disabled: false,
+                tooltip: None,
             })
             .collect();
 
