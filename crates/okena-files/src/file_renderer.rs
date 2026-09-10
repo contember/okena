@@ -1,4 +1,8 @@
-//! Reusable renderer for complete image and font files.
+//! Reusable renderer for complete image, font, and PDF files.
+
+mod pdf;
+
+use pdf::PdfPreview;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -17,6 +21,7 @@ const MAX_SVG_PIXELS: u64 = 64 * 1024 * 1024;
 pub enum FileRendererKind {
     Image { is_svg: bool },
     Font,
+    Pdf,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -132,6 +137,7 @@ struct FontData {
 
 enum PreparedContent {
     Image(DecodedImage),
+    Pdf(PdfPreview),
     Font {
         data: Arc<FontData>,
         bytes: Arc<Vec<u8>>,
@@ -149,8 +155,10 @@ impl PreparedFile {
     }
 
     pub fn release(self, cx: &mut App) {
-        if let PreparedContent::Image(image) = self.content {
-            release_image_assets(image, cx);
+        match self.content {
+            PreparedContent::Image(image) => release_image_assets(image, cx),
+            PreparedContent::Pdf(pdf) => pdf.release(cx),
+            PreparedContent::Font { .. } => {}
         }
     }
 }
@@ -159,12 +167,15 @@ impl PreparedFile {
 enum RenderedContent {
     Image(DecodedImage),
     Font(Arc<FontData>),
+    Pdf(PdfPreview),
 }
 
 pub struct FileRenderer {
     id: SharedString,
     content: Option<RenderedContent>,
     image_view: ImageViewState,
+    pdf_render_in_flight: bool,
+    pdf_viewport: Option<(Size<Pixels>, f32)>,
 }
 
 impl FileRenderer {
@@ -175,6 +186,8 @@ impl FileRenderer {
             })
         } else if font_format_for_path(path).is_some() {
             Some(FileRendererKind::Font)
+        } else if pdf::is_pdf(path) {
+            Some(FileRendererKind::Pdf)
         } else {
             None
         }
@@ -199,6 +212,8 @@ impl FileRenderer {
             prepare_image(path, bytes, svg_renderer)
         } else if font_format_for_path(path).is_some() {
             prepare_font(path, bytes)
+        } else if pdf::is_pdf(path) {
+            pdf::prepare(bytes)
         } else {
             Err("No preview is available for this binary file".to_string())
         }
@@ -214,6 +229,8 @@ impl FileRenderer {
             id: id.into(),
             content: Some(content),
             image_view: ImageViewState::default(),
+            pdf_render_in_flight: false,
+            pdf_viewport: None,
         }
     }
 
@@ -228,12 +245,17 @@ impl FileRenderer {
     }
 
     pub fn release_assets(&mut self, cx: &mut App) {
-        if let Some(RenderedContent::Image(image)) = self.content.take() {
-            release_image_assets(image, cx);
+        match self.content.take() {
+            Some(RenderedContent::Image(image)) => release_image_assets(image, cx),
+            Some(RenderedContent::Pdf(pdf)) => pdf.release(cx),
+            _ => {}
         }
     }
 
     pub fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if self.zoom_pdf_by(factor, cx) {
+            return;
+        }
         if !matches!(self.content, Some(RenderedContent::Image(_))) {
             return;
         }
@@ -248,21 +270,32 @@ impl FileRenderer {
     }
 
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        if !matches!(self.content, Some(RenderedContent::Image(_))) {
+        if !matches!(
+            self.content,
+            Some(RenderedContent::Image(_) | RenderedContent::Pdf(_))
+        ) {
             return;
         }
         self.image_view.set_zoom(zoom);
         cx.notify();
         self.maybe_rerender_svg(cx);
+        self.maybe_render_pdf(cx);
     }
 
     pub fn fit(&mut self, cx: &mut Context<Self>) {
         self.image_view.reset_to_fit();
+        self.maybe_render_pdf(cx);
         cx.notify();
     }
 
     fn start_pan(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if !matches!(self.content, Some(RenderedContent::Image(_))) {
+        if !matches!(
+            self.content,
+            Some(RenderedContent::Image(_) | RenderedContent::Pdf(_))
+        ) {
+            return;
+        }
+        if matches!(self.content, Some(RenderedContent::Pdf(_))) && self.image_view.auto_fit {
             return;
         }
         self.image_view.is_panning = true;
@@ -402,7 +435,30 @@ impl FileRenderer {
         };
         let (natural_width, natural_height) = image.dimensions();
         let view = self.image_view.clone();
-        let (background, checker) = match view.background {
+        self.render_bitmap(
+            image.into(),
+            (!view.auto_fit).then(|| {
+                size(
+                    Pixels::from(natural_width) * view.zoom,
+                    Pixels::from(natural_height) * view.zoom,
+                )
+            }),
+            view.background,
+            t,
+            cx,
+        )
+    }
+
+    fn render_bitmap(
+        &self,
+        image: ImageSource,
+        display_size: Option<Size<Pixels>>,
+        background: PreviewBackground,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = self.image_view.clone();
+        let (background, checker) = match background {
             PreviewBackground::Light => (0xFFFFFF, false),
             PreviewBackground::Dark => (0x111111, false),
             PreviewBackground::Checker => (0x808080, true),
@@ -418,20 +474,20 @@ impl FileRenderer {
                 .child("Cannot decode image")
                 .into_any_element()
         });
-        let image = if view.auto_fit {
+        let image = if let Some(display_size) = display_size {
             image
                 .object_fit(ObjectFit::Contain)
-                .max_w_full()
-                .max_h_full()
+                .w(display_size.width)
+                .h(display_size.height)
+                .flex_shrink_0()
+                .ml(view.pan.x)
+                .mt(view.pan.y)
                 .into_any_element()
         } else {
             image
                 .object_fit(ObjectFit::Contain)
-                .w(px(natural_width as f32 * view.zoom))
-                .h(px(natural_height as f32 * view.zoom))
-                .flex_shrink_0()
-                .ml(view.pan.x)
-                .mt(view.pan.y)
+                .max_w_full()
+                .max_h_full()
                 .into_any_element()
         };
         let cursor = if view.auto_fit {
@@ -629,6 +685,7 @@ impl FileRenderer {
 
 impl Render for FileRenderer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.maybe_render_pdf(cx);
         let t = theme(cx);
         match self.content.as_ref() {
             Some(RenderedContent::Image(_)) => v_flex()
@@ -639,6 +696,7 @@ impl Render for FileRenderer {
                 .child(self.render_image(&t, cx))
                 .into_any_element(),
             Some(RenderedContent::Font(data)) => render_font(data.clone(), &t, cx),
+            Some(RenderedContent::Pdf(_)) => self.render_pdf(&t, cx),
             None => unavailable("File preview not available", &t, cx),
         }
     }
@@ -849,6 +907,7 @@ fn prepare_font(path: &Path, bytes: Vec<u8>) -> Result<PreparedFile, String> {
 fn install_prepared(prepared: PreparedFile, cx: &mut App) -> RenderedContent {
     match prepared.content {
         PreparedContent::Image(image) => RenderedContent::Image(image),
+        PreparedContent::Pdf(pdf) => RenderedContent::Pdf(pdf),
         PreparedContent::Font { data, bytes } => {
             register_font_bytes(cx, &bytes);
             RenderedContent::Font(data)

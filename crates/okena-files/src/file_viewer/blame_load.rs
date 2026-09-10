@@ -44,7 +44,7 @@ impl FileViewer {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
-        if tab.relative_path.is_empty() || tab.revision.is_some() {
+        if tab.relative_path.is_empty() || tab.revision.is_some() || tab.is_pdf {
             return;
         }
         if matches!(

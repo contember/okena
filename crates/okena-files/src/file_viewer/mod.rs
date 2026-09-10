@@ -154,6 +154,7 @@ pub(super) struct FileViewerTab {
     pub file_renderer: Option<Entity<crate::file_renderer::FileRenderer>>,
     /// True for font files (otf/ttf/woff/woff2).
     pub is_font: bool,
+    pub is_pdf: bool,
     /// One-based source position requested by the link that opened this tab.
     pub target_line: Option<usize>,
     pub target_column: Option<usize>,
@@ -190,6 +191,15 @@ pub enum FileHistoryLoadState {
 }
 
 impl FileViewerTab {
+    fn freshness_version(&self) -> Option<(u64, Option<u64>)> {
+        (!self.is_empty() && !self.loading && self.revision.is_none())
+            .then_some((self.load_generation, self.modified_at))
+    }
+
+    fn needs_reload(&self, version: (u64, Option<u64>), modified_at: Option<u64>) -> bool {
+        self.freshness_version() == Some(version) && modified_at != self.modified_at
+    }
+
     fn source_row_for_line(&self, line: usize) -> usize {
         let logical_line = line.saturating_sub(1);
         self.source_rows
@@ -236,6 +246,7 @@ impl FileViewerTab {
             is_svg: false,
             file_renderer: None,
             is_font: false,
+            is_pdf: false,
             target_line: None,
             target_column: None,
         }
@@ -253,6 +264,7 @@ impl FileViewerTab {
             Some(crate::file_renderer::FileRendererKind::Image { is_svg: true })
         );
         let is_font = renderer_kind == Some(crate::file_renderer::FileRendererKind::Font);
+        let is_pdf = renderer_kind == Some(crate::file_renderer::FileRendererKind::Pdf);
         let is_markdown = !is_image && !is_font && Self::is_markdown_file(&file_path);
         Self {
             file_path,
@@ -295,6 +307,7 @@ impl FileViewerTab {
             is_svg,
             file_renderer: None,
             is_font,
+            is_pdf,
             target_line: None,
             target_column: None,
         }
@@ -942,7 +955,7 @@ impl FileViewer {
             // Theme changed — re-highlight without reloading. Raster image
             // and font tabs have no highlighted content; SVG tabs do (the
             // source-view XML), so they need the rehighlight too.
-            if rehighlight && !tab.is_font && (!tab.is_image || tab.is_svg) {
+            if rehighlight && !tab.is_font && !tab.is_pdf && (!tab.is_image || tab.is_svg) {
                 tab.do_highlight_content(&tab.file_path.clone(), &self.syntax_set, self.is_dark);
                 if let Some(alternate) = tab.json_alternate.as_mut() {
                     alternate.highlighted_lines = None;
@@ -1210,12 +1223,11 @@ impl FileViewer {
         self.last_change_check = std::time::Instant::now();
 
         let tab = &self.tabs[self.active_tab];
-        if tab.is_empty() || tab.revision.is_some() {
+        let Some(version) = tab.freshness_version() else {
             return;
-        }
+        };
 
         let relative_path = tab.relative_path.clone();
-        let old_mtime = tab.modified_at;
         let fs = self.project_fs.clone();
         let path_for_request = relative_path.clone();
         let generation = self.scope_generation;
@@ -1233,12 +1245,13 @@ impl FileViewer {
                 this.freshness_check_in_flight = false;
                 match result {
                     Ok(metadata)
-                        if metadata.modified_at_millis != old_mtime
-                            && this
-                                .tabs
-                                .iter()
-                                .find(|tab| tab.relative_path == relative_path)
-                                .is_some_and(|tab| tab.revision.is_none()) =>
+                        if this
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.relative_path == relative_path)
+                            .is_some_and(|tab| {
+                                tab.needs_reload(version, metadata.modified_at_millis)
+                            }) =>
                     {
                         this.spawn_tab_load(relative_path, cx);
                     }
@@ -1546,15 +1559,8 @@ impl FileViewer {
         }
         let fs = self.project_fs.clone();
         let rel = relative_path.clone();
-        // Image / font detection is driven purely by extension, so we can
-        // decide the load strategy off-thread without holding the tab borrow.
         let asset_path = PathBuf::from(&relative_path);
         let renderer_kind = crate::file_renderer::FileRenderer::kind_for_path(&asset_path);
-        let is_image = matches!(
-            renderer_kind,
-            Some(crate::file_renderer::FileRendererKind::Image { .. })
-        );
-        let is_font = renderer_kind == Some(crate::file_renderer::FileRendererKind::Font);
         let svg_renderer = cx.svg_renderer();
         let syntax_set = self.syntax_set.clone();
         let is_dark = self.is_dark;
@@ -1563,7 +1569,7 @@ impl FileViewer {
                 .background_executor()
                 .spawn(async move {
                     let metadata = fs.file_metadata(&rel)?;
-                    let content = if is_image || is_font {
+                    let content = if renderer_kind.is_some() {
                         if metadata.size > crate::file_renderer::MAX_RENDERED_FILE_SIZE {
                             return Err(format!(
                                 "File too large ({} bytes). Maximum size is 20 MB.",
@@ -1571,11 +1577,7 @@ impl FileViewer {
                             ));
                         }
                         let bytes = fs.read_file_bytes(&rel)?;
-                        if is_image {
-                            loading::build_image_content(&asset_path, bytes, &svg_renderer)?
-                        } else {
-                            loading::build_font_content(&asset_path, bytes, &svg_renderer)?
-                        }
+                        loading::build_rendered_content(&asset_path, bytes, &svg_renderer)?
                     } else {
                         if metadata.size > MAX_FILE_SIZE {
                             return Err(format!(
@@ -1728,6 +1730,37 @@ mod tests {
 
     fn paths(tabs: &[FileViewerTab]) -> Vec<&str> {
         tabs.iter().map(|t| t.relative_path.as_str()).collect()
+    }
+
+    #[test]
+    fn freshness_does_not_restart_initial_load_or_reload() {
+        let mut tab = tab("document.pdf");
+        assert!(tab.freshness_version().is_none());
+        assert!(!tab.needs_reload((0, None), Some(100)));
+
+        tab.loading = false;
+        tab.modified_at = Some(100);
+        let version = tab.freshness_version().unwrap();
+        assert!(!tab.needs_reload(version, Some(100)));
+        assert!(tab.needs_reload(version, Some(200)));
+
+        tab.loading = true;
+        tab.load_generation += 1;
+        assert!(tab.freshness_version().is_none());
+        assert!(!tab.needs_reload(version, Some(200)));
+    }
+
+    #[test]
+    fn freshness_discards_metadata_from_before_a_completed_reload() {
+        let mut tab = tab("document.pdf");
+        tab.loading = false;
+        tab.modified_at = Some(100);
+        let old_version = tab.freshness_version().unwrap();
+        tab.load_generation += 1;
+        tab.modified_at = Some(200);
+        assert!(!tab.needs_reload(old_version, Some(200)));
+        assert!(!tab.needs_reload(old_version, Some(300)));
+        assert!(tab.needs_reload(tab.freshness_version().unwrap(), Some(300)));
     }
 
     #[::core::prelude::v1::test]
