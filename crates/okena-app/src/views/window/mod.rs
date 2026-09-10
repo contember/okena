@@ -4,6 +4,7 @@ mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
+mod view_mode_bar;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
@@ -944,8 +945,8 @@ impl WindowView {
                 window_id,
             }
         });
-        let agent_panel_ctx = self.local_daemon_action_client(cx).ok().map(|client| {
-            crate::views::agent_session::AgentPanelContext {
+        let info_panel_ctx = self.local_daemon_action_client(cx).ok().map(|client| {
+            crate::views::agent_session::InfoPanelContext {
                 client,
                 request_broker: self.request_broker.clone(),
                 workspace: self.workspace.clone(),
@@ -973,11 +974,11 @@ impl WindowView {
                 cx,
             );
             col.set_action_dispatcher(action_dispatcher);
-            // Lets an agent-session column swap its terminal for the session's
-            // info. Absent until the daemon connection is up, in which case the
-            // column simply offers no toggle.
-            if let Some(ctx) = agent_panel_ctx {
-                col.set_agent_panel_context(ctx);
+            // Lets the column show its project's or session's info beside its
+            // terminal. Absent until the daemon connection is up, in which case
+            // the column simply offers no toggle.
+            if let Some(ctx) = info_panel_ctx {
+                col.set_info_panel_context(ctx);
             }
             // Observe workspace for remote service state changes
             // (instead of local ServiceManager which has no data for remote projects)

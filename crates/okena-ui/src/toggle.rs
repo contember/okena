@@ -10,6 +10,10 @@ pub struct Segment<'a> {
     pub id: SharedString,
     pub label: &'a str,
     pub selected: bool,
+    /// Shown but not selectable — an option that exists but isn't available
+    /// yet. Pair with a `tooltip` saying why, or it reads as broken.
+    pub disabled: bool,
+    pub tooltip: Option<SharedString>,
 }
 
 /// Segmented control — a row of mutually exclusive options in one pill.
@@ -37,10 +41,10 @@ where
 
     for (i, seg) in segments.iter().enumerate() {
         let on_select = on_select.clone();
+        let tooltip = seg.tooltip.clone();
         container = container.child(
             div()
                 .id(ElementId::Name(format!("{}-{}", id, seg.id).into()))
-                .cursor_pointer()
                 .px(px(9.0))
                 .py(px(3.0))
                 .rounded(px(3.0))
@@ -50,13 +54,26 @@ where
                         .text_color(rgb(t.text_primary))
                         .font_weight(FontWeight::MEDIUM)
                 })
-                .when(!seg.selected, |el| {
-                    el.text_color(rgb(t.text_muted))
+                .when(seg.disabled, |el| {
+                    el.cursor_default()
+                        .text_color(with_alpha(t.text_muted, 0.5))
+                })
+                .when(!seg.selected && !seg.disabled, |el| {
+                    el.cursor_pointer()
+                        .text_color(rgb(t.text_muted))
                         .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_secondary)))
                 })
+                .when(seg.selected, |el| el.cursor_pointer())
+                .when_some(tooltip, |el, tooltip| {
+                    el.tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                    })
+                })
                 .child(seg.label.to_string())
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    on_select(i, window, cx);
+                .when(!seg.disabled, |el| {
+                    el.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        on_select(i, window, cx);
+                    })
                 }),
         );
     }

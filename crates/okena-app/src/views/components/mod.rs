@@ -14,6 +14,7 @@ pub mod file_icon;
 pub mod list_overlay;
 pub mod modal_backdrop;
 pub mod path_autocomplete;
+pub mod project_nav;
 pub mod simple_input;
 pub mod ui_helpers;
 

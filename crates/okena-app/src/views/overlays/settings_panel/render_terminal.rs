@@ -149,6 +149,8 @@ impl SettingsPanel {
                 id: format!("{:?}", style).into(),
                 label: style.display_name(),
                 selected: *style == current,
+                disabled: false,
+                tooltip: None,
             })
             .collect();
 

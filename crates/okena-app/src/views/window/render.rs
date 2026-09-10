@@ -764,7 +764,7 @@ impl Render for WindowView {
                                     }
                                 }
                             }
-                            DragState::AgentPanel {
+                            DragState::InfoPanel {
                                 project_id,
                                 initial_mouse_x,
                                 initial_width,
@@ -777,7 +777,7 @@ impl Render for WindowView {
                                 let project_id = project_id.clone();
                                 if let Some(col) = this.project_columns.get(&project_id).cloned() {
                                     col.update(cx, |col, cx| {
-                                        col.set_agent_panel_width(new_width, cx);
+                                        col.set_info_panel_width(new_width, cx);
                                     });
                                 }
                             }
@@ -1554,17 +1554,29 @@ impl Render for WindowView {
                                     .flex_row()
                                     .map(|d| match self.active_harness_pane(cx) {
                                         Some(pane) => d.child(pane),
-                                        // An agent session's context lives in
-                                        // its own column, behind the header's
-                                        // info toggle — not in a second panel
-                                        // beside it repeating the same thing.
+                                        // A project's or session's context
+                                        // lives in its own column, behind the
+                                        // header's info toggle — not in a
+                                        // second panel repeating the same
+                                        // thing. The bar above the grid picks
+                                        // how every column is shown.
                                         None => d.child(
                                             div()
                                                 .id("projects-grid-wrap")
                                                 .flex_1()
                                                 .min_h_0()
                                                 .min_w_0()
-                                                .child(self.render_projects_grid(cx)),
+                                                .flex()
+                                                .flex_col()
+                                                .children(self.render_view_mode_bar(cx))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_h_0()
+                                                        .min_w_0()
+                                                        .flex()
+                                                        .child(self.render_projects_grid(cx)),
+                                                ),
                                         ),
                                     }),
                             ),

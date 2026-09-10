@@ -10,19 +10,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// `all()` drives the nav, the tab strip and persistence, so the three cannot
 /// drift out of sync.
+///
+/// There is no Projects view: a project's worktrees, agents and git state live
+/// in the project's own column, behind its info toggle — the same place an
+/// agent session keeps its context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessSection {
-    Projects,
     Tasks,
     Specs,
     Knowledge,
 }
 
 impl HarnessSection {
-    pub const fn all() -> [HarnessSection; 4] {
+    pub const fn all() -> [HarnessSection; 3] {
         [
-            HarnessSection::Projects,
             HarnessSection::Tasks,
             HarnessSection::Specs,
             HarnessSection::Knowledge,
@@ -31,7 +33,6 @@ impl HarnessSection {
 
     pub const fn label(self) -> &'static str {
         match self {
-            HarnessSection::Projects => "Projects",
             HarnessSection::Tasks => "Tasks",
             HarnessSection::Specs => "Specs",
             HarnessSection::Knowledge => "Knowledge",
@@ -41,7 +42,6 @@ impl HarnessSection {
     /// Stable id used for element ids and persistence.
     pub const fn slug(self) -> &'static str {
         match self {
-            HarnessSection::Projects => "projects",
             HarnessSection::Tasks => "tasks",
             HarnessSection::Specs => "specs",
             HarnessSection::Knowledge => "knowledge",
@@ -52,9 +52,6 @@ impl HarnessSection {
     /// subtitle while the view itself is a stub.
     pub const fn blurb(self) -> &'static str {
         match self {
-            HarnessSection::Projects => {
-                "Agents in flight per project, what each is waiting on, and PR / pipeline status."
-            }
             HarnessSection::Tasks => {
                 "Epics, features and stories from your task manager — launch an agent on one."
             }

@@ -313,6 +313,22 @@ impl WorkspaceData {
         Some(w.agents_show_info)
     }
 
+    /// Show or hide project info on every project column in the targeted
+    /// window. Unknown extra ids are a silent no-op (`None`).
+    pub fn set_projects_show_info(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.projects_show_info = on;
+        Some(w.projects_show_info)
+    }
+
+    /// Set the info switch of whichever grid the targeted window is showing.
+    /// Unknown extra ids are a silent no-op (`None`).
+    pub fn set_grid_show_info(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.set_grid_show_info(on);
+        Some(on)
+    }
+
     /// Flip the "needs attention" section opt-in on the targeted window and
     /// return the new value. Unknown extra ids are a silent no-op (`None`).
     pub fn toggle_show_attention_section(&mut self, id: WindowId) -> Option<bool> {
@@ -479,6 +495,8 @@ mod agents_overview_tests {
 
         assert!(data.set_agents_overview(ghost, true).is_none());
         assert!(data.set_agents_show_info(ghost, true).is_none());
+        assert!(data.set_projects_show_info(ghost, true).is_none());
+        assert!(data.set_grid_show_info(ghost, true).is_none());
         assert!(
             data.set_agent_sort_mode(ghost, AgentSortMode::Name)
                 .is_none()

@@ -6,7 +6,6 @@
 //! rather than only display them.
 
 mod new_task_form;
-mod projects_view;
 mod sections;
 mod specs_view;
 mod tasks_view;
@@ -69,16 +68,6 @@ pub(crate) struct TasksState {
     /// Agent command configured on the daemon, used as the dialog's default.
     /// `None` until settings have been read.
     pub(crate) default_agent: Option<String>,
-}
-
-/// Projects-view state.
-pub(crate) struct ProjectsState {
-    /// Fuzzy filter over project names.
-    pub(crate) search: Entity<SimpleInputState>,
-    /// Show only projects with work in flight — a worktree open or an agent
-    /// running. The common question of a wide board is "where is something
-    /// happening", which a long list of idle repos buries.
-    pub(crate) active_only: bool,
 }
 
 /// Specs-view state.
@@ -183,7 +172,6 @@ pub struct HarnessPane {
     pub(crate) board_width: Rc<RefCell<f32>>,
     pub(crate) section: HarnessSection,
     pub(crate) tasks: TasksState,
-    pub(crate) projects: ProjectsState,
     pub(crate) specs: SpecsState,
 }
 
@@ -211,7 +199,6 @@ impl HarnessPane {
         let new_task_body = cx.new(|cx| {
             SimpleInputState::new(cx).placeholder("What it covers, and what finishing it means")
         });
-        let project_search = cx.new(|cx| SimpleInputState::new(cx).placeholder("Filter projects…"));
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
         let idea_input = cx.new(|cx| {
             SimpleInputState::new(cx).placeholder(
@@ -251,10 +238,6 @@ impl HarnessPane {
                 new_task_body,
                 start_form: None,
                 default_agent: None,
-            },
-            projects: ProjectsState {
-                search: project_search,
-                active_only: false,
             },
             specs: SpecsState {
                 stores: None,

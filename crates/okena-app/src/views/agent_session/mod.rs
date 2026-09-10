@@ -16,7 +16,9 @@ mod model;
 mod render;
 
 pub use detect::{AGENT_COMMANDS, detect_agent};
-pub use model::{AgentSessionInfo, AgentSessionKind, RelatedWorkspace, session_kind};
+pub use model::{
+    AgentSessionInfo, AgentSessionKind, RelatedWorkspace, SessionActivity, session_kind,
+};
 
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
@@ -62,9 +64,11 @@ pub enum PanelTab {
     Terminal,
 }
 
-/// Everything the panel needs from its host.
+/// Everything an info panel needs from its host — an agent session's, or a
+/// project's. One context for both, since a column hosts whichever its project
+/// calls for and the window hands it the same handles either way.
 #[derive(Clone)]
-pub struct AgentPanelContext {
+pub struct InfoPanelContext {
     pub client: okena_transport::remote_action::RemoteActionClient,
     /// Lets the panel open a worktree's diff without knowing which window it
     /// is in.
@@ -111,7 +115,7 @@ impl AgentSessionPanel {
     pub fn new(
         project_id: String,
         density: PanelDensity,
-        ctx: AgentPanelContext,
+        ctx: InfoPanelContext,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -168,35 +172,18 @@ impl AgentSessionPanel {
 
     /// Show what changed in a worktree.
     fn open_diff(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(
-                okena_workspace::requests::OverlayRequest::Project(
-                    okena_workspace::requests::ProjectOverlay {
-                        project_id: project_id.to_string(),
-                        kind: okena_workspace::requests::ProjectOverlayKind::DiffViewer {
-                            file: None,
-                            mode: None,
-                            commit_message: None,
-                            commits: None,
-                            commit_index: None,
-                        },
-                    },
-                ),
-                cx,
-            );
-        });
+        crate::views::components::project_nav::open_diff(&self.request_broker, project_id, cx);
     }
 
     /// Focus a project in the terminal workspace, leaving any harness view.
     fn open_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-            });
-            cx.notify();
-        });
-        okena_workspace::harness_state::set_active_harness(self.window_id, None, cx);
+        crate::views::components::project_nav::focus_project(
+            &self.workspace,
+            &self.focus_manager,
+            self.window_id,
+            &project_id,
+            cx,
+        );
         cx.notify();
     }
 

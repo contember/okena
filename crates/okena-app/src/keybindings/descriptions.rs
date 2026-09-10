@@ -434,7 +434,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "ShowHarness",
         ActionDescription {
             name: "Engineering Harness",
-            description: "Open the harness window (projects, tasks, agents, specs, knowledge)",
+            description: "Open the harness window (tasks, specs, knowledge)",
             category: "Global",
             factory: || Box::new(ShowHarness),
         },

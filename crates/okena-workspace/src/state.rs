@@ -1518,6 +1518,41 @@ impl Workspace {
         }
     }
 
+    /// Show or hide project info on every project column. Persisted via
+    /// `notify_data`.
+    pub fn set_projects_show_info(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_projects_show_info(window_id, on).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Whether the grid the window is showing opens its columns on their info.
+    ///
+    /// Each overview keeps its own switch; this reads whichever is on screen,
+    /// the way `grid_layout_mode` does, so the view bar and the columns cannot
+    /// disagree about which one applies.
+    pub fn grid_show_info(&self, window_id: WindowId) -> bool {
+        self.data
+            .window(window_id)
+            .is_some_and(|w| w.grid_show_info())
+    }
+
+    /// Set the info switch of whichever grid the window is showing. Persisted
+    /// via `notify_data`.
+    pub fn set_grid_show_info(&mut self, window_id: WindowId, on: bool, cx: &mut impl WorkspaceCx) {
+        if self.grid_show_info(window_id) == on {
+            return;
+        }
+        if self.data.set_grid_show_info(window_id, on).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
     /// Flip the sidebar project sort mode (manual ↔ activity) for a window.
     /// Persisted via `notify_data`.
     pub fn toggle_project_sort_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
