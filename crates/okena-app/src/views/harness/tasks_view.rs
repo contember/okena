@@ -202,6 +202,10 @@ pub(super) struct TaskLinks {
     /// Project to focus when opening the task's existing session. Prefers the
     /// agent session (which spans the repos) over any single worktree.
     pub open_target: Option<String>,
+    /// The agent session itself, when one exists. Distinct from `open_target`,
+    /// which falls back to a worktree: only a session has session facts —
+    /// a reported status, produced assets, the checkouts it was handed.
+    pub session: Option<String>,
     /// Sessions running a detected coding agent.
     pub agents_running: usize,
 }
@@ -314,6 +318,15 @@ impl HarnessPane {
                         Ok(tasks) => {
                             this.tasks.tasks = tasks;
                             this.tasks.error = None;
+                            // Drop a selection whose task is gone — closed,
+                            // reassigned, or filtered out by the provider.
+                            // Leaving it would show detail for a task no
+                            // longer in the list.
+                            if let Some(id) = this.tasks.selected.clone()
+                                && !this.tasks.tasks.iter().any(|t| t.id.external_id == id)
+                            {
+                                this.tasks.selected = None;
+                            }
                         }
                         Err(e) => {
                             // A rejected credential is the one failure with a
@@ -587,7 +600,10 @@ impl HarnessPane {
 
             // The agent session spans every repo, so it is the better landing
             // place than an arbitrary one of the task's worktrees.
-            if project.is_agent_session() || links.open_target.is_none() {
+            if project.is_agent_session() {
+                links.session = Some(project.id.clone());
+                links.open_target = Some(project.id.clone());
+            } else if links.open_target.is_none() {
                 links.open_target = Some(project.id.clone());
             }
 
@@ -665,24 +681,101 @@ impl HarnessPane {
         (todo, staged)
     }
 
-    /// One swimlane column.
-    fn render_lane(
+    /// A collapsible section heading in the task list.
+    fn render_section_header(
         &self,
         id: &'static str,
-        title: String,
-        share: f32,
-        groups: Vec<(Option<Stage>, Vec<Task>)>,
+        label: &'static str,
+        count: usize,
+        accent: u32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let total: usize = groups.iter().map(|(_, tasks)| tasks.len()).sum();
+        let collapsed = self.tasks.sections_collapsed.contains(id);
+        h_flex()
+            .id(SharedString::from(format!("task-section-{id}")))
+            .cursor_pointer()
+            .w_full()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .bg(with_alpha(accent, 0.08))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .hover(|s| s.bg(with_alpha(accent, 0.14)))
+            .child(
+                div()
+                    .w(px(10.0))
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(accent))
+                    .child(if collapsed { "›" } else { "⌄" }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(ui_text(13.0, cx))
+                    .text_color(rgb(accent))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(accent))
+                    .child(format!("{count}")),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    if !this.tasks.sections_collapsed.remove(id) {
+                        this.tasks.sections_collapsed.insert(id.to_string());
+                    }
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
 
-        let mut body = v_flex().id(id).flex_1().overflow_y_scroll();
-        for (stage, tasks) in groups {
-            if tasks.is_empty() {
-                continue;
+    /// The task list: in progress above todo, each foldable.
+    ///
+    /// One column rather than two side-by-side lanes. The lanes forced every
+    /// row into half the width, which a task's key, kind, state and title do
+    /// not fit into, and left one column idle whenever the work was all in one
+    /// state. In progress sits on top because it is what needs acting on.
+    fn render_task_list(
+        &self,
+        todo: Vec<Task>,
+        staged: Vec<(Stage, Vec<Task>)>,
+        share: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let in_progress_total: usize = staged.iter().map(|(_, v)| v.len()).sum();
+
+        let mut body = v_flex()
+            .id("tasks-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+
+        body = body.child(self.render_section_header(
+            "in-progress",
+            "In progress",
+            in_progress_total,
+            t.success,
+            cx,
+        ));
+        if !self.tasks.sections_collapsed.contains("in-progress") {
+            if in_progress_total == 0 {
+                body = body.child(self.list_note("Nothing in flight.", cx));
             }
-            if let Some(stage) = stage {
+            for (stage, tasks) in staged {
+                if tasks.is_empty() {
+                    continue;
+                }
                 let accent = match stage {
                     Stage::NeedsAttention => t.warning,
                     Stage::ReadyForTesting => t.success,
@@ -691,26 +784,262 @@ impl HarnessPane {
                 body = body.child(
                     div()
                         .px(px(12.0))
-                        .py(px(5.0))
-                        .bg(with_alpha(accent, 0.08))
+                        .py(px(4.0))
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(accent))
                         .child(format!("{} · {}", stage.label(), tasks.len())),
                 );
+                for row in order_by_hierarchy(tasks, &self.tasks.collapsed) {
+                    body = body.child(self.render_task_row(&row, cx));
+                }
             }
-            for row in order_by_hierarchy(tasks, &self.tasks.collapsed) {
+        }
+
+        body = body.child(self.render_section_header(
+            "todo",
+            "Todo",
+            todo.len(),
+            t.text_secondary,
+            cx,
+        ));
+        if !self.tasks.sections_collapsed.contains("todo") {
+            if todo.is_empty() {
+                body = body.child(self.list_note("Nothing waiting.", cx));
+            }
+            for row in order_by_hierarchy(todo, &self.tasks.collapsed) {
                 body = body.child(self.render_task_row(&row, cx));
             }
         }
 
-        if total == 0 {
+        v_flex()
+            .w(relative(share))
+            .min_w_0()
+            .h_full()
+            .child(body)
+            .into_any_element()
+    }
+
+    fn list_note(&self, text: &'static str, cx: &Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .px(px(12.0))
+            .py(px(10.0))
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(t.text_muted))
+            .child(text)
+            .into_any_element()
+    }
+
+    /// The detail pane: everything about the selected task, and what to do
+    /// with it.
+    ///
+    /// The actions live here rather than on every row: one row's worth of
+    /// buttons repeated down a list is noise, and a task you are deciding
+    /// about is one you have selected.
+    fn render_task_detail(&self, share: f32, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let selected = self
+            .tasks
+            .selected
+            .as_ref()
+            .and_then(|id| {
+                self.tasks
+                    .tasks
+                    .iter()
+                    .find(|task| &task.id.external_id == id)
+            })
+            .cloned();
+
+        let Some(task) = selected else {
+            return v_flex()
+                .w(relative(share))
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .border_l_1()
+                .border_color(rgb(t.border))
+                .child(
+                    div()
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Select a task."),
+                )
+                .into_any_element();
+        };
+
+        let links = self.links_for(&task, cx);
+        let busy = self.tasks.starting.is_some();
+        let is_starting = self.tasks.starting.as_deref() == Some(task.id.external_id.as_str());
+        let state_label = if task.state_name.is_empty() {
+            "—".to_string()
+        } else {
+            task.state_name.clone()
+        };
+        let task_for_start = task.clone();
+
+        let action = match links.open_target.clone() {
+            // A session already exists for this task: starting another would
+            // create a second set of worktrees on the same branch.
+            Some(project_id) => div()
+                .id("detail-open")
+                .cursor_pointer()
+                .px(px(14.0))
+                .py(px(6.0))
+                .rounded(px(4.0))
+                .bg(rgb(t.bg_secondary))
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .text_size(ui_text_md(cx))
+                .text_color(rgb(t.text_primary))
+                .child("Open session")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.open_session(project_id.clone(), cx);
+                    }),
+                ),
+            None => div()
+                .id("detail-start")
+                .cursor_pointer()
+                .px(px(14.0))
+                .py(px(6.0))
+                .rounded(px(4.0))
+                .bg(if busy {
+                    rgb(t.bg_secondary)
+                } else {
+                    rgb(t.button_primary_bg)
+                })
+                .when(!busy, |d| d.hover(|s| s.bg(rgb(t.button_primary_hover))))
+                .text_size(ui_text_md(cx))
+                .text_color(if busy {
+                    rgb(t.text_secondary)
+                } else {
+                    rgb(t.button_primary_fg)
+                })
+                .child(if is_starting {
+                    "Starting…"
+                } else {
+                    "Start work"
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.open_start_form(&task_for_start, cx);
+                    }),
+                ),
+        };
+
+        let mut body = v_flex()
+            .id("task-detail-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(14.0))
+            .child(
+                h_flex()
+                    .gap(px(6.0))
+                    .flex_wrap()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(task.display_key.clone()),
+                    )
+                    .child(self.chip(task.kind.label().to_string(), kind_color(task.kind, &t), cx))
+                    .child(self.chip(state_label, state_color(task.state, &t), cx)),
+            )
+            .child(
+                div()
+                    .text_size(ui_text(15.0, cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(task.title.clone()),
+            )
+            .child(action);
+
+        if let Some(parent) = task.parent_key.as_ref() {
             body = body.child(
                 div()
-                    .px(px(12.0))
-                    .py(px(16.0))
-                    .text_size(ui_text_sm(cx))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
-                    .child("Nothing here."),
+                    .child(format!("Sub-task of {parent}")),
+            );
+        }
+
+        body = body
+            .child(self.detail_label("BRANCH", cx))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(task.branch_name.clone()),
+            )
+            .child(self.detail_label("LINK", cx))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(task.url.clone()),
+            );
+
+        if !task.labels.is_empty() {
+            body = body.child(self.detail_label("LABELS", cx)).child(
+                h_flex().gap(px(4.0)).flex_wrap().children(
+                    task.labels
+                        .iter()
+                        .map(|l| self.chip(l.clone(), t.text_muted, cx))
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+
+        // What okena itself has running for this task, which the provider
+        // cannot know. With a session there is a great deal to say and the
+        // block below says it; without one there is a single line, and the two
+        // must not both appear.
+        let session_info = links.session.as_ref().and_then(|id| {
+            crate::views::agent_session::AgentSessionInfo::collect(
+                self.workspace.read(cx),
+                &self.terminals,
+                id,
+            )
+        });
+        match &session_info {
+            Some(info) => body = body.child(self.render_session_facts(info, cx)),
+            None => {
+                body = body.child(self.detail_label("IN OKENA", cx)).child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(if links.signals.linked {
+                            "A worktree exists, with no agent session."
+                        } else {
+                            "No worktree or session yet."
+                        }),
+                );
+            }
+        }
+
+        if let Some(description) = task
+            .description
+            .as_ref()
+            .map(|d| d.trim())
+            .filter(|d| !d.is_empty())
+        {
+            body = body.child(self.detail_label("DESCRIPTION", cx)).child(
+                div()
+                    .w_full()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(description.to_string()),
             );
         }
 
@@ -718,18 +1047,152 @@ impl HarnessPane {
             .w(relative(share))
             .min_w_0()
             .h_full()
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(7.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .bg(rgb(t.bg_secondary))
-                    .text_size(ui_text(13.0, cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(format!("{title} · {total}")),
-            )
+            .border_l_1()
+            .border_color(rgb(t.border))
             .child(body)
+            .into_any_element()
+    }
+
+    /// What okena's own session for this task is doing.
+    ///
+    /// Read through the shared `AgentSessionInfo`, so this says exactly what
+    /// the session's own panel says rather than a second derivation of it.
+    /// Shown only where the task detail does not already cover it: the task
+    /// itself is above, so this is the session, its checkouts and its output.
+    fn render_session_facts(
+        &self,
+        info: &crate::views::agent_session::AgentSessionInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+
+        // Terminal state, not the agent's claim: an agent that stopped
+        // reporting still shows as waiting when its prompt is waiting.
+        let (status_color, status) = if !info.running {
+            (t.text_muted, "stopped".to_string())
+        } else if info.waiting {
+            (
+                t.warning,
+                if info.idle.is_empty() {
+                    "waiting".to_string()
+                } else {
+                    format!("waiting · {}", info.idle)
+                },
+            )
+        } else {
+            (t.success, "running".to_string())
+        };
+
+        let mut chips = vec![self.chip(status, status_color, cx)];
+        if let Some(agent) = &info.agent {
+            chips.push(self.chip(agent.clone(), t.text_secondary, cx));
+        }
+        if !info.mcp {
+            // Explains a permanently empty PRODUCED list: the agent was never
+            // handed okena's MCP, so it cannot report anything.
+            chips.push(self.chip("no okena mcp".to_string(), t.text_muted, cx));
+        }
+
+        let mut out = v_flex()
+            .gap(px(6.0))
+            .child(self.detail_label("AGENT SESSION", cx))
+            .child(h_flex().gap(px(4.0)).flex_wrap().children(chips));
+
+        if let Some(reported) = &info.status {
+            out = out.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(4.0))
+                    .bg(with_alpha(t.success, 0.1))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(format!("“{reported}”")),
+            );
+        }
+
+        out = out.child(self.detail_label("WORKTREES", cx));
+        if info.workspaces.is_empty() {
+            out = out.child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Runs directly in its project."),
+            );
+        }
+        for w in &info.workspaces {
+            let Some(summary) = crate::views::components::WorktreeSummary::collect(
+                self.workspace.read(cx),
+                &w.project_id,
+            ) else {
+                continue;
+            };
+            out = out.child(crate::views::components::render_worktree_card(
+                &summary,
+                |this, id, cx| this.open_session(id.to_string(), cx),
+                |this, id, cx| this.open_diff(id, cx),
+                cx,
+            ));
+        }
+
+        out = out.child(self.detail_label("PRODUCED", cx));
+        if info.assets.is_empty() {
+            out = out.child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(if info.mcp {
+                        "Nothing registered yet."
+                    } else {
+                        "Cannot report — no okena MCP."
+                    }),
+            );
+        }
+        for asset in &info.assets {
+            out = out.child(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap(px(1.0))
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_secondary))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(asset.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(match (&asset.project, &asset.url) {
+                                (Some(p), _) => format!("{} · {p}", asset.kind.label()),
+                                (None, Some(url)) => format!("{} · {url}", asset.kind.label()),
+                                (None, None) => asset.kind.label().to_string(),
+                            }),
+                    ),
+            );
+        }
+
+        out.into_any_element()
+    }
+
+    fn detail_label(&self, label: &'static str, cx: &Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .pt(px(6.0))
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(t.text_muted))
+            .child(label)
             .into_any_element()
     }
 
@@ -802,11 +1265,8 @@ impl HarnessPane {
         let task = &row.task;
         let depth = row.depth;
         let t = theme(cx);
-        let is_starting = self.tasks.starting.as_deref() == Some(task.id.external_id.as_str());
         let links = self.links_for(task, cx);
         let collapsed = self.tasks.collapsed.contains(&task.id.external_id);
-        let busy = self.tasks.starting.is_some();
-        let task_for_click = task.clone();
         let state_label = if task.state_name.is_empty() {
             "—".to_string()
         } else {
@@ -816,15 +1276,31 @@ impl HarnessPane {
         // Indent per level, with a rail on nested rows so containment is
         // visible rather than implied by a few pixels of whitespace.
         let indent = 16.0 * depth as f32;
+        let selected = self.tasks.selected.as_deref() == Some(task.id.external_id.as_str());
+        let select_id = task.id.external_id.clone();
         h_flex()
+            .id(SharedString::from(format!(
+                "task-row-{}",
+                task.id.external_id
+            )))
+            .cursor_pointer()
             .justify_between()
             .items_start()
             .gap(px(12.0))
             .pl(px(12.0 + indent))
             .pr(px(12.0))
-            .py(px(10.0))
+            .py(px(8.0))
             .border_b_1()
             .border_color(rgb(t.border))
+            .when(selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.14)))
+            .when(!selected, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.tasks.selected = Some(select_id.clone());
+                    cx.notify();
+                }),
+            )
             .when(depth > 0, |d| {
                 d.border_l_2()
                     .border_color(with_alpha(t.border_active, 0.5))
@@ -857,6 +1333,9 @@ impl HarnessPane {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _, _window, cx| {
+                                            // Folding a subtree is not selecting
+                                            // the row it hangs off.
+                                            cx.stop_propagation();
                                             if !this.tasks.collapsed.remove(&id) {
                                                 this.tasks.collapsed.insert(id.clone());
                                             }
@@ -941,58 +1420,6 @@ impl HarnessPane {
                             .child(format!("branch: {}", task.branch_name)),
                     ),
             )
-            .child(match links.open_target.clone() {
-                // A session already exists for this task: starting another
-                // would create a second set of worktrees on the same branch.
-                Some(project_id) => div()
-                    .id(SharedString::from(format!("open-{}", task.id.external_id)))
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child("Open session")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.open_session(project_id.clone(), cx);
-                        }),
-                    ),
-                None => div()
-                    .id(SharedString::from(format!("start-{}", task.id.external_id)))
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(if busy {
-                        rgb(t.bg_secondary)
-                    } else {
-                        rgb(t.button_primary_bg)
-                    })
-                    .when(!busy, |d| d.hover(|s| s.bg(rgb(t.button_primary_hover))))
-                    .text_size(ui_text_md(cx))
-                    .text_color(if busy {
-                        rgb(t.text_secondary)
-                    } else {
-                        rgb(t.button_primary_fg)
-                    })
-                    .child(if is_starting {
-                        "Starting…"
-                    } else {
-                        "Start work"
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.open_start_form(&task_for_click, cx);
-                        }),
-                    ),
-            })
     }
 
     /// The "Start work" dialog: projects, branch name, agent.
@@ -1345,13 +1772,7 @@ impl HarnessPane {
                         .absolute()
                         .size_full(),
                     )
-                    .child(self.render_lane(
-                        "lane-todo",
-                        "Todo".to_string(),
-                        fraction,
-                        vec![(None, todo)],
-                        cx,
-                    ))
+                    .child(self.render_task_list(todo, staged, fraction, cx))
                     .child({
                         let width = self.board_width.clone();
                         ResizeHandle::new(false, t.border, t.border_active, move |pos, _cx| {
@@ -1362,13 +1783,7 @@ impl HarnessPane {
                             });
                         })
                     })
-                    .child(self.render_lane(
-                        "lane-in-progress",
-                        "In progress".to_string(),
-                        1.0 - fraction,
-                        staged.into_iter().map(|(s, t)| (Some(s), t)).collect(),
-                        cx,
-                    ))
+                    .child(self.render_task_detail(1.0 - fraction, cx))
                     .into_any_element()
             } else {
                 div()

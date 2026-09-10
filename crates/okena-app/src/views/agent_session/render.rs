@@ -83,57 +83,6 @@ impl AgentSessionPanel {
         self.chip(label, color, cx)
     }
 
-    /// A clickable row for a checkout this session's work lands in.
-    fn workspace_row(&self, w: &super::RelatedWorkspace, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let id = w.project_id.clone();
-        let mut chips = Vec::new();
-        if let Some(branch) = &w.branch {
-            chips.push(self.chip(branch.clone(), t.text_secondary, cx));
-        }
-        v_flex()
-            .id(SharedString::from(format!("agent-ws-{}", w.project_id)))
-            .cursor_pointer()
-            .w_full()
-            .min_w_0()
-            .gap(px(2.0))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(w.name.clone()),
-            )
-            .children(w.repo.as_ref().map(|repo| {
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(repo.clone())
-                    .into_any_element()
-            }))
-            .when(!chips.is_empty(), |d| {
-                d.child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
-            })
-            // Jumping to a checkout is the common move from here: the agent
-            // reports a PR, you go read the diff.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.open_project(id.clone(), cx);
-                }),
-            )
-            .into_any_element()
-    }
-
     fn asset_row(&self, asset: &okena_core::harness::AgentAsset, cx: &App) -> AnyElement {
         let t = theme(cx);
         v_flex()
@@ -310,7 +259,21 @@ impl AgentSessionPanel {
             body = body.child(self.note(info.kind.empty_workspace_note(), cx));
         }
         for w in &info.workspaces {
-            body = body.child(self.workspace_row(w, cx));
+            // Read fresh rather than from the session's snapshot: the card
+            // shows push and review state, which the session model does not
+            // carry and which changes without the session changing.
+            let Some(summary) = crate::views::components::WorktreeSummary::collect(
+                self.workspace.read(cx),
+                &w.project_id,
+            ) else {
+                continue;
+            };
+            body = body.child(crate::views::components::render_worktree_card(
+                &summary,
+                |this, id, cx| this.open_project(id.to_string(), cx),
+                |this, id, cx| this.open_diff(id, cx),
+                cx,
+            ));
         }
 
         // ── What came out ────────────────────────────────────────────────────

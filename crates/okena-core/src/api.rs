@@ -533,6 +533,15 @@ pub struct ApiWorktreeMetadata {
     pub parent_project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<FolderColor>,
+    /// Branch this worktree is checked out on.
+    ///
+    /// Carried because it is the worktree's identity to a reader, and a thin
+    /// client has no other way to learn it: the paths are the daemon's and are
+    /// deliberately not sent. Without it a client can only fall back to git
+    /// status, which is empty until the first poll and absent for a worktree
+    /// whose branch has no commits yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

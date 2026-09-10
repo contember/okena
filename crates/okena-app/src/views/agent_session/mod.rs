@@ -66,6 +66,9 @@ pub enum PanelTab {
 #[derive(Clone)]
 pub struct AgentPanelContext {
     pub client: okena_transport::remote_action::RemoteActionClient,
+    /// Lets the panel open a worktree's diff without knowing which window it
+    /// is in.
+    pub request_broker: Entity<okena_workspace::request_broker::RequestBroker>,
     pub workspace: Entity<Workspace>,
     pub focus_manager: Entity<FocusManager>,
     pub window_id: WindowId,
@@ -74,6 +77,7 @@ pub struct AgentPanelContext {
 
 pub struct AgentSessionPanel {
     client: okena_transport::remote_action::RemoteActionClient,
+    request_broker: Entity<okena_workspace::request_broker::RequestBroker>,
     workspace: Entity<Workspace>,
     focus_manager: Entity<FocusManager>,
     window_id: WindowId,
@@ -112,6 +116,7 @@ impl AgentSessionPanel {
     ) -> Self {
         Self {
             client: ctx.client,
+            request_broker: ctx.request_broker,
             workspace: ctx.workspace,
             focus_manager: ctx.focus_manager,
             window_id: ctx.window_id,
@@ -159,6 +164,27 @@ impl AgentSessionPanel {
     /// Everything shown, read fresh from the workspace mirror each frame.
     fn info(&self, cx: &App) -> Option<AgentSessionInfo> {
         AgentSessionInfo::collect(self.workspace.read(cx), &self.terminals, &self.project_id)
+    }
+
+    /// Show what changed in a worktree.
+    fn open_diff(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Project(
+                    okena_workspace::requests::ProjectOverlay {
+                        project_id: project_id.to_string(),
+                        kind: okena_workspace::requests::ProjectOverlayKind::DiffViewer {
+                            file: None,
+                            mode: None,
+                            commit_message: None,
+                            commits: None,
+                            commit_index: None,
+                        },
+                    },
+                ),
+                cx,
+            );
+        });
     }
 
     /// Focus a project in the terminal workspace, leaving any harness view.
