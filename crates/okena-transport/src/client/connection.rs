@@ -125,6 +125,54 @@ fn initial_connect_retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
+/// Whether this task must settle the server's certificate identity before it
+/// sends the bearer token: a TLS handshake reached the server and the config
+/// carries no pin, so the verifier accepted whatever certificate answered.
+fn needs_certificate_adoption(config: &RemoteConnectionConfig, detected_tls: bool) -> bool {
+    detected_tls && local_unix_path(config).is_none() && config.pinned_cert_sha256.is_none()
+}
+
+/// Pin the certificate this task's TLS handshake observed, so its HTTP client,
+/// WS connector and reconnects enforce it instead of re-running TOFU. No-op
+/// without TLS: the slot may hold a probe that was abandoned for plain http.
+fn adopt_observed_pin(
+    config: &mut RemoteConnectionConfig,
+    observed: &crate::client::tls::ObservedFingerprint,
+) -> Option<String> {
+    if !config.tls {
+        return None;
+    }
+    let fingerprint = observed.lock().ok().and_then(|slot| slot.clone())?;
+    config.pinned_cert_sha256 = Some(fingerprint.clone());
+    Some(fingerprint)
+}
+
+/// A config whose TLS identity is settled. [`RemoteClient::run_ws_loop`] takes
+/// nothing else, so no entry path can start a session — nor the reconnects that
+/// reuse this one config — still willing to trust any certificate.
+struct SessionConfig(RemoteConnectionConfig);
+
+impl SessionConfig {
+    /// The only constructor: pins whatever the handshake that got us here
+    /// observed. Also returns that fingerprint, so a caller reporting it to the
+    /// manager reports exactly what the session enforces.
+    fn adopt(
+        mut config: RemoteConnectionConfig,
+        observed: &crate::client::tls::ObservedFingerprint,
+    ) -> (Self, Option<String>) {
+        let fingerprint = adopt_observed_pin(&mut config, observed);
+        (Self(config), fingerprint)
+    }
+
+    fn get(&self) -> &RemoteConnectionConfig {
+        &self.0
+    }
+
+    fn into_inner(self) -> RemoteConnectionConfig {
+        self.0
+    }
+}
+
 fn ws_message_channel() -> (
     async_channel::Sender<WsClientMessage>,
     async_channel::Receiver<WsClientMessage>,
@@ -448,7 +496,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
             }
 
-            let (detected_tls, client, base_url) = match chosen {
+            let (detected_tls, mut client, base_url) = match chosen {
                 Some(v) => v,
                 None => {
                     let msg = match last_connect_failure {
@@ -475,21 +523,46 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 if detected_tls { "TLS" } else { "plain http" }
             );
 
-            // Auto-upgrade: a previously-plain connection that reached the server
-            // over TLS adopts TLS and pins the cert (TOFU), and asks the manager
-            // to persist the upgrade so the sidebar reflects it and the pin is
-            // enforced next time.
-            if local_unix.is_none() && detected_tls && !config.tls {
+            // TOFU: the handshake that reached the server settles the identity
+            // for this task. Without this a config carrying `tls` but no pin —
+            // what desktop UpgradeToTls persists before pairing — would hand its
+            // bearer token to whatever certificate answers, on every reconnect.
+            if needs_certificate_adoption(&config, detected_tls) {
+                let upgraded_from_plain = !config.tls;
                 config.tls = true;
-                let fp = observed.lock().ok().and_then(|g| g.clone());
-                config.pinned_cert_sha256 = fp.clone();
-                log::info!("Auto-upgraded {}:{} to TLS", config.host, config.port);
-                let _ = event_tx
-                    .send(ConnectionEvent::TlsUpgraded {
-                        connection_id: config.id.clone(),
-                        cert_fingerprint: fp,
-                    })
-                    .await;
+                let fp = adopt_observed_pin(&mut config, &observed);
+                // A previously-plain connection asks the manager to persist both,
+                // so the sidebar reflects the upgrade and the pin is enforced next
+                // time.
+                if upgraded_from_plain {
+                    log::info!("Auto-upgraded {}:{} to TLS", config.host, config.port);
+                    let _ = event_tx
+                        .send(ConnectionEvent::TlsUpgraded {
+                            connection_id: config.id.clone(),
+                            cert_fingerprint: fp,
+                        })
+                        .await;
+                }
+                // The client above was built for an unpinned handshake; the
+                // requests below carry the bearer token.
+                match crate::client::tls::build_reqwest_client(
+                    true,
+                    config.pinned_cert_sha256.clone(),
+                    observed.clone(),
+                ) {
+                    Ok(pinned) => client = pinned,
+                    Err(error) => {
+                        let msg = format!("Cannot pin {}: {error}", config.display_endpoint());
+                        log::warn!("{}", msg);
+                        let _ = event_tx
+                            .send(ConnectionEvent::StatusChanged {
+                                connection_id: config.id.clone(),
+                                status: ConnectionStatus::Error(msg),
+                            })
+                            .await;
+                        return;
+                    }
+                }
             }
 
             // Step 2: Validate saved token, or trust same-user Unix socket transport.
@@ -513,8 +586,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             log::info!("Token valid for {}", config.display_endpoint());
                         }
                         // Token is valid - start WebSocket
+                        let (session_config, _) = SessionConfig::adopt(config, &observed);
                         Self::run_ws_loop(
-                            config,
+                            session_config,
                             token,
                             event_tx,
                             ws_tx,
@@ -650,14 +724,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 *guard = Some(pair_resp.token.clone());
                             }
 
-                            // Capture the cert fingerprint observed during the
-                            // (TLS) pairing handshake so the manager can pin it.
-                            let cert_fingerprint = observed.lock().ok().and_then(|g| g.clone());
+                            // The session runs on the certificate the pairing
+                            // handshake presented; the manager persists the same
+                            // value.
+                            let (session_config, cert_fingerprint) =
+                                SessionConfig::adopt(config, &observed);
 
                             // Notify manager to save the token (+ pin the cert)
                             let _ = event_tx
                                 .send(ConnectionEvent::TokenObtained {
-                                    connection_id: config.id.clone(),
+                                    connection_id: session_config.get().id.clone(),
                                     token: pair_resp.token.clone(),
                                     cert_fingerprint,
                                 })
@@ -665,7 +741,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
                             // Start WebSocket
                             Self::run_ws_loop(
-                                config,
+                                session_config,
                                 pair_resp.token,
                                 event_tx,
                                 ws_tx,
@@ -754,7 +830,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     // Each param is a distinct piece of per-connection state the session needs.
     #[allow(clippy::too_many_arguments)]
     async fn run_ws_loop(
-        config: RemoteConnectionConfig,
+        session_config: SessionConfig,
         token: String,
         event_tx: async_channel::Sender<ConnectionEvent>,
         ws_tx: async_channel::Sender<WsClientMessage>,
@@ -763,6 +839,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
         visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
     ) {
+        let config = session_config.into_inner();
         let mut reconnect_attempt: u32 = 0;
         let max_reconnect_attempts = ws_reconnect_max_attempts(&config);
         let mut current_token = token;
@@ -1755,6 +1832,135 @@ mod tests {
         assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 16);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 6), 30);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 30, "capped at 30s");
+    }
+
+    /// The bearer token must not go out over a certificate this task has not
+    /// pinned. `tls` without a pin is the dangerous entry: desktop UpgradeToTls
+    /// persists exactly that (with the saved token) before pairing.
+    #[test]
+    fn a_tls_config_without_a_pin_must_adopt_before_the_token_goes_out() {
+        assert!(needs_certificate_adoption(&tls_config(None), true));
+    }
+
+    #[test]
+    fn a_plain_config_reaching_tls_still_adopts_on_upgrade() {
+        assert!(needs_certificate_adoption(
+            &config("plain-remote", None),
+            true
+        ));
+    }
+
+    #[test]
+    fn an_already_pinned_config_does_not_re_adopt() {
+        // Its probe client was built from that pin, so it is already enforced.
+        assert!(!needs_certificate_adoption(
+            &tls_config(Some("abc123")),
+            true
+        ));
+    }
+
+    #[test]
+    fn plain_http_and_unix_transports_have_no_certificate_to_adopt() {
+        assert!(!needs_certificate_adoption(&tls_config(None), false));
+        assert!(!needs_certificate_adoption(
+            &config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint()),
+            true
+        ));
+    }
+
+    fn tls_config(pinned: Option<&str>) -> RemoteConnectionConfig {
+        let mut cfg = config("tls-remote", None);
+        cfg.tls = true;
+        cfg.pinned_cert_sha256 = pinned.map(str::to_string);
+        cfg
+    }
+
+    fn observed_with(fingerprint: &str) -> crate::client::tls::ObservedFingerprint {
+        let observed = crate::client::tls::new_observed();
+        *observed.lock().unwrap() = Some(fingerprint.to_string());
+        observed
+    }
+
+    /// `run_ws_loop` takes only a `SessionConfig`, and this is its constructor:
+    /// the config a paired session runs on carries the pairing handshake's
+    /// certificate, and the manager is told to persist that same value.
+    #[test]
+    fn a_session_config_carries_the_handshake_certificate() {
+        let (session_config, reported) =
+            SessionConfig::adopt(tls_config(None), &observed_with("abc123"));
+
+        assert_eq!(
+            session_config.get().pinned_cert_sha256.as_deref(),
+            Some("abc123"),
+            "the WS connector, state HTTP call and reconnects all read this pin"
+        );
+        assert_eq!(
+            reported.as_deref(),
+            session_config.get().pinned_cert_sha256.as_deref(),
+            "the fingerprint reported to the manager is the one the session enforces"
+        );
+        assert_eq!(
+            session_config.into_inner().pinned_cert_sha256.as_deref(),
+            Some("abc123"),
+            "and it is still there when run_ws_loop unwraps it"
+        );
+    }
+
+    /// Pairing over plain http, and the trusted Unix-socket transport, run no
+    /// pinning verifier — there is nothing to adopt and nothing to report.
+    #[test]
+    fn a_session_config_without_a_handshake_has_no_pin() {
+        let (session_config, reported) =
+            SessionConfig::adopt(tls_config(None), &crate::client::tls::new_observed());
+
+        assert_eq!(reported, None);
+        assert_eq!(session_config.get().pinned_cert_sha256, None);
+    }
+
+    /// A plain-http connect first probes TLS, so the slot can hold a certificate
+    /// from an attempt that was abandoned. A plain session must not carry it.
+    #[test]
+    fn a_plain_session_ignores_an_abandoned_tls_probe() {
+        let (session_config, reported) =
+            SessionConfig::adopt(config("plain-remote", None), &observed_with("abc123"));
+
+        assert_eq!(reported, None);
+        assert_eq!(session_config.get().pinned_cert_sha256, None);
+    }
+
+    #[test]
+    fn observed_pin_is_adopted_into_the_task_config() {
+        let mut cfg = tls_config(None);
+        let adopted = adopt_observed_pin(&mut cfg, &observed_with("abc123"));
+
+        assert_eq!(cfg.pinned_cert_sha256.as_deref(), Some("abc123"));
+        assert_eq!(
+            adopted.as_deref(),
+            cfg.pinned_cert_sha256.as_deref(),
+            "the reported fingerprint is the one the task pins"
+        );
+    }
+
+    /// Plain http and Unix-socket transports never run the pinning verifier, so
+    /// there is nothing to adopt — and an already-pinned config must keep its pin.
+    #[test]
+    fn nothing_observed_leaves_the_existing_pin_alone() {
+        let mut cfg = tls_config(Some("previously-pinned"));
+        let adopted = adopt_observed_pin(&mut cfg, &crate::client::tls::new_observed());
+
+        assert_eq!(adopted, None);
+        assert_eq!(cfg.pinned_cert_sha256.as_deref(), Some("previously-pinned"));
+    }
+
+    /// Adoption is idempotent: a second pass over the empty slot that
+    /// `ws_session` allocates per attempt must not clear an adopted pin.
+    #[test]
+    fn re_adopting_from_an_empty_slot_keeps_the_pin() {
+        let mut cfg = tls_config(None);
+        adopt_observed_pin(&mut cfg, &observed_with("abc123"));
+        adopt_observed_pin(&mut cfg, &crate::client::tls::new_observed());
+
+        assert_eq!(cfg.pinned_cert_sha256.as_deref(), Some("abc123"));
     }
 
     #[test]

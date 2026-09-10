@@ -15,6 +15,7 @@ mod project;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
 pub mod agent_mcp;
+mod review;
 mod session;
 mod specs;
 mod tab;
@@ -42,6 +43,7 @@ pub use project::{
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
     execute_prepared_content_search_with_cancellation, prepare_content_search,
+    prepare_content_search_for_path,
 };
 pub use session::{
     apply_imported_workspace, apply_loaded_session, begin_workspace_replacement,
@@ -344,6 +346,11 @@ pub fn execute_action(
             mode,
             ignore_whitespace,
         } => git::diff(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::ReviewComposition {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => review::composition(ws, project_id, mode, ignore_whitespace),
         ActionRequest::GitBranches { project_id } => git::branches(ws, project_id),
         ActionRequest::GitListPullRequests { project_id, limit } => {
             git::list_pull_requests(ws, project_id, limit)
@@ -353,6 +360,12 @@ pub fn execute_action(
             file_path,
             mode,
         } => git::file_contents(ws, project_id, file_path, mode),
+        ActionRequest::GitBinaryFileContents {
+            project_id,
+            old_path,
+            new_path,
+            mode,
+        } => git::binary_file_contents(ws, project_id, old_path, new_path, mode),
         ActionRequest::GitCommitGraph {
             project_id,
             count,

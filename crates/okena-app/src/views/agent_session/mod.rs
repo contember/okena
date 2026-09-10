@@ -484,11 +484,14 @@ impl AgentSessionPanel {
             // Forwarded here rather than relying on the panel's own handling:
             // without this the agent cannot be answered, which is the point of
             // showing its terminal instead of a link to it.
-            .on_key_down(move |event, _window, _cx| {
+            // A listener rather than a bare closure: key encoding reads the
+            // terminal view settings (Option-as-Meta among them), which need a
+            // context to resolve.
+            .on_key_down(cx.listener(move |_this, event, _window, cx| {
                 okena_views_terminal::overlays::terminal_overlay_utils::handle_terminal_key_input(
-                    &terminal, event,
+                    &terminal, event, cx,
                 );
-            })
+            }))
             .child(
                 AnyView::from(term.content.clone()).cached(StyleRefinement::default().size_full()),
             )

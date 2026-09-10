@@ -4,7 +4,7 @@ use super::types::DiffViewMode;
 use super::{Cancel, DiffViewer};
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_files::file_tree::{
     FileTreeNavigationDirection, FileTreeRow, expandable_file_row, expandable_folder_row,
@@ -20,6 +20,24 @@ use okena_ui::resizable_sidebar::resizable_sidebar;
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
+
+fn binary_preview_message<T: 'static>(
+    message: &str,
+    t: &ThemeColors,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(t.bg_secondary))
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(t.text_muted))
+        .child(message.to_string())
+        .into_any_element()
+}
 
 impl DiffViewer {
     // GPUI render helper: params are render inputs (theme, flags, callbacks).
@@ -499,7 +517,7 @@ impl DiffViewer {
                             .id("revision-hash")
                             .flex_shrink_0()
                             .text_size(ui_text_ms(cx))
-                            .font_family("monospace")
+                            .font(self.file_font.clone())
                             .text_color(rgb(t.term_yellow))
                             .cursor_pointer()
                             .px(px(4.0))
@@ -626,6 +644,8 @@ impl DiffViewer {
             .text_color(rgb(t.text_muted))
             .line_height(px(11.0))
             .child("Files");
+        let composition = self.render_composition(t, cx);
+        let filter_footer = self.render_composition_footer(t, cx);
         let tree = div()
             .id("file-tree")
             .flex_1()
@@ -641,7 +661,11 @@ impl DiffViewer {
             t.bg_primary,
             t.border,
             t.border_active,
-            vec![header.into_any_element(), tree.into_any_element()],
+            composition
+                .into_iter()
+                .chain([header.into_any_element(), tree.into_any_element()])
+                .chain(filter_footer)
+                .collect(),
             move |mouse_pos, cx| {
                 if let Some(entity) = entity.upgrade() {
                     entity.update(cx, |this, _| {
@@ -771,7 +795,7 @@ impl DiffViewer {
                                     .min_w_0()
                                     .gap(px(5.0))
                                     .text_size(ui_text_md(cx))
-                                    .font_family("monospace")
+                                    .font(self.file_font.clone())
                                     .text_color(rgb(t.text_secondary))
                                     .cursor_pointer()
                                     .hover(|style| style.text_color(rgb(t.text_primary)))
@@ -803,16 +827,7 @@ impl DiffViewer {
             )
             // In-page search bar (Cmd/Ctrl+F)
             .children(search_bar)
-            .when(is_binary, |d| {
-                d.child(
-                    div().flex_1().flex().items_center().justify_center().child(
-                        div()
-                            .text_size(ui_text_xl(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child("Binary file - cannot display diff"),
-                    ),
-                )
-            })
+            .when(is_binary, |d| d.child(self.render_binary_preview(t, cx)))
             .when(!is_binary, |d| {
                 let item_count = match view_mode {
                     DiffViewMode::Unified => line_count,
@@ -868,6 +883,77 @@ impl DiffViewer {
                     d.child(self.render_horizontal_scrollbar(t, scroll_x, max_scroll, cx))
                 })
             })
+    }
+
+    fn render_binary_preview(&self, t: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        if self.binary_preview_loading {
+            return binary_preview_message("Loading preview…", t, cx);
+        }
+        let Some(preview) = &self.binary_preview else {
+            return binary_preview_message("Binary file preview is not available", t, cx);
+        };
+        match (&preview.old, &preview.new) {
+            (Some(old), Some(new)) => h_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.render_binary_side("Before", old, false, t, cx))
+                .child(self.render_binary_side("After", new, true, t, cx))
+                .into_any_element(),
+            (Some(old), None) => self.render_binary_side("Deleted", old, false, t, cx),
+            (None, Some(new)) => self.render_binary_side("Added", new, false, t, cx),
+            (None, None) => binary_preview_message("Binary file preview is not available", t, cx),
+        }
+    }
+
+    fn render_binary_side(
+        &self,
+        label: &'static str,
+        side: &super::BinaryPreviewSide,
+        border_left: bool,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .when(border_left, |div| {
+                div.border_l_1().border_color(rgb(t.border))
+            })
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .bg(rgb(t.bg_secondary))
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(t.text_primary))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font(self.file_font.clone())
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(side.path.clone()),
+                    ),
+            )
+            .when_some(side.renderer.clone(), |div, renderer| div.child(renderer))
+            .when_some(side.error.clone(), |div, error: String| {
+                div.child(binary_preview_message(&error, t, cx))
+            })
+            .into_any_element()
     }
 
     pub(super) fn render_scrollbar_thumb(
@@ -1244,12 +1330,7 @@ fn file_nav_button(
 impl Render for DiffViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Measure actual monospace character width from font metrics
-        let font = Font {
-            family: "monospace".into(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            ..Default::default()
-        };
+        let font = self.file_font.clone();
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&font);
         self.measured_char_width = text_system

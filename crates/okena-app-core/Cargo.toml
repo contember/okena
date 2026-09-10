@@ -16,6 +16,7 @@ okena-openspec = { path = "../okena-openspec" }
 okena-terminal = { path = "../okena-terminal" }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-git = { path = "../okena-git" }
+okena-review = { path = "../okena-review" }
 okena-hooks = { path = "../okena-hooks", default-features = false }
 okena-files = { path = "../okena-files", default-features = false }
 okena-theme = { path = "../okena-theme", default-features = false }

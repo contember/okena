@@ -42,6 +42,13 @@ use std::collections::HashMap;
 // Settings Panel
 // ============================================================================
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FontSetting {
+    Ui,
+    Terminal,
+    File,
+}
+
 /// Settings panel overlay for configuring app settings
 pub struct SettingsPanel {
     pub(super) workspace: Entity<Workspace>,
@@ -50,11 +57,13 @@ pub struct SettingsPanel {
     /// None = "User" (global settings), Some(id) = per-project
     pub(super) selected_project_id: Option<String>,
     pub(super) project_dropdown_open: bool,
-    pub(super) font_dropdown_open: bool,
+    pub(super) font_dropdown_open: Option<FontSetting>,
     pub(super) shell_dropdown_open: bool,
     pub(super) session_backend_dropdown_open: bool,
     pub(super) project_button_bounds: Option<Bounds<Pixels>>,
-    pub(super) font_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) ui_font_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) terminal_font_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) file_font_button_bounds: Option<Bounds<Pixels>>,
     pub(super) shell_button_bounds: Option<Bounds<Pixels>>,
     pub(super) session_backend_button_bounds: Option<Bounds<Pixels>>,
     pub(super) available_shells: Vec<AvailableShell>,
@@ -984,11 +993,13 @@ impl SettingsPanel {
             active_category: category.unwrap_or(SettingsCategory::General),
             selected_project_id: project_id,
             project_dropdown_open: false,
-            font_dropdown_open: false,
+            font_dropdown_open: None,
             shell_dropdown_open: false,
             session_backend_dropdown_open: false,
             project_button_bounds: None,
-            font_button_bounds: None,
+            ui_font_button_bounds: None,
+            terminal_font_button_bounds: None,
+            file_font_button_bounds: None,
             shell_button_bounds: None,
             session_backend_button_bounds: None,
             available_shells: available_shells(),
@@ -1109,14 +1120,14 @@ impl SettingsPanel {
     }
 
     pub(super) fn close_all_dropdowns(&mut self) {
-        self.font_dropdown_open = false;
+        self.font_dropdown_open = None;
         self.shell_dropdown_open = false;
         self.session_backend_dropdown_open = false;
         self.project_dropdown_open = false;
     }
 
     fn has_open_dropdown(&self) -> bool {
-        self.font_dropdown_open
+        self.font_dropdown_open.is_some()
             || self.shell_dropdown_open
             || self.session_backend_dropdown_open
             || self.project_dropdown_open
@@ -1486,8 +1497,17 @@ impl Render for SettingsPanel {
         if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
         }
+        let font_overlay = self.font_dropdown_open.and_then(|setting| {
+            let bounds = match setting {
+                FontSetting::Ui => self.ui_font_button_bounds,
+                FontSetting::Terminal => self.terminal_font_button_bounds,
+                FontSetting::File => self.file_font_button_bounds,
+            }?;
+            Some((setting, bounds))
+        });
 
         modal_backdrop("settings-panel-backdrop", &t)
+            .font_family(okena_ui::tokens::ui_font_family(cx))
             .track_focus(&focus_handle)
             .key_context("SettingsPanel")
             .items_center()
@@ -1557,18 +1577,18 @@ impl Render for SettingsPanel {
                             ))
                         },
                     )
-                    .when_some(
-                        self.font_dropdown_open
-                            .then_some(self.font_button_bounds)
-                            .flatten(),
-                        |modal, bounds| {
-                            let current = settings_entity(cx).read(cx).settings.font_family.clone();
-                            modal.child(dropdown_anchored_below(
-                                bounds,
-                                self.render_font_dropdown_overlay(&current, cx),
-                            ))
-                        },
-                    )
+                    .when_some(font_overlay, |modal, (setting, bounds)| {
+                        let settings = settings_entity(cx).read(cx).settings.clone();
+                        let current = match setting {
+                            FontSetting::Ui => settings.ui_font_family.clone(),
+                            FontSetting::Terminal => settings.font_family.clone(),
+                            FontSetting::File => settings.file_font_family.clone(),
+                        };
+                        modal.child(dropdown_anchored_below(
+                            bounds,
+                            self.render_font_dropdown_overlay(setting, &current, cx),
+                        ))
+                    })
                     .when_some(
                         self.shell_dropdown_open
                             .then_some(self.shell_button_bounds)

@@ -79,9 +79,10 @@ pub(crate) fn single_threaded<'repo, P: gix::Progress>(
     platform.index_worktree_options_mut(|opts| opts.thread_limit = Some(1))
 }
 
-/// List untracked files honoring `.gitignore`, with paths relative to
-/// `query_path` (matches the previous `git -C path ls-files --others
-/// --exclude-standard` behavior, including for monorepo subdirs).
+/// List untracked files honoring `.gitignore`, scoped to the subtree at
+/// `query_path` but named the way git names them: **relative to the worktree
+/// root**, so a monorepo subdir project's untracked paths share one base with
+/// its tracked `git diff` paths.
 ///
 /// Returns `None` on a transient failure (gix couldn't open the index, the
 /// status walk init failed, or an iteration step errored). Callers that just
@@ -156,10 +157,8 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
             continue;
         }
         let rela = entry.rela_path.to_string();
-        if prefix.is_empty() {
+        if prefix.is_empty() || rela.starts_with(&prefix) {
             result.push(rela);
-        } else if let Some(stripped) = rela.strip_prefix(&prefix) {
-            result.push(stripped.to_string());
         }
     }
     Some(result)

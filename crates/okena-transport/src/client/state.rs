@@ -59,29 +59,43 @@ pub fn collect_all_terminal_ids(state: &StateResponse) -> HashSet<String> {
         if let Some(ref layout) = project.layout {
             ids.extend(collect_layout_terminal_ids(layout));
         }
-        // Hook terminals live outside the layout tree (they render in the hook
-        // panel, not the pane grid), but they are real daemon PTYs — the client
-        // must subscribe to them too or their output never streams and the pane
-        // shows a live-but-empty terminal.
+        // Hook and service PTYs live outside the layout tree but are real daemon
+        // terminals: unsubscribed they never stream, and omitted here a reconnect
+        // prunes them from the registry under a live pane.
         for hook in &project.hook_terminals {
             ids.insert(hook.terminal_id.clone());
+        }
+        for service in &project.services {
+            if let Some(ref terminal_id) = service.terminal_id {
+                ids.insert(terminal_id.clone());
+            }
         }
     }
     ids
 }
 
-/// Collect all terminal IDs from a StateResponse (as a Vec).
+/// Collect all terminal IDs from a StateResponse (as a Vec), first occurrence
+/// first. Deduplicated: the same PTY may be reachable through more than one
+/// projection, and a repeated id would double-subscribe it.
 pub fn collect_state_terminal_ids(state: &StateResponse) -> Vec<String> {
     let mut ids = Vec::new();
     for project in &state.projects {
         if let Some(ref layout) = project.layout {
             collect_layout_terminal_ids_into(layout, &mut ids);
         }
-        // See `collect_all_terminal_ids`: hook-terminal PTYs must be subscribed.
+        // See `collect_all_terminal_ids`: hook- and service-terminal PTYs must
+        // be subscribed and retained too.
         for hook in &project.hook_terminals {
             ids.push(hook.terminal_id.clone());
         }
+        for service in &project.services {
+            if let Some(ref terminal_id) = service.terminal_id {
+                ids.push(terminal_id.clone());
+            }
+        }
     }
+    let mut seen = HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
     ids
 }
 
@@ -222,6 +236,18 @@ mod tests {
         }
     }
 
+    fn hook_entry(terminal_id: &str) -> okena_core::api::ApiHookTerminalEntry {
+        okena_core::api::ApiHookTerminalEntry {
+            terminal_id: terminal_id.to_string(),
+            label: "on_worktree_create".to_string(),
+            status: okena_core::api::ApiHookTerminalStatus::Running,
+            hook_type: "on_worktree_create".to_string(),
+            command: "echo hi".to_string(),
+            cwd: "/tmp".to_string(),
+            finished_at: None,
+        }
+    }
+
     #[test]
     fn diff_states_detects_added_terminals() {
         let old = make_state(vec![make_project("p1", vec!["t1"])]);
@@ -245,17 +271,8 @@ mod tests {
     /// live-but-empty terminal — e.g. an on_worktree_create hook).
     #[test]
     fn collectors_include_hook_terminal_ids() {
-        use okena_core::api::{ApiHookTerminalEntry, ApiHookTerminalStatus};
         let mut proj = make_project("p1", vec!["t1"]);
-        proj.hook_terminals.push(ApiHookTerminalEntry {
-            terminal_id: "hook-1".to_string(),
-            label: "on_worktree_create".to_string(),
-            status: ApiHookTerminalStatus::Running,
-            hook_type: "on_worktree_create".to_string(),
-            command: "echo hi".to_string(),
-            cwd: "/tmp".to_string(),
-            finished_at: None,
-        });
+        proj.hook_terminals.push(hook_entry("hook-1"));
         let state = make_state(vec![proj]);
 
         assert!(
@@ -274,6 +291,78 @@ mod tests {
         assert!(
             diff.added_terminals.contains(&"hook-1".to_string()),
             "a new hook terminal must be diffed as added so it gets subscribed"
+        );
+    }
+
+    fn service(name: &str, terminal_id: Option<&str>) -> okena_core::api::ApiServiceInfo {
+        okena_core::api::ApiServiceInfo {
+            name: name.to_string(),
+            status: "running".to_string(),
+            terminal_id: terminal_id.map(str::to_string),
+            ports: Vec::new(),
+            exit_code: None,
+            kind: "okena".to_string(),
+            is_extra: false,
+        }
+    }
+
+    /// Service PTYs live outside the layout tree. Omitted from the collectors,
+    /// `remove_terminals_except` prunes a service pane's registry entry on the
+    /// next reconnect while the panel still holds its `Arc<Terminal>`.
+    #[test]
+    fn collectors_include_service_terminal_ids() {
+        let mut proj = make_project("p1", vec!["t1"]);
+        proj.services.push(service("api", Some("svc-1")));
+        let state = make_state(vec![proj]);
+
+        assert!(
+            collect_state_terminal_ids(&state).contains(&"svc-1".to_string()),
+            "initial-subscribe seed must include service terminal ids"
+        );
+        assert!(
+            collect_all_terminal_ids(&state).contains("svc-1"),
+            "reconnect retention set must include service terminal ids"
+        );
+
+        let before = make_state(vec![make_project("p1", vec!["t1"])]);
+        let diff = diff_states(&before, &state);
+        assert!(
+            diff.added_terminals.contains(&"svc-1".to_string()),
+            "a service that just started must be diffed as added so it gets subscribed"
+        );
+
+        let after = diff_states(&state, &before);
+        assert!(
+            after.removed_terminals.contains(&"svc-1".to_string()),
+            "a stopped service must be diffed as removed so its stream is released"
+        );
+    }
+
+    /// A stopped service reports no PTY; nothing to subscribe or retain for it.
+    #[test]
+    fn collectors_skip_services_without_a_terminal() {
+        let mut proj = make_project("p1", vec!["t1"]);
+        proj.services.push(service("api", None));
+        let state = make_state(vec![proj]);
+
+        assert_eq!(collect_state_terminal_ids(&state), vec!["t1"]);
+        assert_eq!(collect_all_terminal_ids(&state).len(), 1);
+    }
+
+    /// The same PTY can be reachable through two projections (a service whose
+    /// terminal is also placed in the pane grid). Subscribing it twice would
+    /// open a second stream for one terminal.
+    #[test]
+    fn collect_state_terminal_ids_deduplicates_across_projections() {
+        let mut proj = make_project("p1", vec!["t1", "t2"]);
+        proj.services.push(service("api", Some("t2")));
+        proj.hook_terminals.push(hook_entry("t1"));
+        let state = make_state(vec![proj]);
+
+        assert_eq!(
+            collect_state_terminal_ids(&state),
+            vec!["t1", "t2"],
+            "each terminal is seeded once, in first-seen order"
         );
     }
 

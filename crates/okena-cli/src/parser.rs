@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "okena",
+    version,
     about = "Control a running Okena instance",
     disable_help_subcommand = false,
     // The binary also launches the GUI; only the subcommands below are CLI.
@@ -517,6 +518,26 @@ pub fn subcommand_names() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn both_advertised_version_forms_report_the_app_version() {
+        let version = Cli::command()
+            .get_version()
+            .expect("clap needs version metadata or `-V` is an unknown argument")
+            .to_string();
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        // The workspace version is the shipped app version; a per-crate 0.1.0
+        // here would report a version no release ever had.
+        assert_ne!(version, "0.1.0");
+
+        for form in ["-V", "--version"] {
+            let kind = Cli::try_parse_from(["okena", form])
+                .err()
+                .map(|e| e.kind())
+                .expect("version exits via an error");
+            assert_eq!(kind, clap::error::ErrorKind::DisplayVersion, "{form}");
+        }
+    }
 
     #[test]
     fn command_tree_is_well_formed() {

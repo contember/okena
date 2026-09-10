@@ -41,6 +41,7 @@ import {
   Text,
   TextInput,
   StyleSheet,
+  Keyboard,
   Platform,
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
@@ -73,6 +74,18 @@ export interface TerminalPaneProps {
   fonts: TerminalFonts;
   /** Shared modifier store (also used by the key toolbar). */
   modifiers: KeyModifiers;
+  /**
+   * Called with {@link terminalId} when this pane takes keyboard focus or is
+   * tapped, so the key toolbar targets the pane the user is typing into.
+   */
+  onSelect?: (terminalId: string) => void;
+  /**
+   * Whether this pane is the current toolbar target. When it becomes true while
+   * the soft keyboard is up, keyboard focus follows — otherwise a selection the
+   * user did not make (a newly-created terminal) would leave typing on the old
+   * pane. Focus is never summoned when the keyboard is down.
+   */
+  selected?: boolean;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
 }
@@ -87,7 +100,15 @@ interface Grid {
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
   (
-    { connId, terminalId, fonts, modifiers, native = getOkenaNative() },
+    {
+      connId,
+      terminalId,
+      fonts,
+      modifiers,
+      onSelect,
+      selected = false,
+      native = getOkenaNative(),
+    },
     ref,
   ) => {
     const inputRef = useRef<TextInput>(null);
@@ -152,12 +173,21 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       inputRef.current?.setNativeProps?.({ text: SENTINEL });
     }, []);
 
+    const onInputFocus = useCallback(() => {
+      resetSentinel();
+      onSelect?.(terminalId);
+    }, [resetSentinel, onSelect, terminalId]);
+
     useEffect(() => {
       resetSentinel();
       return () => {
         if (copiedTimer.current) clearTimeout(copiedTimer.current);
       };
     }, [terminalId, resetSentinel]);
+
+    useEffect(() => {
+      if (selected && Keyboard.isVisible()) inputRef.current?.focus();
+    }, [selected]);
 
     const scrollToBottom = useCallback(() => {
       try {
@@ -366,6 +396,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             setSelecting(true);
             copySelectionAndClear();
           } else {
+            // `focus()` on an already-focused input does not re-fire `onFocus`,
+            // so report the selection here too or a tap cannot re-sync it.
+            onSelect?.(terminalId);
             inputRef.current?.focus();
           }
           lastTap.current = { x, y, t: now };
@@ -380,6 +413,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         selecting,
         copySelectionAndClear,
         clearLongPress,
+        onSelect,
       ],
     );
 
@@ -430,7 +464,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
           }
           disableFullscreenUI
-          onFocus={resetSentinel}
+          onFocus={onInputFocus}
           // Keep it from being read out / styled visibly.
           underlineColorAndroid="transparent"
         />

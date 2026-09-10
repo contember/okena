@@ -5,8 +5,8 @@ use crate::theme::theme;
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
 
-use super::SettingsPanel;
 use super::components::*;
+use super::{FontSetting, SettingsPanel};
 
 impl SettingsPanel {
     // GPUI render helper: params are render inputs (value, bounds, callbacks).
@@ -102,25 +102,46 @@ impl SettingsPanel {
 
     pub(super) fn render_font_dropdown_row(
         &mut self,
+        setting: FontSetting,
+        label: &'static str,
         current_family: &str,
+        has_border: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-
-        let font_bounds_setter = Self::bounds_setter(cx, |s, b| s.font_button_bounds = b);
-        settings_row("font-family".to_string(), "Font Family", &t, cx, true).child(
+        let suffix = match setting {
+            FontSetting::Ui => "ui",
+            FontSetting::Terminal => "terminal",
+            FontSetting::File => "file",
+        };
+        let entity = cx.entity().downgrade();
+        let font_bounds_setter = move |bounds, _: &mut Window, cx: &mut App| {
+            if let Some(entity) = entity.upgrade() {
+                entity.update(cx, |this, _| match setting {
+                    FontSetting::Ui => this.ui_font_button_bounds = Some(bounds),
+                    FontSetting::Terminal => this.terminal_font_button_bounds = Some(bounds),
+                    FontSetting::File => this.file_font_button_bounds = Some(bounds),
+                });
+            }
+        };
+        let is_open = self.font_dropdown_open == Some(setting);
+        settings_row(format!("{suffix}-font-family"), label, &t, cx, has_border).child(
             dropdown_button(
-                "font-family-btn",
-                current_family,
-                self.font_dropdown_open,
+                format!("{suffix}-font-family-btn"),
+                font_family_label(current_family),
+                is_open,
                 &t,
                 cx,
                 font_bounds_setter,
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.font_dropdown_open = !this.font_dropdown_open;
+                cx.listener(move |this, _, _, cx| {
+                    this.font_dropdown_open = if this.font_dropdown_open == Some(setting) {
+                        None
+                    } else {
+                        Some(setting)
+                    };
                     this.shell_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
@@ -132,31 +153,47 @@ impl SettingsPanel {
 
     pub(super) fn render_font_dropdown_overlay(
         &self,
+        setting: FontSetting,
         current: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
+        let families: Vec<String> = if setting == FontSetting::Ui {
+            cx.text_system().all_font_names()
+        } else {
+            MONOSPACE_FONT_FAMILIES
+                .iter()
+                .map(|family| (*family).to_string())
+                .collect()
+        };
 
-        dropdown_overlay("font-family-dropdown-list", &t).children(FONT_FAMILIES.iter().map(
+        dropdown_overlay("font-family-dropdown-list", &t).children(families.into_iter().map(
             |family| {
-                let is_selected = *family == current;
-                let family_str = family.to_string();
+                let is_selected = family == current;
 
-                dropdown_option(format!("font-opt-{}", family), family, is_selected, &t, cx)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener({
-                            let family = family_str.clone();
-                            move |this, _, _, cx| {
-                                let family = family.clone();
-                                settings_entity(cx).update(cx, |state, cx| {
-                                    state.set_font_family(family, cx);
-                                });
-                                this.font_dropdown_open = false;
-                                cx.notify();
-                            }
-                        }),
-                    )
+                dropdown_option(
+                    format!("font-opt-{family}"),
+                    font_family_label(&family),
+                    is_selected,
+                    &t,
+                    cx,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let family = family.clone();
+                        move |this, _, _, cx| {
+                            let family = family.clone();
+                            settings_entity(cx).update(cx, |state, cx| match setting {
+                                FontSetting::Ui => state.set_ui_font_family(family, cx),
+                                FontSetting::Terminal => state.set_font_family(family, cx),
+                                FontSetting::File => state.set_file_font_family(family, cx),
+                            });
+                            this.font_dropdown_open = None;
+                            cx.notify();
+                        }
+                    }),
+                )
             },
         ))
     }
@@ -183,7 +220,7 @@ impl SettingsPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
-                    this.font_dropdown_open = false;
+                    this.font_dropdown_open = None;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
                     cx.notify();
@@ -262,7 +299,7 @@ impl SettingsPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
-                    this.font_dropdown_open = false;
+                    this.font_dropdown_open = None;
                     this.shell_dropdown_open = false;
                     this.project_dropdown_open = false;
                     cx.notify();

@@ -1,12 +1,12 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
-use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
+use crate::code_view::{clamp_to_char_boundary, start_scrollbar_drag, update_scrollbar_drag};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty, copy_to_clipboard};
 use gpui::*;
 use okena_core::send_payload::{CodeBlock, SendPayload};
 use std::path::PathBuf;
 
-use super::{DisplayMode, FileViewer, FileViewerEvent, PreviewBackground};
+use super::{DisplayMode, FileViewer, FileViewerEvent, FileViewerTab};
 
 impl FileViewer {
     /// Toggle between source and preview display modes. Only meaningful for
@@ -21,6 +21,54 @@ impl FileViewer {
             DisplayMode::Source => DisplayMode::Preview,
             DisplayMode::Preview => DisplayMode::Source,
         };
+        cx.notify();
+    }
+
+    pub(super) fn toggle_line_wrap(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        tab.wrap_lines = !tab.wrap_lines;
+        tab.selection.clear();
+        tab.source_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(0.0)));
+        tab.rebuild_source_rows();
+        self.perform_file_search(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_json_pretty(&mut self, cx: &mut Context<Self>) {
+        let path = self.active_tab().file_path.clone();
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
+        let tab = self.active_tab_mut();
+        let Some(mut alternate) = tab.json_alternate.take() else {
+            return;
+        };
+
+        std::mem::swap(&mut tab.content, &mut alternate.content);
+        let next_lines = alternate.highlighted_lines.take().unwrap_or_else(|| {
+            crate::syntax::highlight_content(
+                &tab.content,
+                &path,
+                &syntax_set,
+                super::MAX_LINES,
+                is_dark,
+            )
+        });
+        alternate.highlighted_lines =
+            Some(std::mem::replace(&mut tab.highlighted_lines, next_lines));
+        tab.json_alternate = Some(alternate);
+        tab.json_pretty = !tab.json_pretty;
+        tab.selection.clear();
+        tab.rebuild_source_rows();
+        tab.source_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(0.0)));
+        self.perform_file_search(cx);
         cx.notify();
     }
 
@@ -40,7 +88,7 @@ impl FileViewer {
     /// Get selected text using the shared utility.
     pub(super) fn get_selected_text(&self) -> Option<String> {
         let tab = self.active_tab();
-        get_selected_text(&tab.highlighted_lines, &tab.selection)
+        extract_selected_source_text(tab)
     }
 
     /// Copy selected text to clipboard.
@@ -60,15 +108,16 @@ impl FileViewer {
         let ((start_line, _), (end_line, _)) = tab.selection.normalized_non_empty()?;
 
         // Convert from 0-based line index to 1-based, clamp to file length.
-        let last_line_idx = tab.line_count.checked_sub(1)?;
-        let first_idx = start_line.min(last_line_idx);
-        let last_idx = end_line.min(last_line_idx);
-
-        let text: String = tab
+        let last_row_idx = tab.source_rows.len().checked_sub(1)?;
+        let first_idx = start_line.min(last_row_idx);
+        let last_idx = end_line.min(last_row_idx);
+        let first_source_line = tab.source_rows.get(first_idx)?.logical_line;
+        let last_source_line = tab.source_rows.get(last_idx)?.logical_line;
+        let text = tab
             .highlighted_lines
-            .get(first_idx..=last_idx)?
+            .get(first_source_line..=last_source_line)?
             .iter()
-            .map(|l| l.plain_text.as_str())
+            .map(|line| line.plain_text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -78,8 +127,8 @@ impl FileViewer {
                 .absolute_path(&tab.relative_path)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| tab.file_path.clone()),
-            first: first_idx + 1,
-            last: last_idx + 1,
+            first: first_source_line + 1,
+            last: last_source_line + 1,
             text,
         }]))
     }
@@ -101,11 +150,11 @@ impl FileViewer {
     /// Select all text.
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
-        if tab.highlighted_lines.is_empty() {
+        if tab.source_rows.is_empty() {
             return;
         }
-        let last_line = tab.highlighted_lines.len() - 1;
-        let last_col = tab.highlighted_lines[last_line].plain_text.len();
+        let last_line = tab.source_rows.len() - 1;
+        let last_col = tab.source_rows[last_line].byte_range.len();
         tab.selection.start = Some((0, 0));
         tab.selection.end = Some((last_line, last_col));
         cx.notify();
@@ -244,149 +293,92 @@ impl FileViewer {
         cx.notify();
     }
 
-    // ── Image zoom / pan / background ────────────────────────────────────
-
-    /// Multiply the active tab's image zoom by `factor` (e.g. 1.25 in,
-    /// 1/1.25 out). Leaves auto-fit mode and, for SVG tabs, schedules a
-    /// fresh raster at the new scale so the preview stays crisp.
     pub(super) fn image_zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
+        if let Some(renderer) = self.active_tab().file_renderer.clone() {
+            renderer.update(cx, |renderer, cx| renderer.zoom_by(factor, cx));
         }
-        tab.image_view.zoom_by(factor);
-        cx.notify();
-        self.maybe_rerender_svg(cx);
     }
 
-    /// Set the active tab's image zoom to an explicit factor (1.0 = 100%).
-    pub(super) fn image_set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.set_zoom(zoom);
-        cx.notify();
-        self.maybe_rerender_svg(cx);
-    }
-
-    /// Reset the active tab's image view to fit-to-pane.
     pub(super) fn image_fit(&mut self, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
+        if let Some(renderer) = self.active_tab().file_renderer.clone() {
+            renderer.update(cx, |renderer, cx| renderer.fit(cx));
         }
-        tab.image_view.reset_to_fit();
-        cx.notify();
     }
+}
 
-    /// Record a potential pan drag at `position`. Does NOT promote the
-    /// view out of auto-fit yet — a single click anywhere on a fit-mode
-    /// image (e.g. to focus the pane, or the first half of a double-click
-    /// reset) would otherwise snap the image from Fit to 100% before the
-    /// user has even moved the mouse. Promotion happens in
-    /// `image_update_pan` on the first non-zero movement.
-    pub(super) fn image_start_pan(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.is_panning = true;
-        tab.image_view.pan_anchor = Some(position);
-        tab.image_view.pan_anchor_offset = tab.image_view.pan;
-        cx.notify();
-    }
+fn extract_selected_source_text(tab: &FileViewerTab) -> Option<String> {
+    let ((start_row, start_col), (end_row, end_col)) = tab.selection.normalized_non_empty()?;
+    let mut output = String::new();
+    let mut previous_logical_line = None;
 
-    /// Continue a pan drag — translate by (current - anchor). On the
-    /// first frame with a non-zero delta we also promote the view out of
-    /// auto-fit (and zoom to 1.0 if we hadn't left fit yet) so a stationary
-    /// click that never moved leaves the view untouched.
-    pub(super) fn image_update_pan(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image || !tab.image_view.is_panning {
-            return;
+    for row_index in start_row..=end_row.min(tab.source_rows.len().saturating_sub(1)) {
+        let row = tab.source_rows.get(row_index)?;
+        let line = tab.highlighted_lines.get(row.logical_line)?;
+        let row_text = &line.plain_text[row.byte_range.clone()];
+        if previous_logical_line.is_some_and(|previous| previous != row.logical_line) {
+            output.push('\n');
         }
-        let Some(anchor) = tab.image_view.pan_anchor else {
-            return;
+
+        let start = if row_index == start_row {
+            clamp_to_char_boundary(row_text, start_col)
+        } else {
+            0
         };
-        let dx = position.x - anchor.x;
-        let dy = position.y - anchor.y;
-        if f32::from(dx) == 0.0 && f32::from(dy) == 0.0 {
-            return;
+        let end = if row_index == end_row {
+            clamp_to_char_boundary(row_text, end_col)
+        } else {
+            row_text.len()
+        };
+        output.push_str(&row_text[start..end]);
+        previous_logical_line = Some(row.logical_line);
+    }
+
+    (!output.is_empty()).then_some(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileViewerTab, extract_selected_source_text};
+    use crate::file_viewer::loading::LoadedContent;
+    use crate::syntax::HighlightedLine;
+    use gpui::TestAppContext;
+    use syntect::parsing::SyntaxSet;
+
+    fn single_line(text: &str) -> LoadedContent {
+        LoadedContent::Text {
+            source: text.to_string(),
+            highlighted_lines: vec![HighlightedLine {
+                spans: Vec::new(),
+                plain_text: text.to_string(),
+            }],
+            pretty_json: None,
         }
-        if tab.image_view.auto_fit {
-            tab.image_view.auto_fit = false;
-            tab.image_view.zoom = 1.0;
-            tab.image_view.pan_anchor_offset = gpui::Point::default();
-        }
-        // Clamp pan magnitude. Without this the user can drag the image
-        // arbitrarily far off-pane (the container is overflow_hidden, so
-        // it just vanishes) with no obvious recovery affordance. ±10000 px
-        // per axis is generous for any realistic display while preventing
-        // a runaway momentum drift from sending the image to infinity.
-        const PAN_HARDCAP: f32 = 10_000.0;
-        let raw_x = f32::from(tab.image_view.pan_anchor_offset.x + dx);
-        let raw_y = f32::from(tab.image_view.pan_anchor_offset.y + dy);
-        tab.image_view.pan = gpui::Point::new(
-            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
+    }
+
+    fn loaded(text: &str, cx: &mut TestAppContext) -> FileViewerTab {
+        let mut tab = FileViewerTab::new_empty();
+        cx.update(|cx| {
+            tab.apply_loaded_content(Ok(single_line(text)), None, &SyntaxSet::new(), true, cx)
+        });
+        tab
+    }
+
+    /// Freshness polling can swap the content under a live selection whose
+    /// columns are byte offsets into the text that is gone.
+    #[gpui::test]
+    fn a_reload_drops_a_selection_the_new_content_cannot_carry(cx: &mut TestAppContext) {
+        let mut tab = loaded("a", cx);
+        tab.selection.start = Some((0, 0));
+        tab.selection.end = Some((0, 1));
+
+        cx.update(|cx| {
+            tab.apply_loaded_content(Ok(single_line("é")), None, &SyntaxSet::new(), true, cx)
+        });
+
+        assert_eq!(extract_selected_source_text(&tab), None);
+        assert!(
+            !tab.selection.has_selection(),
+            "the reload kept the previous content's selection"
         );
-        cx.notify();
-    }
-
-    /// Translate the image by `delta` pixels — used by classic wheel-scroll
-    /// (without the Cmd/Ctrl zoom modifier). Honors the same hard-cap that
-    /// drag-pan does so a runaway momentum scroll can't send the image off
-    /// to infinity.
-    pub(super) fn image_pan_by(
-        &mut self,
-        delta: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        const PAN_HARDCAP: f32 = 10_000.0;
-        let raw_x = f32::from(tab.image_view.pan.x + delta.x);
-        let raw_y = f32::from(tab.image_view.pan.y + delta.y);
-        tab.image_view.pan = gpui::Point::new(
-            gpui::px(raw_x.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-            gpui::px(raw_y.clamp(-PAN_HARDCAP, PAN_HARDCAP)),
-        );
-        cx.notify();
-    }
-
-    /// End a pan drag.
-    pub(super) fn image_end_pan(&mut self, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.is_panning = false;
-        tab.image_view.pan_anchor = None;
-        cx.notify();
-    }
-
-    /// Set the preview background explicitly (header button click).
-    pub(super) fn image_set_background(
-        &mut self,
-        background: PreviewBackground,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = self.active_tab_mut();
-        if !tab.is_image {
-            return;
-        }
-        tab.image_view.background = background;
-        cx.notify();
     }
 }

@@ -1,7 +1,11 @@
-//! `POST /v1/shutdown` — loopback-only, client-aware daemon shutdown.
+//! `POST /v1/shutdown` — same-user, same-host, client-aware daemon shutdown.
 //!
 //! A quitting GUI arms its UI-owned daemon to stop after the final authenticated
 //! client disconnects. Standalone daemons ignore desktop lifecycle handoff.
+//!
+//! Access is gated like `/v1/restart`: the local socket or a bearer token on top
+//! of loopback, falling back to loopback alone where the daemon bound no local
+//! socket — see `management_middleware`.
 //!
 //! Self-exclusion: the caller disconnects its OWN loopback WS before calling and
 //! the daemon simply counts live WS connections — see `local::request_local_shutdown`.

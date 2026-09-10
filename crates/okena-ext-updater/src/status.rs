@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "gpui-ui")]
 use gpui::*;
@@ -58,18 +58,34 @@ pub struct UpdateStatusSnapshot {
     pub is_homebrew: bool,
 }
 
+/// The one operation an `UpdateInfo` may have in flight. Checks, downloads,
+/// installs and reverts all claim this slot, so none can clean up or overwrite
+/// the artifacts another is using.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateOp {
+    ManualCheck,
+    BackgroundCheck,
+    Install,
+}
+
 struct UpdateInfoInner {
     status: UpdateStatus,
     dismissed: bool,
     is_homebrew: bool,
-    manual_check_active: bool,
+    active: Option<UpdateOp>,
+}
+
+fn is_in_flight(status: &UpdateStatus) -> bool {
+    matches!(
+        status,
+        UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. }
+    )
 }
 
 /// Thread-safe shared update state, readable from any thread/view.
 #[derive(Clone)]
 pub struct UpdateInfo {
     inner: Arc<Mutex<UpdateInfoInner>>,
-    running: Arc<AtomicBool>,
     cancel_token: Arc<AtomicU64>,
     app_version: Arc<String>,
 }
@@ -81,9 +97,8 @@ impl UpdateInfo {
                 status: UpdateStatus::Idle,
                 dismissed: false,
                 is_homebrew: is_homebrew_install(),
-                manual_check_active: false,
+                active: None,
             })),
-            running: Arc::new(AtomicBool::new(false)),
             cancel_token: Arc::new(AtomicU64::new(0)),
             app_version: Arc::new(app_version),
         }
@@ -143,48 +158,92 @@ impl UpdateInfo {
         self.inner.lock().dismissed = true;
     }
 
+    /// Reserve the update state for a user-initiated check or revert.
     pub fn try_start_manual(&self) -> bool {
         let mut inner = self.inner.lock();
-        if inner.manual_check_active {
+        if inner.active.is_some() || is_in_flight(&inner.status) {
             return false;
         }
-        if matches!(
-            inner.status,
-            UpdateStatus::Checking | UpdateStatus::Downloading { .. }
-        ) {
-            return false;
-        }
-        inner.manual_check_active = true;
+        inner.active = Some(UpdateOp::ManualCheck);
         inner.dismissed = false;
         true
     }
 
     pub fn is_manual_active(&self) -> bool {
-        self.inner.lock().manual_check_active
+        self.inner.lock().active == Some(UpdateOp::ManualCheck)
     }
 
-    pub fn finish_manual(&self) {
-        self.inner.lock().manual_check_active = false;
-    }
-
+    /// Reserve the update state for the background check loop.
     pub fn try_start(&self) -> Option<u64> {
-        if self.inner.lock().manual_check_active {
+        let mut inner = self.inner.lock();
+        if inner.active.is_some() || is_in_flight(&inner.status) {
             return None;
         }
-        if self
-            .running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            Some(self.cancel_token.load(Ordering::SeqCst))
-        } else {
-            None
+        inner.active = Some(UpdateOp::BackgroundCheck);
+        Some(self.cancel_token.load(Ordering::SeqCst))
+    }
+
+    /// Claim the downloaded archive and move to `Installing` under one lock, so
+    /// two callers cannot both read `Ready` and both start installing it.
+    pub fn try_start_install(&self) -> Option<(UpdateReservation, String, std::path::PathBuf)> {
+        let mut inner = self.inner.lock();
+        if inner.active.is_some() {
+            return None;
+        }
+        let UpdateStatus::Ready { version, path } = inner.status.clone() else {
+            return None;
+        };
+        inner.active = Some(UpdateOp::Install);
+        inner.dismissed = false;
+        inner.status = UpdateStatus::Installing {
+            version: version.clone(),
+        };
+        drop(inner);
+        Some((self.reservation(UpdateOp::Install), version, path))
+    }
+
+    /// Take ownership of a reservation an HTTP route already claimed, so the
+    /// worker frees it even if it panics or its task is dropped.
+    pub fn adopt_manual(&self) -> UpdateReservation {
+        self.reservation(UpdateOp::ManualCheck)
+    }
+
+    pub fn adopt_background(&self, token: u64) -> UpdateReservation {
+        UpdateReservation {
+            info: self.clone(),
+            op: UpdateOp::BackgroundCheck,
+            token,
+        }
+    }
+
+    /// A downloaded or installed update is waiting. Re-checking would download
+    /// over its artifacts and turn the `.old` rollback target into a copy of the
+    /// version being installed.
+    pub fn has_staged_update(&self) -> bool {
+        matches!(
+            self.inner.lock().status,
+            UpdateStatus::Ready { .. } | UpdateStatus::ReadyToRestart { .. }
+        )
+    }
+
+    fn reservation(&self, op: UpdateOp) -> UpdateReservation {
+        UpdateReservation {
+            info: self.clone(),
+            op,
+            token: self.cancel_token.load(Ordering::SeqCst),
+        }
+    }
+
+    fn release(&self, op: UpdateOp) {
+        let mut inner = self.inner.lock();
+        if inner.active == Some(op) {
+            inner.active = None;
         }
     }
 
     pub fn cancel(&self) {
         self.cancel_token.fetch_add(1, Ordering::SeqCst);
-        self.running.store(false, Ordering::SeqCst);
+        self.release(UpdateOp::BackgroundCheck);
     }
 
     pub fn is_cancelled(&self, token: u64) -> bool {
@@ -194,11 +253,26 @@ impl UpdateInfo {
     pub fn current_token(&self) -> u64 {
         self.cancel_token.load(Ordering::SeqCst)
     }
+}
 
-    pub fn mark_stopped(&self, token: u64) {
-        if self.cancel_token.load(Ordering::SeqCst) == token {
-            self.running.store(false, Ordering::SeqCst);
+/// Holds the reservation for the length of one operation. Dropping it — on
+/// return, on panic, or when the worker's task is cancelled — frees the slot.
+pub struct UpdateReservation {
+    info: UpdateInfo,
+    op: UpdateOp,
+    token: u64,
+}
+
+impl Drop for UpdateReservation {
+    fn drop(&mut self) {
+        // A cancelled background check must not free a reservation that a newer
+        // one has since taken.
+        if self.op == UpdateOp::BackgroundCheck
+            && self.info.cancel_token.load(Ordering::SeqCst) != self.token
+        {
+            return;
         }
+        self.info.release(self.op);
     }
 }
 
@@ -446,21 +520,25 @@ impl Render for UpdateStatusWidget {
                     };
                     let info = global.0.clone();
                     cx.spawn(async move |this, cx| {
-                        match smol::unblock(crate::daemon_client::restart_daemon_and_wait).await {
-                            Ok(()) => {
-                                let _ = this.update(cx, |_this, cx| {
-                                    crate::installer::restart_app(cx);
-                                });
-                            }
-                            Err(error) => {
-                                info.set_status(UpdateStatus::Failed {
-                                    error: error.to_string(),
-                                });
-                                let _ = this.update(cx, |this, cx| {
-                                    this.restarting = false;
-                                    cx.notify();
-                                });
-                            }
+                        let failure = match smol::unblock(
+                            crate::daemon_client::restart_daemon_and_wait,
+                        )
+                        .await
+                        {
+                            Ok(()) => this
+                                .update(cx, |_this, cx| crate::installer::restart_app(cx))
+                                .ok()
+                                .and_then(Result::err),
+                            Err(error) => Some(error),
+                        };
+                        if let Some(error) = failure {
+                            info.set_status(UpdateStatus::Failed {
+                                error: error.to_string(),
+                            });
+                            let _ = this.update(cx, |this, cx| {
+                                this.restarting = false;
+                                cx.notify();
+                            });
                         }
                     })
                     .detach();
@@ -538,5 +616,153 @@ impl Render for UpdateStatusWidget {
             }
             _ => div().size_0().into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UpdateInfo, UpdateStatus};
+    use std::panic::AssertUnwindSafe;
+    use std::path::PathBuf;
+
+    fn info() -> UpdateInfo {
+        UpdateInfo::new("0.1.0".to_string())
+    }
+
+    fn ready(info: &UpdateInfo) {
+        info.set_status(UpdateStatus::Ready {
+            version: "0.2.0".to_string(),
+            path: PathBuf::from("/tmp/okena-update.tar.gz"),
+        });
+    }
+
+    #[test]
+    fn only_one_caller_can_start_the_install() {
+        let first = info();
+        let second = first.clone();
+        ready(&first);
+
+        let (_reservation, version, _path) =
+            first.try_start_install().expect("first caller installs");
+        assert_eq!(version, "0.2.0");
+        assert!(matches!(first.status(), UpdateStatus::Installing { .. }));
+        assert!(second.try_start_install().is_none());
+    }
+
+    #[test]
+    fn install_is_refused_unless_an_archive_is_ready() {
+        let info = info();
+        assert!(info.try_start_install().is_none());
+        info.set_status(UpdateStatus::Downloading {
+            version: "0.2.0".to_string(),
+            progress: 10,
+        });
+        assert!(info.try_start_install().is_none());
+        info.set_status(UpdateStatus::Failed {
+            error: "boom".to_string(),
+        });
+        assert!(info.try_start_install().is_none());
+    }
+
+    #[test]
+    fn an_install_blocks_every_check() {
+        let info = info();
+        ready(&info);
+        let reservation = info.try_start_install().expect("install reservation");
+
+        assert!(!info.try_start_manual());
+        assert!(info.try_start().is_none());
+
+        info.set_status(UpdateStatus::ReadyToRestart {
+            version: "0.2.0".to_string(),
+            config_restore: None,
+        });
+        drop(reservation);
+        // A pending restart still allows a revert, which enters via try_start_manual.
+        assert!(info.try_start_manual());
+    }
+
+    #[test]
+    fn a_check_reservation_cannot_release_an_install() {
+        let info = info();
+        ready(&info);
+        let _install = info.try_start_install().expect("install reservation");
+
+        drop(info.adopt_manual());
+        drop(info.adopt_background(info.current_token()));
+
+        assert!(!info.try_start_manual());
+        assert!(info.try_start().is_none());
+    }
+
+    #[test]
+    fn a_check_is_refused_while_installing() {
+        let info = info();
+        info.set_status(UpdateStatus::Installing {
+            version: "0.2.0".to_string(),
+        });
+        assert!(!info.try_start_manual());
+        assert!(info.try_start().is_none());
+    }
+
+    #[test]
+    fn manual_and_background_checks_exclude_each_other() {
+        let info = info();
+        let token = info.try_start().expect("background reservation");
+        assert!(!info.try_start_manual());
+        drop(info.adopt_background(token));
+
+        assert!(info.try_start_manual());
+        assert!(info.try_start().is_none());
+        drop(info.adopt_manual());
+        assert!(info.try_start().is_some());
+    }
+
+    #[test]
+    fn a_panicking_install_frees_the_slot() {
+        let info = info();
+        ready(&info);
+
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _reservation = info.try_start_install().expect("install reservation");
+            panic!("install worker died");
+        }));
+        assert!(outcome.is_err());
+
+        // The panic latches the status; what must not leak is the reservation.
+        info.set_status(UpdateStatus::Failed {
+            error: "worker panicked".to_string(),
+        });
+        assert!(info.try_start_manual());
+    }
+
+    #[test]
+    fn a_panicking_background_check_does_not_block_an_install() {
+        let info = info();
+        let token = info.try_start().expect("background reservation");
+
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _reservation = info.adopt_background(token);
+            panic!("check worker died");
+        }));
+        assert!(outcome.is_err());
+
+        ready(&info);
+        assert!(info.try_start_install().is_some());
+    }
+
+    #[test]
+    fn a_staged_update_is_recognised() {
+        let info = info();
+        assert!(!info.has_staged_update());
+        ready(&info);
+        assert!(info.has_staged_update());
+        info.set_status(UpdateStatus::ReadyToRestart {
+            version: "0.2.0".to_string(),
+            config_restore: None,
+        });
+        assert!(info.has_staged_update());
+        info.set_status(UpdateStatus::Idle);
+        assert!(!info.has_staged_update());
     }
 }

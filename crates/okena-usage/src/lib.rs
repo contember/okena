@@ -13,6 +13,7 @@ use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_extensions::ExtensionSettingsStore;
+use okena_ui::metrics::{metric_bar, status_bar_style};
 use okena_ui::settings::{section_container, section_header, section_note};
 use okena_ui::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xs};
@@ -849,40 +850,51 @@ pub fn usage_kv_row(
 /// time-elapsed value (so the color matches the popover headline exactly).
 pub type TriggerItem = (SharedString, f64, Option<f64>);
 
+/// Bar width for one trigger item in the minimal status bar, where the bar
+/// stands on its own instead of sitting under a `label + %` row.
+const MINIMAL_TRIGGER_BAR_WIDTH: Pixels = px(28.0);
+
 /// Build the inner content of the status-bar trigger with a bar below each value.
 /// The caller wraps these in a hoverable, bounds-tracking container.
+///
+/// In the minimal status bar the percentage is dropped and the label sits next
+/// to the bar — the exact figures are one hover away in the popover.
 pub fn usage_trigger_items(t: &ThemeColors, cx: &App, items: &[TriggerItem]) -> Vec<AnyElement> {
-    let mut track_color = rgb(t.text_muted);
-    track_color.a = 0.55;
+    let minimal = status_bar_style(cx).is_minimal();
 
     items
         .iter()
         .map(|(label, pct, time_pct)| {
             let color = headline_color(t, *pct, *time_pct);
-            v_flex()
-                .gap(px(1.0))
-                .child(
-                    h_flex()
-                        .gap(px(3.0))
-                        .text_size(ui_text_sm(cx))
-                        .child(div().text_color(rgb(t.text_muted)).child(label.clone()))
-                        .child(div().text_color(rgb(color)).child(format!("{:.0}%", pct))),
-                )
-                .child(
-                    div()
-                        .h(px(2.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(track_color)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(pct.clamp(0.0, 100.0) as f32 / 100.0))
-                                .rounded_full()
-                                .bg(rgb(color)),
-                        ),
-                )
-                .into_any_element()
+            let fraction = pct.clamp(0.0, 100.0) as f32 / 100.0;
+            let label_el = div()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(label.clone());
+
+            if minimal {
+                h_flex()
+                    .gap(px(4.0))
+                    .child(label_el)
+                    .child(
+                        div()
+                            .w(MINIMAL_TRIGGER_BAR_WIDTH)
+                            .child(metric_bar(fraction, color, t)),
+                    )
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .gap(px(1.0))
+                    .child(
+                        h_flex()
+                            .gap(px(3.0))
+                            .text_size(ui_text_sm(cx))
+                            .child(label_el)
+                            .child(div().text_color(rgb(color)).child(format!("{:.0}%", pct))),
+                    )
+                    .child(metric_bar(fraction, color, t))
+                    .into_any_element()
+            }
         })
         .collect()
 }

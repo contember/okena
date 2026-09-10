@@ -92,7 +92,7 @@ impl SimpleInputState {
 
     pub fn default_value(mut self, value: impl Into<String>) -> Self {
         let v = value.into();
-        self.cursor_position = v.len();
+        self.cursor_position = v.chars().count();
         self.value = v;
         self
     }
@@ -453,6 +453,10 @@ impl SimpleInputState {
             .unwrap_or(self.value.len())
     }
 
+    fn char_position_for_byte(&self, byte_pos: usize) -> usize {
+        char_offset_for_byte(&self.value, byte_pos)
+    }
+
     fn byte_range_for_chars(&self, char_range: &Range<usize>) -> Range<usize> {
         let start = self.byte_position_for_char(char_range.start);
         let end = self.byte_position_for_char(char_range.end);
@@ -533,6 +537,7 @@ impl SimpleInputState {
     }
 
     /// Resolve a mouse position to a char offset using the stored text_layouts.
+    /// `index_for_position` answers in bytes; this input counts characters.
     fn char_position_for_mouse(&self, position: Point<Pixels>) -> usize {
         if self.multiline {
             // A soft-wrapped line is taller than one row, so ask each line's
@@ -545,29 +550,29 @@ impl SimpleInputState {
                     .iter()
                     .position(|layout| position.y < layout.bounds().bottom())
                     .unwrap_or(self.text_layouts.len() - 1);
-                let col = self.text_layouts[line_idx]
+                let byte_col = self.text_layouts[line_idx]
                     .index_for_position(position)
-                    .unwrap_or_else(|ix| ix)
-                    .min(self.line_char_count(line_idx));
-                self.line_start_char(line_idx) + col
+                    .unwrap_or_else(|ix| ix);
+                let line_text = self.value.split('\n').nth(line_idx).unwrap_or("");
+                self.line_start_char(line_idx) + char_offset_for_byte(line_text, byte_col)
             }
+        } else if let Some(layout) = self.text_layouts.first() {
+            let byte_pos = layout.index_for_position(position).unwrap_or_else(|ix| ix);
+            self.char_position_for_byte(byte_pos)
         } else {
-            let char_count = self.value.chars().count();
-            if let Some(layout) = self.text_layouts.first() {
-                layout
-                    .index_for_position(position)
-                    .unwrap_or_else(|ix| ix)
-                    .min(char_count)
-            } else {
-                char_count
-            }
+            self.value.chars().count()
         }
     }
 
     /// Select the word around the given char position.
     fn select_word_at(&mut self, pos: usize, cx: &mut Context<Self>) {
-        let (start, end) = find_word_boundaries(&self.value, pos);
+        // `find_word_boundaries` speaks bytes; everything here speaks chars.
+        let (start, end) = find_word_boundaries(&self.value, self.byte_position_for_char(pos));
         if start != end {
+            let (start, end) = (
+                self.char_position_for_byte(start),
+                self.char_position_for_byte(end),
+            );
             self.selection = Some(start..end);
             self.cursor_position = end;
         }
@@ -741,6 +746,13 @@ impl SimpleInputState {
 
         KeyHandled::Ignored
     }
+}
+
+/// Character offset of the byte offset `byte` in `text`, clamped to its end.
+fn char_offset_for_byte(text: &str, byte: usize) -> usize {
+    text.char_indices()
+        .position(|(i, _)| i >= byte)
+        .unwrap_or_else(|| text.chars().count())
 }
 
 /// Whether a character is a "word" character (alphanumeric or underscore).
@@ -1193,6 +1205,68 @@ mod tests {
         assert!(
             cursor > 0 && cursor <= LONG_LINE.chars().count(),
             "click on the wrapped row resolved to {cursor}, past the first line"
+        );
+    }
+
+    /// gpui's layout answers in byte offsets. Reading one as a character offset
+    /// put the cursor roughly twice as far along a non-ASCII line — and past
+    /// its halfway point, clamping pinned it to the end of the line.
+    #[gpui::test]
+    fn a_click_on_a_multibyte_line_lands_on_the_character_under_it(cx: &mut TestAppContext) {
+        let value = "žž ".repeat(70);
+        let char_count = value.chars().count();
+        let (input, vcx) = draw(cx, &value);
+        let bounds = input_bounds(vcx);
+
+        // The last visual row of a line that wraps several times: every
+        // character before it is already more bytes than the line has chars.
+        vcx.simulate_mouse_down(
+            point(
+                bounds.origin.x + px(2.0),
+                bounds.bottom() - px(V_PADDING + 2.0),
+            ),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        let cursor = input.read_with(vcx, |input, _| input.cursor_position);
+        assert!(
+            cursor > 0 && cursor < char_count,
+            "click on the last row resolved to {cursor} of {char_count} chars"
+        );
+    }
+
+    /// Rename fields are built with `default_value` and focused straight away,
+    /// so the very first Alt+Left runs against that initial cursor.
+    #[gpui::test]
+    fn word_navigation_works_on_a_multibyte_default_value(cx: &mut TestAppContext) {
+        let (input, vcx) = draw(cx, "žluť");
+        input.update(vcx, |input, cx| input.move_word_left(false, cx));
+
+        let cursor = input.read_with(vcx, |input, _| input.cursor_position);
+        assert_eq!(cursor, 0, "Alt+Left did not reach the start of the word");
+    }
+
+    #[gpui::test]
+    fn deleting_a_word_backwards_from_a_multibyte_default_value(cx: &mut TestAppContext) {
+        let (input, vcx) = draw(cx, "žluť kůň");
+        input.update(vcx, |input, cx| input.delete_word_backward(cx));
+
+        let value = input.read_with(vcx, |input, _| input.value.clone());
+        assert_eq!(value, "žluť ");
+    }
+
+    #[gpui::test]
+    fn double_click_selects_only_the_word_under_the_cursor(cx: &mut TestAppContext) {
+        let (input, vcx) = draw(cx, "žluť kůň");
+        // Char 6 is the `ů` of the second word; its byte offset is 8.
+        input.update(vcx, |input, cx| input.select_word_at(6, cx));
+
+        let selection = input.read_with(vcx, |input, _| input.selection.clone());
+        assert_eq!(
+            selection,
+            Some(5..8),
+            "word selection was not reported in char offsets"
         );
     }
 }

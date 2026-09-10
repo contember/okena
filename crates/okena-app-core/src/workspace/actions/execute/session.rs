@@ -22,9 +22,9 @@ use super::{
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::persistence::{
-    LoadedWorkspace, delete_session, export_workspace, import_workspace, list_sessions,
-    load_session_with_cleanup, load_session_with_cleanup_for_shell, rename_session, save_session,
-    session_exists,
+    LoadedWorkspace, clear_workspace_save_suppression, delete_session, export_workspace,
+    import_workspace, list_sessions, load_session_with_cleanup,
+    load_session_with_cleanup_for_shell, rename_session, save_session, session_exists,
 };
 use crate::workspace::state::{Workspace, WorkspaceData};
 use okena_terminal::TerminalsRegistry;
@@ -538,6 +538,10 @@ pub fn finish_workspace_replacement(
         plan.terminals.lock().remove(terminal_id);
     }
     ws.finish_workspace_replacement_transition(plan.epoch, cx);
+    // The live workspace is no longer the fallback default a failed load left
+    // behind, so saving is safe again. Only here: a replacement that never
+    // committed must keep the protected file on disk untouched.
+    clear_workspace_save_suppression();
     if completion.errors.is_empty() {
         ActionResult::Ok(None)
     } else {

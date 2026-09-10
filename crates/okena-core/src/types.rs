@@ -35,6 +35,38 @@ impl DiffViewMode {
     }
 }
 
+/// How much text the status bar spells out.
+///
+/// `Detailed` (default) is the labelled bar: `CPU 13%`, `Claude Code OK`,
+/// `5h 20%`. `Minimal` keeps the same widgets but drops the redundant numbers
+/// and "OK" labels, leaving the graphs and bars to carry the value — the exact
+/// figures move into tooltips. Anything abnormal (a degraded service) still
+/// prints its label in both modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusBarStyle {
+    #[default]
+    Detailed,
+    Minimal,
+}
+
+impl StatusBarStyle {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            StatusBarStyle::Detailed => "Detailed",
+            StatusBarStyle::Minimal => "Minimal",
+        }
+    }
+
+    pub fn all_variants() -> &'static [StatusBarStyle] {
+        &[StatusBarStyle::Detailed, StatusBarStyle::Minimal]
+    }
+
+    pub fn is_minimal(self) -> bool {
+        matches!(self, StatusBarStyle::Minimal)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffMode {
