@@ -73,6 +73,38 @@ impl ActionResult {
     }
 }
 
+/// Run an OpenSpec store change — register, unregister, set up, or set the
+/// machine default — which needs settings but not the workspace.
+///
+/// `None` for any other action. The daemon runs these on its blocking pool
+/// rather than under the workspace lock: setup commits with git, and every
+/// registry change may wait on the lock an `openspec` command holds.
+pub fn execute_spec_store_action(
+    action: &ActionRequest,
+    settings: &AppSettings,
+) -> Option<ActionResult> {
+    Some(match action {
+        ActionRequest::SpecStoreRegister { path, id } => {
+            specs::register_store(settings, path.clone(), id.clone())
+        }
+        ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id.clone()),
+        ActionRequest::SpecStoreSetup {
+            id,
+            path,
+            remote,
+            init_git,
+        } => specs::setup_store(
+            settings,
+            id.clone(),
+            path.clone(),
+            remote.clone(),
+            *init_git,
+        ),
+        ActionRequest::SpecSetDefaultStore { id } => specs::set_default_store(settings, id.clone()),
+        _ => return None,
+    })
+}
+
 /// Execute any `ActionRequest` against the workspace.
 ///
 /// This is the single source of truth for all client-facing actions.
@@ -650,10 +682,21 @@ pub fn execute_action(
             settings,
             cx,
         ),
-        // ── Engineering harness: OpenSpec documents ────────────────────────
-        ActionRequest::SpecsTree => specs::tree(settings),
-        ActionRequest::SpecRead { path } => specs::read(settings, path),
+        // ── Engineering harness: OpenSpec ──────────────────────────────────
+        ActionRequest::SpecStores => specs::stores(ws, settings),
+        ActionRequest::SpecsTree { root } => specs::tree(ws, settings, root),
+        ActionRequest::SpecRead { root, path } => specs::read(ws, settings, root, path),
+        ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
+        ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id),
+        ActionRequest::SpecStoreSetup {
+            id,
+            path,
+            remote,
+            init_git,
+        } => specs::setup_store(settings, id, path, remote, init_git),
+        ActionRequest::SpecSetDefaultStore { id } => specs::set_default_store(settings, id),
         ActionRequest::SpecDraftChange {
+            root,
             idea,
             name,
             agent_command,
@@ -663,6 +706,7 @@ pub fn execute_action(
             idea,
             name,
             agent_command,
+            root,
             backend,
             terminals,
             settings,

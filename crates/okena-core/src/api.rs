@@ -1189,31 +1189,80 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
     },
-    // ─── Engineering harness: OpenSpec documents ──────────────────────────
+    // ─── Engineering harness: OpenSpec ────────────────────────────────────
     //
-    // okena reads the OpenSpec layout directly off disk rather than shelling
-    // out to the `openspec` CLI: the convention is plain Markdown in a git
-    // repo, so browsing works whether or not the CLI is installed, while an
-    // agent authoring a change can still use the CLI itself.
-    /// The spec repository's OpenSpec tree: stable specs, active changes and
-    /// the archive. Reads `settings.harness.spec_repo`; an unset or missing
-    /// repo is reported as such rather than as an error.
-    SpecsTree,
-    /// Read one document from the spec repository.
+    // okena follows OpenSpec's store model (https://openspec.dev/docs/stores):
+    // roots come from the machine store registry, from projects holding their
+    // own `openspec/` tree or a `store:` pointer, and from folders in
+    // settings. The daemon reads and writes those files itself
+    // (`okena-openspec`), so nothing here needs the `openspec` CLI installed,
+    // and whatever okena writes the CLI reads back.
+    /// Every OpenSpec root okena can see, with health, references, pointers
+    /// and the machine `defaultStore` — an `okena_core::specs::SpecStores`.
+    SpecStores,
+    /// One root's planning tree: capabilities, active changes and the archive.
     ///
-    /// `path` is relative to the repository root, as returned by `SpecsTree`.
-    /// The daemon refuses any path that resolves outside the repo, so a
-    /// compromised or buggy client cannot use this to read arbitrary files.
+    /// `root` is a key from `SpecStores`; `None` opens the default root. The
+    /// daemon refuses keys it did not discover itself, so a key cannot name an
+    /// arbitrary directory.
+    SpecsTree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
+    /// Read one document from a root.
+    ///
+    /// `path` is relative to the root, as returned by `SpecsTree`. The daemon
+    /// refuses any path that resolves outside the root, so a compromised or
+    /// buggy client cannot use this to read arbitrary files.
     SpecRead {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
         path: String,
+    },
+    /// Register an existing store checkout in OpenSpec's machine registry —
+    /// `openspec store register <path> [--id <id>] --yes`. A root without
+    /// `.openspec-store/store.yaml` becomes a store named `id`, else its
+    /// folder name.
+    SpecStoreRegister {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// Forget a registered store — `openspec store unregister <id>`. The
+    /// checkout stays on disk.
+    SpecStoreUnregister {
+        id: String,
+    },
+    /// Create and register a new store — `openspec store setup <id> --path
+    /// <path> [--remote <url>]` — with one initial commit when `init_git`.
+    SpecStoreSetup {
+        id: String,
+        path: String,
+        /// Canonical clone source, recorded in the store's identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<String>,
+        #[serde(default = "crate::specs::default_init_git")]
+        init_git: bool,
+    },
+    /// Set or clear OpenSpec's machine-wide `defaultStore` — `openspec config
+    /// set|unset defaultStore`.
+    SpecSetDefaultStore {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// Draft a new OpenSpec change from a free-text idea, with an agent.
     ///
-    /// Scaffolds `openspec/changes/<slug>/` and opens an agent session in the
-    /// spec repo briefed to fill it in. okena creates the directory itself so
-    /// the change exists and is browsable even if the agent is closed
-    /// immediately; the agent's job is the thinking, not the mkdir.
+    /// Scaffolds `openspec/changes/<slug>/` in the chosen root — the
+    /// `.openspec.yaml` that `openspec new change` writes, plus a stub
+    /// proposal — and opens an agent session there briefed to fill it in.
+    /// okena creates the directory itself so the change exists and is
+    /// browsable even if the agent is closed immediately; the agent's job is
+    /// the thinking, not the mkdir.
     SpecDraftChange {
+        /// Root to draft in, a key from `SpecStores`. `None` uses the default
+        /// root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
         idea: String,
         /// Directory name for the change. `None` derives one from `idea`.
         ///

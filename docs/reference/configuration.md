@@ -196,6 +196,39 @@ Controls default behavior when creating and closing git worktrees:
 | `worktree.default_push` | bool | `false` | Push branch on close |
 | `worktree.default_delete_branch` | bool | `false` | Delete branch after close |
 
+#### Specs (OpenSpec)
+
+The harness Specs view follows OpenSpec's store model
+([openspec.dev/docs/stores](https://openspec.dev/docs/stores)). It shows every
+OpenSpec *root* it can find:
+
+- **Stores** registered on this machine — what `openspec store list` shows, read
+  from OpenSpec's registry (`<data>/stores/registry.yaml`).
+- **Projects** whose repository holds an `openspec/` tree. A project whose
+  `openspec/config.yaml` only says `store: <id>` resolves to that store, as the
+  CLI does.
+- **Folders** listed in settings.
+
+Settings → Specs registers, creates (`openspec store setup`) and unregisters
+stores, and sets OpenSpec's machine `defaultStore`. These change OpenSpec's own
+files, using the CLI's `registry.yaml.lock` protocol, so the `openspec` CLI sees
+the same stores. The CLI does not need to be installed.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `harness.specs.registry` | bool | `true` | List every registered store. When off, a store is still shown if a project points at it |
+| `harness.specs.projects` | bool | `true` | Find roots and `store:` pointers in okena projects (worktrees and agent sessions are skipped) |
+| `harness.specs.folders` | string[] | `[]` | Extra folders to show as roots without registering them |
+| `harness.specs.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
+| `harness.specs.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
+| `harness.spec_repo` | string | — | Legacy single spec repository. Still shown as a folder; cleared once the folder list is edited |
+
+The Specs view opens OpenSpec's `defaultStore` when it is set and healthy, else
+the first healthy store, else the first healthy root. "New change" writes the
+`.openspec.yaml` that `openspec new change` writes, plus a stub `proposal.md`, in
+the chosen root. When that root is a store, the drafting agent is told to pass
+`--store <id>` to the CLI.
+
 ---
 
 ## keybindings.json

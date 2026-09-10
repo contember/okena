@@ -14,6 +14,7 @@ mod render_general;
 mod render_harness;
 mod render_hooks;
 mod render_paired_devices;
+mod render_specs;
 mod render_tasks;
 mod render_terminal;
 mod render_worktree;
@@ -91,7 +92,8 @@ pub struct SettingsPanel {
     // Worktree dir suffix input
     pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
     pub(super) harness_agent_root_input: Entity<SimpleInputState>,
-    pub(super) harness_spec_repo_input: Entity<SimpleInputState>,
+    /// The Specs page: OpenSpec stores, discovery and folders.
+    specs: render_specs::SpecsPage,
     pub(super) harness_agent_args_input: Entity<SimpleInputState>,
     pub(super) harness_agent_mcp_args_input: Entity<SimpleInputState>,
     // File opener input
@@ -894,19 +896,11 @@ impl SettingsPanel {
         let tasks_api_key_input =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("Paste a personal API key…"));
 
-        let harness_spec_repo_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("e.g. ~/p/specs")
-                .default_value(s.harness.spec_repo.clone().unwrap_or_default())
-        });
-        cx.subscribe(
-            &harness_spec_repo_input,
-            |_this, entity, _: &InputChangedEvent, cx| {
-                let val = entity.read(cx).value().to_string();
-                settings_entity(cx).update(cx, |state, cx| state.set_harness_spec_repo(val, cx));
-            },
-        )
-        .detach();
+        let specs = render_specs::SpecsPage::new(
+            s.harness.specs.data_dir.clone(),
+            s.harness.specs.config_dir.clone(),
+            cx,
+        );
 
         let harness_agent_args_input = cx.new(|cx| {
             SimpleInputState::new(cx)
@@ -1026,7 +1020,7 @@ impl SettingsPanel {
             project_hook_terminal_shell_wrapper,
             worktree_dir_suffix_input,
             harness_agent_root_input,
-            harness_spec_repo_input,
+            specs,
             harness_agent_args_input,
             harness_agent_mcp_args_input,
             file_opener_input,
@@ -1412,6 +1406,7 @@ impl SettingsPanel {
             SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
             SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
+            SettingsCategory::Specs => self.render_specs(cx),
             SettingsCategory::Tasks => self.render_tasks(cx).into_any_element(),
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),

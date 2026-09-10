@@ -91,17 +91,6 @@ impl SettingsPanel {
                 false,
                 cx,
             )))
-            .child(section_header("Specs", &t, cx))
-            .child(section_container(&t).child(hook_input_row(
-                "harness-spec-repo",
-                "Spec repository",
-                "Git repository holding your OpenSpec documents. A change often \
-                 spans several projects, so specs live in their own repo.",
-                &self.harness_spec_repo_input,
-                &t,
-                false,
-                cx,
-            )))
             .child(section_header("Agent", &t, cx))
             .child(
                 section_container(&t)

@@ -63,6 +63,12 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // project-creation hooks — and launches an agent. Hooks are arbitrary
         // shell with no bound, so the fast bucket is the wrong budget.
         ActionRequest::SpecDraftChange { .. } => ActionClientKind::LongMutation,
+        // Store setup runs `git init` and a commit — which may run the user's
+        // commit hooks — and both may wait up to 5 s on the registry lock an
+        // `openspec` command is holding.
+        ActionRequest::SpecStoreSetup { .. } | ActionRequest::SpecStoreRegister { .. } => {
+            ActionClientKind::LongMutation
+        }
         // Same shape as drafting a change: creates a project, runs its hooks,
         // and launches an agent. Hooks are arbitrary shell with no bound.
         ActionRequest::AgentStartSession { .. } => ActionClientKind::LongMutation,
@@ -754,6 +760,7 @@ mod action_timeout_tests {
     fn drafting_a_spec_gets_the_long_mutation_budget() {
         // It creates a project (running its hooks) and launches an agent.
         let action = ActionRequest::SpecDraftChange {
+            root: None,
             idea: "add login".into(),
             name: None,
             agent_command: None,
@@ -765,13 +772,38 @@ mod action_timeout_tests {
     }
 
     #[test]
-    fn reading_specs_stays_in_the_fast_bucket() {
-        // Both are local filesystem reads; borrowing a longer budget would
-        // only delay how fast a broken connection is reported.
+    fn store_setup_and_register_outlast_git_and_the_registry_lock() {
+        // Setup commits (hooks may run) and both may wait 5 s on a lock an
+        // `openspec` command holds.
         for action in [
-            ActionRequest::SpecsTree,
+            ActionRequest::SpecStoreSetup {
+                id: "team-plans".into(),
+                path: "~/openspec/team-plans".into(),
+                remote: None,
+                init_git: true,
+            },
+            ActionRequest::SpecStoreRegister {
+                path: "~/openspec/team-plans".into(),
+                id: None,
+            },
+        ] {
+            assert!(matches!(
+                client_kind_for(&action),
+                ActionClientKind::LongMutation
+            ));
+        }
+    }
+
+    #[test]
+    fn reading_specs_stays_in_the_fast_bucket() {
+        // All local filesystem reads; borrowing a longer budget would only
+        // delay how fast a broken connection is reported.
+        for action in [
+            ActionRequest::SpecStores,
+            ActionRequest::SpecsTree { root: None },
             ActionRequest::SpecRead {
-                path: "openspec/specs/auth.md".into(),
+                root: Some("store:team-plans".into()),
+                path: "openspec/specs/auth/spec.md".into(),
             },
         ] {
             assert!(matches!(client_kind_for(&action), ActionClientKind::Fast));

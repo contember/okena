@@ -2648,6 +2648,42 @@ pub async fn daemon_command_loop(
                 }
                 continue;
             }
+            // ── OpenSpec store changes: off the queue and the workspace lock ──
+            // Store setup runs `git init` and a commit (the user's hooks may
+            // run), and every registry change may wait up to 5 s on the lock an
+            // `openspec` command holds. None of them touch the workspace, so they
+            // run on the blocking pool with a settings snapshot and reply when
+            // done instead of stalling every other action behind them.
+            RemoteCommand::Action(
+                action @ (ActionRequest::SpecStoreRegister { .. }
+                | ActionRequest::SpecStoreUnregister { .. }
+                | ActionRequest::SpecStoreSetup { .. }
+                | ActionRequest::SpecSetDefaultStore { .. }),
+            ) => {
+                let app_settings = settings.lock().clone();
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            okena_app_core::workspace::actions::execute::execute_spec_store_action(
+                                &action,
+                                &app_settings,
+                            )
+                            .map(|r| r.into_command_result())
+                            .unwrap_or_else(|| {
+                                CommandResult::Err("not an OpenSpec store action".into())
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            CommandResult::Err(format!("OpenSpec store worker failed: {e}"))
+                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
             command => command,
         };
 

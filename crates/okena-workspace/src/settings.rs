@@ -102,13 +102,17 @@ pub struct HarnessConfig {
     #[serde(default = "default_true")]
     pub agent_mcp_injection: bool,
 
-    /// Git repository holding this person's OpenSpec documents.
+    /// Legacy single spec repository.
     ///
-    /// Specs live in their own repo rather than beside the code because a
-    /// change routinely spans several projects — the same reason `agent_root`
-    /// exists. Unset means the Specs view has nothing to show and says so.
+    /// Superseded by `specs`: OpenSpec stores are found through OpenSpec's
+    /// own registry now. Still read so an existing setup keeps working — it
+    /// counts as one of `specs.folders` until the folder list is edited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_repo: Option<String>,
+
+    /// Where the Specs view finds OpenSpec roots.
+    #[serde(default)]
+    pub specs: SpecDiscoveryConfig,
 
     /// Override the flags used to hand an agent its MCP config.
     ///
@@ -130,6 +134,79 @@ impl Default for HarnessConfig {
             agent_mcp_injection: true,
             agent_mcp_args: None,
             spec_repo: None,
+            specs: SpecDiscoveryConfig::default(),
+        }
+    }
+}
+
+impl HarnessConfig {
+    /// Folders to show as spec roots: the configured list, plus the legacy
+    /// `spec_repo` when it is still set and not already listed.
+    pub fn spec_folders(&self) -> Vec<String> {
+        let mut folders: Vec<String> = self
+            .specs
+            .folders
+            .iter()
+            .map(|f| f.trim())
+            .filter(|f| !f.is_empty())
+            .map(str::to_string)
+            .collect();
+        if let Some(repo) = self.spec_repo.as_deref().map(str::trim)
+            && !repo.is_empty()
+            && !folders.iter().any(|f| f == repo)
+        {
+            folders.insert(0, repo.to_string());
+        }
+        folders
+    }
+}
+
+/// Where the Specs view finds OpenSpec roots.
+///
+/// Discovery follows OpenSpec's own model
+/// (<https://openspec.dev/docs/stores>): stores registered on this machine,
+/// repositories that carry their own `openspec/` tree or point at a store with
+/// `store:`, plus any folders listed here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecDiscoveryConfig {
+    /// List the stores in OpenSpec's machine registry — what
+    /// `openspec store list` shows.
+    #[serde(default = "default_true")]
+    pub registry: bool,
+
+    /// Treat okena projects as OpenSpec roots when their repository holds an
+    /// `openspec/` tree, and follow their `store:` pointers.
+    #[serde(default = "default_true")]
+    pub projects: bool,
+
+    /// Extra folders to show that are neither registered stores nor projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+
+    /// OpenSpec's data directory, where `stores/registry.yaml` lives.
+    ///
+    /// Unset resolves it the way the CLI does (`$XDG_DATA_HOME/openspec`, else
+    /// `~/.local/share/openspec`, `%LOCALAPPDATA%\openspec` on Windows). Needed
+    /// when the CLI runs with an `XDG_DATA_HOME` the daemon never saw — an app
+    /// launched from the dock does not inherit a shell profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+
+    /// OpenSpec's config directory, where `config.json` (and `defaultStore`)
+    /// lives. Same resolution and reason as `data_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
+}
+
+impl Default for SpecDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            // Must match the serde defaults above.
+            registry: true,
+            projects: true,
+            folders: Vec::new(),
+            data_dir: None,
+            config_dir: None,
         }
     }
 }
