@@ -917,8 +917,6 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
                 force,
             }
         }
-        // Spec actions carry no ids — paths are relative to the daemon's own
-        // spec repository, which the client never names.
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::AgentStartSession {
             goal,
@@ -933,13 +931,34 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
             agent_command,
         },
-        ActionRequest::SpecsTree => ActionRequest::SpecsTree,
-        ActionRequest::SpecRead { path } => ActionRequest::SpecRead { path },
+        // Spec actions carry no ids — root keys and paths are the daemon's
+        // own, discovered and checked on its side.
+        ActionRequest::SpecStores => ActionRequest::SpecStores,
+        ActionRequest::SpecsTree { root } => ActionRequest::SpecsTree { root },
+        ActionRequest::SpecRead { root, path } => ActionRequest::SpecRead { root, path },
+        ActionRequest::SpecStoreRegister { path, id } => {
+            ActionRequest::SpecStoreRegister { path, id }
+        }
+        ActionRequest::SpecStoreUnregister { id } => ActionRequest::SpecStoreUnregister { id },
+        ActionRequest::SpecStoreSetup {
+            id,
+            path,
+            remote,
+            init_git,
+        } => ActionRequest::SpecStoreSetup {
+            id,
+            path,
+            remote,
+            init_git,
+        },
+        ActionRequest::SpecSetDefaultStore { id } => ActionRequest::SpecSetDefaultStore { id },
         ActionRequest::SpecDraftChange {
+            root,
             idea,
             name,
             agent_command,
         } => ActionRequest::SpecDraftChange {
+            root,
             idea,
             name,
             agent_command,

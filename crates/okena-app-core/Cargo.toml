@@ -12,6 +12,7 @@ gpui = ["dep:gpui", "okena-workspace/gpui", "okena-files/gpui", "okena-theme/gpu
 okena-core = { path = "../okena-core" }
 dirs = "5.0"
 okena-tasks = { path = "../okena-tasks" }
+okena-openspec = { path = "../okena-openspec" }
 okena-terminal = { path = "../okena-terminal" }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-git = { path = "../okena-git" }
@@ -31,6 +32,8 @@ smol = "2.0"
 serde_json = "1.0"
 log = "0.4"
 uuid = { version = "1.10", features = ["v4"] }
+# Local calendar date for a new OpenSpec change's `.openspec.yaml`.
+time = { version = "0.3", features = ["local-offset"] }
 base64 = "0.22"
 url = "2"
 percent-encoding = "2"

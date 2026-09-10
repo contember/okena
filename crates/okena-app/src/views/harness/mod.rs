@@ -60,11 +60,19 @@ pub(crate) struct ProjectsState {
 
 /// Specs-view state.
 pub(crate) struct SpecsState {
-    /// `None` until the first load lands.
+    /// Every root the daemon discovered. `None` until the first load lands.
+    pub(crate) stores: Option<okena_core::specs::SpecStores>,
+    /// Key of the root being shown. `None` until the first load picks the
+    /// default one.
+    pub(crate) root_key: Option<String>,
+    /// The open root's planning tree.
     pub(crate) tree: Option<okena_core::specs::SpecTree>,
     pub(crate) loading: bool,
+    /// Bumped on every load, so a slow response for a root the user has since
+    /// left is dropped instead of replacing the newer one.
+    pub(crate) load_generation: u64,
     pub(crate) error: Option<String>,
-    /// Path of the document being read, relative to the repository root.
+    /// Path of the document being read, relative to the root.
     pub(crate) selected: Option<String>,
     pub(crate) content: Option<String>,
     pub(crate) content_error: Option<String>,
@@ -86,6 +94,9 @@ pub(crate) struct SpecsState {
     /// or an explicit "No agent" would be silently overwritten when settings
     /// land.
     pub(crate) agent_picked: bool,
+    /// Root a new change is drafted into. Follows the open root until the
+    /// user picks another in the form.
+    pub(crate) draft_root: Option<String>,
     pub(crate) drafting: bool,
     /// Change names whose documents are hidden. Collapsed rather than expanded
     /// state, so a fresh view shows everything.
@@ -210,8 +221,11 @@ impl HarnessPane {
                 active_only: false,
             },
             specs: SpecsState {
+                stores: None,
+                root_key: None,
                 tree: None,
                 loading: false,
+                load_generation: 0,
                 error: None,
                 selected: None,
                 content: None,
@@ -221,6 +235,7 @@ impl HarnessPane {
                 agent_picked: false,
                 composing: false,
                 name_input,
+                draft_root: None,
                 drafting: false,
                 collapsed: std::collections::HashSet::new(),
             },

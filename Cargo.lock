@@ -6075,6 +6075,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-hooks",
+ "okena-openspec",
  "okena-tasks",
  "okena-terminal",
  "okena-theme",
@@ -6082,6 +6083,7 @@ dependencies = [
  "percent-encoding",
  "serde_json",
  "smol",
+ "time",
  "url",
  "uuid",
 ]
@@ -6353,6 +6355,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "uniffi",
+ "uuid",
+]
+
+[[package]]
+name = "okena-openspec"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "log",
+ "okena-core",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
  "uuid",
 ]
 

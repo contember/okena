@@ -407,12 +407,46 @@ impl SettingsState {
         }));
     }
 
-    /// Set worktree default merge
-    /// Directory a multi-project agent session runs in.
-    pub fn set_harness_spec_repo(&mut self, value: String, cx: &mut Context<Self>) {
-        // Blank means "unset": the Specs view then says there is no repository
-        // rather than reporting an empty path as missing.
-        self.settings.harness.spec_repo = opt_trimmed(value);
+    /// List every store in OpenSpec's machine registry in the Specs view.
+    pub fn set_spec_discovery_registry(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness.specs.registry = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Find OpenSpec roots and `store:` pointers in okena projects.
+    pub fn set_spec_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness.specs.projects = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Replace the extra spec folders.
+    ///
+    /// The legacy `spec_repo` is folded in by the caller's list (see
+    /// `HarnessConfig::spec_folders`), so it is cleared here: once someone has
+    /// edited the list, the list is the whole truth.
+    pub fn set_spec_folders(&mut self, folders: Vec<String>, cx: &mut Context<Self>) {
+        let mut cleaned: Vec<String> = Vec::new();
+        for folder in folders.into_iter().filter_map(opt_trimmed) {
+            if !cleaned.contains(&folder) {
+                cleaned.push(folder);
+            }
+        }
+        self.settings.harness.specs.folders = cleaned;
+        self.settings.harness.spec_repo = None;
+        self.save_and_notify(cx);
+    }
+
+    /// Override where OpenSpec's store registry lives. Blank follows the CLI's
+    /// own resolution.
+    pub fn set_spec_data_dir(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.harness.specs.data_dir = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
+    /// Override where OpenSpec's `config.json` lives. Blank follows the CLI's
+    /// own resolution.
+    pub fn set_spec_config_dir(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.harness.specs.config_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 

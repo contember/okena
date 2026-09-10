@@ -61,6 +61,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-views-services` | Service panel views |
 | `okena-remote-client` | Remote client connection manager |
 | `okena-services` | Docker Compose, port detection |
+| `okena-openspec` | OpenSpec on disk, CLI-compatible: store registry (with the CLI's lock), store identity, root discovery, planning tree, store setup. GPUI-free. |
 | `okena-extensions` | Extension system |
 | `okena-ext-claude` | Claude AI extension |
 | `okena-ext-codex` | Codex extension |
