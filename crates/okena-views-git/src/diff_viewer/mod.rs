@@ -3,6 +3,8 @@
 //! Provides a read-only view of git diffs with working/staged toggle,
 //! file tree sidebar, syntax highlighting, and selection support.
 
+mod composition;
+mod composition_render;
 mod context_menu;
 mod data;
 mod line_render;
@@ -20,6 +22,7 @@ use gpui::prelude::*;
 use gpui::*;
 use okena_core::selection::SelectionState;
 use okena_core::types::DiffViewMode;
+use okena_files::file_renderer::FileRenderer;
 use okena_files::syntax::load_syntax_set;
 use okena_git::{CommitLogEntry, DiffMode, FileDiff};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
@@ -77,6 +80,8 @@ pub struct DiffViewer {
     pub(super) file_stats: Vec<FileStats>,
     /// Currently processed file with syntax highlighting (lazy loaded).
     pub(super) current_file: Option<DiffDisplayFile>,
+    pub(super) binary_preview_loading: bool,
+    pub(super) binary_preview: Option<BinaryDiffPreview>,
     pub(super) file_tree: FileTreeNode,
     pub(super) expanded_folders: HashSet<String>,
     pub(super) selected_file_index: usize,
@@ -92,6 +97,7 @@ pub struct DiffViewer {
     pub(super) syntax_set: std::sync::Arc<SyntaxSet>,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
     pub(super) file_font_size: f32,
+    pub(super) file_font: Font,
     /// Cached side-by-side lines for current file.
     pub(super) side_by_side_lines: Vec<SideBySideLine>,
     /// Horizontal scroll offset in pixels.
@@ -144,6 +150,19 @@ pub struct DiffViewer {
     pub(super) search: Option<okena_files::in_page_search::InPageSearch>,
     /// See [`DiffSearchSig`].
     pub(super) search_sig: Option<DiffSearchSig>,
+    /// What the comparison is made of, and the role filter over the file tree.
+    pub(super) composition: composition::CompositionState,
+}
+
+pub(super) struct BinaryDiffPreview {
+    pub old: Option<BinaryPreviewSide>,
+    pub new: Option<BinaryPreviewSide>,
+}
+
+pub(super) struct BinaryPreviewSide {
+    pub path: String,
+    pub renderer: Option<Entity<FileRenderer>>,
+    pub error: Option<String>,
 }
 
 /// Which commit the viewer opens on and the history it can step through.
@@ -176,6 +195,7 @@ impl DiffViewer {
         let focus_handle = cx.focus_handle();
         let gs = git_settings(cx);
         let font_size = gs.file_font_size;
+        let file_font = okena_ui::tokens::file_font_for_family(gs.file_font_family, cx);
         let view_mode = gs.diff_view_mode;
         let ignore_whitespace = gs.diff_ignore_whitespace;
         let is_dark = gs.is_dark;
@@ -201,6 +221,8 @@ impl DiffViewer {
             raw_files: Vec::new(),
             file_stats: Vec::new(),
             current_file: None,
+            binary_preview_loading: false,
+            binary_preview: None,
             file_tree: FileTreeNode::default(),
             expanded_folders: HashSet::new(),
             selected_file_index: 0,
@@ -214,6 +236,7 @@ impl DiffViewer {
             syntax_set: load_syntax_set(),
             scrollbar_drag: None,
             file_font_size: font_size,
+            file_font,
             side_by_side_lines: Vec::new(),
             scroll_x: 0.0,
             max_line_chars: 0,
@@ -239,6 +262,7 @@ impl DiffViewer {
             selection_context_menu: None,
             search: None,
             search_sig: None,
+            composition: composition::CompositionState::default(),
         };
 
         if !provider.is_git_repo() {
@@ -263,14 +287,35 @@ impl DiffViewer {
         self.ignore_whitespace
     }
 
-    /// Update configuration (font size, theme) from outside.
-    pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
+    /// Update configuration (font, theme) from outside.
+    pub fn update_config(
+        &mut self,
+        font_size: f32,
+        font_family: SharedString,
+        is_dark: bool,
+        cx: &App,
+    ) {
         self.file_font_size = font_size;
+        self.file_font = okena_ui::tokens::file_font_for_family(font_family, cx);
         if is_dark != self.is_dark {
             self.is_dark = is_dark;
             self.rehighlight_current_file();
             self.update_side_by_side_cache();
         }
+    }
+
+    pub(super) fn release_binary_preview(&mut self, cx: &mut App) {
+        if let Some(preview) = self.binary_preview.take() {
+            for side in [preview.old, preview.new].into_iter().flatten() {
+                if let Some(renderer) = side.renderer {
+                    renderer.update(cx, |renderer, cx| renderer.release_assets(cx));
+                }
+            }
+        }
+    }
+
+    pub fn release_all_image_assets(&mut self, cx: &mut App) {
+        self.release_binary_preview(cx);
     }
 }
 

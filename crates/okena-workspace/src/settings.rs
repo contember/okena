@@ -1,5 +1,5 @@
 use okena_core::theme::ThemeMode;
-pub use okena_core::types::DiffViewMode;
+pub use okena_core::types::{DiffViewMode, StatusBarStyle};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -358,6 +358,30 @@ impl Default for SidebarSettings {
     }
 }
 
+/// Status bar appearance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusBarSettings {
+    /// How much text the bar spells out — see [`StatusBarStyle`].
+    #[serde(default)]
+    pub style: StatusBarStyle,
+    /// Draw CPU/MEM as a short history graph instead of a single-value bar.
+    #[serde(default = "default_status_bar_metrics_graph")]
+    pub metrics_graph: bool,
+}
+
+impl Default for StatusBarSettings {
+    fn default() -> Self {
+        Self {
+            style: StatusBarStyle::default(),
+            metrics_graph: default_status_bar_metrics_graph(),
+        }
+    }
+}
+
+fn default_status_bar_metrics_graph() -> bool {
+    true
+}
+
 /// Current settings schema version - increment when making breaking changes
 pub const SETTINGS_VERSION: u32 = 3;
 
@@ -399,9 +423,17 @@ pub struct AppSettings {
     /// UI font size for panels/dialogs (default: 13.0)
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
+    /// UI font family (default: system UI font)
+    #[serde(default = "default_ui_font_family")]
+    pub ui_font_family: String,
     /// File viewer/diff viewer font size (default: 12.0)
     #[serde(default = "default_file_font_size")]
     pub file_font_size: f32,
+    /// File viewer/diff viewer font family (default: "JetBrains Mono")
+    #[serde(default = "default_file_font_family")]
+    pub file_font_family: String,
+    #[serde(default = "default_file_line_height")]
+    pub file_line_height: f32,
 
     // Terminal settings
     /// Cursor shape: Block, Bar, or Underline (default: Block)
@@ -555,6 +587,13 @@ pub struct AppSettings {
     #[serde(default)]
     pub terminal_double_click_selects_in_mouse_mode: bool,
 
+    /// macOS only: when true, Option+key sends the Meta escape prefix instead of
+    /// composing a character (Option+B is `∫`). Ignored elsewhere, where Alt
+    /// already encodes Meta.
+    /// Default: false (matches Terminal.app / iTerm2).
+    #[serde(default)]
+    pub terminal_option_as_meta: bool,
+
     /// File finder filter preferences. The "Go to File" dialog reads these
     /// when opened and writes them back when the user toggles a filter, so
     /// the last-used state is also the default for future opens.
@@ -565,6 +604,11 @@ pub struct AppSettings {
     /// (two rows with extended git info).
     #[serde(default)]
     pub header_density: HeaderDensity,
+
+    /// Status bar appearance: how verbose it is, and whether CPU/MEM render
+    /// as a history graph.
+    #[serde(default)]
+    pub status_bar: StatusBarSettings,
 
     /// Native desktop notifications for background-terminal activity
     /// (OSC 9/777 alerts and the bell). Opt-in — see [`NotificationSettings`].
@@ -593,7 +637,10 @@ impl Default for AppSettings {
             font_family: default_font_family(),
             line_height: default_line_height(),
             ui_font_size: default_ui_font_size(),
+            ui_font_family: default_ui_font_family(),
             file_font_size: default_file_font_size(),
+            file_font_family: default_file_font_family(),
+            file_line_height: default_file_line_height(),
             cursor_style: CursorShape::default(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
@@ -629,8 +676,10 @@ impl Default for AppSettings {
             terminal_right_click_opens_menu: true,
             terminal_drag_selects_in_mouse_mode: false,
             terminal_double_click_selects_in_mouse_mode: false,
+            terminal_option_as_meta: false,
             file_finder: FileFinderSettings::default(),
             header_density: HeaderDensity::default(),
+            status_bar: StatusBarSettings::default(),
             notifications: NotificationSettings::default(),
             allow_clipboard_read: false,
         }
@@ -666,8 +715,20 @@ fn default_ui_font_size() -> f32 {
     13.0
 }
 
+fn default_ui_font_family() -> String {
+    ".SystemUIFont".to_string()
+}
+
 fn default_file_font_size() -> f32 {
     12.0
+}
+
+fn default_file_line_height() -> f32 {
+    1.8
+}
+
+fn default_file_font_family() -> String {
+    default_font_family()
 }
 
 fn default_cursor_blink() -> bool {
@@ -829,6 +890,7 @@ fn clamp_settings(settings: &mut AppSettings) {
     settings.line_height = settings.line_height.clamp(1.0, 3.0);
     settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
     settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
+    settings.file_line_height = settings.file_line_height.clamp(1.0, 3.0);
     settings.scrollback_lines = settings.scrollback_lines.clamp(100, 100_000);
     // 0 = disabled; otherwise cap the grace window at a sane upper bound.
     settings.terminal_close_grace_secs = settings.terminal_close_grace_secs.min(60);
@@ -1151,6 +1213,7 @@ mod tests {
         // (here `version` has no key, so it gets `default_settings_version()`).
         assert_eq!(recovered.version, default_settings_version());
         assert_eq!(recovered.cursor_blink, default_cursor_blink());
+        assert_eq!(recovered.file_line_height, 1.8);
     }
 
     #[test]
@@ -1158,6 +1221,7 @@ mod tests {
         let original = AppSettings {
             font_family: "Custom Font".to_string(),
             font_size: 18.0,
+            file_line_height: 1.4,
             scrollback_lines: 42000,
             ..Default::default()
         };
@@ -1165,6 +1229,7 @@ mod tests {
         let recovered = recover_settings_from_json(&json).unwrap();
         assert_eq!(recovered.font_family, "Custom Font");
         assert_eq!(recovered.font_size, 18.0);
+        assert_eq!(recovered.file_line_height, 1.4);
         assert_eq!(recovered.scrollback_lines, 42000);
     }
 
@@ -1179,16 +1244,27 @@ mod tests {
     }
 
     #[test]
+    fn option_as_meta_is_opt_in() {
+        assert!(!AppSettings::default().terminal_option_as_meta);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"terminal_option_as_meta":true}"#).unwrap();
+        assert!(loaded.terminal_option_as_meta);
+    }
+
+    #[test]
     fn recover_clamps_out_of_range_numeric_fields() {
         // Fast path: otherwise-valid JSON, but numeric fields exceed their
         // allowed ranges. Recovery must clamp them exactly as the old
         // hand-rolled version did.
         let json = r#"{
             "font_size": 1000.0,
+            "file_line_height": 10.0,
             "scrollback_lines": 999999999
         }"#;
         let recovered = recover_settings_from_json(json).unwrap();
         assert_eq!(recovered.font_size, 48.0);
+        assert_eq!(recovered.file_line_height, 3.0);
         assert_eq!(recovered.scrollback_lines, 100_000);
     }
 

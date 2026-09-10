@@ -185,16 +185,49 @@ pub async fn serve_plain(
     }
 }
 
+/// Bind the local daemon socket inside a directory that is ours and private.
+/// A directory another user owns or can write to would let them replace the
+/// socket and impersonate the daemon, so binding fails rather than proceeds.
 #[cfg(unix)]
 pub fn bind_unix_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     if let Some(parent) = path.parent() {
+        // `create_dir_all` and `set_permissions` both follow symlinks, so a
+        // planted link would redirect the chmod and the bind together.
+        if std::fs::symlink_metadata(parent).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{} is a symlink", parent.display()),
+            ));
+        }
         std::fs::create_dir_all(parent)?;
+        // chmod is owner-only, so this both proves the directory is ours and
+        // repairs one an earlier umask left readable. That proof holds only for
+        // a non-root daemon (root has CAP_FOWNER); the client's owner check is
+        // what carries it otherwise.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     if path.exists() {
         let _ = std::fs::remove_file(path);
     }
 
-    tokio::net::UnixListener::bind(path)
+    let listener = tokio::net::UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// Same-user check for a local socket peer. Credentials we cannot read are
+/// refused rather than trusted.
+#[cfg(unix)]
+fn peer_is_socket_owner(stream: &tokio::net::UnixStream, owner_uid: u32) -> bool {
+    match stream.peer_cred() {
+        Ok(cred) => cred.uid() == owner_uid,
+        Err(error) => {
+            log::warn!("Refusing local socket peer with unreadable credentials: {error}");
+            false
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -204,7 +237,12 @@ pub async fn serve_unix_listener(
     app: Router,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
     log::info!("Local daemon socket listening on {}", path.display());
+    // We created the socket, so its owner is this daemon's user — the only peer
+    // whose requests may be treated as same-user local traffic.
+    let owner_uid = std::fs::metadata(&path)?.uid();
     tokio::pin!(shutdown);
 
     loop {
@@ -221,6 +259,11 @@ pub async fn serve_unix_listener(
                 return Ok(());
             },
         };
+
+        if !peer_is_socket_owner(&stream, owner_uid) {
+            log::warn!("Refusing local socket connection from another user");
+            continue;
+        }
 
         let app = app.clone();
         tokio::spawn(async move {
@@ -240,5 +283,72 @@ pub async fn serve_unix_listener(
                 log::debug!("Local socket connection ended: {e}");
             }
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[tokio::test]
+    async fn binding_makes_the_socket_and_its_directory_private() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket = dir.path().join("nested").join("daemon.sock");
+        std::fs::create_dir_all(socket.parent().expect("parent")).expect("create parent");
+        std::fs::set_permissions(
+            socket.parent().expect("parent"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("loosen parent");
+
+        let _listener = bind_unix_socket(&socket).expect("bind");
+
+        let parent_mode = std::fs::metadata(socket.parent().expect("parent"))
+            .expect("stat parent")
+            .permissions()
+            .mode();
+        assert_eq!(parent_mode & 0o777, 0o700);
+        let socket_mode = std::fs::metadata(&socket)
+            .expect("stat socket")
+            .permissions()
+            .mode();
+        assert_eq!(socket_mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_socket_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create the planted target");
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("plant the symlink");
+
+        let error = bind_unix_socket(&dir.path().join("link").join("daemon.sock"))
+            .expect_err("a symlinked socket directory must be refused");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn the_socket_owner_is_accepted_as_a_local_peer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+        let listener = bind_unix_socket(&socket).expect("bind");
+        let owner_uid = {
+            use std::os::unix::fs::MetadataExt as _;
+            std::fs::metadata(&socket).expect("stat socket").uid()
+        };
+
+        let client = tokio::net::UnixStream::connect(&socket)
+            .await
+            .expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+
+        assert!(peer_is_socket_owner(&server, owner_uid));
+        assert!(
+            !peer_is_socket_owner(&server, owner_uid + 1),
+            "a peer running as another user must be refused"
+        );
+        drop(client);
     }
 }

@@ -151,15 +151,15 @@ pub fn extract_selected_text<'a>(
         let text = get_plain_text(line_idx);
 
         if start_line == end_line {
-            let start = start_col.min(text.len());
-            let end = end_col.min(text.len());
+            let start = clamp_to_char_boundary(text, start_col);
+            let end = clamp_to_char_boundary(text, end_col);
             result.push_str(&text[start..end]);
         } else if line_idx == start_line {
-            let start = start_col.min(text.len());
+            let start = clamp_to_char_boundary(text, start_col);
             result.push_str(&text[start..]);
             result.push('\n');
         } else if line_idx == end_line {
-            let end = end_col.min(text.len());
+            let end = clamp_to_char_boundary(text, end_col);
             result.push_str(&text[..end]);
         } else {
             result.push_str(text);
@@ -174,6 +174,17 @@ pub fn extract_selected_text<'a>(
     }
 }
 
+/// Snap a selection column onto a char boundary at or before it. Columns are
+/// byte offsets, so a selection that outlived the text it was made in — a
+/// reload, a filter that switches files — can land mid-character.
+pub fn clamp_to_char_boundary(text: &str, column: usize) -> usize {
+    let mut column = column.min(text.len());
+    while !text.is_char_boundary(column) {
+        column -= 1;
+    }
+    column
+}
+
 /// Get selected text from highlighted lines (convenience wrapper).
 pub fn get_selected_text(lines: &[HighlightedLine], selection: &CodeSelection) -> Option<String> {
     extract_selected_text(selection, lines.len(), |i| &lines[i].plain_text)
@@ -183,7 +194,44 @@ pub use okena_ui::text_utils::find_word_boundaries;
 
 #[cfg(test)]
 mod tests {
-    use super::find_word_boundaries;
+    use super::{
+        CodeSelection, clamp_to_char_boundary, extract_selected_text, find_word_boundaries,
+    };
+
+    fn selection(start: (usize, usize), end: (usize, usize)) -> CodeSelection {
+        CodeSelection {
+            start: Some(start),
+            end: Some(end),
+            is_selecting: false,
+        }
+    }
+
+    #[test]
+    fn clamping_walks_back_to_the_start_of_a_character() {
+        assert_eq!(clamp_to_char_boundary("é", 1), 0);
+        assert_eq!(clamp_to_char_boundary("é", 9), 2);
+        assert_eq!(clamp_to_char_boundary("ab", 1), 1);
+    }
+
+    /// The diff pane can swap the file under a live selection — its columns are
+    /// then byte offsets into text that is gone.
+    #[test]
+    fn a_stale_column_cannot_split_a_character() {
+        let lines = ["ané"];
+        assert_eq!(
+            extract_selected_text(&selection((0, 1), (0, 3)), 1, |i| lines[i]),
+            Some("n".to_string())
+        );
+    }
+
+    #[test]
+    fn a_stale_column_cannot_split_a_character_on_a_multi_line_selection() {
+        let lines = ["éé", "ab"];
+        assert_eq!(
+            extract_selected_text(&selection((0, 3), (1, 2)), 2, |i| lines[i]),
+            Some("é\nab".to_string())
+        );
+    }
 
     #[test]
     fn test_empty_string() {

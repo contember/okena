@@ -25,6 +25,7 @@ pub mod icon_button;
 pub mod input;
 pub mod list_row;
 pub mod menu;
+pub mod metrics;
 pub mod modal;
 pub mod overlay;
 pub mod popover;

@@ -1,7 +1,11 @@
 //! Working-tree status, diff stats, HEAD/branch reads, and ahead/behind counts.
 
 use std::path::Path;
+use std::time::SystemTime;
 
+use okena_core::process::{command, safe_output};
+
+use super::diff_memo;
 use crate::GitStatus;
 
 /// Cheap identity of the commit currently checked out in a worktree.
@@ -81,25 +85,82 @@ pub fn get_status(path: &Path) -> StatusFetch {
     }))
 }
 
-/// Check if a worktree/repo has uncommitted changes (staged, unstaged, or untracked).
+/// Three-state result of a fresh dirty check — see [`uncommitted_changes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirtyCheck {
+    /// Definitive reading of the working tree.
+    Known(bool),
+    /// There is no repository at the path or above it.
+    NotRepo,
+    /// A repository is there, but neither gix nor git could read its status.
+    Unknown,
+}
+
+/// Whether a worktree/repo has uncommitted changes (staged, unstaged, or
+/// untracked), keeping "could not tell" apart from "clean".
 /// Always performs a fresh check (no caching).
-pub fn has_uncommitted_changes(path: &Path) -> bool {
-    let Some(repo) = crate::gix_helpers::open(path) else {
-        return false;
-    };
+///
+/// gix answers the common case in-process. It gives up on shapes git handles
+/// fine — a sparse index, a directory it cannot read — so on a user-action path
+/// (never the poll loop) we ask git itself rather than report a status we do
+/// not have.
+pub fn uncommitted_changes(path: &Path) -> DirtyCheck {
+    if let Some(dirty) = gix_uncommitted_changes(path) {
+        return DirtyCheck::Known(dirty);
+    }
+    if !git_dir_exists_upwards(path) {
+        return DirtyCheck::NotRepo;
+    }
+    cli_uncommitted_changes(path).map_or(DirtyCheck::Unknown, DirtyCheck::Known)
+}
 
-    let Ok(platform) = repo.status(gix::progress::Discard) else {
-        return false;
-    };
-
-    let Ok(iter) = crate::gix_helpers::single_threaded(platform)
+/// `None` when the gix walk could not run, or an entry errored part-way.
+fn gix_uncommitted_changes(path: &Path) -> Option<bool> {
+    let repo = crate::gix_helpers::open(path)?;
+    let platform = repo.status(gix::progress::Discard).ok()?;
+    let mut iter = crate::gix_helpers::single_threaded(platform)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
-    else {
-        return false;
-    };
+        .ok()?;
+    match iter.next() {
+        Some(Ok(_)) => Some(true),
+        Some(Err(_)) => None,
+        None => Some(false),
+    }
+}
 
-    iter.filter_map(Result::ok).next().is_some()
+/// `None` when git itself refuses to report status.
+fn cli_uncommitted_changes(path: &Path) -> Option<bool> {
+    let p = path.to_str()?;
+    let output = safe_output(command("git").args(["-C", p, "status", "--porcelain"])).ok()?;
+    output
+        .status
+        .success()
+        .then(|| !output.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
+/// Whether a `.git` entry sits at `path` or any ancestor.
+///
+/// "No repository here" is a filesystem fact. Asking git would let a `.git`
+/// we merely failed to read — an unparsable config, no permission — pass
+/// itself off as an absent one, and absent means "nothing to protect".
+fn git_dir_exists_upwards(path: &Path) -> bool {
+    path.ancestors().any(|dir| dir.join(".git").exists())
+}
+
+/// Safety-gate view of [`uncommitted_changes`]: a status that could not be
+/// established counts as dirty, so destructive flows prompt or refuse instead
+/// of proceeding as if the checkout were clean.
+///
+/// Callers that can *escalate* on a dirty answer (deriving a force flag, say)
+/// must match on [`uncommitted_changes`] instead — for them `Unknown` has to
+/// refuse, and this collapses it into the same `true` a user-accepted dirty
+/// close produces.
+pub fn has_uncommitted_changes(path: &Path) -> bool {
+    matches!(
+        uncommitted_changes(path),
+        DirtyCheck::Known(true) | DirtyCheck::Unknown
+    )
 }
 
 /// Get the current branch name or short commit hash for detached HEAD.
@@ -169,9 +230,11 @@ pub(crate) struct WorktreeDiff {
     /// equivalent of `git diff --numstat --no-renames HEAD`. Binary files
     /// appear with `(.., 0, 0)`, matching numstat's `-`/`-`.
     pub tracked: Vec<(String, usize, usize)>,
-    /// Untracked file paths, relative to the queried path (monorepo-subdir
-    /// prefix stripped, matching the previous standalone untracked listing).
+    /// Untracked file paths, scoped to the queried path's subtree but relative
+    /// to the worktree root — the same base as `tracked`.
     pub untracked: Vec<String>,
+    /// Worktree root both path lists are relative to.
+    pub root: std::path::PathBuf,
 }
 
 /// Tracked diff counts **and** the untracked-file list from one HEAD → index →
@@ -188,6 +251,10 @@ pub(crate) struct WorktreeDiff {
 /// Returns `None` on a transient failure (couldn't open the repo, init the
 /// status walk, or an iteration step errored) so the polling watcher can keep
 /// the last known counts — see `StatusFetch::Transient`.
+///
+/// Per-file counts are memoized across walks of the same `path` (see
+/// [`diff_memo`]): a changed file whose HEAD blob id and worktree stat match
+/// the previous walk reuses its counts instead of re-reading and re-diffing.
 pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     let repo = crate::gix_helpers::open(path)?;
     let workdir = repo.workdir()?.to_path_buf();
@@ -196,9 +263,8 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     // leaves this `None`, so every tracked blob diffs against an empty source.
     let head_tree = repo.head_tree().ok();
 
-    // Prefix from workdir down to the queried path, so untracked paths are
-    // reported relative to the (possibly monorepo-subdir) project — matching the
-    // previous standalone untracked listing. Tracked counts stay repo-relative.
+    // Prefix from workdir down to the queried path, scoping untracked entries
+    // to the (possibly monorepo-subdir) project. Both lists stay repo-relative.
     let canonical_query = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
     let untracked_prefix: String = canonical_query
@@ -240,10 +306,8 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         {
             if matches!(entry.status, gix::dir::entry::Status::Untracked) {
                 let rela = entry.rela_path.to_string();
-                if untracked_prefix.is_empty() {
+                if untracked_prefix.is_empty() || rela.starts_with(&untracked_prefix) {
                     untracked.push(rela);
-                } else if let Some(stripped) = rela.strip_prefix(&untracked_prefix) {
-                    untracked.push(stripped.to_string());
                 }
             }
             continue;
@@ -251,25 +315,87 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         changed.insert(item.location().to_owned());
     }
 
+    // The walk is complete, so nothing below can fail: the memo is only touched
+    // by walks that finished, and a transient failure above leaves it as it was.
+    let now = SystemTime::now();
+    let mut memo = diff_memo::take(path);
+    memo.retain_walk(&changed, &untracked);
+
     let mut tracked = Vec::with_capacity(changed.len());
     for rela in &changed {
         let rela_bstr = gix::bstr::BStr::new(rela);
         let rela_path = gix::path::from_bstr(rela_bstr);
         let name = String::from_utf8_lossy(rela_bstr).into_owned();
-        let head_blob = head_blob_bytes(head_tree.as_ref(), rela_bstr);
-        let wt_bytes = std::fs::read(workdir.join(&rela_path)).unwrap_or_default();
-
-        // Binary files report `-`/`-` (i.e. 0/0) in numstat. Record them with
-        // zero counts rather than diffing — they still belong in per-file lists.
-        if is_binary(&head_blob) || is_binary(&wt_bytes) {
-            tracked.push((name, 0, 0));
+        let full_path = workdir.join(&rela_path);
+        let head_entry = head_blob_entry(head_tree.as_ref(), rela_bstr);
+        let observed = diff_memo::observe(&full_path, now);
+        let inputs = observed.map(|observed| diff_memo::TrackedInputs {
+            head: head_entry.as_ref().map(|entry| entry.object_id()),
+            worktree: observed.input,
+        });
+        if let Some(inputs) = &inputs
+            && let Some((added, removed)) = memo.tracked_counts(rela_bstr, inputs)
+        {
+            tracked.push((name, added, removed));
             continue;
         }
-        let (added, removed) = diff_line_counts(&head_blob, &wt_bytes);
+
+        let head_blob = head_blob_bytes(head_entry.as_ref());
+        let worktree_blob = std::fs::read(&full_path);
+        let (added, removed) = tracked_line_counts(
+            head_blob.as_deref().unwrap_or_default(),
+            worktree_blob.as_deref().unwrap_or_default(),
+        );
+        memo.note_computed_tracked();
+        let settled = observed.is_some_and(|observed| {
+            observed.trusted && diff_memo::read_settled(&observed.input, &worktree_blob)
+        });
+        if let Some(inputs) = inputs
+            && settled
+            && head_blob.is_some()
+        {
+            memo.remember_tracked(rela.clone(), inputs, (added, removed));
+        }
         tracked.push((name, added, removed));
     }
+    diff_memo::store(path, memo);
 
-    Some(WorktreeDiff { tracked, untracked })
+    Some(WorktreeDiff {
+        tracked,
+        untracked,
+        root: workdir,
+    })
+}
+
+/// Line count of an untracked file listed in [`WorktreeDiff::untracked`]
+/// (relative to `root`), each line counting as an addition. Unreadable or
+/// non-UTF-8 files count as zero. Memoized like tracked files, keyed by the
+/// queried `path` that produced the listing.
+pub(crate) fn untracked_line_count(path: &Path, root: &Path, file: &str) -> usize {
+    let full_path = root.join(file);
+    let observed = diff_memo::observe(&full_path, SystemTime::now());
+    if let Some(observed) = &observed
+        && let Some(lines) =
+            diff_memo::with(path, |memo| memo.untracked_lines(file, &observed.input)).flatten()
+    {
+        return lines;
+    }
+
+    let read = std::fs::read_to_string(&full_path);
+    let lines = read
+        .as_ref()
+        .map(|content| content.lines().count())
+        .unwrap_or(0);
+    diff_memo::with(path, |memo| {
+        memo.note_computed_untracked();
+        if let Some(observed) = observed
+            && observed.trusted
+            && diff_memo::read_settled(&observed.input, &read)
+        {
+            memo.remember_untracked(file.to_owned(), observed.input, lines);
+        }
+    });
+    lines
 }
 
 /// Get diff statistics (total lines added, lines removed) for the working
@@ -290,29 +416,43 @@ fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
 
     // Untracked files: count each line as an addition.
     for file in &diff.untracked {
-        let file_path = path.join(file);
-        if let Ok(content) = std::fs::read_to_string(&file_path) {
-            added += content.lines().count();
-        }
+        added += untracked_line_count(path, &diff.root, file);
     }
 
     Some((added, removed))
 }
 
-/// Read the bytes of `rela_path`'s blob in the HEAD tree. Returns empty when
-/// HEAD is unborn, the path isn't in HEAD (freshly added), or it isn't a
-/// regular blob (submodule/gitlink) — all of which diff as "no prior content".
-fn head_blob_bytes(head_tree: Option<&gix::Tree<'_>>, rela_path: &gix::bstr::BStr) -> Vec<u8> {
-    let Some(tree) = head_tree else {
-        return Vec::new();
-    };
+/// The regular-blob entry at `rela_path` in the HEAD tree. `None` when HEAD
+/// is unborn, the path isn't in HEAD (freshly added), or it isn't a regular
+/// blob (submodule/gitlink) — all of which diff as "no prior content".
+fn head_blob_entry<'repo>(
+    head_tree: Option<&gix::Tree<'repo>>,
+    rela_path: &gix::bstr::BStr,
+) -> Option<gix::object::tree::Entry<'repo>> {
     let path = gix::path::from_bstr(rela_path);
-    match tree.lookup_entry_by_path(path.as_ref()) {
-        Ok(Some(entry)) if entry.mode().is_blob() => {
-            entry.object().map(|o| o.data.clone()).unwrap_or_default()
-        }
-        _ => Vec::new(),
+    match head_tree?.lookup_entry_by_path(path.as_ref()) {
+        Ok(Some(entry)) if entry.mode().is_blob() => Some(entry),
+        _ => None,
     }
+}
+
+/// Bytes of a HEAD blob entry, or empty when there is none. `None` only when
+/// the object store failed to serve an existing entry, so the result must not
+/// be remembered — the next walk may succeed.
+fn head_blob_bytes(entry: Option<&gix::object::tree::Entry<'_>>) -> Option<Vec<u8>> {
+    match entry {
+        None => Some(Vec::new()),
+        Some(entry) => entry.object().ok().map(|o| o.data.clone()),
+    }
+}
+
+/// Numstat-style counts for one tracked path. Binary files report `-`/`-`
+/// (i.e. 0/0) in numstat; record them with zero counts rather than diffing.
+fn tracked_line_counts(head: &[u8], worktree: &[u8]) -> (usize, usize) {
+    if is_binary(head) || is_binary(worktree) {
+        return (0, 0);
+    }
+    diff_line_counts(head, worktree)
 }
 
 /// Count added/removed lines between two blob versions using imara-diff (pulled
@@ -557,6 +697,73 @@ mod tests {
     fn has_uncommitted_returns_false_for_clean_repo() {
         let (_tmp, repo) = init_temp_repo();
         assert!(!has_uncommitted_changes(&repo));
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(false));
+    }
+
+    #[test]
+    fn an_unreadable_status_is_unknown_rather_than_clean() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        // A directory where the index file belongs: the walk cannot start, so
+        // the answer is "we do not know", not "clean".
+        std::fs::remove_file(repo.join(".git").join("index")).unwrap();
+        std::fs::create_dir(repo.join(".git").join("index")).unwrap();
+
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Unknown);
+        assert!(
+            has_uncommitted_changes(&repo),
+            "a status we cannot read must gate destructive flows, not wave them through"
+        );
+    }
+
+    #[test]
+    fn a_path_outside_any_repository_is_not_dirty() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        assert_eq!(uncommitted_changes(&path), DirtyCheck::NotRepo);
+    }
+
+    #[test]
+    fn a_repository_we_cannot_open_is_unknown_not_absent() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        // A `.git` that is plainly there but unusable. Reporting "no
+        // repository" would read as "nothing to protect" and wave a
+        // destructive removal through.
+        std::fs::remove_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+
+        assert_eq!(gix_uncommitted_changes(&repo), None);
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Unknown);
+        assert!(has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn a_sparse_index_checkout_still_reports_its_dirty_state() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(
+            &repo,
+            &["sparse-checkout", "init", "--cone", "--sparse-index"],
+        );
+
+        // gix cannot walk a sparse index at all, so every answer here comes
+        // from the git fallback.
+        assert_eq!(gix_uncommitted_changes(&repo), None);
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(false));
+        std::fs::write(repo.join("file.txt"), "dirty").unwrap();
+        assert_eq!(uncommitted_changes(&repo), DirtyCheck::Known(true));
+    }
+
+    #[test]
+    fn untracked_listing_from_a_subdirectory_uses_the_worktree_root_base() {
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("fresh.txt"), "x").unwrap();
+        std::fs::write(repo.join("outside.txt"), "y").unwrap();
+
+        let untracked = crate::gix_helpers::list_untracked_files(&project)
+            .expect("gix status should succeed on a clean test repo");
+        assert_eq!(untracked, vec!["packages/app/fresh.txt".to_string()]);
     }
 
     #[test]
@@ -845,6 +1052,104 @@ mod tests {
         // contributes nothing to the +/- totals.
         std::fs::write(repo.join("file.txt"), [0u8, 1, 2, 0, 5]).unwrap();
         assert_eq!(get_diff_stats(&repo), Some((0, 0)));
+    }
+
+    /// Push a file's mtime `secs` into the past so the memo may trust it.
+    fn age_file(path: &Path, secs: u64) {
+        let past = SystemTime::now() - std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+
+    #[test]
+    fn diff_memo_reuses_counts_when_nothing_changed() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "u1\nu2\nu3\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+        age_file(&repo.join("new.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        let after_first = diff_memo::computed(&repo);
+        assert_eq!((after_first.tracked, after_first.untracked), (1, 1));
+
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        assert_eq!(diff_memo::computed(&repo), after_first);
+    }
+
+    #[test]
+    fn diff_memo_invalidates_only_the_edited_file() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("other.txt"), "1\n2\n").unwrap();
+        git_in(&repo, &["add", "other.txt"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "other"],
+        );
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("other.txt"), "1\n2\n3\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+        age_file(&repo.join("other.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 2);
+
+        std::fs::write(repo.join("other.txt"), "1\n2\n3\n4\n5\n").unwrap();
+        age_file(&repo.join("other.txt"), 8);
+        assert_eq!(get_diff_stats(&repo), Some((6, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 3);
+    }
+
+    #[test]
+    fn diff_memo_invalidates_when_head_blob_changes() {
+        let (_tmp, repo) = init_temp_repo();
+        // Stage one version, then leave a different one in the worktree.
+        std::fs::write(repo.join("file.txt"), "a\nb\n").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        age_file(&repo.join("file.txt"), 10);
+
+        assert_eq!(get_diff_stats(&repo), Some((3, 1)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 1);
+
+        // Committing the staged version moves HEAD's blob without touching the
+        // worktree file: same stat, different HEAD side.
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "staged"],
+        );
+        assert_eq!(get_diff_stats(&repo), Some((1, 0)));
+        assert_eq!(diff_memo::computed(&repo).tracked, 2);
+    }
+
+    #[test]
+    fn diff_memo_recounts_untracked_file_rewritten_with_same_size() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("new.txt"), "aaa\n").unwrap();
+        age_file(&repo.join("new.txt"), 10);
+        assert_eq!(get_diff_stats(&repo), Some((1, 0)));
+        assert_eq!(diff_memo::computed(&repo).untracked, 1);
+
+        std::fs::write(repo.join("new.txt"), "a\na\n").unwrap();
+        age_file(&repo.join("new.txt"), 8);
+        assert_eq!(get_diff_stats(&repo), Some((2, 0)));
+        assert_eq!(diff_memo::computed(&repo).untracked, 2);
+    }
+
+    #[test]
+    fn diff_memo_recomputes_files_inside_the_racy_window() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "u1\n").unwrap();
+
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        assert_eq!(get_diff_stats(&repo), Some((4, 1)));
+        let computed = diff_memo::computed(&repo);
+        assert_eq!((computed.tracked, computed.untracked), (2, 2));
     }
 
     #[test]

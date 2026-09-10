@@ -94,16 +94,17 @@ export function savedServerEquals(a: SavedServer, b: SavedServer): boolean {
 /**
  * Return a copy of `server` with the given fields overridden. Mirrors the Dart
  * `copyWith` (which only allowed `token`); extended here to cover `token`,
- * `fingerprint`, and `label` since those get filled in post-pairing.
+ * `fingerprint`, `tls` and `label` since those get filled in post-pairing.
  */
 export function withSavedServer(
   server: SavedServer,
-  patch: Partial<Pick<SavedServer, 'token' | 'fingerprint' | 'label'>>,
+  patch: Partial<Pick<SavedServer, 'token' | 'fingerprint' | 'tls' | 'label'>>,
 ): SavedServer {
   return {
     ...server,
     token: patch.token ?? server.token,
     fingerprint: patch.fingerprint ?? server.fingerprint,
+    tls: patch.tls ?? server.tls,
     label: patch.label ?? server.label,
   };
 }

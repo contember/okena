@@ -109,7 +109,7 @@ impl DiffViewer {
             .h(px(line_height))
             .flex()
             .items_center()
-            .font_family("monospace")
+            .font(self.file_font.clone())
             .bg(rgba(t.diff_hunk_header_bg, 0.3))
             .border_t_1()
             .border_color(rgba(t.border, 0.5))
@@ -127,7 +127,7 @@ impl DiffViewer {
                     div()
                         .text_size(px(font_size * 0.85))
                         .text_color(rgba(t.diff_hunk_header_fg, 0.7))
-                        .font_family("monospace")
+                        .font(self.file_font.clone())
                         .child(context.to_string()),
                 )
             })
@@ -173,7 +173,7 @@ impl DiffViewer {
             .h(px(line_height))
             .flex()
             .items_center()
-            .font_family("monospace")
+            .font(self.file_font.clone())
             .text_size(px(font_size))
             .bg(rgba(t.diff_hunk_header_bg, 0.55))
             .border_y_1()
@@ -297,7 +297,7 @@ impl DiffViewer {
             .flex()
             .h(px(line_height))
             .text_size(px(font_size))
-            .font_family("monospace")
+            .font(self.file_font.clone())
             .when_some(line_bg, |d, bg| d.bg(bg))
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();

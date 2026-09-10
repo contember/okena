@@ -3,7 +3,9 @@
 use crate::ActionDispatch;
 use crate::layout::navigation::{NavigationDirection, PaneBounds, get_pane_map};
 use gpui::*;
-use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use okena_terminal::input::{
+    KeyEncodeOptions, KeyEvent, KeyModifiers, consumes_composed_text, key_to_bytes,
+};
 use okena_workspace::state::LayoutNode;
 
 use super::TerminalPane;
@@ -223,8 +225,11 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 return;
             }
 
-            let app_cursor_mode = terminal.is_app_cursor_mode();
-            let kitty = terminal.kitty_keyboard_flags();
+            let options = KeyEncodeOptions {
+                app_cursor_mode: terminal.is_app_cursor_mode(),
+                kitty: terminal.kitty_keyboard_flags(),
+                option_as_meta: crate::terminal_view_settings(cx).option_as_meta,
+            };
             let key_event = KeyEvent {
                 key: event.keystroke.key.clone(),
                 key_char: event.keystroke.key_char.clone(),
@@ -235,8 +240,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     platform: event.keystroke.modifiers.platform,
                 },
             };
-            if let Some(input) = key_to_bytes(&key_event, app_cursor_mode, kitty) {
+            if let Some(input) = key_to_bytes(&key_event, options) {
                 terminal.send_bytes(&input);
+                // GPUI keeps forwarding to the input context, which would commit
+                // the character macOS composed on top of the meta sequence.
+                if consumes_composed_text(&key_event, options) {
+                    cx.stop_propagation();
+                }
             }
         }
     }

@@ -146,7 +146,11 @@ impl RemoteServer {
                 match bound {
                     Ok(listener) => Some((path_buf, listener)),
                     Err(e) => {
-                        log::warn!("Failed to bind local daemon socket at {path}: {e}");
+                        log::warn!(
+                            "Failed to bind local daemon socket at {path}: {e}. \
+                             Without it there is no same-user local transport, so the daemon \
+                             lifecycle and updater routes fall back to loopback-only access."
+                        );
                         local_endpoint = None;
                         None
                     }
@@ -165,6 +169,10 @@ impl RemoteServer {
         ) {
             log::warn!("Failed to write remote.json: {}", e);
         }
+
+        // Management routes can only demand more than loopback where the daemon
+        // actually has a same-user local endpoint to bootstrap over.
+        let local_bootstrap = local_endpoint.is_some();
 
         let start_time = std::time::Instant::now();
         okena_ext_updater::installer::cleanup_old_binary();
@@ -210,6 +218,7 @@ impl RemoteServer {
                 process_shutdown,
                 ui_owned,
                 had_client,
+                local_bootstrap,
                 update_info,
             );
             #[cfg(unix)]

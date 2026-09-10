@@ -1,8 +1,20 @@
 use crate::status::{UpdateInfo, UpdateStatus};
 
-/// Run one check/download pass. The caller owns concurrency guards
-/// (`try_start_manual` for user-initiated checks, `try_start` for background).
-pub async fn run_check(info: UpdateInfo, token: u64, finish_manual: bool) {
+/// Run one check/download pass. The caller claims the reservation
+/// (`try_start_manual` for user-initiated checks, `try_start` for background);
+/// this routine adopts it so it is freed however the pass ends.
+pub async fn run_check(info: UpdateInfo, token: u64, manual: bool) {
+    let _reservation = if manual {
+        info.adopt_manual()
+    } else {
+        info.adopt_background(token)
+    };
+
+    if info.has_staged_update() {
+        log::info!("Skipping the update check: an update is already staged");
+        return;
+    }
+
     info.set_status(UpdateStatus::Checking);
 
     match crate::checker::check_for_update(info.app_version()).await {
@@ -54,24 +66,14 @@ pub async fn run_check(info: UpdateInfo, token: u64, finish_manual: bool) {
             });
         }
     }
-
-    if finish_manual {
-        info.finish_manual();
-    } else {
-        info.mark_stopped(token);
-    }
 }
 
-/// Install the downloaded update currently held in `Ready` status.
+/// Install the downloaded update currently held in `Ready` status. Takes the
+/// reservation itself, so a duplicate request finds nothing to install.
 pub async fn install_ready_update(info: UpdateInfo) {
-    let (version, path) = match info.status() {
-        UpdateStatus::Ready { version, path } => (version, path),
-        _ => return,
+    let Some((_reservation, version, path)) = info.try_start_install() else {
+        return;
     };
-
-    info.set_status(UpdateStatus::Installing {
-        version: version.clone(),
-    });
 
     let result = smol::unblock(move || crate::installer::install_update(&path)).await;
     match result {
@@ -93,6 +95,7 @@ pub async fn install_ready_update(info: UpdateInfo) {
 /// Download and install one exact older release. Config restoration is deferred
 /// until daemon restart so the outgoing daemon cannot overwrite restored files.
 pub async fn run_revert(info: UpdateInfo, target_version: String, restore_config: bool) {
+    let _reservation = info.adopt_manual();
     info.set_status(UpdateStatus::Checking);
 
     let result = run_revert_inner(&info, &target_version, restore_config).await;
@@ -102,7 +105,6 @@ pub async fn run_revert(info: UpdateInfo, target_version: String, restore_config
             error: error.to_string(),
         });
     }
-    info.finish_manual();
 }
 
 async fn run_revert_inner(

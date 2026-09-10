@@ -157,11 +157,46 @@ impl InPageSearch {
     }
 }
 
+/// A lowercased copy of a cell plus the offset maps back to the original text.
+/// Case folding is not length-preserving (`İ` lowercases to two chars), so the
+/// folded offsets a match lands on are not offsets into the original.
+struct Folded {
+    text: String,
+    /// Original byte offset a match *starting* at this folded offset begins at.
+    starts: Vec<usize>,
+    /// Original byte offset a match *ending* at this folded offset ends at.
+    ends: Vec<usize>,
+}
+
+fn fold_case(text: &str) -> Folded {
+    let mut folded = Folded {
+        text: String::with_capacity(text.len()),
+        starts: Vec::with_capacity(text.len() + 1),
+        ends: Vec::with_capacity(text.len() + 1),
+    };
+    for (offset, character) in text.char_indices() {
+        let group_start = folded.text.len();
+        folded.text.extend(character.to_lowercase());
+        for byte in group_start..folded.text.len() {
+            folded.starts.push(offset);
+            // A match cut inside one character's expansion still covers it whole.
+            folded.ends.push(if byte == group_start {
+                offset
+            } else {
+                offset + character.len_utf8()
+            });
+        }
+    }
+    folded.starts.push(text.len());
+    folded.ends.push(text.len());
+    folded
+}
+
 /// Compute literal-substring matches over a sequence of cells.
 ///
 /// `cells` yields the plain text of each cell in host order; the cell id is the
-/// iteration index. Returns byte-offset ranges. An empty query yields no
-/// matches.
+/// iteration index. Returns byte-offset ranges into the original cell text. An
+/// empty query yields no matches.
 pub fn compute_matches<'a>(
     query: &str,
     case_sensitive: bool,
@@ -173,24 +208,24 @@ pub fn compute_matches<'a>(
     let needle = if case_sensitive {
         query.to_string()
     } else {
-        query.to_lowercase()
+        fold_case(query).text
     };
     let mut matches = Vec::new();
     for (cell, text) in cells.enumerate() {
-        let haystack = if case_sensitive {
-            text.to_string()
-        } else {
-            text.to_lowercase()
-        };
+        let folded = (!case_sensitive).then(|| fold_case(text));
+        let haystack = folded.as_ref().map_or(text, |folded| folded.text.as_str());
         let mut start = 0;
         while let Some(pos) = haystack[start..].find(&needle) {
             let abs = start + pos;
+            let end = abs + needle.len();
             matches.push(SearchMatch {
                 cell,
-                start: abs,
-                end: abs + query.len(),
+                start: folded.as_ref().map_or(abs, |folded| folded.starts[abs]),
+                end: folded.as_ref().map_or(end, |folded| folded.ends[end]),
             });
-            start = abs + 1;
+            // Overlapping matches are wanted, but the step has to stay on a
+            // character boundary or the next re-slice panics.
+            start = abs + haystack[abs..].chars().next().map_or(1, char::len_utf8);
         }
     }
     matches
@@ -353,4 +388,53 @@ pub fn render_search_bar<V: 'static>(
                 .on_click(cx.listener(move |this, _, window, cx| (on_close)(this, window, cx)))
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_matches;
+
+    fn ranges(query: &str, case_sensitive: bool, text: &str) -> Vec<(usize, usize)> {
+        compute_matches(query, case_sensitive, std::iter::once(text))
+            .into_iter()
+            .map(|found| (found.start, found.end))
+            .collect()
+    }
+
+    #[test]
+    fn steps_over_a_multibyte_match_instead_of_into_it() {
+        assert_eq!(ranges("é", false, "éé"), vec![(0, 2), (2, 4)]);
+        assert_eq!(ranges("é", true, "éé"), vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn reports_overlapping_matches() {
+        assert_eq!(ranges("aa", false, "aaa"), vec![(0, 2), (1, 3)]);
+        assert_eq!(ranges("žž", false, "žžž"), vec![(0, 4), (2, 6)]);
+    }
+
+    #[test]
+    fn maps_a_length_changing_fold_back_onto_the_original_text() {
+        // `İ` lowercases to two chars, so the folded offsets run ahead.
+        assert_eq!(ranges("x", false, "İx"), vec![(2, 3)]);
+        assert_eq!(ranges("i", false, "İx"), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn matches_are_sliceable_ranges_of_the_original_text() {
+        for text in ["éé", "İx", "aaa", "žluť kůň"] {
+            for query in ["é", "x", "i", "a", "ť", "KŮŇ"] {
+                for case_sensitive in [false, true] {
+                    for (start, end) in ranges(query, case_sensitive, text) {
+                        assert!(
+                            start <= end
+                                && text.is_char_boundary(start)
+                                && text.is_char_boundary(end),
+                            "{query:?} in {text:?} produced {start}..{end}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

@@ -3,7 +3,7 @@
 //! This module defines named constants for common UI values to ensure
 //! consistency across the application and make global adjustments easier.
 
-use gpui::{App, Global, px};
+use gpui::{App, Font, FontFeatures, FontStyle, FontWeight, Global, SharedString, px};
 
 // =============================================================================
 // Global UI font size provider
@@ -15,10 +15,74 @@ pub struct GlobalUiFontSize(pub fn(&App) -> f32);
 
 impl Global for GlobalUiFontSize {}
 
+pub struct GlobalUiFontFamily(pub fn(&App) -> SharedString);
+
+impl Global for GlobalUiFontFamily {}
+
+pub struct GlobalFileFontFamily(pub fn(&App) -> SharedString);
+
+impl Global for GlobalFileFontFamily {}
+
 fn get_ui_font_size(cx: &App) -> f32 {
     cx.try_global::<GlobalUiFontSize>()
         .map(|g| (g.0)(cx))
         .unwrap_or(DEFAULT_UI_FONT_SIZE)
+}
+
+pub fn ui_font_family(cx: &App) -> SharedString {
+    cx.try_global::<GlobalUiFontFamily>()
+        .map(|global| (global.0)(cx))
+        .unwrap_or_else(|| ".SystemUIFont".into())
+}
+
+pub fn file_font_for_family(family: impl Into<SharedString>, cx: &App) -> Font {
+    let configured = code_font(family.into());
+    let text_system = cx.text_system();
+    if has_fixed_advance(&configured, text_system) {
+        return configured;
+    }
+
+    let bundled_fallback = code_font("JetBrains Mono".into());
+    if has_fixed_advance(&bundled_fallback, text_system) {
+        return bundled_fallback;
+    }
+
+    text_system
+        .all_font_names()
+        .into_iter()
+        .map(|family| code_font(family.into()))
+        .find(|font| has_fixed_advance(font, text_system))
+        .unwrap_or(bundled_fallback)
+}
+
+fn has_fixed_advance(font: &Font, text_system: &gpui::TextSystem) -> bool {
+    let font_id = text_system.resolve_font(font);
+    let widths = ['i', 'm', 'W', ' '].map(|character| {
+        text_system
+            .advance(font_id, px(16.0), character)
+            .map(|advance| f32::from(advance.width))
+            .unwrap_or_default()
+    });
+    let first = widths[0];
+    first > 0.0 && widths.iter().all(|width| (width - first).abs() < 0.01)
+}
+
+pub fn file_font(cx: &App) -> Font {
+    let family = cx
+        .try_global::<GlobalFileFontFamily>()
+        .map(|global| (global.0)(cx))
+        .unwrap_or_else(|| "monospace".into());
+    file_font_for_family(family, cx)
+}
+
+fn code_font(family: SharedString) -> Font {
+    Font {
+        family,
+        features: FontFeatures::disable_ligatures(),
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+        ..Default::default()
+    }
 }
 
 // =============================================================================

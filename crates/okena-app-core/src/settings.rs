@@ -98,7 +98,10 @@ impl SettingsState {
     setting_setter!(set_font_family, font_family, String);
     setting_setter!(set_line_height, line_height, f32, 1.0, 3.0);
     setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
+    setting_setter!(set_ui_font_family, ui_font_family, String);
     setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
+    setting_setter!(set_file_font_family, file_font_family, String);
+    setting_setter!(set_file_line_height, file_line_height, f32, 1.0, 3.0);
     /// Set the cursor style (Block, Bar, Underline)
     pub fn set_cursor_style(
         &mut self,
@@ -116,6 +119,22 @@ impl SettingsState {
         cx: &mut Context<Self>,
     ) {
         self.settings.header_density = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the status bar style (Detailed, Minimal)
+    pub fn set_status_bar_style(
+        &mut self,
+        value: crate::workspace::settings::StatusBarStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.status_bar.style = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Toggle the CPU/MEM history graph in the status bar.
+    pub fn set_status_bar_metrics_graph(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_bar.metrics_graph = value;
         self.save_and_notify(cx);
     }
 
@@ -171,6 +190,7 @@ impl SettingsState {
         terminal_double_click_selects_in_mouse_mode,
         bool
     );
+    setting_setter!(set_terminal_option_as_meta, terminal_option_as_meta, bool);
     setting_setter!(set_blame_visible, blame_visible, bool);
 
     /// Master switch for native desktop notifications (opt-in).

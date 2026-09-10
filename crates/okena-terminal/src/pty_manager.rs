@@ -1,4 +1,5 @@
 use crate::backend::{TerminalLaunchPlan, TerminalSessionTeardown, TerminalTeardownRoute};
+use crate::pty_write_queue::{PtyWriteQueue, Queued};
 use crate::session_backend::SessionCommand;
 #[cfg(not(windows))]
 use crate::session_backend::get_extended_path;
@@ -456,12 +457,12 @@ struct PtyHandle {
     /// Private `forkpty` session used to find descendants after the shell exits.
     #[cfg(unix)]
     process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
-    /// Channel to send input to the writer thread.
-    /// `Option` so teardown and the `Drop` backstop can both `take()` it
-    /// idempotently to close the channel and unblock the writer thread.
-    input_tx: Option<mpsc::Sender<Vec<u8>>>,
-    /// Shared PTY writer, also held by the batched writer thread. Lets
-    /// `write_response` write query replies synchronously (see that method).
+    /// Bounded write queue drained by the writer thread. Closed idempotently by
+    /// teardown and the `Drop` backstop to unblock that thread.
+    write_queue: Arc<PtyWriteQueue>,
+    /// The manager's clone of the PTY write side. Only the writer thread writes
+    /// through it; this clone exists so teardown can close the write side before
+    /// waiting for reader EOF (see `shutdown_handle`).
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     reader_handle: Option<JoinHandle<()>>,
     writer_handle: Option<JoinHandle<()>>,
@@ -485,19 +486,18 @@ impl Drop for PtyHandle {
     /// to observe EOF and exit instead of leaking silently.
     ///
     /// It is idempotent (safe to run after `shutdown_handle` already took the
-    /// fields) and must NOT block: it signals shutdown and drops `input_tx` /
-    /// `master` so the channel and PTY close, but it does NOT join the threads
+    /// fields) and must NOT block: it signals shutdown, closes the write queue
+    /// and drops `master` so the PTY closes, but it does NOT join the threads
     /// and does NOT call `child.kill()` (the PID may have been reaped/recycled).
     fn drop(&mut self) {
         // Signal the reader/writer threads to stop (idempotent: just sets a bool).
         self.shutdown.mark_broken();
-        // Closing the input channel makes the writer thread's `recv` return Err;
-        // dropping the master unblocks a reader still stuck in `read`. Both are
-        // no-ops if `shutdown_handle` already took them.
-        drop(self.input_tx.take());
+        // Closing the queue ends the writer thread's drain; dropping the master
+        // unblocks a reader still stuck in `read`. Both are idempotent.
+        self.write_queue.close();
         drop(self.master.take());
         // Intentionally do NOT join reader_handle / writer_handle here — a Drop
-        // must not block. The threads exit on their own once the channel/master
+        // must not block. The threads exit on their own once the queue/master
         // close (or the process exits).
     }
 }
@@ -670,11 +670,15 @@ impl PtyManager {
                 // kill the session inside WSL instead of on the host.
                 #[cfg(windows)]
                 if let Some(backend) = wsl_backend {
-                    crate::session_backend::kill_wsl_session(
+                    if crate::session_backend::kill_wsl_session(
                         backend,
                         wsl_distro.as_deref(),
                         &session_name,
-                    );
+                    ) {
+                        tracker.mark_verified(&terminal_id);
+                    } else {
+                        tracker.mark_unverified(&terminal_id);
+                    }
                 } else {
                     record_session_kill(tracker, &terminal_id, &session_backend, &session_name);
                 }
@@ -989,8 +993,9 @@ impl PtyManager {
                 }
             })?;
 
-        // Create input channel and spawn writer thread with panic guard
-        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+        // Create the write queue and spawn the writer thread with a panic guard
+        let write_queue = Arc::new(PtyWriteQueue::new());
+        let queue_for_thread = Arc::clone(&write_queue);
         let writer_shutdown = Arc::clone(&shutdown);
         let writer_event_tx = self.event_tx.clone();
         let writer_id = terminal_id.to_string();
@@ -1012,7 +1017,7 @@ impl PtyManager {
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     Self::write_loop(
                         writer_for_thread,
-                        input_rx,
+                        queue_for_thread,
                         writer_shutdown,
                         writer_event_tx,
                         writer_id,
@@ -1044,7 +1049,7 @@ impl PtyManager {
                 child,
                 #[cfg(unix)]
                 process_session,
-                input_tx: Some(input_tx),
+                write_queue,
                 writer: Some(writer),
                 reader_handle: Some(reader_handle),
                 writer_handle: Some(writer_handle),
@@ -1368,27 +1373,22 @@ impl PtyManager {
         }
     }
 
-    /// Write loop for PTY input - batches writes for better performance.
-    /// Shares the writer with `write_response` (query replies) via the `Mutex`;
-    /// the lock is held only for the duration of each `write_all`.
+    /// Sole IO owner of the PTY write side: it is the only place a write can
+    /// block, which is what keeps the queue's producers off a blocking write.
     fn write_loop(
         writer: Arc<Mutex<Box<dyn Write + Send>>>,
-        rx: mpsc::Receiver<Vec<u8>>,
+        queue: Arc<PtyWriteQueue>,
         shutdown: Arc<PtyShutdownState>,
         event_tx: Sender<PtyEvent>,
         terminal_id: String,
     ) {
-        // Loop exits when the channel is closed (`recv` returns Err).
-        while let Ok(first) = rx.recv() {
-            // Collect any additional pending messages (non-blocking)
-            let mut batch = first;
-            while let Ok(data) = rx.try_recv() {
-                batch.extend(data);
-            }
-
-            // Write the batched data
+        // Loop exits once the queue is closed and drained.
+        while let Some(batch) = queue.next_batch() {
             okena_core::latency_probe::daemon_pty_write_started(&terminal_id);
-            if let Err(e) = writer.lock().write_all(&batch) {
+            let mut w = writer.lock();
+            let written = w.write_all(&batch).and_then(|_| w.flush());
+            drop(w);
+            if let Err(e) = written {
                 log::error!("Failed to write to PTY {}: {}", terminal_id, e);
                 shutdown.mark_broken();
                 let _ = event_tx.send_blocking(PtyEvent::Exit {
@@ -1402,35 +1402,38 @@ impl PtyManager {
         }
     }
 
-    /// Send input to a terminal
-    /// Input is sent through a channel to a dedicated writer thread,
-    /// which batches writes for better performance.
+    /// Send input to a terminal.
+    ///
+    /// Queued for the writer thread; this never waits on the PTY itself.
     pub fn send_input(&self, terminal_id: &str, data: &[u8]) {
-        if let Some(handle) = self.terminals.lock().get(terminal_id)
-            && let Some(input_tx) = handle.input_tx.as_ref()
-        {
+        if let Some(handle) = self.terminals.lock().get(terminal_id) {
             okena_core::latency_probe::daemon_pty_queued(terminal_id);
-            let _ = input_tx.send(data.to_vec());
+            if handle.write_queue.push_input(data) == Queued::Full {
+                log::warn!(
+                    "dropped {} input byte(s) for PTY {}: the child is not draining its input",
+                    data.len(),
+                    terminal_id
+                );
+            }
         }
     }
 
-    /// Write a query reply straight to the PTY master + flush, bypassing the
-    /// batched input channel and writer-thread scheduling. This shrinks the
-    /// window between a program's Device-Attributes/cursor query and its exit
-    /// back to the shell, so the reply reaches the program instead of leaking to
-    /// the shell prompt (e.g. a stray `6c` after closing nvim). The writer `Arc`
-    /// is cloned out under the registry lock, which is released before the
-    /// (potentially blocking) PTY write.
+    /// Queue a query reply on the writer's priority lane, ahead of pending
+    /// input. This shrinks the window between a program's Device-Attributes /
+    /// cursor query and its exit back to the shell, so the reply reaches the
+    /// program instead of leaking to the shell prompt (e.g. a stray `6c` after
+    /// closing nvim). A reply is parsed on the authoritative reactor, so this
+    /// must never touch the PTY write side — a child that stopped reading would
+    /// otherwise park the reactor behind a paste already in flight.
     pub fn write_response(&self, terminal_id: &str, data: &[u8]) {
-        let writer = {
-            let terminals = self.terminals.lock();
-            terminals.get(terminal_id).and_then(|h| h.writer.clone())
-        };
-        if let Some(writer) = writer {
-            let mut w = writer.lock();
-            if let Err(e) = w.write_all(data).and_then(|_| w.flush()) {
-                log::debug!("write_response to PTY {} failed: {}", terminal_id, e);
-            }
+        if let Some(handle) = self.terminals.lock().get(terminal_id)
+            && handle.write_queue.push_response(data) == Queued::Full
+        {
+            log::debug!(
+                "dropped {} reply byte(s) for PTY {}: reply lane is full",
+                data.len(),
+                terminal_id
+            );
         }
     }
 
@@ -1686,16 +1689,16 @@ impl PtyManager {
             log::warn!("Failed to kill PTY process {}: {}", id, e);
         }
 
-        // 3. Drop input_tx - writer gets Err from rx.recv()
-        drop(handle.input_tx.take());
+        // 3. Close the write queue - the writer thread drains and exits
+        handle.write_queue.close();
 
         // 4. Drop master - safety net to unblock reader if still stuck
         drop(handle.master.take());
 
-        // 5. Join writer thread (should exit quickly after input_tx drop), then
-        // close the manager's synchronous-response writer clone. Keeping this
-        // clone alive while waiting for the child leaves the PTY master open and
-        // can prevent session clients such as dtach from completing their exit.
+        // 5. Join writer thread (should exit quickly after the queue closes), then
+        // close the manager's writer clone. Keeping this clone alive while
+        // waiting for the child leaves the PTY master open and can prevent
+        // session clients such as dtach from completing their exit.
         if let Some(h) = handle.writer_handle.take()
             && let Err(e) = h.join()
         {
@@ -2705,7 +2708,7 @@ mod tests {
                 try_wait_error: true,
             }),
             process_session: None,
-            input_tx: None,
+            write_queue: Arc::new(PtyWriteQueue::new()),
             writer: None,
             reader_handle: Some(reader_handle),
             writer_handle: None,
@@ -2737,6 +2740,110 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("manager reaper joins released reader");
         assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]));
+    }
+
+    /// A child that stopped draining its PTY blocks the writer thread inside
+    /// `write_all`. The reply path runs on the daemon's reactor, so it must
+    /// queue and return instead of waiting behind that write.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_does_not_wait_for_a_pty_write_the_child_is_not_draining() {
+        struct BlockingWriter {
+            entered: mpsc::Sender<()>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+            written: mpsc::Sender<Vec<u8>>,
+        }
+
+        impl Write for BlockingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.send(());
+                let mut released = self.release.0.lock();
+                while !*released {
+                    self.release.1.wait(&mut released);
+                }
+                let _ = self.written.send(buf.to_vec());
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let terminal_id = "reply-under-backpressure".to_string();
+        let generation = PtyGeneration(1);
+        let queue = Arc::new(PtyWriteQueue::new());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(BlockingWriter {
+                entered: entered_tx,
+                release: Arc::clone(&release),
+                written: written_tx,
+            })));
+        let shutdown = Arc::new(PtyShutdownState::new(terminal_id.clone(), generation));
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        let writer_handle = std::thread::spawn({
+            let writer = Arc::clone(&writer);
+            let queue = Arc::clone(&queue);
+            let shutdown = Arc::clone(&shutdown);
+            let terminal_id = terminal_id.clone();
+            move || PtyManager::write_loop(writer, queue, shutdown, event_tx, terminal_id)
+        });
+        manager.terminals.lock().insert(
+            terminal_id.clone(),
+            PtyHandle {
+                generation,
+                master: None,
+                child: Box::new(DelayedTerminationChild {
+                    release: Arc::new((Mutex::new(true), Condvar::new())),
+                    try_wait_error: false,
+                }),
+                process_session: None,
+                write_queue: Arc::clone(&queue),
+                writer: Some(writer),
+                reader_handle: None,
+                writer_handle: Some(writer_handle),
+                shutdown,
+            },
+        );
+
+        manager.send_input(&terminal_id, b"a paste the child never reads");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer thread is inside the PTY write");
+
+        let (replied_tx, replied_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                manager.write_response(&terminal_id, b"\x1b[0n");
+                let _ = replied_tx.send(());
+            });
+            let replied = replied_rx.recv_timeout(Duration::from_secs(1));
+            *release.0.lock() = true;
+            release.1.notify_all();
+            assert!(
+                replied.is_ok(),
+                "a reply must not wait on a PTY write the child is not draining"
+            );
+        });
+
+        assert_eq!(
+            written_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the paste is written"),
+            b"a paste the child never reads"
+        );
+        assert_eq!(
+            written_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the reply follows once the PTY drains"),
+            b"\x1b[0n"
+        );
+
+        manager.terminals.lock().remove(&terminal_id);
     }
 
     #[cfg(unix)]
@@ -2779,7 +2886,7 @@ mod tests {
                 try_wait_error: false,
             }),
             process_session: None,
-            input_tx: None,
+            write_queue: Arc::new(PtyWriteQueue::new()),
             writer: Some(Arc::new(Mutex::new(Box::new(DropNotifyingWriter(Some(
                 writer_dropped_tx,
             )))))),
@@ -2832,7 +2939,7 @@ mod tests {
                     try_wait_error: false,
                 }),
                 process_session: None,
-                input_tx: None,
+                write_queue: Arc::new(PtyWriteQueue::new()),
                 writer: None,
                 reader_handle: Some(reader_handle),
                 writer_handle: None,

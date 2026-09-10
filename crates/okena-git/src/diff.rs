@@ -2,6 +2,13 @@
 //!
 //! Provides structures and functions for parsing unified diff output
 //! and executing git diff commands.
+//!
+//! One path base for the diff and per-file mutation surface: `FileDiff` paths
+//! and the `file_path` arguments here and in `repository::branch` are relative
+//! to the git worktree root, while `repo_path` may be any directory inside the
+//! repository. `diff.relative` would make git print a different base, so the
+//! invocations below pin it with `--no-relative`. Blame and file history take
+//! their own bases — see their modules.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -107,22 +114,122 @@ impl DiffResult {
     }
 }
 
+/// A hunk that is still absorbing lines, plus how many it still owes each side.
+///
+/// Git's `@@` counts are exact, and they are the only thing that tells hunk
+/// *content* apart from the next file's metadata: an added line may itself read
+/// `+++ b/other.rs`, and taking that for a header retargets the whole file.
+struct OpenHunk {
+    hunk: DiffHunk,
+    old_remaining: usize,
+    new_remaining: usize,
+}
+
+/// What an open hunk did with a line.
+enum Consumed {
+    Added,
+    Removed,
+    /// Context, or the `\ No newline at end of file` marker (which owes nothing).
+    Other,
+}
+
+impl OpenHunk {
+    fn is_complete(&self) -> bool {
+        self.old_remaining == 0 && self.new_remaining == 0
+    }
+
+    /// Append `line` as hunk content, or return `None` when it is not content.
+    fn consume(
+        &mut self,
+        line: &str,
+        old_line: &mut usize,
+        new_line: &mut usize,
+    ) -> Option<Consumed> {
+        if let Some(content) = line.strip_prefix('+') {
+            self.hunk.lines.push(DiffLine {
+                line_type: DiffLineType::Added,
+                content: content.to_string(),
+                old_line_num: None,
+                new_line_num: Some(*new_line),
+            });
+            *new_line += 1;
+            self.new_remaining = self.new_remaining.saturating_sub(1);
+            Some(Consumed::Added)
+        } else if let Some(content) = line.strip_prefix('-') {
+            self.hunk.lines.push(DiffLine {
+                line_type: DiffLineType::Removed,
+                content: content.to_string(),
+                old_line_num: Some(*old_line),
+                new_line_num: None,
+            });
+            *old_line += 1;
+            self.old_remaining = self.old_remaining.saturating_sub(1);
+            Some(Consumed::Removed)
+        } else if line.starts_with('\\') {
+            Some(Consumed::Other)
+        } else if line.is_empty() || line.starts_with(' ') {
+            self.hunk.lines.push(DiffLine {
+                line_type: DiffLineType::Context,
+                content: line.strip_prefix(' ').unwrap_or("").to_string(),
+                old_line_num: Some(*old_line),
+                new_line_num: Some(*new_line),
+            });
+            *old_line += 1;
+            *new_line += 1;
+            self.old_remaining = self.old_remaining.saturating_sub(1);
+            self.new_remaining = self.new_remaining.saturating_sub(1);
+            Some(Consumed::Other)
+        } else {
+            None
+        }
+    }
+}
+
+/// Move a finished hunk into its file.
+fn close_hunk(open: &mut Option<OpenHunk>, file: &mut Option<FileDiff>) {
+    if let Some(open) = open.take()
+        && let Some(file) = file.as_mut()
+    {
+        file.hunks.push(open.hunk);
+    }
+}
+
 /// Parse a unified diff output into structured form.
 pub fn parse_unified_diff(output: &str) -> DiffResult {
     let mut files = Vec::new();
     let mut current_file: Option<FileDiff> = None;
-    let mut current_hunk: Option<DiffHunk> = None;
+    let mut current_hunk: Option<OpenHunk> = None;
     let mut old_line = 0usize;
     let mut new_line = 0usize;
 
     for line in output.lines() {
+        // While a hunk still owes lines, every line is its content — header
+        // shapes included. Only outside one do the metadata rules below apply.
+        if let Some(open) = current_hunk.as_mut() {
+            match open.consume(line, &mut old_line, &mut new_line) {
+                Some(kind) => {
+                    if let Some(file) = current_file.as_mut() {
+                        match kind {
+                            Consumed::Added => file.lines_added += 1,
+                            Consumed::Removed => file.lines_removed += 1,
+                            Consumed::Other => {}
+                        }
+                    }
+                    if !open.is_complete() {
+                        continue;
+                    }
+                    close_hunk(&mut current_hunk, &mut current_file);
+                    continue;
+                }
+                // Malformed: the hunk ran out of recognizable content early.
+                None => close_hunk(&mut current_hunk, &mut current_file),
+            }
+        }
+
         // Check for diff header (new file)
         if line.starts_with("diff --git ") {
             // Save previous file
-            if let Some(mut file) = current_file.take() {
-                if let Some(hunk) = current_hunk.take() {
-                    file.hunks.push(hunk);
-                }
+            if let Some(file) = current_file.take() {
                 files.push(file);
             }
 
@@ -157,42 +264,37 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
             .strip_prefix("rename from ")
             .or_else(|| line.strip_prefix("copy from "))
         {
-            file.old_path = Some(old.to_string());
+            file.old_path = decode_git_path(old);
             continue;
         }
         if let Some(new) = line
             .strip_prefix("rename to ")
             .or_else(|| line.strip_prefix("copy to "))
         {
-            file.new_path = Some(new.to_string());
+            file.new_path = decode_git_path(new);
+            continue;
+        }
+
+        if line.starts_with("new file mode ") {
+            file.old_path = None;
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            file.new_path = None;
             continue;
         }
 
         // Parse old file path. These lines are authoritative and override the
         // `diff --git` header fallback (e.g. /dev/null clears the path for an
         // added file even though the header carried a fake `a/<new>`).
-        if line.starts_with("--- ") {
-            let path = line.strip_prefix("--- ").unwrap_or("");
-            if path == "/dev/null" {
-                file.old_path = None;
-            } else {
-                // Strip "a/" prefix if present
-                let path = path.strip_prefix("a/").unwrap_or(path);
-                file.old_path = Some(path.to_string());
-            }
+        if let Some(raw) = line.strip_prefix("--- ") {
+            file.old_path = parse_diff_path_line(raw, "a/");
             continue;
         }
 
         // Parse new file path
-        if line.starts_with("+++ ") {
-            let path = line.strip_prefix("+++ ").unwrap_or("");
-            if path == "/dev/null" {
-                file.new_path = None;
-            } else {
-                // Strip "b/" prefix if present
-                let path = path.strip_prefix("b/").unwrap_or(path);
-                file.new_path = Some(path.to_string());
-            }
+        if let Some(raw) = line.strip_prefix("+++ ") {
+            file.new_path = parse_diff_path_line(raw, "b/");
             continue;
         }
 
@@ -205,86 +307,37 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
 
         // Parse hunk header
         if line.starts_with("@@ ") {
-            // Save previous hunk
-            if let Some(hunk) = current_hunk.take() {
-                file.hunks.push(hunk);
-            }
-
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@ context
-            let (old_start, new_start) = parse_hunk_header(line);
+            let (old_start, old_count, new_start, new_count) = parse_hunk_header(line);
             old_line = old_start;
             new_line = new_start;
 
-            current_hunk = Some(DiffHunk {
-                header: line.to_string(),
-                old_start,
-                new_start,
-                lines: vec![DiffLine {
-                    line_type: DiffLineType::Header,
-                    content: line.to_string(),
-                    old_line_num: None,
-                    new_line_num: None,
-                }],
+            current_hunk = Some(OpenHunk {
+                hunk: DiffHunk {
+                    header: line.to_string(),
+                    old_start,
+                    new_start,
+                    lines: vec![DiffLine {
+                        line_type: DiffLineType::Header,
+                        content: line.to_string(),
+                        old_line_num: None,
+                        new_line_num: None,
+                    }],
+                },
+                old_remaining: old_count,
+                new_remaining: new_count,
             });
+            // An empty hunk owes nothing, so nothing would ever close it.
+            if current_hunk.as_ref().is_some_and(OpenHunk::is_complete) {
+                close_hunk(&mut current_hunk, &mut current_file);
+            }
             continue;
         }
-
-        // Skip if no current hunk
-        let hunk = match current_hunk.as_mut() {
-            Some(h) => h,
-            None => continue,
-        };
-
-        // Parse diff lines
-        if let Some(content) = line.strip_prefix('+') {
-            // Added line
-            hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Added,
-                content: content.to_string(),
-                old_line_num: None,
-                new_line_num: Some(new_line),
-            });
-            file.lines_added += 1;
-            new_line += 1;
-        } else if let Some(content) = line.strip_prefix('-') {
-            // Removed line
-            hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Removed,
-                content: content.to_string(),
-                old_line_num: Some(old_line),
-                new_line_num: None,
-            });
-            file.lines_removed += 1;
-            old_line += 1;
-        } else if let Some(content) = line.strip_prefix(' ') {
-            // Context line
-            hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Context,
-                content: content.to_string(),
-                old_line_num: Some(old_line),
-                new_line_num: Some(new_line),
-            });
-            old_line += 1;
-            new_line += 1;
-        } else if line.is_empty() {
-            // Empty context line
-            hunk.lines.push(DiffLine {
-                line_type: DiffLineType::Context,
-                content: String::new(),
-                old_line_num: Some(old_line),
-                new_line_num: Some(new_line),
-            });
-            old_line += 1;
-            new_line += 1;
-        }
-        // Skip other lines (e.g., "\ No newline at end of file")
     }
 
     // Save last file and hunk
-    if let Some(mut file) = current_file {
-        if let Some(hunk) = current_hunk {
-            file.hunks.push(hunk);
-        }
+    close_hunk(&mut current_hunk, &mut current_file);
+    if let Some(file) = current_file {
         files.push(file);
     }
 
@@ -298,68 +351,154 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
 /// authoritative paths come from `rename from`/`rename to` or `---`/`+++`
 /// lines when present, which override this.
 ///
-/// Caveat: when paths contain spaces the `a/… b/…` form is ambiguous and git
-/// quotes them or relies on the explicit headers instead, so this helper only
-/// reliably handles unquoted, space-free paths. Returns `(None, None)` if the
-/// header can't be split unambiguously.
+/// Caveat: git quotes each side independently, so both forms can share one
+/// header. Two unquoted paths stay ambiguous when the old one contains " b/";
+/// returns `(None, None)` if the header can't be split unambiguously.
 fn parse_diff_git_header(line: &str) -> (Option<String>, Option<String>) {
-    let rest = match line.strip_prefix("diff --git ") {
-        Some(r) => r,
-        None => return (None, None),
-    };
-
-    // Quoted paths (contain spaces / special chars) are not handled here; defer
-    // to the explicit rename/`---`/`+++` headers.
-    if rest.starts_with('"') {
+    let Some(rest) = line.strip_prefix("diff --git ") else {
         return (None, None);
-    }
-
-    let a = match rest.strip_prefix("a/") {
-        Some(a) => a,
-        None => return (None, None),
     };
-
-    // Split on the " b/" that separates the two paths. Use the last occurrence
-    // so directory components named "b" earlier in the old path don't trip us.
-    let (old, new) = match a.rsplit_once(" b/") {
-        Some(pair) => pair,
-        None => return (None, None),
-    };
-
-    if old.is_empty() || new.is_empty() {
+    let Some((old, new)) = split_diff_git_paths(rest) else {
         return (None, None);
-    }
+    };
 
-    (Some(old.to_string()), Some(new.to_string()))
+    match (
+        decode_git_path(old).and_then(|path| strip_path_prefix(&path, "a/")),
+        decode_git_path(new).and_then(|path| strip_path_prefix(&path, "b/")),
+    ) {
+        (Some(old), Some(new)) => (Some(old), Some(new)),
+        _ => (None, None),
+    }
 }
 
-/// Parse hunk header to extract old and new starting line numbers.
-fn parse_hunk_header(header: &str) -> (usize, usize) {
+/// The path a `---`/`+++` line names, or `None` for `/dev/null`.
+///
+/// Git terminates the name with a tab whenever it contains a space, so the
+/// token ends at the closing quote or at the first tab — never at end of line.
+fn parse_diff_path_line(raw: &str, prefix: &str) -> Option<String> {
+    let token = if raw.starts_with('"') {
+        raw.get(..quoted_token_end(raw)?)?
+    } else {
+        raw.split('\t').next()?
+    };
+
+    let path = decode_git_path(token)?;
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(path.strip_prefix(prefix).unwrap_or(&path).to_string())
+}
+
+/// Split a `diff --git` header's two path tokens, each possibly C-quoted.
+fn split_diff_git_paths(rest: &str) -> Option<(&str, &str)> {
+    if rest.starts_with('"') {
+        let (old, tail) = rest.split_at(quoted_token_end(rest)?);
+        return Some((old, tail.strip_prefix(' ')?));
+    }
+
+    // An unquoted old path cannot contain `"`, so a trailing one means the new
+    // side is quoted; otherwise the last " b/" is the least-bad guess.
+    let at = if rest.ends_with('"') {
+        rest.rfind(" \"")?
+    } else {
+        rest.rfind(" b/")?
+    };
+    Some((&rest[..at], &rest[at + 1..]))
+}
+
+/// Byte index just past the closing `"` of the quoted token starting at 0.
+fn quoted_token_end(token: &str) -> Option<usize> {
+    let bytes = token.as_bytes();
+    let mut index = 1;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\\' => index += 2,
+            b'"' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Strip a `a/`-style diff prefix, rejecting a path that is nothing but it.
+fn strip_path_prefix(path: &str, prefix: &str) -> Option<String> {
+    let stripped = path.strip_prefix(prefix)?;
+    (!stripped.is_empty()).then(|| stripped.to_string())
+}
+
+/// Decode git's C-quoting (`core.quotePath`): `\NNN` escapes are *bytes*, so
+/// they decode into a byte buffer before the UTF-8 check. A malformed escape
+/// or a non-UTF-8 result yields `None` — a lossy name is a wrong identity.
+fn decode_git_path(raw: &str) -> Option<String> {
+    let Some(inner) = raw
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return Some(raw.to_string());
+    };
+
+    let mut decoded = Vec::with_capacity(inner.len());
+    let mut rest = inner.bytes();
+    while let Some(byte) = rest.next() {
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        decoded.push(match rest.next()? {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'v' => 0x0b,
+            verbatim @ (b'"' | b'\\') => verbatim,
+            first @ b'0'..=b'7' => {
+                // Git always writes three octal digits, and never above \377.
+                let mut value = u32::from(first - b'0');
+                for _ in 0..2 {
+                    let digit = rest.next().filter(|d| (b'0'..=b'7').contains(d))?;
+                    value = value * 8 + u32::from(digit - b'0');
+                }
+                u8::try_from(value).ok()?
+            }
+            _ => return None,
+        });
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+/// Parse a hunk header into `(old_start, old_count, new_start, new_count)`.
+fn parse_hunk_header(header: &str) -> (usize, usize, usize, usize) {
     // Format: @@ -old_start,old_count +new_start,new_count @@ context
     // or: @@ -old_start +new_start @@ context (count of 1 is implicit)
-    let mut old_start = 1;
-    let mut new_start = 1;
+    let mut old = (1usize, 1usize);
+    let mut new = (1usize, 1usize);
 
     // Find the range part between @@ markers
     if let Some(range_part) = header
         .strip_prefix("@@ ")
         .and_then(|s| s.split(" @@").next())
     {
-        let parts: Vec<&str> = range_part.split_whitespace().collect();
-        for part in parts {
-            if let Some(old) = part.strip_prefix('-') {
-                // Parse "-old_start,old_count" or "-old_start"
-                let num = old.split(',').next().unwrap_or("1");
-                old_start = num.parse().unwrap_or(1);
-            } else if let Some(new) = part.strip_prefix('+') {
-                // Parse "+new_start,new_count" or "+new_start"
-                let num = new.split(',').next().unwrap_or("1");
-                new_start = num.parse().unwrap_or(1);
+        for part in range_part.split_whitespace() {
+            if let Some(spec) = part.strip_prefix('-') {
+                old = parse_hunk_range(spec);
+            } else if let Some(spec) = part.strip_prefix('+') {
+                new = parse_hunk_range(spec);
             }
         }
     }
 
-    (old_start, new_start)
+    (old.0, old.1, new.0, new.1)
+}
+
+/// Parse a `start,count` (or bare `start`, count 1 implied) hunk range.
+fn parse_hunk_range(spec: &str) -> (usize, usize) {
+    let mut parts = spec.split(',');
+    let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let count = parts.next().map_or(1, |s| s.parse().unwrap_or(1));
+    (start, count)
 }
 
 /// Whether `base` and `head` have a common ancestor, i.e. whether a three-dot
@@ -371,7 +510,11 @@ fn has_merge_base(repo_path: &str, base: &str, head: &str) -> bool {
     merge_base(repo_path, base, head).is_some()
 }
 
-fn merge_base(repo_path: &str, base: &str, head: &str) -> Option<String> {
+/// The merge base of two refs, or `None` when they share no history.
+///
+/// Shells out, so a caller working over many files should resolve it once
+/// rather than through a per-file content lookup.
+pub fn merge_base(repo_path: &str, base: &str, head: &str) -> Option<String> {
     crate::validate_git_ref(base).ok()?;
     crate::validate_git_ref(head).ok()?;
     let output =
@@ -473,6 +616,11 @@ pub fn get_diff_with_options(
             ]
         }
     };
+
+    // `diff.relative` (or a `--relative` in a user's alias) would print paths
+    // relative to the project subdir instead of the worktree root, silently
+    // moving the base the whole path contract rests on. Pin it.
+    args.push("--no-relative");
 
     // Add -w flag to ignore whitespace changes
     if ignore_whitespace {
@@ -637,15 +785,24 @@ pub fn is_git_repo(path: &Path) -> bool {
 ///
 /// - `revision` can be "HEAD", a commit hash, or empty for the index (staged version)
 pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> Option<String> {
+    String::from_utf8(get_file_bytes_from_git(repo_path, revision, file_path)?).ok()
+}
+
+/// Get raw file bytes from git at a revision, or from the index for an empty revision.
+pub fn get_file_bytes_from_git(
+    repo_path: &Path,
+    revision: &str,
+    file_path: &str,
+) -> Option<Vec<u8>> {
     let repo = crate::gix_helpers::open(repo_path)?;
 
-    let data = if revision.is_empty() {
+    if revision.is_empty() {
         // Empty revision → stage-0 (staged) version from the index.
         let index = repo.open_index().ok()?;
         let id = index
             .entry_by_path(gix::bstr::BStr::new(file_path.as_bytes()))?
             .id;
-        repo.find_object(id).ok()?.data.clone()
+        Some(repo.find_object(id).ok()?.data.clone())
     } else {
         // Validate to reject flag injection, then resolve <rev> → tree → blob.
         crate::validate_git_ref(revision).ok()?;
@@ -660,20 +817,25 @@ pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> O
         if !entry.mode().is_blob() {
             return None;
         }
-        entry.object().ok()?.data.clone()
-    };
-
-    String::from_utf8(data).ok()
+        Some(entry.object().ok()?.data.clone())
+    }
 }
 
-/// Safely join a file path to a repo root, rejecting path traversal attempts.
+/// Safely join a worktree-root-relative file path to its repository, rejecting
+/// path traversal attempts.
 ///
-/// Returns `None` if the resolved path escapes the repo directory (e.g. via `../`).
+/// `repo_path` may be any directory inside the repository: diff paths are
+/// relative to the worktree root, so resolving them against a monorepo subdir
+/// project would read the wrong file (or none). Falls back to `repo_path` when
+/// it is not a repository at all.
+///
+/// Returns `None` if the resolved path escapes the root (e.g. via `../`).
 fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
-    let full_path = repo_path.join(file_path);
-    let canonical = full_path.canonicalize().ok()?;
-    let repo_canonical = repo_path.canonicalize().ok()?;
-    if canonical.starts_with(&repo_canonical) {
+    let root =
+        crate::repository::get_repo_root(repo_path).unwrap_or_else(|| repo_path.to_path_buf());
+    let canonical = root.join(file_path).canonicalize().ok()?;
+    let root_canonical = root.canonicalize().ok()?;
+    if canonical.starts_with(&root_canonical) {
         Some(canonical)
     } else {
         None
@@ -682,8 +844,53 @@ fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
 
 /// Get the full content of a file from the working tree (filesystem).
 pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<String> {
+    String::from_utf8(get_file_bytes_from_working_tree(repo_path, file_path)?).ok()
+}
+
+/// Get raw file bytes from the working tree.
+pub fn get_file_bytes_from_working_tree(repo_path: &Path, file_path: &str) -> Option<Vec<u8>> {
     let full_path = safe_repo_path(repo_path, file_path)?;
-    std::fs::read_to_string(full_path).ok()
+    std::fs::read(full_path).ok()
+}
+
+/// Get both raw sides of a diff, using each side's own path for renames.
+pub fn get_file_bytes_for_diff(
+    repo_path: &Path,
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+    mode: DiffMode,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    match mode {
+        DiffMode::WorkingTree => {
+            let old = old_path.and_then(|path| {
+                get_file_bytes_from_git(repo_path, "", path)
+                    .or_else(|| get_file_bytes_from_git(repo_path, "HEAD", path))
+            });
+            let new = new_path.and_then(|path| get_file_bytes_from_working_tree(repo_path, path));
+            (old, new)
+        }
+        DiffMode::Staged => {
+            let old = old_path.and_then(|path| get_file_bytes_from_git(repo_path, "HEAD", path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, "", path));
+            (old, new)
+        }
+        DiffMode::Commit(hash) => {
+            let parent = format!("{hash}^");
+            let old = old_path.and_then(|path| get_file_bytes_from_git(repo_path, &parent, path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, &hash, path));
+            (old, new)
+        }
+        DiffMode::BranchCompare { base, head } => {
+            let effective_base = repo_path
+                .to_str()
+                .and_then(|repo_path| merge_base(repo_path, &base, &head))
+                .unwrap_or(base);
+            let old =
+                old_path.and_then(|path| get_file_bytes_from_git(repo_path, &effective_base, path));
+            let new = new_path.and_then(|path| get_file_bytes_from_git(repo_path, &head, path));
+            (old, new)
+        }
+    }
 }
 
 /// Get the "old" and "new" file content for a file diff based on the diff mode.
@@ -783,6 +990,26 @@ mod tests {
     }
 
     #[test]
+    fn binary_diff_contents_use_each_side_path() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["mv", "file.txt", "renamed.bin"]);
+        let bytes = vec![0, 159, 146, 150, 255];
+        std::fs::write(repo.join("renamed.bin"), &bytes).unwrap();
+        git_in(&repo, &["add", "renamed.bin"]);
+
+        let (old, new) = get_file_bytes_for_diff(
+            &repo,
+            Some("file.txt"),
+            Some("renamed.bin"),
+            DiffMode::Staged,
+        );
+        assert_eq!(old.as_deref(), Some(b"x".as_slice()));
+        assert_eq!(new, Some(bytes));
+    }
+
+    #[test]
     fn branch_contents_use_the_merge_base_as_the_old_side() {
         use crate::repository::test_support::{git_in, init_temp_repo};
 
@@ -865,13 +1092,15 @@ mod tests {
 
     #[test]
     fn test_parse_hunk_header() {
-        assert_eq!(parse_hunk_header("@@ -1,5 +1,7 @@ fn main()"), (1, 1));
-        assert_eq!(parse_hunk_header("@@ -10,3 +15,5 @@"), (10, 15));
-        assert_eq!(parse_hunk_header("@@ -1 +1 @@"), (1, 1));
+        assert_eq!(parse_hunk_header("@@ -1,5 +1,7 @@ fn main()"), (1, 5, 1, 7));
+        assert_eq!(parse_hunk_header("@@ -10,3 +15,5 @@"), (10, 3, 15, 5));
+        // Omitted counts mean one line on that side.
+        assert_eq!(parse_hunk_header("@@ -1 +1 @@"), (1, 1, 1, 1));
         assert_eq!(
             parse_hunk_header("@@ -100,20 +95,15 @@ impl Foo"),
-            (100, 95)
+            (100, 20, 95, 15)
         );
+        assert_eq!(parse_hunk_header("@@ -0,0 +1,2 @@"), (0, 0, 1, 2));
     }
 
     #[test]
@@ -991,6 +1220,23 @@ Binary files a/image.png and b/image.png differ
     }
 
     #[test]
+    fn test_parse_added_and_deleted_binary_paths() {
+        let diff = r#"diff --git a/added.png b/added.png
+new file mode 100644
+Binary files /dev/null and b/added.png differ
+diff --git a/deleted.png b/deleted.png
+deleted file mode 100644
+Binary files a/deleted.png and /dev/null differ
+"#;
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files[0].old_path, None);
+        assert_eq!(result.files[0].new_path.as_deref(), Some("added.png"));
+        assert_eq!(result.files[1].old_path.as_deref(), Some("deleted.png"));
+        assert_eq!(result.files[1].new_path, None);
+    }
+
+    #[test]
     fn test_parse_empty_diff() {
         let result = parse_unified_diff("");
         assert!(result.is_empty());
@@ -1072,13 +1318,24 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn test_safe_repo_path_traversal_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a file inside the repo so the parent dirs exist
-        std::fs::write(dir.path().join("dummy.txt"), "").unwrap();
+        use crate::repository::test_support::init_temp_repo;
 
-        // Attempt to escape the repo via ../
-        let result = safe_repo_path(dir.path(), "../../../etc/passwd");
-        assert!(result.is_none());
+        // A real repository, so the guard is measured against the worktree
+        // root it actually resolves against — not the non-repo fallback.
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+
+        assert!(safe_repo_path(&repo, "../../../etc/passwd").is_none());
+        // Escaping the root from inside a subdirectory project is rejected
+        // even though the path stays above the project.
+        assert!(safe_repo_path(&project, "../../../etc/passwd").is_none());
+        // Climbing out of the project but staying in the repo is allowed:
+        // repo-root-relative paths are the contract.
+        assert_eq!(
+            safe_repo_path(&project, "file.txt"),
+            Some(repo.canonicalize().unwrap().join("file.txt"))
+        );
     }
 
     #[test]
@@ -1186,13 +1443,179 @@ rename to src/new.rs
             parse_diff_git_header("diff --git a/old.rs b/new.rs"),
             (Some("old.rs".to_string()), Some("new.rs".to_string()))
         );
-        // Quoted (special-char) paths are deferred to explicit headers.
+        // Quoted (special-char) paths are decoded, both sides independently.
         assert_eq!(
             parse_diff_git_header("diff --git \"a/has space.rs\" \"b/has space.rs\""),
-            (None, None)
+            (
+                Some("has space.rs".to_string()),
+                Some("has space.rs".to_string())
+            )
+        );
+        assert_eq!(
+            parse_diff_git_header(r#"diff --git a/plain.rs "b/p\303\251.rs""#),
+            (Some("plain.rs".to_string()), Some("pé.rs".to_string()))
+        );
+        assert_eq!(
+            parse_diff_git_header(r#"diff --git "a/p\303\251.rs" b/plain.rs"#),
+            (Some("pé.rs".to_string()), Some("plain.rs".to_string()))
         );
         // Non-header input.
         assert_eq!(parse_diff_git_header("@@ -1 +1 @@"), (None, None));
+    }
+
+    #[test]
+    fn decode_git_path_follows_gits_byte_escapes() {
+        // Octal escapes are bytes, so `\305\231` is the single char `ř`.
+        assert_eq!(
+            decode_git_path(r#""sekce/p\305\231ehled.md""#).as_deref(),
+            Some("sekce/přehled.md")
+        );
+        assert_eq!(
+            decode_git_path(r#""a\tb.txt""#).as_deref(),
+            Some("a\tb.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""q\"uote.txt""#).as_deref(),
+            Some("q\"uote.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""back\\slash.txt""#).as_deref(),
+            Some(r"back\slash.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""nl\n.txt""#).as_deref(),
+            Some("nl\n.txt")
+        );
+        assert_eq!(
+            decode_git_path(r#""bell\a.txt""#).as_deref(),
+            Some("bell\u{7}.txt")
+        );
+
+        // Only a fully double-quoted string is quoted; the rest passes through.
+        assert_eq!(
+            decode_git_path("src/main.rs").as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(decode_git_path(r"a\303b").as_deref(), Some(r"a\303b"));
+        assert_eq!(decode_git_path("\"").as_deref(), Some("\""));
+
+        // Bytes that are not UTF-8, and malformed escapes, have no path form.
+        assert_eq!(decode_git_path(r#""\377.txt""#), None);
+        assert_eq!(decode_git_path(r#""\q""#), None);
+        assert_eq!(decode_git_path(r#""\30""#), None);
+    }
+
+    #[test]
+    fn quoted_paths_decode_across_the_whole_file_section() {
+        let diff = "diff --git \"a/sekce/p\\305\\231ehled.md\" \"b/sekce/p\\305\\231ehled.md\"\n\
+                    --- \"a/sekce/p\\305\\231ehled.md\"\n\
+                    +++ \"b/sekce/p\\305\\231ehled.md\"\n\
+                    @@ -1,1 +1,1 @@\n\
+                    -a\n\
+                    +b\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(
+            result.files[0].old_path.as_deref(),
+            Some("sekce/přehled.md")
+        );
+        assert_eq!(
+            result.files[0].new_path.as_deref(),
+            Some("sekce/přehled.md")
+        );
+        // display_name feeds content loading, stage and discard.
+        assert_eq!(result.files[0].display_name(), "sekce/přehled.md");
+    }
+
+    #[test]
+    fn quoted_rename_decodes_both_sides() {
+        let diff = "diff --git \"a/st\\303\\241r\\303\\251.md\" \"b/nov\\303\\251 \\\"one\\\".md\"\n\
+                    similarity index 100%\n\
+                    rename from \"st\\303\\241r\\303\\251.md\"\n\
+                    rename to \"nov\\303\\251 \\\"one\\\".md\"\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("stáré.md"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("nové \"one\".md"));
+    }
+
+    #[test]
+    fn tabs_and_backslashes_in_a_new_file_path_decode() {
+        let diff = "diff --git \"a/od\\\\tud\\there.md\" \"b/od\\\\tud\\there.md\"\n\
+                    new file mode 100644\n\
+                    --- /dev/null\n\
+                    +++ \"b/od\\\\tud\\there.md\"\n\
+                    @@ -0,0 +1,1 @@\n\
+                    +x\n";
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].old_path, None);
+        assert_eq!(
+            result.files[0].new_path.as_deref(),
+            Some("od\\tud\there.md")
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_space_drops_gits_tab_terminator() {
+        // git ends a `---`/`+++` name containing a space with a tab, quoted or
+        // not — keeping it would put the tab in the file identity.
+        let diff = "diff --git a/has space.md b/has space.md\n\
+                    --- a/has space.md\t\n\
+                    +++ b/has space.md\t\n\
+                    @@ -1,1 +1,1 @@\n\
+                    -a\n\
+                    +b\n";
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files[0].old_path.as_deref(), Some("has space.md"));
+        assert_eq!(result.files[0].new_path.as_deref(), Some("has space.md"));
+
+        let quoted = "diff --git \"a/sekce/nov\\303\\251 jm\\303\\251no.md\" \"b/sekce/nov\\303\\251 jm\\303\\251no.md\"\n\
+                      --- \"a/sekce/nov\\303\\251 jm\\303\\251no.md\"\t\n\
+                      +++ \"b/sekce/nov\\303\\251 jm\\303\\251no.md\"\t\n\
+                      @@ -1,1 +1,1 @@\n\
+                      -a\n\
+                      +b\n";
+        let result = parse_unified_diff(quoted);
+        assert_eq!(
+            result.files[0].old_path.as_deref(),
+            Some("sekce/nové jméno.md")
+        );
+        assert_eq!(result.files[0].display_name(), "sekce/nové jméno.md");
+    }
+
+    #[test]
+    fn an_accented_path_survives_a_real_git_diff() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // Accent (quoting) plus a space (tab terminator) in one real name.
+        let (_tmp, repo) = init_temp_repo();
+        let name = "sekce/nové jméno.md";
+        std::fs::create_dir_all(repo.join("sekce")).unwrap();
+        std::fs::write(repo.join(name), "a\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "accented"],
+        );
+        std::fs::write(repo.join(name), "b\n").unwrap();
+
+        let result = get_diff_with_options(&repo, DiffMode::WorkingTree, false)
+            .expect("diff an accented path");
+        let names: Vec<&str> = result.files.iter().map(|f| f.display_name()).collect();
+        assert_eq!(names, vec![name]);
+        // The name is a file identity, not just a label: it has to resolve.
+        assert_eq!(
+            get_file_from_working_tree(&repo, result.files[0].display_name()).as_deref(),
+            Some("b\n")
+        );
+        assert_eq!(
+            get_file_from_git(&repo, "HEAD", result.files[0].display_name()).as_deref(),
+            Some("a\n")
+        );
     }
 
     #[test]
@@ -1226,6 +1649,178 @@ rename to src/new.rs
         let parts: Vec<&str> = binary.split('\t').collect();
         assert_eq!(parts[0], "-");
         assert_eq!(parts[1], "-");
+    }
+
+    #[test]
+    fn hunk_content_shaped_like_a_file_header_stays_content() {
+        // Added source beginning "++ " and removed source beginning "-- "
+        // produce lines indistinguishable from `+++`/`---` headers. Only the
+        // hunk's `@@` counts say which is which.
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {}
++++ b/attacker.rs
++--- a/attacker.rs
+--- a/victim.rs
+ tail
+"#;
+        let result = parse_unified_diff(diff);
+
+        assert_eq!(result.files.len(), 1);
+        let file = &result.files[0];
+        assert_eq!(file.new_path.as_deref(), Some("src/main.rs"));
+        assert_eq!(file.old_path.as_deref(), Some("src/main.rs"));
+        assert_eq!(
+            file.display_name(),
+            "src/main.rs",
+            "display_name feeds discard/delete, so hunk text must never reach it"
+        );
+        assert_eq!(file.lines_added, 2);
+        assert_eq!(file.lines_removed, 1);
+        let contents: Vec<&str> = file.hunks[0]
+            .lines
+            .iter()
+            .map(|line| line.content.as_str())
+            .collect();
+        assert!(contents.contains(&"++ b/attacker.rs"), "{contents:?}");
+        assert!(contents.contains(&"--- a/attacker.rs"), "{contents:?}");
+        assert!(contents.contains(&"-- a/victim.rs"), "{contents:?}");
+    }
+
+    #[test]
+    fn hunk_content_shaped_like_a_diff_header_does_not_start_a_file() {
+        let diff = r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,1 +1,2 @@
+ keep
++diff --git a/evil.rs b/evil.rs
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1,1 +1,1 @@
+-x
++y
+"#;
+        let result = parse_unified_diff(diff);
+
+        let names: Vec<&str> = result.files.iter().map(|f| f.display_name()).collect();
+        assert_eq!(names, vec!["a.rs", "b.rs"]);
+        assert_eq!(result.files[0].lines_added, 1);
+        assert_eq!(result.files[1].lines_added, 1);
+        assert_eq!(result.files[1].lines_removed, 1);
+    }
+
+    #[test]
+    fn working_tree_reads_resolve_against_the_worktree_root() {
+        use crate::repository::test_support::init_temp_repo;
+
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(project.join("packages").join("app")).unwrap();
+        std::fs::write(project.join("f.txt"), "the real file\n").unwrap();
+        // Resolving a repo-relative diff path against the project instead of
+        // the worktree root lands on this colliding decoy.
+        std::fs::write(
+            project.join("packages").join("app").join("f.txt"),
+            "the decoy\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_file_from_working_tree(&project, "packages/app/f.txt").as_deref(),
+            Some("the real file\n")
+        );
+    }
+
+    #[test]
+    fn tracked_and_untracked_diff_paths_share_one_base() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("tracked.txt"), "base\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "package"],
+        );
+        std::fs::write(project.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(project.join("fresh.txt"), "new\n").unwrap();
+
+        let result = get_diff_with_options(&project, DiffMode::WorkingTree, false)
+            .expect("diff a subdirectory project");
+        let names: Vec<&str> = result.files.iter().map(|f| f.display_name()).collect();
+        assert!(names.contains(&"packages/app/tracked.txt"), "{names:?}");
+        assert!(names.contains(&"packages/app/fresh.txt"), "{names:?}");
+        // The untracked entry must render its content, which only works when
+        // the path resolves against the same root.
+        let fresh = result
+            .files
+            .iter()
+            .find(|f| f.display_name() == "packages/app/fresh.txt")
+            .expect("untracked file diff");
+        assert_eq!(fresh.lines_added, 1);
+    }
+
+    #[test]
+    fn diff_paths_keep_their_base_when_diff_relative_is_configured() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // Two same-named files, one at the root and one in the project, so a
+        // path that loses its base still resolves — onto the wrong file.
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(repo.join("f.txt"), "root base\n").unwrap();
+        std::fs::write(project.join("f.txt"), "project base\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "two f.txt"],
+        );
+        git_in(&repo, &["config", "diff.relative", "true"]);
+        std::fs::write(repo.join("f.txt"), "root edited\n").unwrap();
+        std::fs::write(project.join("f.txt"), "project edited\n").unwrap();
+
+        let result = get_diff_with_options(&project, DiffMode::WorkingTree, false)
+            .expect("diff a subdirectory project");
+        let mut names: Vec<&str> = result.files.iter().map(|f| f.display_name()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["f.txt", "packages/app/f.txt"],
+            "diff.relative must not move the base the mutations resolve against"
+        );
+
+        // Discard exactly what the file tree offers for the project's file —
+        // with the base unpinned that name is a bare "f.txt", which reverts the
+        // root file instead.
+        let clicked = result
+            .files
+            .iter()
+            .find(|file| {
+                file.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| {
+                    line.line_type == DiffLineType::Added && line.content == "project edited"
+                })
+            })
+            .expect("the project's file is in the diff")
+            .display_name()
+            .to_string();
+        crate::repository::discard_file_changes(&project, &clicked)
+            .expect("discard the project's file");
+        assert_eq!(
+            std::fs::read_to_string(project.join("f.txt")).unwrap(),
+            "project base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "root edited\n",
+            "the root file's uncommitted work must be untouched"
+        );
     }
 
     #[test]

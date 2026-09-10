@@ -89,7 +89,7 @@ async fn run_action_queue(
         if matches!(&action.action, ActionRequest::SetSettings { .. }) {
             while let Ok(next) = receiver.try_recv() {
                 if matches!(&next.action, ActionRequest::SetSettings { .. }) {
-                    action = next;
+                    action = coalesce_settings_actions(action, next);
                 } else {
                     pending = Some(next);
                     break;
@@ -97,6 +97,45 @@ async fn run_action_queue(
             }
         }
         send_queued_action(&connection_id, action, &event_tx).await;
+    }
+}
+
+/// Fold an older settings patch under a newer one so coalescing keeps both
+/// deltas; where they touch the same field the newer value wins.
+fn coalesce_settings_actions(older: QueuedAction, newer: QueuedAction) -> QueuedAction {
+    let QueuedAction {
+        config,
+        token,
+        action,
+    } = newer;
+    let action = match (older.action, action) {
+        (
+            ActionRequest::SetSettings { patch: mut merged },
+            ActionRequest::SetSettings { patch: newer_patch },
+        ) => {
+            merge_settings_patches(&mut merged, newer_patch);
+            ActionRequest::SetSettings { patch: merged }
+        }
+        (_, newer_action) => newer_action,
+    };
+    QueuedAction {
+        config,
+        token,
+        action,
+    }
+}
+
+/// Deep-merge one settings patch into another: objects merge key-by-key, and
+/// everything else — scalars, arrays and the `null` clear token — is replaced
+/// wholesale by the newer patch.
+fn merge_settings_patches(base: &mut serde_json::Value, newer: serde_json::Value) {
+    match (base, newer) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(newer)) => {
+            for (key, value) in newer {
+                merge_settings_patches(base.entry(key).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (base, newer) => *base = newer,
     }
 }
 
@@ -1022,10 +1061,12 @@ fn now_unix_timestamp() -> i64 {
 mod tests {
     use super::{
         ActionQueues, QueuedAction, RemoteConnectionManager, activity_changed,
-        is_local_connection_terminal_failure,
+        coalesce_settings_actions, is_local_connection_terminal_failure, merge_settings_patches,
+        run_action_queue,
     };
     use okena_core::api::ActionRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+    use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
@@ -1151,6 +1192,91 @@ mod tests {
                 },
             );
         }
+
+        server.join().unwrap();
+    }
+
+    fn settings_action(patch: serde_json::Value, port: u16) -> QueuedAction {
+        QueuedAction {
+            config: make_config("127.0.0.1", port),
+            token: "token".to_string(),
+            action: ActionRequest::SetSettings { patch },
+        }
+    }
+
+    #[test]
+    fn merge_settings_patches_keeps_disjoint_fields_and_clear_tokens() {
+        let mut merged =
+            json!({ "font_size": 19.0, "hooks": { "terminal": { "on_create": "a" } } });
+        merge_settings_patches(
+            &mut merged,
+            json!({ "font_size": 21.0, "hooks": { "terminal": { "on_create": null } } }),
+        );
+        assert_eq!(
+            merged,
+            json!({ "font_size": 21.0, "hooks": { "terminal": { "on_create": null } } })
+        );
+    }
+
+    #[test]
+    fn coalescing_two_settings_actions_merges_their_patches() {
+        let older = settings_action(json!({ "font_size": 19.0 }), 1);
+        let newer = settings_action(json!({ "session_backend": "None" }), 2);
+
+        let coalesced = coalesce_settings_actions(older, newer);
+
+        // The newest action's connection details win; both deltas survive.
+        assert_eq!(coalesced.config.port, 2);
+        match coalesced.action {
+            ActionRequest::SetSettings { patch } => assert_eq!(
+                patch,
+                json!({ "font_size": 19.0, "session_backend": "None" })
+            ),
+            other => panic!("expected SetSettings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queued_settings_actions_are_sent_as_one_merged_patch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut request = accept_until(&listener, deadline);
+            let body = read_request_body(&mut request);
+            assert!(body.contains("font_size"), "earlier patch lost: {body}");
+            assert!(body.contains("session_backend"), "later patch lost: {body}");
+            respond_ok(&mut request);
+
+            std::thread::sleep(Duration::from_millis(100));
+            match listener.accept() {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(_) => panic!("the coalesced patches were sent as separate requests"),
+                Err(error) => panic!("failed to inspect action queue: {error}"),
+            }
+        });
+
+        // Both actions are queued before the loop runs, so it always coalesces.
+        let (action_tx, action_rx) = async_channel::unbounded();
+        action_tx
+            .try_send(settings_action(json!({ "font_size": 19.0 }), port))
+            .unwrap();
+        action_tx
+            .try_send(settings_action(json!({ "session_backend": "None" }), port))
+            .unwrap();
+        drop(action_tx);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        runtime.block_on(run_action_queue(
+            "connection".to_string(),
+            action_rx,
+            event_tx,
+        ));
 
         server.join().unwrap();
     }

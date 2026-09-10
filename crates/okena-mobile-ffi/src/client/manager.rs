@@ -451,9 +451,14 @@ impl ConnectionManager {
     }
 
     /// Start connecting to the remote server.
+    ///
+    /// The FFI-visible status is published synchronously: the first
+    /// `StatusChanged` event only arrives after the handshake, and a poller that
+    /// sampled `Disconnected` before then would treat the attempt as over.
     pub fn connect(&self, conn_id: &str) {
         let connections = self.connections.read();
         if let Some(conn) = connections.get(conn_id) {
+            *conn.status.write() = ConnectionStatus::Connecting;
             conn.client.write().connect();
         }
     }
@@ -492,6 +497,14 @@ impl ConnectionManager {
         connections
             .get(conn_id)
             .and_then(|conn| conn.client.read().config().saved_token.clone())
+    }
+
+    /// Get the pinned server certificate fingerprint for a connection.
+    pub fn get_cert_fingerprint(&self, conn_id: &str) -> Option<String> {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .and_then(|conn| conn.client.read().config().pinned_cert_sha256.clone())
     }
 
     /// Get the cached remote state.
@@ -979,5 +992,50 @@ mod tests {
         )]);
         merge_state_presentation(&mut without_terminal, &previous);
         assert!(without_terminal.fullscreen_terminal.is_none());
+    }
+
+    /// TEST-NET-1 (RFC 5737): routable nowhere, so the connect task cannot
+    /// finish and race the assertion on the synchronously-published status.
+    const UNREACHABLE_HOST: &str = "192.0.2.1";
+
+    #[test]
+    fn connect_publishes_connecting_before_any_native_event() {
+        ConnectionManager::init();
+        let mgr = ConnectionManager::get();
+        let conn_id = mgr.add_connection(UNREACHABLE_HOST, 19100, None, true, None);
+        assert!(matches!(
+            mgr.get_status(&conn_id),
+            ConnectionStatus::Disconnected
+        ));
+
+        mgr.connect(&conn_id);
+        assert!(matches!(
+            mgr.get_status(&conn_id),
+            ConnectionStatus::Connecting
+        ));
+
+        mgr.remove_connection(&conn_id);
+    }
+
+    #[test]
+    fn cert_fingerprint_reports_the_pin_the_connection_uses() {
+        ConnectionManager::init();
+        let mgr = ConnectionManager::get();
+
+        let pinned = mgr.add_connection(
+            UNREACHABLE_HOST,
+            19101,
+            Some("token".to_string()),
+            true,
+            Some("abc123".to_string()),
+        );
+        assert_eq!(mgr.get_cert_fingerprint(&pinned).as_deref(), Some("abc123"));
+
+        let unpinned = mgr.add_connection(UNREACHABLE_HOST, 19102, None, true, None);
+        assert_eq!(mgr.get_cert_fingerprint(&unpinned), None);
+        assert_eq!(mgr.get_cert_fingerprint("missing"), None);
+
+        mgr.remove_connection(&pinned);
+        mgr.remove_connection(&unpinned);
     }
 }

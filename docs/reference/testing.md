@@ -1,7 +1,9 @@
 # Testing
 
 Repo-wide rules for Rust tests. Tests live in `#[cfg(test)]` modules inside
-source files; run with `cargo test`, or `cargo test -p <crate>` for one crate.
+source files; run with `cargo test --workspace`, or `cargo test -p <crate>` for
+one crate. A bare `cargo test` runs the root package alone — the workspace
+declares no `default-members`.
 
 Every implementation plan should say which tests to add, update, or delete.
 Identify the functions with real logic worth testing (rules below) and list

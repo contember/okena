@@ -7,7 +7,8 @@
  *   - folders (`getFolders`),
  *   - project order (`getProjectOrder`),
  *   - the server's focused project (`getFocusedProjectId`),
- *   - the fullscreen terminal (`getFullscreenTerminal`).
+ *   - the fullscreen terminal (`getFullscreenTerminal`),
+ *   - the selected project's layout JSON (`getProjectLayoutJson`).
  *
  * It auto-selects the focused project when nothing is selected, and auto-selects
  * a terminal within the selected project (newly-added one, or the first if the
@@ -39,9 +40,24 @@ import { getOkenaNative } from '../native/okena';
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
 
+/**
+ * The slice of the native surface this store calls. Narrowed from
+ * {@link OkenaNative} so a test stub only has to provide these.
+ */
+export type WorkspaceNative = Pick<
+  OkenaNative,
+  | 'getProjects'
+  | 'getFocusedProjectId'
+  | 'getFolders'
+  | 'getProjectOrder'
+  | 'getFullscreenTerminal'
+  | 'getProjectLayoutJson'
+  | 'secondsSinceActivity'
+>;
+
 /** Dependencies the store calls out to. Overridable for tests. */
 export interface WorkspaceDeps {
-  native: OkenaNative;
+  native: WorkspaceNative;
 }
 
 /**
@@ -58,6 +74,12 @@ export interface WorkspaceState {
   projectOrder: ProjectId[];
   /** The active fullscreen terminal, if any. */
   fullscreenTerminal: FullscreenInfo | null;
+  /**
+   * Authoritative layout JSON for the selected project, refreshed every poll.
+   * The terminal id set does not change on a tab switch, a minimize or a split
+   * resize, so this string is what consumers must key a re-render on.
+   */
+  projectLayoutJson: string | null;
   /** Currently-selected project id (auto-selected from focused, or by the user). */
   selectedProjectId: ProjectId | null;
   /** Currently-selected terminal id within the selected project. */
@@ -87,12 +109,6 @@ export interface WorkspaceState {
    * selector helper since zustand state holds only the id.)
    */
   getSelectedProject(): ProjectInfo | null;
-  /**
-   * The layout JSON for the selected project, via the native module. `null` if
-   * not connected or no project selected. Mirrors `getProjectLayoutJson`.
-   * Parse it with {@link import('../models/layoutNode').parseLayout}.
-   */
-  getProjectLayoutJson(): string | undefined;
 }
 
 let injectedDeps: Partial<WorkspaceDeps> = {};
@@ -248,6 +264,13 @@ function pollState(
     }
   }
 
+  const layoutJson =
+    (project ? native.getProjectLayoutJson(connId, project.id) : undefined) ?? null;
+  if (layoutJson !== prev.projectLayoutJson) {
+    patch.projectLayoutJson = layoutJson;
+    changed = true;
+  }
+
   // Connection health (drives the staleness indicator's 3s / 10s thresholds).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
@@ -284,6 +307,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     folders: [],
     projectOrder: [],
     fullscreenTerminal: null,
+    projectLayoutJson: null,
     selectedProjectId: null,
     selectedTerminalId: null,
     secondsSinceActivity: 0,
@@ -303,6 +327,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         folders: [],
         projectOrder: [],
         fullscreenTerminal: null,
+        projectLayoutJson: null,
         selectedProjectId: null,
         selectedTerminalId: null,
       });
@@ -310,7 +335,15 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
 
     selectProject(projectId) {
       previousTerminalIds = null;
-      set({ selectedProjectId: projectId, selectedTerminalId: null });
+      set({
+        selectedProjectId: projectId,
+        selectedTerminalId: null,
+        // Swap the layout with the project so the old tree isn't shown until
+        // the next poll.
+        projectLayoutJson: activeConnId
+          ? (deps().native.getProjectLayoutJson(activeConnId, projectId) ?? null)
+          : null,
+      });
     },
 
     selectTerminal(terminalId) {
@@ -320,13 +353,6 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     getSelectedProject() {
       const { projects, selectedProjectId } = get();
       return resolveSelectedProject(projects, selectedProjectId);
-    },
-
-    getProjectLayoutJson() {
-      if (!activeConnId) return undefined;
-      const project = get().getSelectedProject();
-      if (!project) return undefined;
-      return deps().native.getProjectLayoutJson(activeConnId, project.id);
     },
   }));
 

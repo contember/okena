@@ -111,6 +111,7 @@ where
 
         div()
             .id("detached-overlay-root")
+            .font_family(okena_ui::tokens::ui_font_family(cx))
             .track_focus(&focus_handle)
             .key_context("DetachedOverlay")
             .size_full()

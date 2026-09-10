@@ -9,19 +9,17 @@
 use crate::layout::terminal_pane::TerminalContent;
 use gpui::*;
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::input::{KeyEvent, KeyModifiers, KittyKeyboardFlags, key_to_bytes};
+use okena_terminal::input::{
+    KeyEncodeOptions, KeyEvent, KeyModifiers, consumes_composed_text, key_to_bytes,
+};
 use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
 use std::sync::Arc;
 
-/// Convert a GPUI key event to terminal input bytes.
-fn gpui_key_to_bytes(
-    event: &KeyDownEvent,
-    app_cursor_mode: bool,
-    kitty: KittyKeyboardFlags,
-) -> Option<Vec<u8>> {
-    let key_event = KeyEvent {
+/// Convert a GPUI key event to the encoder's framework-agnostic representation.
+fn to_key_event(event: &KeyDownEvent) -> KeyEvent {
+    KeyEvent {
         key: event.keystroke.key.clone(),
         key_char: event.keystroke.key_char.clone(),
         modifiers: KeyModifiers {
@@ -30,8 +28,7 @@ fn gpui_key_to_bytes(
             alt: event.keystroke.modifiers.alt,
             platform: event.keystroke.modifiers.platform,
         },
-    };
-    key_to_bytes(&key_event, app_cursor_mode, kitty)
+    }
 }
 
 /// Default terminal size for overlay terminals.
@@ -101,15 +98,27 @@ pub fn create_terminal_content<V: 'static>(
 ///
 /// Converts the key event to terminal bytes and sends them to the terminal.
 /// Returns true if input was sent.
-pub fn handle_terminal_key_input(terminal: &Terminal, event: &KeyDownEvent) -> bool {
-    let app_cursor_mode = terminal.is_app_cursor_mode();
-    let kitty = terminal.kitty_keyboard_flags();
-    if let Some(input) = gpui_key_to_bytes(event, app_cursor_mode, kitty) {
-        terminal.send_bytes(&input);
-        true
-    } else {
-        false
+pub fn handle_terminal_key_input<V: 'static>(
+    terminal: &Terminal,
+    event: &KeyDownEvent,
+    cx: &mut Context<V>,
+) -> bool {
+    let options = KeyEncodeOptions {
+        app_cursor_mode: terminal.is_app_cursor_mode(),
+        kitty: terminal.kitty_keyboard_flags(),
+        option_as_meta: crate::terminal_view_settings(cx).option_as_meta,
+    };
+    let key_event = to_key_event(event);
+    let Some(input) = key_to_bytes(&key_event, options) else {
+        return false;
+    };
+    terminal.send_bytes(&input);
+    // GPUI keeps forwarding to the input context, which would commit the
+    // character macOS composed on top of the meta sequence.
+    if consumes_composed_text(&key_event, options) {
+        cx.stop_propagation();
     }
+    true
 }
 
 /// Handle pending focus for a terminal view.

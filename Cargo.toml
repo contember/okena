@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-tasks", "crates/okena-openspec","crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-highlight", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app", "crates/okena-daemon-core", "crates/okena-daemon", "crates/okena-tui"]
+members = [".", "crates/okena-mobile-ffi", "crates/okena-core", "crates/okena-transport", "crates/okena-tasks", "crates/okena-openspec", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-layout", "crates/okena-state", "crates/okena-hooks", "crates/okena-workspace", "crates/okena-ui", "crates/okena-usage", "crates/okena-files", "crates/okena-markdown", "crates/okena-highlight", "crates/okena-syntax", "crates/okena-review", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-github", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client", "crates/okena-remote-server", "crates/okena-views-remote", "crates/okena-theme", "crates/okena-cli", "crates/okena-app-core", "crates/okena-app", "crates/okena-daemon-core", "crates/okena-daemon", "crates/okena-tui"]
 resolver = "2"
 
 [workspace.package]
@@ -117,6 +117,10 @@ strip = false
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+
+# The end-to-end tests drive the shipped binaries the way a user does: the TUI
+# needs a real terminal to enter raw mode at all.
+portable-pty = "0.9"
 
 # jemalloc is the default allocator on Unix (Linux + macOS). Kept Unix-only
 # because tikv-jemalloc-sys doesn't build under MSVC; Windows uses mimalloc.

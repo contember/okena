@@ -29,6 +29,12 @@ case "$OS" in
   *) err "Unsupported OS: $OS. For Windows, use install.ps1" ;;
 esac
 
+# Only the combinations we actually publish. Without this, Linux arm64 falls
+# through and installs an x64 binary that cannot run.
+if [ "$OS" = "linux" ] && [ "$ARCH" != "x64" ]; then
+  err "No Linux $ARCH release is published yet. Build from source: https://github.com/${REPO}#building"
+fi
+
 # Get version (from argument or latest release)
 if [ -n "$1" ]; then
   VERSION="$1"
@@ -77,7 +83,7 @@ if [ "$OS" = "darwin" ]; then
   echo ""
 
 else
-  ARTIFACT="okena-linux-x64"
+  ARTIFACT="okena-linux-${ARCH}"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARTIFACT}.tar.gz"
 
   step "Downloading"

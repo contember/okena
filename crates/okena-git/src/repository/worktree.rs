@@ -377,6 +377,69 @@ fn require_absent_worktree_target(target_path: &Path) -> GitResult<()> {
     Ok(())
 }
 
+/// An existing ref to start a new branch from: the pushed copy when there is
+/// one, else the local branch. `None` when the repository has neither — a
+/// local-only repository never has `origin/<branch>` to base anything on.
+fn resolve_start_ref(repo_path: &Path, branch: &str) -> Option<String> {
+    let repo = crate::gix_helpers::open(repo_path)?;
+    if repo
+        .find_reference(&format!("refs/remotes/origin/{branch}"))
+        .is_ok()
+    {
+        return Some(format!("origin/{branch}"));
+    }
+    repo.find_reference(&format!("refs/heads/{branch}"))
+        .is_ok()
+        .then(|| branch.to_string())
+}
+
+/// Freshen the default branch, then resolve what a new branch starts from.
+fn fetch_and_resolve_start_ref(repo_path: &Path, repo_str: &str) -> Option<String> {
+    let default_branch = get_default_branch(repo_path)?;
+    let _ =
+        safe_output(network_command().args(["-C", repo_str, "fetch", "origin", &default_branch]));
+    resolve_start_ref(repo_path, &default_branch)
+}
+
+/// How `git worktree add` attaches the new checkout.
+enum BranchAttachment {
+    /// Create `-b <branch>`, optionally from a resolved start ref.
+    NewBranch(Option<String>),
+    /// Check out an existing branch by name.
+    Existing(String),
+    /// Create a local branch tracking a remote-only selection.
+    TrackRemote { local: String, remote: String },
+}
+
+/// Resolve a branch picked from a list that mixes local names with
+/// remote-prefixed ones (`origin/feature`). Handing the remote ref straight to
+/// `git worktree add` detaches HEAD, so it becomes a local tracking branch
+/// instead; an existing local branch of that name wins, as it does in
+/// `checkout_remote_branch`. Anything that is neither goes to git unchanged so
+/// its own diagnostic reaches the user.
+fn resolve_existing_branch(repo_path: &Path, branch: &str) -> GitResult<BranchAttachment> {
+    let Some(repo) = crate::gix_helpers::open(repo_path) else {
+        return Ok(BranchAttachment::Existing(branch.to_string()));
+    };
+    let is_ref = |full: String| repo.find_reference(&full).is_ok();
+    if is_ref(format!("refs/heads/{branch}")) || !is_ref(format!("refs/remotes/{branch}")) {
+        return Ok(BranchAttachment::Existing(branch.to_string()));
+    }
+
+    let local = branch.split_once('/').map_or("", |(_, rest)| rest);
+    if local.is_empty() {
+        return Err(GitError::InvalidRef(branch.to_string()));
+    }
+    crate::validate_git_ref(local)?;
+    if is_ref(format!("refs/heads/{local}")) {
+        return Ok(BranchAttachment::Existing(local.to_string()));
+    }
+    Ok(BranchAttachment::TrackRemote {
+        local: local.to_string(),
+        remote: branch.to_string(),
+    })
+}
+
 /// Create a new worktree.
 pub fn create_worktree(
     repo_path: &Path,
@@ -390,30 +453,33 @@ pub fn create_worktree(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    let mut args = vec!["-C", repo_str, "worktree", "add"];
-
-    // When creating a new branch, fetch the remote default branch first,
-    // then base the worktree on origin/{default} so it starts from the
-    // latest remote state instead of a potentially stale local ref.
-    let start_point;
-    if create_branch {
-        args.push("-b");
-        args.push(branch);
-        args.push(target_str);
-        if let Some(default_branch) = get_default_branch(repo_path) {
-            let _ = safe_output(network_command().args([
-                "-C",
-                repo_str,
-                "fetch",
-                "origin",
-                &default_branch,
-            ]));
-            start_point = format!("origin/{}", default_branch);
-            args.push(&start_point);
-        }
+    let attachment = if create_branch {
+        BranchAttachment::NewBranch(fetch_and_resolve_start_ref(repo_path, repo_str))
     } else {
-        args.push(target_str);
-        args.push(branch);
+        resolve_existing_branch(repo_path, branch)?
+    };
+
+    let mut args = vec!["-C", repo_str, "worktree", "add"];
+    match &attachment {
+        BranchAttachment::NewBranch(start_point) => {
+            args.push("-b");
+            args.push(branch);
+            args.push(target_str);
+            if let Some(start_point) = start_point {
+                args.push(start_point);
+            }
+        }
+        BranchAttachment::Existing(name) => {
+            args.push(target_str);
+            args.push(name);
+        }
+        BranchAttachment::TrackRemote { local, remote } => {
+            args.push("--track");
+            args.push("-b");
+            args.push(local);
+            args.push(target_str);
+            args.push(remote);
+        }
     }
 
     let output = safe_output(command("git").args(&args))?;
@@ -421,8 +487,9 @@ pub fn create_worktree(
 }
 
 /// Create a new worktree with an optional pre-fetched start point.
-/// If `start_branch` is Some, creates `-b <branch> <target> origin/<start_branch>`
-/// without re-fetching (caller is expected to have fetched already).
+/// If `start_branch` is Some, creates `-b <branch> <target> <resolved start>`
+/// without re-fetching (caller is expected to have fetched already); the start
+/// ref resolves to `origin/<start_branch>` or, failing that, the local branch.
 pub fn create_worktree_with_start_point(
     repo_path: &Path,
     branch: &str,
@@ -440,10 +507,9 @@ pub fn create_worktree_with_start_point(
 
     let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
 
-    let start_point;
-    if let Some(sb) = start_branch {
-        start_point = format!("origin/{}", sb);
-        args.push(&start_point);
+    let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));
+    if let Some(start_point) = &start_point {
+        args.push(start_point);
     }
 
     let output = safe_output(command("git").args(&args))?;
@@ -1036,6 +1102,154 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sentinel).expect("existing data survives"),
             "user data"
+        );
+    }
+
+    /// Read-only git, returning trimmed stdout.
+    fn git_out(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit_in(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), name).expect("write file");
+        git_in(repo, &["add", "."]);
+        git_in(repo, &["-c", "commit.gpgsign=false", "commit", "-m", name]);
+    }
+
+    /// A repo whose `main` is pushed to a bare `origin`. The second tempdir owns
+    /// the remote and must stay alive for the repo's lifetime.
+    fn repo_with_origin() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
+        let (tmp, repo) = init_temp_repo();
+        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
+        let remote = remote_tmp.path().join("remote.git");
+        let remote_str = remote.to_str().expect("remote path is utf-8");
+        git_in(&repo, &["init", "--bare", "-b", "main", remote_str]);
+        git_in(&repo, &["remote", "add", "origin", remote_str]);
+        git_in(&repo, &["push", "-q", "origin", "main"]);
+        (tmp, repo, remote_tmp)
+    }
+
+    /// Push `feature` and drop the local copy, leaving only `origin/feature` —
+    /// the shape a remote-only entry in the branch picker has.
+    fn push_and_forget_feature(repo: &Path) {
+        git_in(repo, &["branch", "feature"]);
+        git_in(repo, &["push", "-q", "origin", "feature"]);
+        git_in(repo, &["branch", "-D", "feature"]);
+        git_in(repo, &["fetch", "-q", "origin"]);
+    }
+
+    /// A repository with no remote has no `origin/<default>` at all, so a start
+    /// point built from that name is a fatal invalid reference.
+    #[test]
+    fn a_local_only_repository_starts_a_new_branch_from_its_local_default() {
+        let (_tmp, repo) = init_temp_repo();
+        // Take HEAD off the default branch, so starting from HEAD instead of
+        // the resolved default would be visible.
+        git_in(&repo, &["checkout", "-q", "-b", "side"]);
+        commit_in(&repo, "side.txt");
+
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feature");
+
+        create_worktree(&repo, "feature", &target, true).expect("create from a local default");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(
+            git_out(&target, &["rev-parse", "HEAD"]),
+            git_out(&repo, &["rev-parse", "main"]),
+            "the new branch starts from the local default branch"
+        );
+    }
+
+    /// Same fallback for the pre-fetched entry point the daemon uses.
+    #[test]
+    fn a_pre_resolved_start_point_falls_back_to_the_local_branch() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["checkout", "-q", "-b", "side"]);
+        commit_in(&repo, "side.txt");
+
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feature");
+
+        create_worktree_with_start_point(&repo, "feature", &target, Some("main"))
+            .expect("create from a local start point");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(
+            git_out(&target, &["rev-parse", "HEAD"]),
+            git_out(&repo, &["rev-parse", "main"])
+        );
+    }
+
+    /// Handing `origin/feature` to `git worktree add` detaches HEAD; the pick
+    /// has to become a local branch tracking it.
+    #[test]
+    fn a_remote_only_branch_becomes_an_attached_local_tracking_branch() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        push_and_forget_feature(&repo);
+
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feature");
+
+        create_worktree(&repo, "origin/feature", &target, false)
+            .expect("create from a remote-only branch");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature",
+            "the checkout must be attached to a local branch, not detached"
+        );
+        assert_eq!(
+            git_out(&target, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/feature"
+        );
+    }
+
+    /// Collision policy: a local branch of the derived name already exists, so
+    /// the checkout attaches to it rather than inventing a second name or
+    /// moving the branch onto the remote tip.
+    #[test]
+    fn a_remote_pick_whose_local_name_exists_checks_out_that_local_branch() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        push_and_forget_feature(&repo);
+        commit_in(&repo, "later.txt");
+        git_in(&repo, &["branch", "-f", "feature", "main"]);
+
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feature");
+
+        create_worktree(&repo, "origin/feature", &target, false)
+            .expect("create from a colliding remote pick");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(
+            git_out(&target, &["rev-parse", "HEAD"]),
+            git_out(&repo, &["rev-parse", "feature"]),
+            "the existing local branch wins over the remote tip"
+        );
+        assert_ne!(
+            git_out(&target, &["rev-parse", "HEAD"]),
+            git_out(&repo, &["rev-parse", "origin/feature"])
         );
     }
 }

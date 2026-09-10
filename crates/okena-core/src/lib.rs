@@ -8,6 +8,7 @@ pub mod latency_probe;
 pub mod process;
 pub mod profiles;
 pub mod render_probe;
+pub mod review;
 pub mod selection;
 pub mod send_payload;
 pub mod shell;

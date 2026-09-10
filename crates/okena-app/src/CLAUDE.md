@@ -79,7 +79,8 @@ In the platform config dir (macOS: `~/Library/Application Support/okena/`, Linux
 
 ## Testing
 
-Tests live in `#[cfg(test)]` modules inside source files. Run with `cargo test`.
+Tests live in `#[cfg(test)]` modules inside source files. Run with
+`cargo test --workspace` (a bare `cargo test` runs the root package alone).
 
 Test-selection rules and the GPUI test harness setup are repo-wide — see
 [`docs/reference/testing.md`](../../../docs/reference/testing.md).
