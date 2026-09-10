@@ -1092,7 +1092,34 @@ impl HarnessPane {
                             .child(task.display_key.clone()),
                     )
                     .child(self.chip(task.kind.label().to_string(), kind_color(task.kind, &t), cx))
-                    .child(self.chip(state_label, state_color(task.state, &t), cx)),
+                    .child(self.chip(state_label, state_color(task.state, &t), cx))
+                    // Pushed to the right edge: these act on the task as a
+                    // whole, not on the chips beside them.
+                    .child(div().flex_1().min_w_0())
+                    .child({
+                        let url = task.url.clone();
+                        self.link_button(
+                            format!("task-copy-{}", task.id.external_id),
+                            "icons/copy.svg",
+                            "Copy link",
+                            move |_this, _, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                            },
+                            cx,
+                        )
+                    })
+                    .child({
+                        let url = task.url.clone();
+                        self.link_button(
+                            format!("task-open-{}", task.id.external_id),
+                            "icons/external-link.svg",
+                            "Open in browser",
+                            move |_this, _, _window, _cx| {
+                                okena_core::process::open_url(&url);
+                            },
+                            cx,
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1193,27 +1220,15 @@ impl HarnessPane {
             ),
         });
 
-        body = body
-            .child(self.detail_label("BRANCH", cx))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(task.branch_name.clone()),
-            )
-            .child(self.detail_label("LINK", cx))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(task.url.clone()),
-            );
+        body = body.child(self.detail_label("BRANCH", cx)).child(
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_secondary))
+                .child(task.branch_name.clone()),
+        );
 
         if !task.labels.is_empty() {
             body = body.child(self.detail_label("LABELS", cx)).child(
@@ -1488,6 +1503,50 @@ impl HarnessPane {
         out.into_any_element()
     }
 
+    /// A small icon button for a task's link actions.
+    ///
+    /// The permalink used to be printed in full: a long opaque string nobody
+    /// reads and could not click. Two icons do what the text only hinted at.
+    fn link_button(
+        &self,
+        id: String,
+        icon: &'static str,
+        tooltip: &'static str,
+        on_click: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .id(SharedString::from(id))
+            .cursor_pointer()
+            .flex_shrink_0()
+            .size(px(22.0))
+            .rounded(px(4.0))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(13.0))
+                    .text_color(rgb(t.text_secondary)),
+            )
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    // These sit on rows that select or open a task; the button
+                    // must do its own thing and nothing else.
+                    cx.stop_propagation();
+                    on_click(this, event, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     /// A heading with a count beside it, when there is one to give.
     fn detail_label_with_count(
         &self,
@@ -1637,8 +1696,8 @@ impl HarnessPane {
             .child(
                 // `min_w_0` is load-bearing: a flex child defaults to a minimum
                 // width of its content, so a long title would widen this column
-                // past the lane and push "Start work" out of view instead of
-                // wrapping or truncating.
+                // past the lane and push the row's controls out of view instead
+                // of wrapping or truncating.
                 v_flex()
                     .gap(px(3.0))
                     .flex_1()
@@ -1749,6 +1808,18 @@ impl HarnessPane {
                             .child(format!("branch: {}", task.branch_name)),
                     ),
             )
+            .child({
+                let url = task.url.clone();
+                self.link_button(
+                    format!("row-open-{}", task.id.external_id),
+                    "icons/external-link.svg",
+                    "Open in browser",
+                    move |_this, _, _window, _cx| {
+                        okena_core::process::open_url(&url);
+                    },
+                    cx,
+                )
+            })
     }
 
     /// The "Start work" dialog: projects, branch name, agent.
