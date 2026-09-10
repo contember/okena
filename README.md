@@ -90,7 +90,7 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 - **Settings panel** - GUI for all preferences (theme, font, terminal, hooks, per-project settings)
 - **Theme selector** - Live-preview theme picker
 - **Keybindings help** - Categorized shortcut reference with search
-- **File viewer** - Syntax-highlighted file preview with line numbers and search
+- **File viewer** - Syntax-highlighted file preview with line numbers and search, plus PDF previews with page navigation and zoom
 - **Diff viewer** - Unified and side-by-side diff views with syntax highlighting
 
 ### Customization

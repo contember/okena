@@ -27,8 +27,8 @@ enum ProcessedFile {
     },
     Binary {
         display_file: DiffDisplayFile,
-        old: Option<PreparedBinarySide>,
-        new: Option<PreparedBinarySide>,
+        old: Option<Box<PreparedBinarySide>>,
+        new: Option<Box<PreparedBinarySide>>,
     },
 }
 
@@ -204,8 +204,8 @@ impl DiffViewer {
                     );
                     return Ok::<_, String>(ProcessedFile::Binary {
                         display_file,
-                        old: prepare_side(raw_file.old_path, contents.old),
-                        new: prepare_side(raw_file.new_path, contents.new),
+                        old: prepare_side(raw_file.old_path, contents.old).map(Box::new),
+                        new: prepare_side(raw_file.new_path, contents.new).map(Box::new),
                     });
                 }
                 let (old_content, new_content) =
@@ -284,8 +284,8 @@ impl DiffViewer {
                         this.max_line_chars = 0;
                         this.current_file = Some(display_file);
                         this.binary_preview = Some(BinaryDiffPreview {
-                            old: old.map(|side| install(side, "binary-diff-old", cx)),
-                            new: new.map(|side| install(side, "binary-diff-new", cx)),
+                            old: old.map(|side| install(*side, "binary-diff-old", cx)),
+                            new: new.map(|side| install(*side, "binary-diff-new", cx)),
                         });
                         this.side_by_side_lines.clear();
                     }
