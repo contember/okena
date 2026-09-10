@@ -39,15 +39,6 @@ struct GitFacts {
     ci: Option<(CiStatus, usize, usize, usize)>,
 }
 
-/// A worktree open against a project.
-struct WorktreeCard {
-    id: String,
-    name: String,
-    git: GitFacts,
-    /// The task this worktree was created for, if it came from one.
-    task: Option<String>,
-}
-
 /// An agent session working on this project.
 struct AgentCard {
     id: String,
@@ -67,7 +58,10 @@ struct Lane {
     name: String,
     git: GitFacts,
     terminal_count: usize,
-    worktrees: Vec<WorktreeCard>,
+    /// Ids of the worktrees open against it. Only ids: the shared worktree
+    /// card reads everything it shows, including push and review state, which
+    /// would otherwise be collected here and go stale differently.
+    worktrees: Vec<String>,
     agents: Vec<AgentCard>,
 }
 
@@ -145,16 +139,11 @@ impl HarnessPane {
             // Worktrees and sessions appear inside a lane, never as one.
             .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
             .map(|p| {
-                let worktrees: Vec<WorktreeCard> = p
+                let worktrees: Vec<String> = p
                     .worktree_ids
                     .iter()
-                    .filter_map(|id| ws.project(id))
-                    .map(|w| WorktreeCard {
-                        id: w.id.clone(),
-                        name: w.name.clone(),
-                        git: Self::git_facts(ws, &w.id),
-                        task: w.task_ref.as_ref().map(|t| t.display_key.clone()),
-                    })
+                    .filter(|id| ws.project(id).is_some())
+                    .cloned()
                     .collect();
 
                 // Tasks this project has work in flight for, including one
@@ -216,6 +205,27 @@ impl HarnessPane {
         });
         okena_workspace::harness_state::set_active_harness(self.window_id, None, cx);
         cx.notify();
+    }
+
+    /// Show what changed in a worktree.
+    pub(super) fn open_diff(&self, project_id: &str, cx: &mut App) {
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Project(
+                    okena_workspace::requests::ProjectOverlay {
+                        project_id: project_id.to_string(),
+                        kind: okena_workspace::requests::ProjectOverlayKind::DiffViewer {
+                            file: None,
+                            mode: None,
+                            commit_message: None,
+                            commits: None,
+                            commit_index: None,
+                        },
+                    },
+                ),
+                cx,
+            );
+        });
     }
 
     pub(super) fn chip(&self, text: String, color: u32, cx: &Context<Self>) -> AnyElement {
@@ -385,9 +395,17 @@ impl HarnessPane {
             );
         }
         for w in &lane.worktrees {
-            let chips = self.git_chips(&w.git, cx);
-            body =
-                body.child(self.lane_card(w.id.clone(), w.name.clone(), w.task.clone(), chips, cx));
+            let Some(summary) =
+                crate::views::components::WorktreeSummary::collect(self.workspace.read(cx), w)
+            else {
+                continue;
+            };
+            body = body.child(crate::views::components::render_worktree_card(
+                &summary,
+                |this, id, cx| this.open_project(id.to_string(), cx),
+                |this, id, cx| this.open_diff(id, cx),
+                cx,
+            ));
         }
 
         body = body.child(self.lane_section("AGENTS", Some(lane.agents.len()), cx));

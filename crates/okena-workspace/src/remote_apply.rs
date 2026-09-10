@@ -177,9 +177,12 @@ pub fn apply_remote_snapshot(
                                     conn_id, wt.parent_project_id
                                 ),
                                 color_override: wt.color_override,
+                                // The paths stay the daemon's: a client has no
+                                // filesystem of its own to resolve them
+                                // against. The branch is meaningful anywhere.
                                 main_repo_path: String::new(),
                                 worktree_path: String::new(),
-                                branch_name: String::new(),
+                                branch_name: wt.branch_name.clone(),
                             });
                     existing.worktree_ids = api_project
                         .worktree_ids
@@ -232,7 +235,7 @@ pub fn apply_remote_snapshot(
                                 color_override: wt.color_override,
                                 main_repo_path: String::new(),
                                 worktree_path: String::new(),
-                                branch_name: String::new(),
+                                branch_name: wt.branch_name.clone(),
                             });
                     let worktree_ids: Vec<String> = api_project
                         .worktree_ids

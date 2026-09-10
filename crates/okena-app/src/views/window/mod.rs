@@ -947,6 +947,7 @@ impl WindowView {
         let agent_panel_ctx = self.local_daemon_action_client(cx).ok().map(|client| {
             crate::views::agent_session::AgentPanelContext {
                 client,
+                request_broker: self.request_broker.clone(),
                 workspace: self.workspace.clone(),
                 focus_manager: self.focus_manager.clone(),
                 window_id,

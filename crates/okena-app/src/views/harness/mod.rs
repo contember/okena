@@ -41,6 +41,11 @@ pub(crate) struct TasksState {
     /// Task ids whose sub-tasks are hidden. Collapsed rather than expanded
     /// state so a fresh view shows the whole breakdown by default.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    /// The task shown in the detail pane, by provider id.
+    pub(crate) selected: Option<String>,
+    /// Sections folded shut in the list. Collapsed rather than expanded state,
+    /// so a fresh view shows everything.
+    pub(crate) sections_collapsed: std::collections::HashSet<String>,
     /// Open "Start work" dialog, if any.
     pub(crate) start_form: Option<StartWorkForm>,
     /// Agent command configured on the daemon, used as the dialog's default.
@@ -213,6 +218,8 @@ impl HarnessPane {
                 api_key_input,
                 lane_fraction: 0.5,
                 collapsed: std::collections::HashSet::new(),
+                selected: None,
+                sections_collapsed: std::collections::HashSet::new(),
                 start_form: None,
                 default_agent: None,
             },

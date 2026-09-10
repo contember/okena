@@ -62,6 +62,7 @@ pub fn build_api_project(
         worktree_info: p.worktree_info.as_ref().map(|wt| ApiWorktreeMetadata {
             parent_project_id: wt.parent_project_id.clone(),
             color_override: wt.color_override,
+            branch_name: wt.branch_name.clone(),
         }),
         worktree_ids: p.worktree_ids.clone(),
         task_ref: p.task_ref.clone(),
@@ -197,5 +198,46 @@ pub fn build_state_response(
         folders,
         windows,
         hooks,
+    }
+}
+
+#[cfg(test)]
+mod worktree_wire_tests {
+    use okena_workspace::state::{ProjectData, WorktreeMetadata};
+
+    fn worktree(branch: &str) -> ProjectData {
+        let mut p: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "wt1",
+            "name": "okena (feat/x)",
+            "path": "/p/wt",
+        }))
+        .unwrap();
+        p.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "repo1".into(),
+            color_override: None,
+            main_repo_path: "/p/okena".into(),
+            worktree_path: "/p/wt".into(),
+            branch_name: branch.into(),
+        });
+        p
+    }
+
+    #[test]
+    fn the_branch_crosses_the_wire() {
+        // A thin client has no other way to learn a worktree's branch: the
+        // paths are deliberately not sent, and git status is empty until the
+        // first poll. Without this the branch is blank in every client view.
+        let p = worktree("feat/x");
+        let api = super::build_api_project(
+            &p,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert_eq!(
+            api.worktree_info.expect("worktree info").branch_name,
+            "feat/x"
+        );
     }
 }
