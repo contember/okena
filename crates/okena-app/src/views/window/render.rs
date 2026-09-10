@@ -131,7 +131,7 @@ impl WindowView {
             None => return,
         };
 
-        let is_rows = workspace.project_layout_mode(self.window_id).is_rows();
+        let is_rows = workspace.grid_layout_mode(self.window_id).is_rows();
         let settings = settings_entity(cx).read(cx).settings.clone();
         let container_size = {
             let b = self.projects_grid_bounds.borrow();
@@ -209,7 +209,7 @@ impl WindowView {
                 .len();
             let is_zoomed = fm.focused_project_id().is_some();
 
-            let is_rows = workspace.project_layout_mode(self.window_id).is_rows();
+            let is_rows = workspace.grid_layout_mode(self.window_id).is_rows();
             let max_offset = self.projects_scroll_handle.max_offset();
             let axis_overflow = if is_rows { max_offset.y } else { max_offset.x };
             if is_zoomed || num_visible <= 1 {
@@ -347,7 +347,7 @@ impl WindowView {
         let is_rows = self
             .workspace
             .read(cx)
-            .project_layout_mode(self.window_id)
+            .grid_layout_mode(self.window_id)
             .is_rows();
 
         let widths: Vec<f32> = if num_projects <= 1 {
@@ -761,6 +761,23 @@ impl Render for WindowView {
                                     }
                                 }
                             }
+                            DragState::AgentPanel {
+                                project_id,
+                                initial_mouse_x,
+                                initial_width,
+                            } => {
+                                // The panel is on the right of the column, so
+                                // dragging the handle left widens it — the
+                                // delta is subtracted, not added.
+                                let delta = f32::from(event.position.x) - initial_mouse_x;
+                                let new_width = initial_width - delta;
+                                let project_id = project_id.clone();
+                                if let Some(col) = this.project_columns.get(&project_id).cloned() {
+                                    col.update(cx, |col, cx| {
+                                        col.set_agent_panel_width(new_width, cx);
+                                    });
+                                }
+                            }
                             DragState::HookPanel {
                                 project_id,
                                 initial_mouse_y,
@@ -969,7 +986,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ToggleProjectLayout, _window, cx| {
                 let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {
-                    ws.toggle_project_layout_mode(window_id, cx);
+                    ws.toggle_grid_layout_mode(window_id, cx);
                 });
             }))
             // Start the first terminal in a project that has none — the
@@ -1534,23 +1551,18 @@ impl Render for WindowView {
                                     .flex_row()
                                     .map(|d| match self.active_harness_pane(cx) {
                                         Some(pane) => d.child(pane),
-                                        None => {
-                                            // An agent session gets a task
-                                            // workspace: its terminal on the
-                                            // left, task context on the right.
-                                            let session = self.focused_agent_session(cx);
-                                            d.child(
-                                                div()
-                                                    .id("projects-grid-wrap")
-                                                    .flex_1()
-                                                    .min_h_0()
-                                                    .min_w_0()
-                                                    .child(self.render_projects_grid(cx)),
-                                            )
-                                            .children(
-                                                session.map(|id| self.render_task_panel(id, cx)),
-                                            )
-                                        }
+                                        // An agent session's context lives in
+                                        // its own column, behind the header's
+                                        // info toggle — not in a second panel
+                                        // beside it repeating the same thing.
+                                        None => d.child(
+                                            div()
+                                                .id("projects-grid-wrap")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .min_w_0()
+                                                .child(self.render_projects_grid(cx)),
+                                        ),
                                     }),
                             ),
                     ),

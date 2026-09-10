@@ -8,7 +8,7 @@
 //! Pane entities are kept alive after being switched away from, so returning to
 //! a view restores what it had loaded instead of refetching.
 
-use crate::views::harness::{HarnessPane, HarnessPaneEvent};
+use crate::views::harness::HarnessPane;
 use gpui::*;
 use okena_core::harness::HarnessSection;
 
@@ -30,6 +30,7 @@ impl WindowView {
             };
             let ctx = crate::views::harness::PaneContext {
                 client,
+                request_broker: self.request_broker.clone(),
                 workspace: self.workspace.clone(),
                 focus_manager: self.focus_manager.clone(),
                 window_id: self.window_id,
@@ -37,25 +38,9 @@ impl WindowView {
                 active_drag: self.active_drag.clone(),
             };
             let pane = cx.new(|cx| HarnessPane::new(section, ctx, cx));
-            cx.subscribe(
-                &pane,
-                move |this, _pane, event: &HarnessPaneEvent, cx| match event {
-                    HarnessPaneEvent::Close(section) => this.close_harness_view(*section, cx),
-                },
-            )
-            .detach();
             self.harness_panes.push((section, pane));
         }
         okena_workspace::harness_state::set_active_harness(self.window_id, Some(section), cx);
-        cx.notify();
-    }
-
-    /// Return to the terminal workspace, dropping the view's state.
-    pub(crate) fn close_harness_view(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        self.harness_panes.retain(|(s, _)| *s != section);
-        if okena_workspace::harness_state::active_harness(self.window_id, cx) == Some(section) {
-            okena_workspace::harness_state::set_active_harness(self.window_id, None, cx);
-        }
         cx.notify();
     }
 

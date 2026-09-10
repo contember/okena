@@ -5,6 +5,7 @@ pub(in crate::views::overlays) enum SettingsCategory {
     Terminal,
     Worktree,
     Harness,
+    Tasks,
     Hooks,
     Extensions,
     PairedDevices,
@@ -20,6 +21,7 @@ impl SettingsCategory {
             Self::Terminal => "Terminal",
             Self::Worktree => "Worktree",
             Self::Harness => "Harness",
+            Self::Tasks => "Tasks",
             Self::Hooks => "Hooks",
             Self::Extensions => "Extensions",
             Self::PairedDevices => "Devices",
@@ -34,10 +36,37 @@ impl SettingsCategory {
             Self::Terminal,
             Self::Worktree,
             Self::Harness,
+            Self::Tasks,
             Self::Hooks,
             Self::Extensions,
             Self::PairedDevices,
         ]
+    }
+
+    /// Stable id used to open the panel on a given page from elsewhere.
+    ///
+    /// A string crosses crate boundaries that the enum cannot: the harness
+    /// views live in this crate but request the page through the shared
+    /// request broker, which does not know this type.
+    pub(super) fn slug(&self) -> &str {
+        match self {
+            Self::General => "general",
+            Self::Font => "font",
+            Self::Terminal => "terminal",
+            Self::Worktree => "worktree",
+            Self::Harness => "harness",
+            Self::Tasks => "tasks",
+            Self::Hooks => "hooks",
+            Self::Extensions => "extensions",
+            Self::PairedDevices => "devices",
+            Self::Extension(id) => id,
+        }
+    }
+
+    /// Resolve a slug back to a page. Unknown slugs open the default page
+    /// rather than failing — a stale link should still open settings.
+    pub(super) fn from_slug(slug: &str) -> Option<SettingsCategory> {
+        Self::all().iter().find(|c| c.slug() == slug).cloned()
     }
 
     /// Categories available in project mode (only hooks for now)

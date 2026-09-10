@@ -41,12 +41,17 @@ impl ProjectData {
         self.spec_change.is_some()
     }
 
+    /// Whether this project is a free-form agent session the user configured.
+    pub fn is_custom_session(&self) -> bool {
+        self.custom_session.is_some()
+    }
+
     /// Whether this project is any kind of agent session.
     ///
     /// Both kinds are rooted above the repos rather than in one, so anything
     /// that lists sessions apart from repos wants this rather than either half.
     pub fn is_any_agent_session(&self) -> bool {
-        self.is_agent_session() || self.is_spec_session()
+        self.is_agent_session() || self.is_spec_session() || self.is_custom_session()
     }
 }
 
@@ -255,6 +260,14 @@ pub struct ProjectData {
     /// the Specs view can tie a running agent back to the change it is writing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
+    /// What a free-form agent session was started to do.
+    ///
+    /// The third kind of session, alongside task work and spec writing: one the
+    /// user configured themselves rather than deriving from a task or a change.
+    /// Holds their own description of the goal, which is all okena knows about
+    /// what it is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_session: Option<String>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -393,6 +406,7 @@ mod tests {
             task_ref: None,
             agent: None,
             spec_change: None,
+            custom_session: None,
             folder_color: Default::default(),
             hooks: Default::default(),
             connection_id: None,
@@ -2001,6 +2015,7 @@ mod agent_session_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),

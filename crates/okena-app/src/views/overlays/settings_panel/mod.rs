@@ -14,6 +14,7 @@ mod render_general;
 mod render_harness;
 mod render_hooks;
 mod render_paired_devices;
+mod render_tasks;
 mod render_terminal;
 mod render_worktree;
 mod sidebar;
@@ -100,6 +101,14 @@ pub struct SettingsPanel {
     // Paired devices. The remote server lives in the daemon process, so the list
     // is fetched over its REST API rather than read from an in-process store.
     pub(super) daemon_endpoint: Option<DaemonEndpoint>,
+    /// Set by the window when it opens the panel. The Tasks page needs it to
+    /// verify and store a provider credential, which only the daemon holds.
+    pub(super) action_client: Option<okena_transport::remote_action::RemoteActionClient>,
+    pub(super) tasks_api_key_input: Entity<SimpleInputState>,
+    /// Provider auth state, refreshed when the page opens. `None` until then.
+    pub(super) tasks_status: Option<okena_core::tasks::TaskAuthStatusResponse>,
+    pub(super) tasks_busy: bool,
+    pub(super) tasks_error: Option<String>,
     pub(super) paired_devices: PairedDevices,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
@@ -125,6 +134,31 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_options(workspace, None, None, daemon_endpoint, cx)
+    }
+
+    /// Open the panel on a named page.
+    ///
+    /// An unknown slug opens the default page rather than failing — a caller
+    /// asking for a page this build does not have should still get settings.
+    pub fn new_at(
+        workspace: Entity<Workspace>,
+        page: Option<&str>,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let category = page.and_then(SettingsCategory::from_slug);
+        Self::new_with_options(workspace, None, category, daemon_endpoint, cx)
+    }
+
+    /// Hand the panel a daemon client. Without one the Tasks page can display
+    /// but not change anything, and says so.
+    pub fn set_action_client(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        cx: &mut Context<Self>,
+    ) {
+        self.action_client = Some(client);
+        self.refresh_task_providers(cx);
     }
 
     pub fn new_for_project(
@@ -857,6 +891,9 @@ impl SettingsPanel {
         )
         .detach();
 
+        let tasks_api_key_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Paste a personal API key…"));
+
         let harness_spec_repo_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("e.g. ~/p/specs")
@@ -996,6 +1033,11 @@ impl SettingsPanel {
             listen_address_input,
             paired_devices: PairedDevices::Loading,
             daemon_endpoint,
+            action_client: None,
+            tasks_api_key_input,
+            tasks_status: None,
+            tasks_busy: false,
+            tasks_error: None,
             extension_views: HashMap::new(),
             content_scroll: ScrollHandle::new(),
         };
@@ -1370,6 +1412,7 @@ impl SettingsPanel {
             SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
             SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
+            SettingsCategory::Tasks => self.render_tasks(cx).into_any_element(),
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),
             SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),

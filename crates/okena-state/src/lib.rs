@@ -20,7 +20,9 @@ pub use okena_layout::{LayoutNode, SplitDirection};
 pub use toast::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 pub use transient::{DropZone, FocusedTerminalState, PendingWorktreeClose};
 pub use window_id::WindowId;
-pub use window_state::{ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState};
+pub use window_state::{
+    AgentSortMode, ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState,
+};
 pub use workspace_data::{
     FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,
     WorktreeMetadata, is_bash_prompt_title, now_unix_seconds,

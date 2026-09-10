@@ -438,55 +438,39 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// Header of the browsing view: the repository, and the way into a change.
-    fn render_browse_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Toolbar actions for the Specs view.
+    fn spec_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = theme(cx);
-        let root_label = self
-            .specs
-            .tree
-            .as_ref()
-            .map(|tr| tr.root.clone())
-            .unwrap_or_default();
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(6.0))
-            .border_b_1()
-            .border_color(rgb(t.border))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(root_label),
-            )
-            .child(
-                div()
-                    .id("spec-new-change")
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.button_primary_fg))
-                    .child("New change")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.specs.composing = true;
-                            this.specs.error = None;
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .into_any_element()
+        vec![
+            self.toolbar_icon(
+                "specs-settings",
+                "icons/settings.svg",
+                "Spec settings",
+                cx.listener(|this, _, _window, cx| this.open_settings("harness", cx)),
+                cx,
+            ),
+            div()
+                .id("spec-new-change")
+                .cursor_pointer()
+                .flex_shrink_0()
+                .px(px(12.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .bg(rgb(t.button_primary_bg))
+                .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                .text_size(ui_text_md(cx))
+                .text_color(rgb(t.button_primary_fg))
+                .child("New change")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.specs.composing = true;
+                        this.specs.error = None;
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+        ]
     }
 
     /// A label over a form field.
@@ -706,7 +690,8 @@ impl HarnessPane {
                 .into_any_element();
         }
 
-        root = root.child(self.render_browse_header(cx));
+        let actions = self.spec_actions(cx);
+        root = root.child(self.render_toolbar(actions, cx));
         if let Some(err) = self.specs.error.clone() {
             root = root.child(self.error_banner(err, cx));
         }

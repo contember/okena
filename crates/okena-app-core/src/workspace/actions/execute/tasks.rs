@@ -737,6 +737,274 @@ mod agent_override_tests {
     }
 }
 
+/// Start a free-form agent session the user configured themselves.
+///
+/// Shares every mechanism with the task and spec routes — a session project, an
+/// agent launched with okena's MCP wired in — and differs only in where the
+/// brief comes from. Kept here beside `start_work` so the three stay in step.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start_custom_session(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    goal: String,
+    name: String,
+    root: String,
+    project_ids: Vec<String>,
+    agent_command: Option<String>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let goal = goal.trim().to_string();
+    if goal.is_empty() {
+        return ActionResult::Err("describe what the agent should do first".into());
+    }
+
+    // Every selected project must exist before anything is created: pointing an
+    // agent at a project that has since gone is worth saying, not ignoring.
+    let mut context: Vec<(String, String)> = Vec::new();
+    for id in &project_ids {
+        match ws.project(id) {
+            Some(p) => context.push((p.name.clone(), p.path.clone())),
+            None => return ActionResult::Err(format!("project not found: {id}")),
+        }
+    }
+
+    let Some(root) = resolve_session_root(&root, &context, settings) else {
+        return ActionResult::Err(
+            "pick a working directory, a project, or set a projects root in Settings → Harness"
+                .into(),
+        );
+    };
+    if !std::path::Path::new(&root).is_dir() {
+        return ActionResult::Err(format!("working directory not found: {root}"));
+    }
+
+    let label = session_label(&name, &goal);
+    let display = format!("{label} (agent)");
+
+    let session_id = match ws.add_project(
+        display.clone(),
+        root.clone(),
+        // With a terminal: this is where the agent runs.
+        true,
+        &settings.hooks,
+        window_id,
+        cx,
+    ) {
+        Ok(id) => id,
+        Err(e) => return ActionResult::Err(format!("could not create the session: {e}")),
+    };
+
+    // Mark it before spawning, so it is recognizable as a session from the
+    // first snapshot the client sees.
+    if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
+        p.custom_session = Some(label.clone());
+    }
+
+    let brief = custom_brief(&goal, &context);
+    if let Some(shell) = custom_agent_shell(settings, agent_command.as_deref(), &brief)
+        && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
+    {
+        p.default_shell = Some(shell);
+    }
+
+    if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
+        ws,
+        &session_id,
+        backend,
+        terminals,
+        settings,
+        None,
+        cx,
+    ) {
+        log::warn!("[agents] session terminal failed to spawn: {e}");
+    }
+
+    ws.notify_data(cx);
+
+    ActionResult::Ok(Some(serde_json::json!({
+        "project_id": session_id,
+        "name": display,
+        "root": root,
+    })))
+}
+
+/// Where a custom session runs.
+///
+/// An explicit directory wins. Otherwise a single selected project runs in
+/// itself, and several run at the configured projects root — an agent given
+/// three repos needs a directory above all of them, the same reasoning
+/// `start_work` uses for a multi-project task.
+fn resolve_session_root(
+    root: &str,
+    context: &[(String, String)],
+    settings: &AppSettings,
+) -> Option<String> {
+    let explicit = root.trim();
+    if !explicit.is_empty() {
+        return Some(expand_home(explicit));
+    }
+    if context.len() == 1 {
+        return Some(context[0].1.clone());
+    }
+    settings
+        .harness
+        .agent_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_home)
+        // With several projects and no root configured, fall back to the parent
+        // of the first, which is right for the common `~/p/<repo>` layout.
+        .or_else(|| {
+            context.first().and_then(|(_, path)| {
+                std::path::Path::new(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+        })
+}
+
+/// Expand a leading `~`. Settings and this dialog are both hand-typed, and
+/// `~/p` is the form a person writes.
+fn expand_home(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    p.to_string()
+}
+
+/// A short label for the session.
+///
+/// The user's name if they gave one; otherwise the first few words of the goal,
+/// because a session listed as the whole paragraph is unreadable in a sidebar.
+fn session_label(name: &str, goal: &str) -> String {
+    let name = name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    let mut label: String = goal
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.len() > 48 {
+        label.truncate(48);
+        label = label.trim_end().to_string();
+    }
+    if label.is_empty() {
+        "agent".to_string()
+    } else {
+        label
+    }
+}
+
+/// The opening prompt for a custom session.
+///
+/// The goal verbatim, plus the projects the user pointed the agent at. The
+/// paths matter: the session may be rooted above them, where "the project" is
+/// ambiguous until they are named.
+fn custom_brief(goal: &str, context: &[(String, String)]) -> String {
+    if context.is_empty() {
+        return goal.to_string();
+    }
+    let list = context
+        .iter()
+        .map(|(name, path)| format!("- {name} ({path})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{goal}\n\nProjects you were given:\n{list}")
+}
+
+/// Shell for a custom agent session.
+fn custom_agent_shell(
+    settings: &AppSettings,
+    override_command: Option<&str>,
+    brief: &str,
+) -> Option<okena_terminal::shell_config::ShellType> {
+    // An explicit empty string means "no agent, just a shell here", even when a
+    // default agent is configured — same contract as the other two routes.
+    let command = match override_command {
+        Some(c) => c,
+        None => settings.harness.agent_command.as_deref().unwrap_or(""),
+    }
+    .trim()
+    .to_string();
+    if command.is_empty() {
+        return None;
+    }
+    let mut args = super::specs::prompt_args(&command, brief);
+    args.extend(super::agent_mcp::injection_args(&command, settings));
+    Some(okena_terminal::shell_config::ShellType::Custom {
+        path: command,
+        args,
+    })
+}
+
+/// What a teardown removes: checkouts on disk, and sessions that own only
+/// terminals.
+pub(super) struct TeardownPlan {
+    /// `(id, name)` of each worktree to remove, checkout and all.
+    pub worktrees: Vec<(String, String)>,
+    /// `(id, name)` of each session project to drop.
+    pub sessions: Vec<(String, String)>,
+}
+
+/// Decide what tearing down `project_id` should remove.
+///
+/// A task session owns the worktrees created for its task, in other repos, and
+/// they go with it. A spec session owns nothing on disk — it runs *in* the
+/// user's spec repository, which must survive — so only the session goes.
+/// `None` for anything that is not a session: this route deletes checkouts, so
+/// it refuses rather than guessing.
+pub(super) fn teardown_plan(
+    projects: &[okena_workspace::state::ProjectData],
+    project_id: &str,
+) -> Option<TeardownPlan> {
+    let anchor = projects.iter().find(|p| p.id == project_id)?;
+
+    // Neither a spec session nor a free-form one owns a checkout: the first
+    // runs in the user's spec repository and the second in a directory they
+    // chose, both of which must survive. Only the session goes.
+    if anchor.is_spec_session() || anchor.is_custom_session() {
+        return Some(TeardownPlan {
+            worktrees: Vec::new(),
+            sessions: vec![(anchor.id.clone(), anchor.name.clone())],
+        });
+    }
+
+    // A worktree carries its task too, but it is a checkout, not a session —
+    // deleting one must not take its siblings with it.
+    let task = anchor
+        .task_ref
+        .as_ref()
+        .filter(|_| anchor.worktree_info.is_none())?;
+
+    let mut plan = TeardownPlan {
+        worktrees: Vec::new(),
+        sessions: Vec::new(),
+    };
+    for p in projects.iter() {
+        let linked = p
+            .task_ref
+            .as_ref()
+            .is_some_and(|t| t.id.external_id == task.id.external_id);
+        if !linked {
+            continue;
+        }
+        if p.worktree_info.is_some() {
+            plan.worktrees.push((p.id.clone(), p.name.clone()));
+        } else {
+            plan.sessions.push((p.id.clone(), p.name.clone()));
+        }
+    }
+    Some(plan)
+}
+
 /// Tear down a task's whole workspace.
 ///
 /// Order is deliberate: worktrees first, session last. The session project is
@@ -757,28 +1025,21 @@ pub(super) fn delete_workspace(
     let Some(anchor) = ws.project(&project_id) else {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
-    let Some(task) = anchor.task_ref.clone() else {
-        return ActionResult::Err("this project is not linked to a task".into());
-    };
 
-    // Everything sharing the task link, split by kind: worktrees own a checkout
-    // on disk, the session owns only its terminals.
-    let mut worktrees: Vec<(String, String)> = Vec::new();
-    let mut sessions: Vec<(String, String)> = Vec::new();
-    for p in ws.data.projects.iter() {
-        let linked = p
-            .task_ref
-            .as_ref()
-            .is_some_and(|t| t.id.external_id == task.id.external_id);
-        if !linked {
-            continue;
-        }
-        if p.worktree_info.is_some() {
-            worktrees.push((p.id.clone(), p.name.clone()));
-        } else {
-            sessions.push((p.id.clone(), p.name.clone()));
-        }
-    }
+    // What to tear down depends on the kind of session.
+    //
+    // A task session owns the worktrees created for its task, in other repos,
+    // and they go with it. A spec session owns nothing on disk — it runs *in*
+    // the user's spec repository, which must survive — so only the session
+    // itself goes. Anything that is not a session is refused rather than
+    // guessed at: this route deletes checkouts.
+    let task = anchor.task_ref.clone();
+    let Some(plan) = teardown_plan(&ws.data.projects, &project_id) else {
+        return ActionResult::Err(
+            "this project is not an agent session — nothing to tear down".into(),
+        );
+    };
+    let (worktrees, sessions) = (plan.worktrees, plan.sessions);
 
     let mut removed: Vec<serde_json::Value> = Vec::new();
     let mut failed: Vec<serde_json::Value> = Vec::new();
@@ -827,4 +1088,233 @@ pub(super) fn delete_workspace(
         "removed": removed,
         "failed": failed,
     })))
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::teardown_plan;
+    use okena_workspace::state::ProjectData;
+
+    fn project(json: serde_json::Value) -> ProjectData {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn task_session(id: &str, external: &str) -> ProjectData {
+        project(serde_json::json!({
+            "id": id, "name": format!("{id} (agent)"), "path": "/p",
+            "task_ref": {
+                "id": { "provider": "linear", "external_id": external },
+                "display_key": "QBL-1", "title": "t", "url": "http://x",
+            },
+        }))
+    }
+
+    fn worktree(id: &str, external: &str) -> ProjectData {
+        project(serde_json::json!({
+            "id": id, "name": format!("okena ({id})"), "path": format!("/p/wt/{id}"),
+            "worktree_info": {
+                "parent_project_id": "repo1",
+                "main_repo_path": "/p/okena",
+                "worktree_path": format!("/p/wt/{id}"),
+                "branch_name": "feat/x",
+            },
+            "task_ref": {
+                "id": { "provider": "linear", "external_id": external },
+                "display_key": "QBL-1", "title": "t", "url": "http://x",
+            },
+        }))
+    }
+
+    fn spec_session(id: &str) -> ProjectData {
+        project(serde_json::json!({
+            "id": id, "name": format!("{id} (spec)"), "path": "/p/specs",
+            "spec_change": "add-login",
+        }))
+    }
+
+    fn repo(id: &str) -> ProjectData {
+        project(serde_json::json!({ "id": id, "name": id, "path": format!("/p/{id}") }))
+    }
+
+    fn ids(v: &[(String, String)]) -> Vec<&str> {
+        v.iter().map(|(id, _)| id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_task_session_takes_its_worktrees_with_it() {
+        let projects = vec![
+            repo("repo1"),
+            task_session("s1", "u1"),
+            worktree("wt1", "u1"),
+            worktree("wt2", "u1"),
+        ];
+        let plan = teardown_plan(&projects, "s1").expect("a session");
+        assert_eq!(ids(&plan.sessions), ["s1"]);
+        assert_eq!(ids(&plan.worktrees), ["wt1", "wt2"]);
+    }
+
+    #[test]
+    fn another_tasks_worktrees_are_left_alone() {
+        let projects = vec![
+            task_session("s1", "u1"),
+            worktree("wt1", "u1"),
+            worktree("other", "u9"),
+        ];
+        let plan = teardown_plan(&projects, "s1").expect("a session");
+        assert_eq!(ids(&plan.worktrees), ["wt1"]);
+    }
+
+    #[test]
+    fn a_spec_session_takes_nothing_on_disk() {
+        // It runs *in* the user's spec repository. Removing a checkout here
+        // would delete the repo they keep every spec in.
+        let projects = vec![repo("repo1"), spec_session("s1")];
+        let plan = teardown_plan(&projects, "s1").expect("a session");
+        assert_eq!(ids(&plan.sessions), ["s1"]);
+        assert!(plan.worktrees.is_empty(), "a spec session owns no checkout");
+    }
+
+    fn custom_session(id: &str) -> ProjectData {
+        project(serde_json::json!({
+            "id": id, "name": format!("{id} (agent)"), "path": "/p",
+            "custom_session": "audit the unwraps",
+        }))
+    }
+
+    #[test]
+    fn a_custom_session_takes_nothing_on_disk() {
+        // It runs in a directory the user chose — often a repo they work in.
+        // Removing a checkout here would delete their project.
+        let projects = vec![repo("repo1"), custom_session("s1")];
+        let plan = teardown_plan(&projects, "s1").expect("a session");
+        assert_eq!(ids(&plan.sessions), ["s1"]);
+        assert!(
+            plan.worktrees.is_empty(),
+            "a custom session owns no checkout"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_project_is_not_a_teardown_target() {
+        // This route deletes checkouts, so it refuses rather than guessing.
+        let projects = vec![repo("repo1")];
+        assert!(teardown_plan(&projects, "repo1").is_none());
+    }
+
+    #[test]
+    fn a_worktree_does_not_take_its_siblings_with_it() {
+        // A worktree carries the task too. Treating it as the session would
+        // let deleting one checkout delete every other checkout for that task.
+        let projects = vec![
+            task_session("s1", "u1"),
+            worktree("wt1", "u1"),
+            worktree("wt2", "u1"),
+        ];
+        assert!(teardown_plan(&projects, "wt1").is_none());
+    }
+
+    #[test]
+    fn an_unknown_project_yields_no_plan() {
+        assert!(teardown_plan(&[], "ghost").is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_session_tests {
+    use super::{custom_brief, resolve_session_root, session_label};
+    use crate::workspace::persistence::AppSettings;
+
+    fn ctx(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(n, p)| (n.to_string(), p.to_string()))
+            .collect()
+    }
+
+    fn settings_with_root(root: Option<&str>) -> AppSettings {
+        let mut s = AppSettings::default();
+        s.harness.agent_root = root.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn an_explicit_directory_wins() {
+        let s = settings_with_root(Some("/configured"));
+        let got = resolve_session_root("/explicit", &ctx(&[("a", "/p/a")]), &s);
+        assert_eq!(got.as_deref(), Some("/explicit"));
+    }
+
+    #[test]
+    fn one_project_runs_in_itself() {
+        // Rooting a single-project session above the repo would make every
+        // relative path in the brief wrong.
+        let s = settings_with_root(Some("/configured"));
+        let got = resolve_session_root("", &ctx(&[("a", "/p/a")]), &s);
+        assert_eq!(got.as_deref(), Some("/p/a"));
+    }
+
+    #[test]
+    fn several_projects_run_at_the_configured_root() {
+        // An agent given three repos needs a directory above all of them.
+        let s = settings_with_root(Some("/configured"));
+        let got = resolve_session_root("", &ctx(&[("a", "/p/a"), ("b", "/p/b")]), &s);
+        assert_eq!(got.as_deref(), Some("/configured"));
+    }
+
+    #[test]
+    fn without_a_configured_root_several_projects_use_their_parent() {
+        let s = settings_with_root(None);
+        let got = resolve_session_root("", &ctx(&[("a", "/p/a"), ("b", "/p/b")]), &s);
+        assert_eq!(got.as_deref(), Some("/p"));
+    }
+
+    #[test]
+    fn nothing_to_go_on_yields_no_root() {
+        // The caller turns this into "pick a directory" rather than guessing at
+        // one and starting an agent somewhere unexpected.
+        let s = settings_with_root(None);
+        assert!(resolve_session_root("", &[], &s).is_none());
+    }
+
+    #[test]
+    fn a_blank_configured_root_counts_as_unset() {
+        let s = settings_with_root(Some("   "));
+        assert!(resolve_session_root("", &[], &s).is_none());
+    }
+
+    #[test]
+    fn a_name_is_used_verbatim() {
+        assert_eq!(
+            session_label("Refactor auth", "some long goal"),
+            "Refactor auth"
+        );
+    }
+
+    #[test]
+    fn without_a_name_the_label_is_the_first_few_words() {
+        // A session listed as a whole paragraph is unreadable in a sidebar.
+        let goal = "Migrate the billing service off the legacy queue and delete the shim";
+        let label = session_label("", goal);
+        assert_eq!(label, "Migrate the billing service off the");
+        assert!(label.len() <= 48);
+    }
+
+    #[test]
+    fn an_empty_goal_still_gets_a_label() {
+        assert_eq!(session_label("", ""), "agent");
+    }
+
+    #[test]
+    fn the_brief_names_the_projects_it_was_given() {
+        // The session may be rooted above them, where "the project" is
+        // ambiguous until they are named.
+        let b = custom_brief("Do the thing", &ctx(&[("okena", "/p/okena")]));
+        assert!(b.starts_with("Do the thing"));
+        assert!(b.contains("/p/okena"), "the path is what disambiguates");
+    }
+
+    #[test]
+    fn a_brief_without_projects_is_just_the_goal() {
+        assert_eq!(custom_brief("Do the thing", &[]), "Do the thing");
+    }
 }

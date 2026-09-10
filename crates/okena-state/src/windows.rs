@@ -15,7 +15,7 @@
 //! not prescriptive of where they live.
 
 use crate::window_id::WindowId;
-use crate::window_state::{ProjectSortMode, WindowBounds, WindowState};
+use crate::window_state::{AgentSortMode, ProjectSortMode, WindowBounds, WindowState};
 use crate::workspace_data::WorkspaceData;
 
 impl WorkspaceData {
@@ -279,6 +279,40 @@ impl WorkspaceData {
         Some(w.project_sort_mode)
     }
 
+    /// Set how the targeted window orders agent sessions. Unknown extra ids are
+    /// a silent no-op (`None`).
+    pub fn set_agent_sort_mode(
+        &mut self,
+        id: WindowId,
+        mode: AgentSortMode,
+    ) -> Option<AgentSortMode> {
+        let w = self.window_mut(id)?;
+        w.agent_sort_mode = mode;
+        Some(w.agent_sort_mode)
+    }
+
+    /// Show or hide the agents overview in the targeted window.
+    ///
+    /// Turning it on clears the folder filter: the two select different things
+    /// (a kind of project vs a folder of repos) and leaving a stale filter
+    /// behind would silently narrow the overview when it is turned off again.
+    pub fn set_agents_overview(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.agents_overview = on;
+        if on {
+            w.folder_filter = None;
+        }
+        Some(w.agents_overview)
+    }
+
+    /// Show or hide session info on every agent column in the targeted window.
+    /// Unknown extra ids are a silent no-op (`None`).
+    pub fn set_agents_show_info(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.agents_show_info = on;
+        Some(w.agents_show_info)
+    }
+
     /// Flip the "needs attention" section opt-in on the targeted window and
     /// return the new value. Unknown extra ids are a silent no-op (`None`).
     pub fn toggle_show_attention_section(&mut self, id: WindowId) -> Option<bool> {
@@ -378,5 +412,77 @@ impl WorkspaceData {
         if let WindowId::Extra(uuid) = id {
             self.extra_windows.retain(|w| w.id != uuid);
         }
+    }
+}
+
+#[cfg(test)]
+mod agents_overview_tests {
+    use crate::window_id::WindowId;
+    use crate::window_state::AgentSortMode;
+    use crate::workspace_data::WorkspaceData;
+
+    #[test]
+    fn turning_the_agents_overview_on_clears_a_stale_folder_filter() {
+        // The two select different things — a kind of project vs a folder of
+        // repos. Left behind, the filter would silently narrow the projects
+        // view the moment the overview was turned off again.
+        let mut data = WorkspaceData::empty();
+        data.main_window.folder_filter = Some("f1".into());
+
+        data.set_agents_overview(WindowId::Main, true);
+
+        assert!(data.main_window.agents_overview);
+        assert!(data.main_window.folder_filter.is_none());
+    }
+
+    #[test]
+    fn turning_it_off_leaves_the_folder_filter_alone() {
+        // Turning the overview off must not reach into a filter it did not set:
+        // the user may have picked a folder since.
+        let mut data = WorkspaceData::empty();
+        data.set_agents_overview(WindowId::Main, true);
+        data.main_window.folder_filter = Some("f2".into());
+
+        data.set_agents_overview(WindowId::Main, false);
+
+        assert!(!data.main_window.agents_overview);
+        assert_eq!(data.main_window.folder_filter.as_deref(), Some("f2"));
+    }
+
+    #[test]
+    fn the_agents_info_switch_round_trips() {
+        let mut data = WorkspaceData::empty();
+        assert!(!data.main_window.agents_show_info, "terminals by default");
+
+        data.set_agents_show_info(WindowId::Main, true);
+        assert!(data.main_window.agents_show_info);
+
+        data.set_agents_show_info(WindowId::Main, false);
+        assert!(!data.main_window.agents_show_info);
+    }
+
+    #[test]
+    fn agent_sort_mode_round_trips() {
+        let mut data = WorkspaceData::empty();
+        assert!(data.main_window.agent_sort_mode.is_activity(), "default");
+
+        data.set_agent_sort_mode(WindowId::Main, AgentSortMode::Name);
+        assert_eq!(data.main_window.agent_sort_mode, AgentSortMode::Name);
+    }
+
+    #[test]
+    fn an_unknown_extra_window_is_a_silent_no_op() {
+        // Same contract as every other window setter: the targeted window may
+        // have been closed between resolve and write.
+        let mut data = WorkspaceData::empty();
+        let ghost = WindowId::Extra(uuid::Uuid::new_v4());
+
+        assert!(data.set_agents_overview(ghost, true).is_none());
+        assert!(data.set_agents_show_info(ghost, true).is_none());
+        assert!(
+            data.set_agent_sort_mode(ghost, AgentSortMode::Name)
+                .is_none()
+        );
+        assert!(!data.main_window.agents_overview, "main is untouched");
     }
 }

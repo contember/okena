@@ -631,6 +631,25 @@ pub fn execute_action(
         ActionRequest::TaskDeleteWorkspace { project_id, force } => {
             tasks::delete_workspace(ws, focus_manager, project_id, force, settings, cx)
         }
+        ActionRequest::AgentStartSession {
+            goal,
+            name,
+            root,
+            project_ids,
+            agent_command,
+        } => tasks::start_custom_session(
+            ws,
+            window_id,
+            goal,
+            name,
+            root,
+            project_ids,
+            agent_command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         // ── Engineering harness: OpenSpec documents ────────────────────────
         ActionRequest::SpecsTree => specs::tree(settings),
         ActionRequest::SpecRead { path } => specs::read(settings, path),
@@ -1408,6 +1427,7 @@ mod reconnect_shell_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),

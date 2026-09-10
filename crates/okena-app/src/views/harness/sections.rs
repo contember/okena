@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 
-use super::{HarnessPane, HarnessPaneEvent, HarnessSection};
+use super::{HarnessPane, HarnessSection};
 
 impl HarnessPane {
     /// Translate a client-side project/terminal id into the id the daemon knows.
@@ -73,6 +73,84 @@ impl HarnessPane {
             .into_any_element()
     }
 
+    /// The toolbar every harness view wears.
+    ///
+    /// One shape for all of them — the view's name on the left, its own
+    /// controls on the right — so moving between Projects, Tasks and Specs does
+    /// not mean relearning where things are. Views differ only in what they put
+    /// in `actions`.
+    pub(super) fn render_toolbar(
+        &self,
+        actions: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text(13.0, cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(self.section.label()),
+            )
+            .child(div().flex_1().min_w_0())
+            .children(actions)
+            .into_any_element()
+    }
+
+    /// A square icon button for the toolbar.
+    pub(super) fn toolbar_icon(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        tooltip: &'static str,
+        on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .id(id)
+            .cursor_pointer()
+            .flex_shrink_0()
+            .size(px(24.0))
+            .rounded(px(4.0))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(13.0))
+                    .text_color(rgb(t.text_secondary)),
+            )
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, on_click)
+            .into_any_element()
+    }
+
+    /// Open the settings modal on `page`.
+    pub(super) fn open_settings(&self, page: &'static str, cx: &mut App) {
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::Settings {
+                    page: Some(page.to_string()),
+                },
+                cx,
+            );
+        });
+    }
+
     /// Placeholder body for a view that isn't built yet.
     fn render_stub(&self, section: HarnessSection, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -82,10 +160,7 @@ impl HarnessPane {
                 "Git-backed, with PR / branch support for changes.",
             ],
             // These are real views; they never reach here.
-            HarnessSection::Tasks
-            | HarnessSection::Projects
-            | HarnessSection::Agents
-            | HarnessSection::Specs => vec![],
+            HarnessSection::Tasks | HarnessSection::Projects | HarnessSection::Specs => vec![],
         };
 
         v_flex()
@@ -106,49 +181,6 @@ impl HarnessPane {
             }))
             .into_any_element()
     }
-
-    /// Header: the view's name and the way back to the terminal workspace.
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let t = theme(cx);
-        let section = self.section;
-        h_flex()
-            .h(crate::ui::tokens::HEADER_HEIGHT)
-            .w_full()
-            .items_center()
-            .justify_between()
-            .px(px(12.0))
-            .border_b_1()
-            .border_color(rgb(t.border))
-            .bg(rgb(t.bg_header))
-            .child(
-                v_flex().child(
-                    div()
-                        .text_size(ui_text(13.0, cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(section.label()),
-                ),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "harness-close-{}",
-                        section.slug()
-                    )))
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .rounded(px(3.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("×")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_this, _, _window, cx| {
-                            cx.emit(HarnessPaneEvent::Close(section));
-                        }),
-                    ),
-            )
-    }
 }
 
 impl Render for HarnessPane {
@@ -157,15 +189,18 @@ impl Render for HarnessPane {
         let body = match self.section {
             HarnessSection::Tasks => self.render_tasks_view(cx),
             HarnessSection::Projects => self.render_projects_view(cx),
-            HarnessSection::Agents => self.render_agents_view(cx),
             HarnessSection::Specs => self.render_specs_view(cx),
             other => self.render_stub(other, cx),
         };
 
+        // No title bar and no close button: the sidebar's HARNESS nav already
+        // shows which view is open, and every view carries its own toolbar. A
+        // second bar on top of that read as a window pasted over the app rather
+        // than part of it. Leaving happens by selecting a project or an
+        // overview, the same way every other view is left.
         v_flex()
             .size_full()
             .bg(rgb(t.bg_primary))
-            .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(body))
     }
 }

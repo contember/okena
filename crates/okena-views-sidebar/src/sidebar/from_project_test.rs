@@ -24,6 +24,7 @@ fn make_project(id: &str) -> ProjectData {
         worktree_ids: Vec::new(),
         task_ref: None,
         spec_change: None,
+        custom_session: None,
         agent: None,
         folder_color: FolderColor::default(),
         hooks: HooksConfig::default(),

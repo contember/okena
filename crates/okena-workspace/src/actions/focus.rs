@@ -296,6 +296,7 @@ mod gpui_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: Default::default(),

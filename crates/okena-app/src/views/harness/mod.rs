@@ -5,7 +5,6 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
-pub(crate) mod agents_view;
 mod projects_view;
 mod sections;
 mod specs_view;
@@ -21,12 +20,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub use okena_core::harness::HarnessSection;
-
-/// Emitted when the view's close button is pressed. The pane holds no handle to
-/// the window, so the window subscribes and switches back to the grid.
-pub enum HarnessPaneEvent {
-    Close(HarnessSection),
-}
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
 /// grow their own state.
@@ -53,6 +46,16 @@ pub(crate) struct TasksState {
     /// Agent command configured on the daemon, used as the dialog's default.
     /// `None` until settings have been read.
     pub(crate) default_agent: Option<String>,
+}
+
+/// Projects-view state.
+pub(crate) struct ProjectsState {
+    /// Fuzzy filter over project names.
+    pub(crate) search: Entity<SimpleInputState>,
+    /// Show only projects with work in flight — a worktree open or an agent
+    /// running. The common question of a wide board is "where is something
+    /// happening", which a long list of idle repos buries.
+    pub(crate) active_only: bool,
 }
 
 /// Specs-view state.
@@ -131,6 +134,9 @@ pub(crate) const MIN_LANE_FRACTION: f32 = 0.15;
 
 pub struct HarnessPane {
     pub(crate) client: okena_transport::remote_action::RemoteActionClient,
+    /// Lets a view open an overlay — the settings modal, mainly — without
+    /// knowing anything about the window that owns it.
+    pub(crate) request_broker: Entity<okena_workspace::request_broker::RequestBroker>,
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<FocusManager>,
     pub(crate) window_id: WindowId,
@@ -143,6 +149,7 @@ pub struct HarnessPane {
     pub(crate) board_width: Rc<RefCell<f32>>,
     pub(crate) section: HarnessSection,
     pub(crate) tasks: TasksState,
+    pub(crate) projects: ProjectsState,
     pub(crate) specs: SpecsState,
 }
 
@@ -153,6 +160,7 @@ pub struct HarnessPane {
 #[derive(Clone)]
 pub struct PaneContext {
     pub client: okena_transport::remote_action::RemoteActionClient,
+    pub request_broker: Entity<okena_workspace::request_broker::RequestBroker>,
     pub workspace: Entity<Workspace>,
     pub focus_manager: Entity<FocusManager>,
     pub window_id: WindowId,
@@ -164,6 +172,7 @@ impl HarnessPane {
     pub fn new(section: HarnessSection, ctx: PaneContext, cx: &mut Context<Self>) -> Self {
         let api_key_input = cx
             .new(|cx| SimpleInputState::new(cx).placeholder("Paste your Linear personal API key…"));
+        let project_search = cx.new(|cx| SimpleInputState::new(cx).placeholder("Filter projects…"));
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
         let idea_input = cx.new(|cx| {
             SimpleInputState::new(cx).placeholder(
@@ -173,6 +182,7 @@ impl HarnessPane {
         });
         let mut pane = Self {
             client: ctx.client,
+            request_broker: ctx.request_broker,
             workspace: ctx.workspace,
             focus_manager: ctx.focus_manager,
             window_id: ctx.window_id,
@@ -194,6 +204,10 @@ impl HarnessPane {
                 collapsed: std::collections::HashSet::new(),
                 start_form: None,
                 default_agent: None,
+            },
+            projects: ProjectsState {
+                search: project_search,
+                active_only: false,
             },
             specs: SpecsState {
                 tree: None,
@@ -223,8 +237,6 @@ impl HarnessPane {
         pane
     }
 }
-
-impl EventEmitter<HarnessPaneEvent> for HarnessPane {}
 
 impl HarnessPane {
     /// Apply a lane-divider drag. Clamped so neither lane can be collapsed.

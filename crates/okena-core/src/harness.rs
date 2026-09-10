@@ -15,17 +15,15 @@ use serde::{Deserialize, Serialize};
 pub enum HarnessSection {
     Projects,
     Tasks,
-    Agents,
     Specs,
     Knowledge,
 }
 
 impl HarnessSection {
-    pub const fn all() -> [HarnessSection; 5] {
+    pub const fn all() -> [HarnessSection; 4] {
         [
             HarnessSection::Projects,
             HarnessSection::Tasks,
-            HarnessSection::Agents,
             HarnessSection::Specs,
             HarnessSection::Knowledge,
         ]
@@ -35,7 +33,6 @@ impl HarnessSection {
         match self {
             HarnessSection::Projects => "Projects",
             HarnessSection::Tasks => "Tasks",
-            HarnessSection::Agents => "Agents",
             HarnessSection::Specs => "Specs",
             HarnessSection::Knowledge => "Knowledge",
         }
@@ -46,7 +43,6 @@ impl HarnessSection {
         match self {
             HarnessSection::Projects => "projects",
             HarnessSection::Tasks => "tasks",
-            HarnessSection::Agents => "agents",
             HarnessSection::Specs => "specs",
             HarnessSection::Knowledge => "knowledge",
         }
@@ -61,9 +57,6 @@ impl HarnessSection {
             }
             HarnessSection::Tasks => {
                 "Epics, features and stories from your task manager — launch an agent on one."
-            }
-            HarnessSection::Agents => {
-                "Running agents, their metrics and status, and the assets (PRs) they produced."
             }
             HarnessSection::Specs => {
                 "Spec documents broken down into epics, features and stories. Git-backed."

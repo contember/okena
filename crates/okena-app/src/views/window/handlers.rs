@@ -1468,6 +1468,35 @@ impl WindowView {
                         });
                     }
                 },
+                OverlayRequest::Settings { page } => {
+                    let endpoint = self.local_daemon_endpoint(cx);
+                    let client = self.local_daemon_action_client(cx).ok();
+                    let workspace = self.workspace.clone();
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.open_settings_panel_at(workspace, page, endpoint, client, cx);
+                    });
+                }
+                OverlayRequest::NewAgentDialog => {
+                    match self.local_daemon_action_client(cx) {
+                        Ok(client) => {
+                            let fm = self.focus_manager.clone();
+                            // Default to the configured agent, the way every
+                            // other launch path does.
+                            let default_agent = crate::settings::settings(cx)
+                                .harness
+                                .agent_command
+                                .clone()
+                                .map(|c| c.trim().to_string())
+                                .filter(|c| !c.is_empty());
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.toggle_new_agent_dialog(client, fm, default_agent, cx);
+                            });
+                        }
+                        Err(error) => {
+                            crate::views::panels::toast::ToastManager::error(error, cx);
+                        }
+                    }
+                }
                 OverlayRequest::AddProjectDialog => {
                     let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {

@@ -81,6 +81,37 @@ impl Sidebar {
     /// alike. Without it, selecting a project while a harness view is up would
     /// change the focus but leave the view covering the whole main area, so
     /// nothing would appear to happen.
+    /// Focus a project from the sidebar, leaving any harness view.
+    ///
+    /// The two belong together: selecting a project means "show me that
+    /// project", and a harness view left covering the main area makes the click
+    /// look like it did nothing. Every sidebar row that focuses a project goes
+    /// through here so a new row cannot forget the pairing — which is exactly
+    /// how the project and worktree rows came to be missing it.
+    ///
+    /// `individual` picks the narrow focus a leaf row wants; a group header
+    /// passes `false` so its worktrees stay visible alongside it.
+    pub(crate) fn focus_project_from_sidebar(
+        &mut self,
+        project_id: String,
+        individual: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_harness_view(cx);
+        self.cursor_index = None;
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| {
+                if individual {
+                    ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
+                } else {
+                    ws.set_focused_project(fm, Some(project_id.clone()), cx);
+                }
+            });
+            cx.notify();
+        });
+    }
+
     pub(crate) fn leave_harness_view(&self, cx: &mut App) {
         okena_workspace::harness_state::set_active_harness(self.window_id, None, cx);
     }

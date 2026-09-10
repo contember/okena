@@ -153,6 +153,15 @@ pub enum OverlayRequest {
     Project(ProjectOverlay),
     Folder(FolderOverlay),
     AddProjectDialog,
+    /// Configure and start a free-form agent session.
+    NewAgentDialog,
+    /// Open the settings modal, optionally on a named page.
+    ///
+    /// A string rather than the panel's own enum: that type lives in the app
+    /// crate, and this one is shared with crates that cannot see it.
+    Settings {
+        page: Option<String>,
+    },
     RemoteConnect,
     RemoteConnectionContextMenu {
         connection_id: String,

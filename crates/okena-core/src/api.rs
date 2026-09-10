@@ -348,6 +348,10 @@ pub struct ApiProject {
     /// means the same thing on either side, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
+    /// What a free-form agent session was started to do — the user's own words,
+    /// so it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_session: Option<String>,
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Carried over the wire so daemon-client projects keep their pin marker
     /// and stable pinned-tier ordering.
@@ -1159,6 +1163,32 @@ pub enum ActionRequest {
         #[serde(default)]
         force: bool,
     },
+    /// Start a free-form agent session the user configured themselves.
+    ///
+    /// The third way in, alongside starting work on a task and drafting a spec:
+    /// same machinery — a session project, an agent with okena's MCP wired in —
+    /// but the goal, working directory and context come from the user rather
+    /// than from a task or a change.
+    AgentStartSession {
+        /// The user's own description of what the agent should do. Becomes its
+        /// opening prompt.
+        goal: String,
+        /// Short name for the session. Empty derives one from the goal.
+        #[serde(default)]
+        name: String,
+        /// Directory the agent runs in. Empty falls back to
+        /// `settings.harness.agent_root`, then the first selected project.
+        #[serde(default)]
+        root: String,
+        /// Projects the agent should know about. Their paths go into the brief,
+        /// so an agent rooted above them knows which ones it was pointed at.
+        #[serde(default)]
+        project_ids: Vec<String>,
+        /// Agent to launch. `None` uses `settings.harness.agent_command`; an
+        /// empty string opens the session on a plain shell.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
     // ─── Engineering harness: OpenSpec documents ──────────────────────────
     //
     // okena reads the OpenSpec layout directly off disk rather than shelling
@@ -1536,6 +1566,7 @@ mod tests {
                 task_ref: None,
                 agent: None,
                 spec_change: None,
+                custom_session: None,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
                 default_shell: Some(ShellType::Default),

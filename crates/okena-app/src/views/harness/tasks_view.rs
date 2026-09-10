@@ -379,33 +379,6 @@ impl HarnessPane {
         .detach();
     }
 
-    pub(super) fn disconnect(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let provider = self.tasks.provider.clone();
-
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                client.post_action(ActionRequest::TasksDisconnect { provider })
-            })
-            .await;
-
-            cx.update(|cx| {
-                let _ = this.update(cx, |this, cx| {
-                    match result {
-                        Ok(_) => {
-                            this.tasks.tasks.clear();
-                            this.tasks.connection = TaskAuthState::Disconnected;
-                            this.tasks.error = None;
-                        }
-                        Err(e) => this.tasks.error = Some(e),
-                    }
-                    cx.notify();
-                });
-            });
-        })
-        .detach();
-    }
-
     /// Open the "Start work" dialog for `task`.
     ///
     /// Pre-filled rather than blank: the provider's branch name (which keeps
@@ -654,8 +627,11 @@ impl HarnessPane {
                         }
                         explicit => explicit,
                     };
-                    if super::agents_view::detect_agent(&shell, terminal.title().as_deref())
-                        .is_some()
+                    if crate::views::agent_session::detect_agent(
+                        &shell,
+                        terminal.title().as_deref(),
+                    )
+                    .is_some()
                     {
                         has_agent = true;
                     }
@@ -1313,47 +1289,38 @@ impl HarnessPane {
         let has_rows = !self.tasks.tasks.is_empty();
         let loading = self.tasks.loading;
 
+        let account_label = match &account {
+            Some(name) => format!("{} · {name}", self.tasks.provider_display_name),
+            None => self.tasks.provider_display_name.clone(),
+        };
+        let actions: Vec<AnyElement> = vec![
+            div()
+                .flex_shrink_0()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_muted))
+                .child(account_label)
+                .into_any_element(),
+            self.small_button(
+                "tasks-refresh",
+                if loading { "Refreshing…" } else { "Refresh" },
+                cx.listener(|this, _, _window, cx| this.refresh_tasks(cx)),
+                cx,
+            ),
+            // Connecting and disconnecting live in Settings now: they are
+            // configuration, and having them here as well meant two
+            // implementations of the same thing.
+            self.toolbar_icon(
+                "tasks-settings",
+                "icons/settings.svg",
+                "Task manager settings",
+                cx.listener(|this, _, _window, cx| this.open_settings("tasks", cx)),
+                cx,
+            ),
+        ];
+
         v_flex()
             .size_full()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_start()
-                    .gap(px(16.0))
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .child(
-                        h_flex()
-                            .gap(px(8.0))
-                            .items_center()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_size(ui_text_ms(cx))
-                                    .text_color(rgb(t.text_secondary))
-                                    .child(match account {
-                                        Some(name) => {
-                                            format!("{} · {name}", self.tasks.provider_display_name)
-                                        }
-                                        None => self.tasks.provider_display_name.clone(),
-                                    }),
-                            )
-                            .child(self.small_button(
-                                "tasks-refresh",
-                                if loading { "Refreshing…" } else { "Refresh" },
-                                cx.listener(|this, _, _window, cx| this.refresh_tasks(cx)),
-                                cx,
-                            ))
-                            .child(self.small_button(
-                                "tasks-disconnect",
-                                "Disconnect",
-                                cx.listener(|this, _, _window, cx| this.disconnect(cx)),
-                                cx,
-                            )),
-                    ),
-            )
+            .child(self.render_toolbar(actions, cx))
             .children(self.tasks.status.clone().map(|m| self.info_banner(m, cx)))
             .children(self.tasks.error.clone().map(|e| self.error_banner(e, cx)))
             .child(if has_rows {

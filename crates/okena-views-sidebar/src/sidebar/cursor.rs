@@ -404,44 +404,21 @@ impl Sidebar {
             SidebarCursorItem::Project { project_id } => {
                 // Selecting a project leaves any harness view, so the grid is
                 // actually visible when focus lands.
-                self.leave_harness_view(cx);
-                // Project may be a group header (has worktrees) → non-individual focus
+                // A group header (one with worktrees) keeps them visible
+                // alongside it; a leaf row narrows to itself.
                 let has_worktrees = !self
                     .workspace
                     .read(cx)
                     .worktree_child_ids(&project_id)
                     .is_empty();
-                let workspace = self.workspace.clone();
-                if has_worktrees {
-                    self.focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project(fm, Some(project_id.clone()), cx);
-                        });
-                        cx.notify();
-                    });
-                } else {
-                    self.focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                        });
-                        cx.notify();
-                    });
-                }
-                self.cursor_index = None;
+                self.focus_project_from_sidebar(project_id.clone(), !has_worktrees, cx);
                 if let Some(ref saved) = self.saved_focus {
                     window.focus(saved, cx);
                 }
                 self.saved_focus = None;
             }
             SidebarCursorItem::WorktreeProject { project_id } => {
-                self.leave_harness_view(cx);
-                let workspace = self.workspace.clone();
-                self.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                    });
-                    cx.notify();
-                });
+                self.focus_project_from_sidebar(project_id.clone(), true, cx);
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
                     window.focus(saved, cx);
@@ -508,16 +485,9 @@ impl Sidebar {
                 self.collapsed_connections.insert(connection_id, !collapsed);
             }
             SidebarCursorItem::RemoteProject { project_id, .. } => {
-                self.leave_harness_view(cx);
-                // Remote projects are now materialized in workspace, use unified focus
-                let workspace = self.workspace.clone();
-                self.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                    });
-                    cx.notify();
-                });
-                self.cursor_index = None;
+                // Remote projects are materialized in the workspace, so they
+                // focus like any other.
+                self.focus_project_from_sidebar(project_id.clone(), true, cx);
                 if let Some(ref saved) = self.saved_focus {
                     window.focus(saved, cx);
                 }

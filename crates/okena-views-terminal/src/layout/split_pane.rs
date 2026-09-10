@@ -33,6 +33,15 @@ pub enum DragState {
         initial_fraction: f32,
         total_width: f32,
     },
+    /// Resizing the session-info panel inside an agent column.
+    ///
+    /// Carries the width captured at drag start so the new width comes from the
+    /// gesture's origin rather than accumulated per-frame deltas, which drift.
+    AgentPanel {
+        project_id: String,
+        initial_mouse_x: f32,
+        initial_width: f32,
+    },
     /// Resizing project columns (or rows, when `vertical`)
     ProjectColumn {
         divider_index: usize,
@@ -318,7 +327,10 @@ pub fn compute_resize(
                 ws.update_project_widths_with_scale(window_id, new_widths, *width_scale, cx);
             });
         }
-        DragState::Sidebar | DragState::ServicePanel { .. } | DragState::HookPanel { .. } => {
+        DragState::Sidebar
+        | DragState::ServicePanel { .. }
+        | DragState::HookPanel { .. }
+        | DragState::AgentPanel { .. } => {
             // Handled directly in WindowView's on_mouse_move
         }
     }

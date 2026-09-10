@@ -816,6 +816,7 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             pinned: false,
             last_activity_at: None,
