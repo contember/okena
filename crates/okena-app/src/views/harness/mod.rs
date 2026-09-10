@@ -5,6 +5,7 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod new_task_form;
 mod projects_view;
 mod sections;
 mod specs_view;
@@ -41,11 +42,28 @@ pub(crate) struct TasksState {
     /// Task ids whose sub-tasks are hidden. Collapsed rather than expanded
     /// state so a fresh view shows the whole breakdown by default.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    /// Sub-tasks fetched per task, keyed by the parent's provider id.
+    ///
+    /// Fetched rather than read off the loaded list because the list is the
+    /// user's own queue: a task's children are often assigned to somebody
+    /// else, or to nobody, and would simply be missing.
+    pub(crate) children: std::collections::HashMap<String, Vec<Task>>,
+    /// Task whose children are being fetched, so a slow provider does not
+    /// spawn a request per frame.
+    pub(crate) children_loading: Option<String>,
     /// The task shown in the detail pane, by provider id.
     pub(crate) selected: Option<String>,
     /// Sections folded shut in the list. Collapsed rather than expanded state,
     /// so a fresh view shows everything.
     pub(crate) sections_collapsed: std::collections::HashSet<String>,
+    /// External id of the task whose breakdown agent is starting. Blocks a
+    /// second start: creating a project and launching an agent takes seconds,
+    /// and without this a second click during the wait made a second agent.
+    pub(crate) breaking_down: Option<String>,
+    /// Open "New task" form, if any.
+    pub(crate) new_task: Option<new_task_form::NewTaskForm>,
+    pub(crate) new_task_title: Entity<SimpleInputState>,
+    pub(crate) new_task_body: Entity<SimpleInputState>,
     /// Open "Start work" dialog, if any.
     pub(crate) start_form: Option<StartWorkForm>,
     /// Agent command configured on the daemon, used as the dialog's default.
@@ -188,6 +206,11 @@ impl HarnessPane {
     pub fn new(section: HarnessSection, ctx: PaneContext, cx: &mut Context<Self>) -> Self {
         let api_key_input = cx
             .new(|cx| SimpleInputState::new(cx).placeholder("Paste your Linear personal API key…"));
+        let new_task_title =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("What needs doing?"));
+        let new_task_body = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("What it covers, and what finishing it means")
+        });
         let project_search = cx.new(|cx| SimpleInputState::new(cx).placeholder("Filter projects…"));
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
         let idea_input = cx.new(|cx| {
@@ -218,8 +241,14 @@ impl HarnessPane {
                 api_key_input,
                 lane_fraction: 0.5,
                 collapsed: std::collections::HashSet::new(),
+                children: std::collections::HashMap::new(),
+                children_loading: None,
                 selected: None,
                 sections_collapsed: std::collections::HashSet::new(),
+                breaking_down: None,
+                new_task: None,
+                new_task_title,
+                new_task_body,
                 start_form: None,
                 default_agent: None,
             },

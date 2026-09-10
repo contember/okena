@@ -8,7 +8,7 @@
 //! same OAuth token this provider holds rather than being the harness's own
 //! data path.
 
-use crate::provider::{AuthStatus, Credential, TaskError, TaskProvider};
+use crate::provider::{AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider};
 use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest};
 use std::time::Duration;
@@ -37,6 +37,112 @@ query AssignedIssues($first: Int!) {
       filter: { state: { type: { nin: ["completed", "canceled"] } } }
       orderBy: updatedAt
     ) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        branchName
+        updatedAt
+        state { name type }
+        parent { id identifier }
+        labels(first: 20) { nodes { name } }
+      }
+    }
+  }
+}
+"#;
+
+/// Teams the authenticated user belongs to, for choosing where a new issue
+/// goes. Linear scopes issues to a team and requires one on create.
+const QUERY_TEAMS: &str = r#"
+query MyTeams {
+  viewer {
+    teams(first: 50) {
+      nodes { id name key }
+    }
+  }
+}
+"#;
+
+/// The team a parent issue lives in, plus that team's labels.
+///
+/// One round-trip because a sub-task needs both: the team it inherits, and the
+/// label carrying its kind, which is per-team.
+const QUERY_PARENT_CONTEXT: &str = r#"
+query ParentContext($id: String!) {
+  issue(id: $id) {
+    id
+    team {
+      id
+      labels(first: 100) { nodes { id name } }
+    }
+  }
+}
+"#;
+
+/// A team's labels, for resolving the one that carries a kind.
+const QUERY_TEAM_LABELS: &str = r#"
+query TeamLabels($id: String!) {
+  team(id: $id) {
+    id
+    labels(first: 100) { nodes { id name } }
+  }
+}
+"#;
+
+/// Create the label carrying a kind, when the team has none matching.
+const MUTATION_CREATE_LABEL: &str = r#"
+mutation CreateLabel($teamId: String!, $name: String!) {
+  issueLabelCreate(input: { teamId: $teamId, name: $name }) {
+    success
+    issueLabel { id name }
+  }
+}
+"#;
+
+/// Create an issue, returning it in the same shape the list query uses so the
+/// caller gets a real `Task` without a second fetch.
+const MUTATION_CREATE_ISSUE: &str = r#"
+mutation CreateIssue(
+  $teamId: String!
+  $title: String!
+  $description: String
+  $parentId: String
+  $labelIds: [String!]
+) {
+  issueCreate(
+    input: {
+      teamId: $teamId
+      title: $title
+      description: $description
+      parentId: $parentId
+      labelIds: $labelIds
+    }
+  ) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      url
+      branchName
+      updatedAt
+      state { name type }
+      parent { id identifier }
+      labels(first: 20) { nodes { name } }
+    }
+  }
+}
+"#;
+
+/// Sub-issues of a parent, whoever they are assigned to.
+const QUERY_CHILDREN: &str = r#"
+query IssueChildren($id: String!) {
+  issue(id: $id) {
+    children(first: 100) {
       nodes {
         id
         identifier
@@ -114,6 +220,51 @@ impl LinearProvider {
     }
 
     /// Issue a GraphQL request and return the `data` object.
+    /// The label ids that record a task's kind on Linear.
+    ///
+    /// Linear has no native kind, so okena carries it as a label — the same
+    /// signal `TaskKind::from_labels` reads back. An existing team label wins;
+    /// only when none of the kind's aliases match does okena create one, so a
+    /// team that already says "Bug" does not end up with "Defect" beside it.
+    ///
+    /// `Task` is the absence of a marker, so it gets no label at all.
+    fn kind_label_ids(
+        &self,
+        team_id: &str,
+        kind: okena_core::tasks::TaskKind,
+        labels: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<String>, TaskError> {
+        use okena_core::tasks::TaskKind;
+        let aliases: &[&str] = match kind {
+            TaskKind::Epic => &["epic", "initiative"],
+            TaskKind::Feature => &["feature"],
+            TaskKind::Story => &["story", "user story"],
+            TaskKind::Defect => &["bug", "defect", "fix", "hotfix"],
+            TaskKind::Task => return Ok(Vec::new()),
+        };
+        if let Some(id) = aliases.iter().find_map(|a| labels.get(*a)) {
+            return Ok(vec![id.clone()]);
+        }
+
+        let data = self.graphql(
+            "linear.create_label",
+            MUTATION_CREATE_LABEL,
+            serde_json::json!({ "teamId": team_id, "name": kind.label() }),
+        )?;
+        let id = data
+            .get("issueLabelCreate")
+            .filter(|c| c.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
+            .and_then(|c| c.get("issueLabel"))
+            .and_then(|l| l.get("id"))
+            .and_then(|v| v.as_str());
+        match id {
+            Some(id) => Ok(vec![id.to_string()]),
+            // A task without its kind label is still a task; refusing to
+            // create it because a label failed would be the wrong trade.
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn graphql(
         &self,
         label: &'static str,
@@ -226,6 +377,35 @@ fn target_state_type(state: TaskState) -> &'static str {
 
 /// Parse one issue node. Returns `None` for a node missing the fields the
 /// harness cannot work without, so one malformed row can't fail the whole poll.
+/// A team's label names (lowercased) to their ids.
+fn label_map(team: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    team.get("labels")
+        .and_then(|l| l.get("nodes"))
+        .and_then(|n| n.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| {
+                    Some((
+                        n.get("name")?.as_str()?.trim().to_ascii_lowercase(),
+                        n.get("id")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn team_id_of(team: &serde_json::Value) -> Result<String, TaskError> {
+    team.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| TaskError::Protocol {
+            provider: PROVIDER_ID,
+            message: "a team came back without an id".into(),
+        })
+}
+
 fn parse_issue(node: &serde_json::Value) -> Option<Task> {
     let str_at = |k: &str| node.get(k).and_then(|v| v.as_str());
     let id = str_at("id")?;
@@ -348,6 +528,141 @@ impl TaskProvider for LinearProvider {
             );
         }
         Ok(tasks)
+    }
+
+    fn list_containers(&self) -> Result<Vec<TaskContainer>, TaskError> {
+        let data = self.graphql("linear.teams", QUERY_TEAMS, serde_json::json!({}))?;
+        let nodes = data
+            .get("viewer")
+            .and_then(|v| v.get("teams"))
+            .and_then(|t| t.get("nodes"))
+            .and_then(|n| n.as_array())
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "could not read your teams".into(),
+            })?;
+        Ok(nodes
+            .iter()
+            .filter_map(|n| {
+                Some(TaskContainer {
+                    id: n.get("id")?.as_str()?.to_string(),
+                    name: n.get("name")?.as_str()?.to_string(),
+                    key: n
+                        .get("key")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect())
+    }
+
+    fn create_task(&self, draft: &TaskDraft) -> Result<Task, TaskError> {
+        if draft.title.trim().is_empty() {
+            return Err(TaskError::NeedsChoice {
+                message: "a task needs a title".into(),
+            });
+        }
+
+        // A sub-task inherits its parent's team — Linear has no cross-team
+        // parenting, and asking the user to pick one that must match would be
+        // a choice with exactly one right answer.
+        let (team_id, labels) = match draft.parent_external_id.as_deref() {
+            Some(parent) => {
+                let data = self.graphql(
+                    "linear.parent_context",
+                    QUERY_PARENT_CONTEXT,
+                    serde_json::json!({ "id": parent }),
+                )?;
+                let team = data
+                    .get("issue")
+                    .and_then(|i| i.get("team"))
+                    .ok_or_else(|| TaskError::Protocol {
+                        provider: PROVIDER_ID,
+                        message: "could not read the parent issue's team".into(),
+                    })?;
+                (team_id_of(team)?, label_map(team))
+            }
+            None => {
+                let team_id = draft.container_id.clone().ok_or_else(|| {
+                    // Not a protocol failure: the caller simply has to say
+                    // which team, and the UI turns this into a picker.
+                    TaskError::NeedsChoice {
+                        message: "choose a team for the new task".into(),
+                    }
+                })?;
+                let data = self.graphql(
+                    "linear.team_labels",
+                    QUERY_TEAM_LABELS,
+                    serde_json::json!({ "id": team_id }),
+                )?;
+                let team = data.get("team").ok_or_else(|| TaskError::Protocol {
+                    provider: PROVIDER_ID,
+                    message: "could not read the team".into(),
+                })?;
+                (team_id, label_map(team))
+            }
+        };
+
+        let label_ids = self.kind_label_ids(&team_id, draft.kind, &labels)?;
+
+        let data = self.graphql(
+            "linear.create_issue",
+            MUTATION_CREATE_ISSUE,
+            serde_json::json!({
+                "teamId": team_id,
+                "title": draft.title.trim(),
+                "description": draft.description,
+                "parentId": draft.parent_external_id,
+                "labelIds": label_ids,
+            }),
+        )?;
+
+        let created = data.get("issueCreate").ok_or_else(|| TaskError::Protocol {
+            provider: PROVIDER_ID,
+            message: "issueCreate returned nothing".into(),
+        })?;
+        if !created
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Err(TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueCreate reported failure".into(),
+            });
+        }
+        created
+            .get("issue")
+            .and_then(parse_issue)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueCreate returned an issue okena could not read".into(),
+            })
+    }
+
+    fn list_children(&self, id: &TaskId) -> Result<Vec<Task>, TaskError> {
+        if id.provider != PROVIDER_ID {
+            return Err(TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: format!("task belongs to provider `{}`", id.provider),
+            });
+        }
+        let data = self.graphql(
+            "linear.children",
+            QUERY_CHILDREN,
+            serde_json::json!({ "id": id.external_id }),
+        )?;
+        let nodes = data
+            .get("issue")
+            .and_then(|i| i.get("children"))
+            .and_then(|c| c.get("nodes"))
+            .and_then(|n| n.as_array())
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "could not read the issue's sub-tasks".into(),
+            })?;
+        Ok(nodes.iter().filter_map(parse_issue).collect())
     }
 
     fn set_state(&self, id: &TaskId, state: TaskState) -> Result<(), TaskError> {

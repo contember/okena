@@ -87,7 +87,9 @@ pub enum SessionManagerEvent {
     /// A ready-to-dispatch session/workspace action for the host to route to the
     /// local daemon (load/save/import/export). The daemon owns session files and
     /// the authoritative workspace, so these never touch the client's mirror.
-    Action(okena_core::api::ActionRequest),
+    /// Boxed: `ActionRequest` is a wide enum, and carrying it inline made
+    /// every `Close` event as large as the largest action.
+    Action(Box<okena_core::api::ActionRequest>),
 }
 
 impl EventEmitter<SessionManagerEvent> for SessionManager {}

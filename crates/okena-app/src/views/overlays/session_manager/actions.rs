@@ -58,9 +58,9 @@ impl SessionManager {
         // The daemon owns the authoritative workspace (local ids) + session
         // files; saving from the client mirror would persist prefixed-id garbage.
         // Dispatch SaveSession and let the daemon write its own data.
-        cx.emit(SessionManagerEvent::Action(ActionRequest::SaveSession {
-            name,
-        }));
+        cx.emit(SessionManagerEvent::Action(Box::new(
+            ActionRequest::SaveSession { name },
+        )));
         self.new_session_input.update(cx, |input, cx| {
             input.set_value("", cx);
         });
@@ -71,9 +71,11 @@ impl SessionManager {
     pub(super) fn load_session(&mut self, name: &str, cx: &mut Context<Self>) {
         // The daemon loads its own session file + swaps state; the new workspace
         // mirrors back via snapshot.
-        cx.emit(SessionManagerEvent::Action(ActionRequest::LoadSession {
-            name: name.to_string(),
-        }));
+        cx.emit(SessionManagerEvent::Action(Box::new(
+            ActionRequest::LoadSession {
+                name: name.to_string(),
+            },
+        )));
         self.error_message = None;
     }
 
@@ -194,9 +196,9 @@ impl SessionManager {
         }
 
         // Export the DAEMON's authoritative workspace (not the client mirror).
-        cx.emit(SessionManagerEvent::Action(
+        cx.emit(SessionManagerEvent::Action(Box::new(
             ActionRequest::ExportWorkspace { path },
-        ));
+        )));
         self.error_message = None;
         cx.notify();
     }
@@ -210,9 +212,9 @@ impl SessionManager {
         }
 
         // The daemon imports the file + swaps state; the result mirrors back.
-        cx.emit(SessionManagerEvent::Action(
+        cx.emit(SessionManagerEvent::Action(Box::new(
             ActionRequest::ImportWorkspace { path },
-        ));
+        )));
         self.error_message = None;
         cx.notify();
     }

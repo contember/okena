@@ -127,6 +127,59 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "okena_list_subtasks",
+            "description":
+                "List the sub-tasks of a task — every child, including ones \
+                 assigned to somebody else. Defaults to this session's own task. \
+                 Call before creating children so you do not duplicate one that \
+                 already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description":
+                            "Provider id of the parent. Defaults to this session's task."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_create_subtask",
+            "description":
+                "Create a sub-task under a task, in the same team as its parent. \
+                 Use this to break work down: one call per child. Prefer several \
+                 small children over one large one, and say in the description \
+                 what \"done\" means for that child.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short imperative title." },
+                    "description": {
+                        "type": "string",
+                        "description":
+                            "What the child covers and what finishing it means."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["epic", "feature", "story", "task", "defect"],
+                        "description":
+                            "Where it sits in the breakdown. Defaults to task. A \
+                             child is normally narrower than its parent: a feature \
+                             under an epic, a story under a feature."
+                    },
+                    "parent": {
+                        "type": "string",
+                        "description":
+                            "Provider id of the parent. Defaults to this session's task."
+                    }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "okena_register_asset",
             "description":
                 "Record something this agent produced — a pull request, branch or \
@@ -189,6 +242,8 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_whoami" => whoami(),
         "okena_list_projects" => list_projects(),
         "okena_report_status" => report_status(&args),
+        "okena_list_subtasks" => list_subtasks(&args),
+        "okena_create_subtask" => create_subtask(&args),
         "okena_register_asset" => register_asset(&args),
         other => {
             return Err(rpc_error(
@@ -308,6 +363,78 @@ fn report_status(args: &Value) -> Result<Value, String> {
     Ok(json!({ "ok": true, "project_id": session.project.id }))
 }
 
+/// The task this session was started for, or an explicit one.
+///
+/// Defaulting to the session's own task is what makes the breakdown tools
+/// usable without the agent having to discover an id first — it is already
+/// working on exactly one task.
+fn target_task(args: &Value) -> Result<(String, String), String> {
+    if let Some(explicit) = args
+        .get("parent")
+        .or_else(|| args.get("task"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // An explicit id still needs a provider; this session's is the only
+        // one okena has a credential for.
+        let session = current_session()?;
+        let provider = session
+            .project
+            .task_ref
+            .as_ref()
+            .map(|t| t.id.provider.clone())
+            .unwrap_or_else(|| "linear".to_string());
+        return Ok((provider, explicit.to_string()));
+    }
+    let session = current_session()?;
+    let task = session.project.task_ref.as_ref().ok_or(
+        "this session is not linked to a task — pass `parent` to say which task to work under",
+    )?;
+    Ok((task.id.provider.clone(), task.id.external_id.clone()))
+}
+
+fn list_subtasks(args: &Value) -> Result<Value, String> {
+    let (provider, task) = target_task(args)?;
+    let token = super::ensure_token()?;
+    let response = super::api_action(
+        &token,
+        &json!({
+            "action": "task_children",
+            "provider": provider,
+            "task_external_id": task,
+        })
+        .to_string(),
+    )?;
+    Ok(json!({ "parent": task, "children": response }))
+}
+
+fn create_subtask(args: &Value) -> Result<Value, String> {
+    let title = args
+        .get("title")
+        .and_then(|s| s.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("`title` is required")?
+        .to_string();
+    let (provider, parent) = target_task(args)?;
+    let token = super::ensure_token()?;
+
+    let response = super::api_action(
+        &token,
+        &json!({
+            "action": "task_create",
+            "provider": provider,
+            "title": title,
+            "description": args.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+            "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
+            "parent_external_id": parent,
+        })
+        .to_string(),
+    )?;
+    Ok(json!({ "created": response, "parent": parent }))
+}
+
 fn register_asset(args: &Value) -> Result<Value, String> {
     let kind = args
         .get("kind")
@@ -381,7 +508,22 @@ mod tests {
     fn tools_list_advertises_every_tool_with_a_schema() {
         let r = dispatch("tools/list", &json!({})).expect("tools/list must succeed");
         let tools = r["tools"].as_array().expect("array");
-        assert_eq!(tools.len(), 4);
+
+        // The exact set, not a count: a bare number says nothing about which
+        // tool went missing, and adding one should be a deliberate edit here.
+        let mut names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "okena_create_subtask",
+                "okena_list_projects",
+                "okena_list_subtasks",
+                "okena_register_asset",
+                "okena_report_status",
+                "okena_whoami",
+            ]
+        );
         for t in tools {
             assert!(t["name"].as_str().is_some_and(|n| n.starts_with("okena_")));
             assert!(
