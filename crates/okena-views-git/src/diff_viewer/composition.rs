@@ -62,8 +62,7 @@ impl RolePreset {
     }
 }
 
-/// One legend row. The sidebar is narrow, so the role name owns the first line
-/// and everything countable goes on the second.
+/// One compact legend row with detailed counts for its tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct LegendRow {
     pub role: FileRole,

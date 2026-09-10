@@ -2,6 +2,7 @@
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::review::FileRole;
 use okena_core::theme::ThemeColors;
@@ -65,13 +66,13 @@ impl DiffViewer {
             v_flex()
                 .flex_shrink_0()
                 .px(px(16.0))
-                .py(px(10.0))
-                .gap(px(8.0))
+                .py(px(8.0))
+                .gap(px(4.0))
                 .border_b_1()
                 .border_color(rgb(t.border))
                 .child(self.render_composition_headline(t, cx))
                 .child(self.render_composition_bar(t))
-                .children(legend)
+                .child(v_flex().children(legend))
                 .child(presets)
                 .children(self.composition.caveat().map(|caveat| {
                     div()
@@ -104,15 +105,13 @@ impl DiffViewer {
             .items_center()
             .text_size(ui_text_ms(cx))
             .text_color(rgb(t.text_muted))
-            .font_weight(FontWeight::MEDIUM)
-            .child("COMPOSITION")
             .children(self.composition.headline())
     }
 
     fn render_composition_bar(&self, t: &ThemeColors) -> impl IntoElement {
         let segments = self.composition.segments();
         h_flex()
-            .h(px(6.0))
+            .h(px(3.0))
             .w_full()
             .rounded(px(3.0))
             .overflow_hidden()
@@ -138,52 +137,43 @@ impl DiffViewer {
             t.text_secondary
         };
 
-        v_flex()
+        h_flex()
             .id(SharedString::from(format!("role-{}", row.label)))
             .px(px(4.0))
             .py(px(2.0))
             .rounded(px(4.0))
+            .gap(px(6.0))
+            .items_center()
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(text_color))
             .cursor_pointer()
-            .when(row.selected, |element| element.bg(rgb(t.bg_selection)))
+            .when(row.selected, |element| element.bg(rgb(t.bg_secondary)))
             .hover(|element| element.bg(rgb(t.bg_hover)))
+            .tooltip(move |window, cx| Tooltip::new(row.detail.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.composition.toggle(role);
                 this.apply_role_filter(cx);
             }))
             .child(
-                h_flex()
-                    .gap(px(6.0))
-                    .items_center()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(text_color))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .size(px(8.0))
-                            .rounded(px(2.0))
-                            .bg(rgb(swatch(role, t))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(row.label),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(rgb(t.text_muted))
-                            .child(row.percent),
-                    ),
+                div()
+                    .flex_shrink_0()
+                    .size(px(6.0))
+                    .rounded(px(2.0))
+                    .bg(rgb(swatch(role, t))),
             )
             .child(
                 div()
-                    .pl(px(14.0))
-                    .text_size(ui_text_ms(cx))
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(row.label),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
                     .text_color(rgb(t.text_muted))
-                    .child(row.detail),
+                    .child(row.percent),
             )
     }
 
@@ -194,13 +184,13 @@ impl DiffViewer {
             chips.push(
                 div()
                     .id(SharedString::from(format!("preset-{}", preset.label())))
-                    .px(px(6.0))
+                    .px(px(4.0))
                     .py(px(2.0))
                     .rounded(px(4.0))
                     .cursor_pointer()
-                    .text_size(ui_text_ms(cx))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(if active { t.text_primary } else { t.text_muted }))
-                    .when(active, |element| element.bg(rgb(t.bg_selection)))
+                    .when(active, |element| element.bg(rgb(t.bg_secondary)))
                     .hover(|element| element.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.composition.apply(preset);
@@ -210,7 +200,11 @@ impl DiffViewer {
                     .into_any_element(),
             );
         }
-        h_flex().gap(px(4.0)).children(chips).into_any_element()
+        h_flex()
+            .flex_wrap()
+            .gap(px(4.0))
+            .children(chips)
+            .into_any_element()
     }
 
     /// The sidebar footer, shown only while a role filter hides something.
