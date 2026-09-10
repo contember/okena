@@ -1,4 +1,4 @@
-//! The composition panel: a stacked bar, a clickable legend, and role presets.
+//! The composition panel: a stacked bar and a clickable legend.
 
 use gpui::prelude::*;
 use gpui::*;
@@ -9,7 +9,7 @@ use okena_core::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm};
 
 use super::DiffViewer;
-use super::composition::{LegendRow, RolePreset};
+use super::composition::LegendRow;
 
 /// Swatch colour per role, from the theme's folder palette so it follows the
 /// theme instead of hard-coding hues.
@@ -30,29 +30,56 @@ fn swatch(role: FileRole, t: &ThemeColors) -> u32 {
 }
 
 impl DiffViewer {
-    /// The whole panel, or nothing while there is no composition to show.
+    /// Reserve the same space across loading, empty, error, and ready states.
     pub(super) fn render_composition(
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let panel = v_flex()
+            .flex_shrink_0()
+            .h(ui_text_ms(cx) * 8.5 + px(16.0))
+            .px(px(16.0))
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(rgb(t.border));
         if let Some(message) = self.composition_status() {
             return Some(
-                div()
-                    .flex_shrink_0()
-                    .px(px(16.0))
-                    .py(px(8.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(message)
+                panel
+                    .child(
+                        v_flex()
+                            .id("composition-status")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .gap(px(8.0))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(message)
+                            .when(self.composition.loading, |element| {
+                                element
+                                    .child(div().h(px(3.0)).w_full().bg(rgb(t.bg_secondary)))
+                                    .children([0.65, 0.85, 0.45].map(|width| {
+                                        div()
+                                            .h(ui_text_ms(cx))
+                                            .w(relative(width))
+                                            .rounded(px(2.0))
+                                            .bg(rgb(t.bg_secondary))
+                                    }))
+                            }),
+                    )
                     .into_any_element(),
             );
         }
         let rows = self.composition.rows();
         if rows.is_empty() {
-            return None;
+            return Some(
+                panel
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("No composition to show")
+                    .into_any_element(),
+            );
         }
         // Built eagerly: each row installs a listener, so it cannot be produced
         // from a closure that would have to hold `cx`.
@@ -60,26 +87,27 @@ impl DiffViewer {
         for row in rows {
             legend.push(self.render_legend_row(row, t, cx).into_any_element());
         }
-        let presets = self.render_role_presets(t, cx);
 
         Some(
-            v_flex()
-                .flex_shrink_0()
-                .px(px(16.0))
-                .py(px(8.0))
-                .gap(px(4.0))
-                .border_b_1()
-                .border_color(rgb(t.border))
-                .child(self.render_composition_headline(t, cx))
-                .child(self.render_composition_bar(t))
-                .child(v_flex().children(legend))
-                .child(presets)
-                .children(self.composition.caveat().map(|caveat| {
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(caveat)
-                }))
+            panel
+                .child(
+                    v_flex()
+                        .id("composition-content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .gap(px(4.0))
+                        .child(self.render_composition_headline(t, cx))
+                        .child(self.render_composition_bar(t))
+                        .child(v_flex().flex_shrink_0().children(legend))
+                        .children(self.composition.caveat().map(|caveat| {
+                            div()
+                                .flex_shrink_0()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(caveat)
+                        })),
+                )
                 .into_any_element(),
         )
     }
@@ -101,6 +129,7 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
+            .flex_shrink_0()
             .justify_between()
             .items_center()
             .text_size(ui_text_ms(cx))
@@ -111,6 +140,7 @@ impl DiffViewer {
     fn render_composition_bar(&self, t: &ThemeColors) -> impl IntoElement {
         let segments = self.composition.segments();
         h_flex()
+            .flex_shrink_0()
             .h(px(3.0))
             .w_full()
             .rounded(px(3.0))
@@ -177,36 +207,6 @@ impl DiffViewer {
             )
     }
 
-    fn render_role_presets(&self, t: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
-        let mut chips = Vec::with_capacity(RolePreset::ALL.len());
-        for preset in RolePreset::ALL {
-            let active = self.composition.is_active(preset);
-            chips.push(
-                div()
-                    .id(SharedString::from(format!("preset-{}", preset.label())))
-                    .px(px(4.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(if active { t.text_primary } else { t.text_muted }))
-                    .when(active, |element| element.bg(rgb(t.bg_secondary)))
-                    .hover(|element| element.bg(rgb(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.composition.apply(preset);
-                        this.apply_role_filter(cx);
-                    }))
-                    .child(preset.label())
-                    .into_any_element(),
-            );
-        }
-        h_flex()
-            .flex_wrap()
-            .gap(px(4.0))
-            .children(chips)
-            .into_any_element()
-    }
-
     /// The sidebar footer, shown only while a role filter hides something.
     pub(super) fn render_composition_footer(
         &self,
@@ -234,7 +234,7 @@ impl DiffViewer {
                         .text_color(rgb(t.text_secondary))
                         .hover(|element| element.text_color(rgb(t.text_primary)))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.composition.apply(RolePreset::Everything);
+                            this.composition.clear_filter();
                             this.apply_role_filter(cx);
                         }))
                         .child("show all"),

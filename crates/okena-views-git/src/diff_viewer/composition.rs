@@ -16,52 +16,6 @@ pub(super) enum RoleFilter {
     Only(BTreeSet<FileRole>),
 }
 
-/// A named group of roles, offered next to the legend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RolePreset {
-    Everything,
-    /// What a reviewer reads for correctness.
-    ReviewCode,
-    /// What supports it.
-    Supporting,
-}
-
-impl RolePreset {
-    pub(super) const ALL: [Self; 3] = [Self::Everything, Self::ReviewCode, Self::Supporting];
-
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Everything => "Everything",
-            Self::ReviewCode => "Review code",
-            Self::Supporting => "Supporting",
-        }
-    }
-
-    fn filter(self) -> RoleFilter {
-        match self {
-            Self::Everything => RoleFilter::All,
-            Self::ReviewCode => RoleFilter::Only(
-                [
-                    FileRole::Implementation,
-                    FileRole::Unclassified,
-                    FileRole::Configuration,
-                ]
-                .into(),
-            ),
-            Self::Supporting => RoleFilter::Only(
-                [
-                    FileRole::Test,
-                    FileRole::Fixture,
-                    FileRole::Snapshot,
-                    FileRole::Example,
-                    FileRole::Documentation,
-                ]
-                .into(),
-            ),
-        }
-    }
-}
-
 /// One compact legend row with detailed counts for its tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct LegendRow {
@@ -136,12 +90,8 @@ impl CompositionState {
         };
     }
 
-    pub(super) fn apply(&mut self, preset: RolePreset) {
-        self.filter = preset.filter();
-    }
-
-    pub(super) fn is_active(&self, preset: RolePreset) -> bool {
-        self.filter == preset.filter()
+    pub(super) fn clear_filter(&mut self) {
+        self.filter = RoleFilter::All;
     }
 
     /// Legend rows, largest role first.
@@ -370,20 +320,6 @@ mod tests {
         let mut state = state();
         state.toggle(FileRole::Test);
         assert!(state.accepts("some/file/added/after.rs"));
-    }
-
-    #[test]
-    fn presets_select_groups_of_roles_and_report_themselves_active() {
-        let mut state = state();
-        state.apply(RolePreset::Supporting);
-        assert!(state.is_active(RolePreset::Supporting));
-        assert!(!state.is_active(RolePreset::ReviewCode));
-        assert!(state.accepts("docs/guide.md"));
-        assert!(!state.accepts("src/engine.rs"));
-
-        state.apply(RolePreset::Everything);
-        assert!(!state.is_filtered());
-        assert!(state.is_active(RolePreset::Everything));
     }
 
     #[test]
