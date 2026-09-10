@@ -126,6 +126,7 @@ mod tests {
             task_ref: None,
             agent: None,
             spec_change: None,
+            custom_session: None,
             id: id.to_string(),
             name: id.to_string(),
             path: path.to_string(),

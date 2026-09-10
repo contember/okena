@@ -10,6 +10,7 @@
 mod agents_section;
 mod cursor;
 mod harness_nav;
+mod list_header;
 mod renames;
 mod render;
 mod worktree;
@@ -17,19 +18,14 @@ mod worktree;
 #[cfg(test)]
 mod from_project_test;
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
 use okena_core::theme::FolderColor;
 use okena_services::manager::ServiceManager;
 use okena_terminal::TerminalsRegistry;
 use okena_transport::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_ui::click_detector::ClickDetector;
-use okena_ui::menu::{context_menu_panel, menu_item, menu_section, menu_separator};
 use okena_ui::rename_state::RenameState;
-use okena_ui::theme::theme;
-use okena_ui::tokens::ui_text_ms;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
 use std::collections::{HashMap, HashSet};
@@ -82,7 +78,8 @@ pub enum GroupKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarHeaderMenu {
     Create,
-    View,
+    /// View options for the current list: how it is ordered and laid out.
+    Overflow,
 }
 
 impl GroupKind {
@@ -232,8 +229,8 @@ pub struct Sidebar {
     /// is not the scroll-child index — this maps one to the other.
     pub(crate) cursor_scroll_indices: Vec<usize>,
     header_menu: Option<SidebarHeaderMenu>,
-    create_button_bounds: Bounds<Pixels>,
-    view_button_bounds: Bounds<Pixels>,
+    pub(super) create_button_bounds: Bounds<Pixels>,
+    pub(super) overflow_button_bounds: Bounds<Pixels>,
 }
 
 impl Sidebar {
@@ -319,7 +316,7 @@ impl Sidebar {
             cursor_scroll_indices: Vec::new(),
             header_menu: None,
             create_button_bounds: Bounds::default(),
-            view_button_bounds: Bounds::default(),
+            overflow_button_bounds: Bounds::default(),
         }
     }
 
@@ -509,329 +506,6 @@ impl Sidebar {
                     .is_some_and(|t| t.is_waiting_for_input())
             })
             .count()
-    }
-
-    pub(super) fn render_overview_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let workspace_entity = self.workspace.clone();
-        let focus_manager = self.focus_manager.clone();
-        let window_id = self.window_id;
-        let activity_mode = self
-            .workspace
-            .read(cx)
-            .data()
-            .window(window_id)
-            .is_some_and(|window| window.project_sort_mode.is_activity());
-        let is_active = self.focus_manager.read(cx).focused_project_id().is_none()
-            && self
-                .workspace
-                .read(cx)
-                .active_folder_filter(window_id)
-                .is_none();
-        let icon_color = if is_active {
-            t.text_primary
-        } else {
-            t.text_secondary
-        };
-        let view_menu_open = self.header_menu == Some(SidebarHeaderMenu::View);
-        let create_menu_open = self.header_menu == Some(SidebarHeaderMenu::Create);
-        let view_bounds_entity = cx.entity().clone();
-        let create_bounds_entity = cx.entity().clone();
-
-        div()
-            .relative()
-            .h(px(35.0))
-            .when(is_active, |row| row.bg(rgb(t.bg_hover)))
-            .child(
-                div()
-                    .id("projects-overview")
-                    .h_full()
-                    .pl(px(20.0))
-                    .pr(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_click(move |_, _window, cx| {
-                        focus_manager.update(cx, |fm, cx| {
-                            workspace_entity.update(cx, |ws, cx| {
-                                ws.set_focused_project(fm, None, cx);
-                                ws.set_folder_filter(window_id, None, cx);
-                            });
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        svg()
-                            .path("icons/select-all.svg")
-                            .size(px(13.0))
-                            .text_color(rgb(icon_color)),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(if is_active {
-                                t.text_primary
-                            } else {
-                                t.text_secondary
-                            }))
-                            .child("Overview"),
-                    )
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .id("project-view-menu-btn")
-                                    .cursor_pointer()
-                                    .size(px(24.0))
-                                    .rounded(px(4.0))
-                                    .when(view_menu_open, |button| button.bg(rgb(t.bg_hover)))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .path("icons/arrow-up-down.svg")
-                                            .size(px(13.0))
-                                            .text_color(rgb(if activity_mode {
-                                                t.border_active
-                                            } else {
-                                                t.text_secondary
-                                            })),
-                                    )
-                                    .child(
-                                        canvas(
-                                            move |bounds, _window, app| {
-                                                view_bounds_entity.update(app, |this, _cx| {
-                                                    this.view_button_bounds = bounds;
-                                                });
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full(),
-                                    )
-                                    .tooltip(move |window, cx| {
-                                        Tooltip::new(if activity_mode {
-                                            "Project ordering: Activity"
-                                        } else {
-                                            "Project ordering: Manual"
-                                        })
-                                        .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.header_menu =
-                                            if this.header_menu == Some(SidebarHeaderMenu::View) {
-                                                None
-                                            } else {
-                                                Some(SidebarHeaderMenu::View)
-                                            };
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("project-create-menu-btn")
-                                    .cursor_pointer()
-                                    .size(px(24.0))
-                                    .rounded(px(4.0))
-                                    .when(create_menu_open, |button| button.bg(rgb(t.bg_hover)))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .path("icons/plus.svg")
-                                            .size(px(14.0))
-                                            .text_color(rgb(t.text_secondary)),
-                                    )
-                                    .child(
-                                        canvas(
-                                            move |bounds, _window, app| {
-                                                create_bounds_entity.update(app, |this, _cx| {
-                                                    this.create_button_bounds = bounds;
-                                                });
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full(),
-                                    )
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new("New project or folder").build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.header_menu = if this.header_menu
-                                            == Some(SidebarHeaderMenu::Create)
-                                        {
-                                            None
-                                        } else {
-                                            Some(SidebarHeaderMenu::Create)
-                                        };
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .child(self.render_header_menu(activity_mode, cx))
-    }
-
-    fn render_header_menu(&self, activity_mode: bool, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let window_id = self.window_id;
-        let Some(menu) = self.header_menu else {
-            return div().size_0().into_any_element();
-        };
-        let bounds = match menu {
-            SidebarHeaderMenu::Create => self.create_button_bounds,
-            SidebarHeaderMenu::View => self.view_button_bounds,
-        };
-        let position = point(
-            bounds.origin.x + bounds.size.width,
-            bounds.origin.y + bounds.size.height + px(2.0),
-        );
-
-        let panel = match menu {
-            SidebarHeaderMenu::Create => context_menu_panel("project-create-menu", &t)
-                .min_w(px(180.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.header_menu = None;
-                    cx.notify();
-                }))
-                .child(
-                    menu_item(
-                        "create-project-menu-item",
-                        "icons/plus.svg",
-                        "New project",
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.header_menu = None;
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(
-                                okena_workspace::requests::OverlayRequest::AddProjectDialog,
-                                cx,
-                            );
-                        });
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    menu_item(
-                        "create-folder-menu-item",
-                        "icons/folder.svg",
-                        "New folder",
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.header_menu = None;
-                        this.create_folder(window, cx);
-                    })),
-                )
-                .into_any_element(),
-            SidebarHeaderMenu::View => {
-                let show_attention = self
-                    .workspace
-                    .read(cx)
-                    .data()
-                    .window(window_id)
-                    .is_some_and(|window| window.show_attention_section);
-                context_menu_panel("project-view-menu", &t)
-                    .min_w(px(200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.header_menu = None;
-                        cx.notify();
-                    }))
-                    .child(menu_section("Order", &t))
-                    .child(
-                        menu_item(
-                            "project-view-manual",
-                            if activity_mode {
-                                "icons/folder.svg"
-                            } else {
-                                "icons/check.svg"
-                            },
-                            "Manual order",
-                            &t,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.header_menu = None;
-                                if activity_mode {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_project_sort_mode(window_id, cx);
-                                    });
-                                }
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        menu_item(
-                            "project-view-activity",
-                            if activity_mode {
-                                "icons/check.svg"
-                            } else {
-                                "icons/bell.svg"
-                            },
-                            "By activity",
-                            &t,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.header_menu = None;
-                                if !activity_mode {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_project_sort_mode(window_id, cx);
-                                    });
-                                }
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .when(!activity_mode, |panel| {
-                        panel.child(menu_separator(&t)).child(
-                            menu_item(
-                                "attention-toggle",
-                                if show_attention {
-                                    "icons/check.svg"
-                                } else {
-                                    "icons/bell.svg"
-                                },
-                                "Needs attention section",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _window, cx| {
-                                    this.header_menu = None;
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_show_attention_section(window_id, cx);
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                    })
-                    .into_any_element()
-            }
-        };
-        deferred(
-            anchored()
-                .position(position)
-                .anchor(Anchor::TopRight)
-                .snap_to_window()
-                .child(panel),
-        )
-        .into_any_element()
     }
 }
 

@@ -184,18 +184,7 @@ impl Sidebar {
                                 cx,
                             );
                         } else {
-                            this.cursor_index = None;
-                            let workspace = this.workspace.clone();
-                            this.focus_manager.update(cx, |fm, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(
-                                        fm,
-                                        Some(project_id.clone()),
-                                        cx,
-                                    );
-                                });
-                                cx.notify();
-                            });
+                            this.focus_project_from_sidebar(project_id.clone(), true, cx);
                         }
                         cx.stop_propagation();
                     }
@@ -367,14 +356,7 @@ impl Sidebar {
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    let workspace = this.workspace.clone();
-                    this.focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                        });
-                        cx.notify();
-                    });
+                    this.focus_project_from_sidebar(project_id.clone(), true, cx);
                 }
             }));
 
@@ -479,14 +461,7 @@ impl Sidebar {
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    let workspace = this.workspace.clone();
-                    this.focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                        });
-                        cx.notify();
-                    });
+                    this.focus_project_from_sidebar(project_id.clone(), true, cx);
                 }
             }));
 
@@ -931,14 +906,7 @@ impl Sidebar {
         .on_click(cx.listener({
             let project_id = project_id.clone();
             move |this, _, _window, cx| {
-                this.cursor_index = None;
-                let workspace = this.workspace.clone();
-                this.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(fm, Some(project_id.clone()), cx);
-                    });
-                    cx.notify();
-                });
+                this.focus_project_from_sidebar(project_id.clone(), false, cx);
             }
         }))
         .child(
@@ -1000,15 +968,7 @@ impl Sidebar {
                             cx,
                         );
                     } else {
-                        this.cursor_index = None;
-                        let workspace = this.workspace.clone();
-                        let pid = project_id.clone();
-                        this.focus_manager.update(cx, |fm, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.set_focused_project(fm, Some(pid), cx);
-                            });
-                            cx.notify();
-                        });
+                        this.focus_project_from_sidebar(project_id.clone(), false, cx);
                     }
                     cx.stop_propagation();
                 }
@@ -1057,14 +1017,7 @@ impl Sidebar {
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    let workspace = this.workspace.clone();
-                    this.focus_manager.update(cx, |fm, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                        });
-                        cx.notify();
-                    });
+                    this.focus_project_from_sidebar(project_id.clone(), true, cx);
                 }
             }))
             .on_mouse_down(

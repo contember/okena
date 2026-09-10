@@ -30,6 +30,7 @@ pub mod folder_context_menu;
 pub mod hook_log;
 pub mod keybindings_help;
 pub mod log_console;
+pub mod new_agent_dialog;
 pub mod pairing_dialog;
 pub mod profile_manager;
 pub mod project_inspector;

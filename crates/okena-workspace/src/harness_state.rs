@@ -119,12 +119,12 @@ mod tests {
     #[test]
     fn switching_views_is_a_change() {
         let state = with(HarnessSection::Tasks);
-        assert!(state.is_change(WindowId::Main, Some(HarnessSection::Agents)));
+        assert!(state.is_change(WindowId::Main, Some(HarnessSection::Specs)));
     }
 
     #[test]
     fn clearing_from_active_is_a_change() {
-        let state = with(HarnessSection::Agents);
+        let state = with(HarnessSection::Specs);
         assert!(state.is_change(WindowId::Main, None));
         assert!(!HarnessState::new().is_change(WindowId::Main, None));
     }

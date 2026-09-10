@@ -63,6 +63,9 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // project-creation hooks — and launches an agent. Hooks are arbitrary
         // shell with no bound, so the fast bucket is the wrong budget.
         ActionRequest::SpecDraftChange { .. } => ActionClientKind::LongMutation,
+        // Same shape as drafting a change: creates a project, runs its hooks,
+        // and launches an agent. Hooks are arbitrary shell with no bound.
+        ActionRequest::AgentStartSession { .. } => ActionClientKind::LongMutation,
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before
         // the provider had given up — reporting a transport failure for what is

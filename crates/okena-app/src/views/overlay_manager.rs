@@ -25,6 +25,7 @@ use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderConte
 use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
 use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::log_console::{LogConsole, LogConsoleEvent};
+use crate::views::overlays::new_agent_dialog::{NewAgentDialog, NewAgentDialogEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
 use crate::views::overlays::project_inspector::{
@@ -69,6 +70,12 @@ pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
 pub use okena_ui::{open_overlay, toggle_overlay};
 
 // CloseEvent impls for overlay events defined in src/ (local types)
+
+impl CloseEvent for NewAgentDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, NewAgentDialogEvent::Close)
+    }
+}
 
 impl CloseEvent for AddProjectDialogEvent {
     fn is_close(&self) -> bool {
@@ -669,6 +676,53 @@ impl OverlayManager {
 
     pub fn toggle_about(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, AboutModal, AboutModalEvent, AboutModal::new);
+    }
+
+    /// Open the settings panel on a named page.
+    ///
+    /// Always opens rather than toggling: a caller asking for a specific page
+    /// wants to see it, and toggling would close the panel when it happens to
+    /// be open on a different one.
+    pub fn open_settings_panel_at(
+        &mut self,
+        workspace: Entity<Workspace>,
+        page: Option<String>,
+        daemon_endpoint: Option<okena_remote_server::local::DaemonEndpoint>,
+        client: Option<okena_transport::remote_action::RemoteActionClient>,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.new(|cx| {
+            let mut panel = SettingsPanel::new_at(workspace, page.as_deref(), daemon_endpoint, cx);
+            if let Some(client) = client {
+                panel.set_action_client(client, cx);
+            }
+            panel
+        });
+        self.subscribe_settings_panel(&entity, cx);
+        self.active_modal = Some(entity.into());
+        cx.notify();
+    }
+
+    /// Toggle the new-agent dialog.
+    pub fn toggle_new_agent_dialog(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        default_agent: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let window_id = self.window_id;
+        toggle_overlay!(self, cx, NewAgentDialog, NewAgentDialogEvent, |cx| {
+            NewAgentDialog::new(
+                client,
+                workspace,
+                focus_manager,
+                window_id,
+                default_agent,
+                cx,
+            )
+        });
     }
 
     /// Toggle add project dialog overlay.

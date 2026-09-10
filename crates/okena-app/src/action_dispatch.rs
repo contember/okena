@@ -196,7 +196,7 @@ impl ActionDispatcher {
             focus_manager,
             window_id,
         } = self;
-        let mode = workspace.read_with(cx, |ws, _cx| ws.project_layout_mode(*window_id));
+        let mode = workspace.read_with(cx, |ws, _cx| ws.grid_layout_mode(*window_id));
         let action = canonicalize_layout_action(action, mode);
 
         // Visual/presentation actions are executed locally on the client
@@ -919,6 +919,20 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         }
         // Spec actions carry no ids — paths are relative to the daemon's own
         // spec repository, which the client never names.
+        // Project ids are client-side and must be stripped for the daemon.
+        ActionRequest::AgentStartSession {
+            goal,
+            name,
+            root,
+            project_ids,
+            agent_command,
+        } => ActionRequest::AgentStartSession {
+            goal,
+            name,
+            root,
+            project_ids: project_ids.iter().map(|id| s(id)).collect(),
+            agent_command,
+        },
         ActionRequest::SpecsTree => ActionRequest::SpecsTree,
         ActionRequest::SpecRead { path } => ActionRequest::SpecRead { path },
         ActionRequest::SpecDraftChange {

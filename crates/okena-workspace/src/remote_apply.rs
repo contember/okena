@@ -191,6 +191,7 @@ pub fn apply_remote_snapshot(
                     // translation — see the push path below.
                     existing.task_ref = api_project.task_ref.clone();
                     existing.spec_change = api_project.spec_change.clone();
+                    existing.custom_session = api_project.custom_session.clone();
                     existing.agent = api_project.agent.clone();
                     existing.pinned = api_project.pinned;
                     existing.last_activity_at = api_project.last_activity_at;
@@ -260,6 +261,7 @@ pub fn apply_remote_snapshot(
                         // every instance.
                         task_ref: api_project.task_ref.clone(),
                         spec_change: api_project.spec_change.clone(),
+                        custom_session: api_project.custom_session.clone(),
                         agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
@@ -557,6 +559,7 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             pinned: false,
             last_activity_at: None,

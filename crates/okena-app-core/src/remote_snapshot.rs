@@ -66,6 +66,7 @@ pub fn build_api_project(
         worktree_ids: p.worktree_ids.clone(),
         task_ref: p.task_ref.clone(),
         spec_change: p.spec_change.clone(),
+        custom_session: p.custom_session.clone(),
         agent: p.agent.clone(),
         pinned: p.pinned,
         last_activity_at: p.last_activity_at,

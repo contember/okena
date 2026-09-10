@@ -202,15 +202,7 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.cursor_index = None;
-                            let workspace = this.workspace.clone();
-                            let pid = project_id.clone();
-                            this.focus_manager.update(cx, |fm, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(fm, Some(pid), cx);
-                                });
-                                cx.notify();
-                            });
+                            this.focus_project_from_sidebar(project_id.clone(), true, cx);
                             this.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(
                                     okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {

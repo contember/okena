@@ -69,6 +69,38 @@ pub enum ProjectSortMode {
     Activity,
 }
 
+/// How the sidebar orders agent sessions.
+///
+/// Deliberately not `ProjectSortMode`: its `Manual` arm means "follow
+/// `project_order` and the folder grouping", and nobody hand-arranges or files
+/// agent sessions — they are created by starting work and disappear when the
+/// work is done. Recency and name are the two axes that actually distinguish
+/// them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSortMode {
+    /// Most recently active first. Default: the session you want is nearly
+    /// always the one that just did something.
+    #[default]
+    Activity,
+    /// Alphabetical by session name, for a stable order that does not move
+    /// under the cursor while agents work.
+    Name,
+}
+
+impl AgentSortMode {
+    pub fn is_activity(self) -> bool {
+        matches!(self, AgentSortMode::Activity)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentSortMode::Activity => "By activity",
+            AgentSortMode::Name => "By name",
+        }
+    }
+}
+
 impl ProjectSortMode {
     /// Return the other mode.
     pub fn toggled(self) -> Self {
@@ -140,6 +172,33 @@ pub struct WindowState {
     /// How the sidebar orders projects in this window (manual vs activity).
     #[serde(default)]
     pub project_sort_mode: ProjectSortMode,
+    /// How the sidebar orders agent sessions in this window.
+    #[serde(default)]
+    pub agent_sort_mode: AgentSortMode,
+    /// Orientation of the agents overview grid in this window.
+    ///
+    /// Its own setting rather than sharing `project_layout`: the two overviews
+    /// hold different things in different numbers — a handful of agents whose
+    /// output you read, versus your repos — and the orientation that suits one
+    /// rarely suits the other.
+    #[serde(default)]
+    pub agent_layout: ProjectLayoutMode,
+    /// Whether agent-session columns open on their info instead of their
+    /// terminal.
+    ///
+    /// The overview-wide default. A column can still be flipped on its own; it
+    /// follows this again the next time this changes, so the switch always
+    /// means "all of them" rather than "all the ones I haven't touched".
+    #[serde(default)]
+    pub agents_show_info: bool,
+    /// Whether the main area is showing every agent session at once.
+    ///
+    /// The agents-tab counterpart to clearing the folder filter: it is what
+    /// "Overview" means on that tab. Separate from `folder_filter` because it
+    /// selects a *kind* of project rather than a folder, and the two must not
+    /// be able to contradict each other.
+    #[serde(default)]
+    pub agents_overview: bool,
     /// Opt-in: in the manual (`ProjectSortMode::Manual`) view, surface a
     /// "needs attention" section at the top of the sidebar that *duplicates*
     /// the projects with an unseen bell/notification, so they're reachable
@@ -172,6 +231,10 @@ impl Default for WindowState {
             project_width_scale: None,
             project_layout: ProjectLayoutMode::default(),
             project_sort_mode: ProjectSortMode::default(),
+            agent_sort_mode: AgentSortMode::default(),
+            agent_layout: ProjectLayoutMode::default(),
+            agents_overview: false,
+            agents_show_info: false,
             show_attention_section: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
@@ -215,6 +278,10 @@ mod tests {
             project_width_scale: Some(12.5),
             project_layout: ProjectLayoutMode::Rows,
             project_sort_mode: ProjectSortMode::Activity,
+            agent_sort_mode: AgentSortMode::Name,
+            agent_layout: ProjectLayoutMode::Rows,
+            agents_overview: true,
+            agents_show_info: true,
             show_attention_section: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {

@@ -713,7 +713,7 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
         let mut layout = self.get_layout(workspace).cloned();
         if let Some(LayoutNode::Split { direction, .. }) = &mut layout {
             *direction = workspace
-                .project_layout_mode(self.window_id)
+                .grid_layout_mode(self.window_id)
                 .presented_split_direction(*direction);
         }
 

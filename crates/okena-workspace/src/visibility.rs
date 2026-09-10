@@ -25,6 +25,20 @@ pub fn compute_visible_projects<'a>(
     focus_individual: bool,
     window: &WindowState,
 ) -> Vec<&'a ProjectData> {
+    // Agents overview: the main area shows every agent session and nothing
+    // else. Checked before anything folder-related because it selects a kind of
+    // project rather than a place — folders group repos, and a session belongs
+    // to no folder. A focused session still wins, exactly as it does for the
+    // projects overview.
+    if window.agents_overview && focused.is_none() {
+        return data
+            .projects
+            .iter()
+            .filter(|p| p.is_any_agent_session())
+            .filter(|p| !window.hidden_project_ids.contains(&p.id))
+            .collect();
+    }
+
     let folder_filter = window.folder_filter.as_ref();
     // Pre-compute worktree children whose parent lives in a folder.
     // These must only be added during folder expansion (not from project_order),
@@ -232,6 +246,7 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -277,6 +292,121 @@ mod tests {
             main_window,
             extra_windows: Vec::new(),
         }
+    }
+
+    fn make_agent_session(id: &str, task_key: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.task_ref = Some(okena_core::tasks::TaskRef {
+            id: okena_core::tasks::TaskId::new("linear", format!("uuid-{id}")),
+            display_key: task_key.to_string(),
+            title: "t".to_string(),
+            url: "http://x".to_string(),
+        });
+        p
+    }
+
+    fn make_spec_session(id: &str, change: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.spec_change = Some(change.to_string());
+        p
+    }
+
+    /// Turn the agents overview on for the main window.
+    fn agents_overview(mut data: WorkspaceData) -> WorkspaceData {
+        data.main_window.agents_overview = true;
+        data
+    }
+
+    #[test]
+    fn agents_overview_shows_every_session_and_no_repos() {
+        let data = agents_overview(make_data(
+            vec![
+                make_project("repo1"),
+                make_agent_session("a1", "QBL-1"),
+                make_project("repo2"),
+                make_spec_session("s1", "add-login"),
+            ],
+            vec!["repo1", "a1", "repo2", "s1"],
+            &[],
+        ));
+        let window = data.main_window.clone();
+        let visible = compute_visible_projects(&data, None, false, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a1", "s1"],
+            "both kinds of session, no repos"
+        );
+    }
+
+    #[test]
+    fn agents_overview_shows_a_worktree_free_repo_as_nothing() {
+        // With no sessions running the overview is empty rather than falling
+        // back to the repos — showing every project would be a different view
+        // than the one the user asked for.
+        let data = agents_overview(make_data(
+            vec![make_project("repo1"), make_project("repo2")],
+            vec!["repo1", "repo2"],
+            &[],
+        ));
+        let window = data.main_window.clone();
+        assert!(compute_visible_projects(&data, None, false, &window).is_empty());
+    }
+
+    #[test]
+    fn a_focused_session_still_wins_over_the_agents_overview() {
+        // Same contract as the projects overview: focusing one narrows to it.
+        let data = agents_overview(make_data(
+            vec![
+                make_agent_session("a1", "QBL-1"),
+                make_agent_session("a2", "QBL-2"),
+            ],
+            vec!["a1", "a2"],
+            &[],
+        ));
+        let window = data.main_window.clone();
+        let focused = "a2".to_string();
+        let visible = compute_visible_projects(&data, Some(&focused), true, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+    }
+
+    #[test]
+    fn agents_overview_still_respects_hidden_projects() {
+        // Hiding is a per-window viewport choice; the overview must not
+        // resurrect something the user closed out of the view.
+        let data = agents_overview(make_data(
+            vec![
+                make_agent_session("a1", "QBL-1"),
+                make_agent_session("a2", "QBL-2"),
+            ],
+            vec!["a1", "a2"],
+            &["a1"],
+        ));
+        let window = data.main_window.clone();
+        let visible = compute_visible_projects(&data, None, false, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+    }
+
+    #[test]
+    fn without_the_agents_overview_sessions_appear_among_the_projects() {
+        // The flag must be the only thing that changes the view — off, a
+        // session is an ordinary project in the grid.
+        let data = make_data(
+            vec![make_project("repo1"), make_agent_session("a1", "QBL-1")],
+            vec!["repo1", "a1"],
+            &[],
+        );
+        let window = data.main_window.clone();
+        let visible = compute_visible_projects(&data, None, false, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["repo1", "a1"]
+        );
     }
 
     #[test]

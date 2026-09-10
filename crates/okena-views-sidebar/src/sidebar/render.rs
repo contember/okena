@@ -111,8 +111,8 @@ impl Sidebar {
             .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
             .on_action(cx.listener(Self::handle_sidebar_escape))
             .child(self.render_harness_nav(cx))
-            .child(self.render_overview_row(cx))
-            .child(self.render_list_tabs(cx))
+            // One header for the list: selector, overview, view options, add.
+            .child(self.render_list_header(cx))
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -563,16 +563,7 @@ impl Sidebar {
                     ),
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
-                // Clicking a project returns to the terminal workspace.
-                this.leave_harness_view(cx);
-                this.cursor_index = None;
-                let workspace = this.workspace.clone();
-                this.focus_manager.update(cx, |fm, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(fm, Some(project_id.clone()), cx);
-                    });
-                    cx.notify();
-                });
+                this.focus_project_from_sidebar(project_id.clone(), true, cx);
             }))
     }
 

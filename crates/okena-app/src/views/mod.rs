@@ -10,6 +10,7 @@
 //! The per-window view is in this module as `window.rs`.
 
 // Submodules
+pub mod agent_session;
 pub mod chrome;
 pub mod components;
 pub mod harness;

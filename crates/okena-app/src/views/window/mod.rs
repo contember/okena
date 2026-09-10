@@ -3,7 +3,6 @@ mod harness_columns;
 mod pane_switcher;
 mod render;
 mod sidebar;
-mod task_panel;
 mod terminal_actions;
 
 use crate::remote_client::manager::RemoteConnectionManager;
@@ -229,7 +228,6 @@ pub struct WindowView {
     /// loaded state. Only `active_harness` is rendered.
     /// Agent session awaiting delete confirmation, with whether the user has
     /// opted into discarding uncommitted work.
-    pending_workspace_delete: Option<(String, bool)>,
     harness_panes: Vec<(
         okena_core::harness::HarnessSection,
         Entity<crate::views::harness::HarnessPane>,
@@ -425,7 +423,6 @@ impl WindowView {
             pane_move,
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
-            pending_workspace_delete: None,
             harness_panes: Vec::new(),
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
@@ -947,6 +944,15 @@ impl WindowView {
                 window_id,
             }
         });
+        let agent_panel_ctx = self.local_daemon_action_client(cx).ok().map(|client| {
+            crate::views::agent_session::AgentPanelContext {
+                client,
+                workspace: self.workspace.clone(),
+                focus_manager: self.focus_manager.clone(),
+                window_id,
+                terminals: self.terminals.clone(),
+            }
+        });
         let ws_for_observe = self.workspace.clone();
 
         let git_provider = self.build_git_provider(project_id, cx)?;
@@ -966,6 +972,12 @@ impl WindowView {
                 cx,
             );
             col.set_action_dispatcher(action_dispatcher);
+            // Lets an agent-session column swap its terminal for the session's
+            // info. Absent until the daemon connection is up, in which case the
+            // column simply offers no toggle.
+            if let Some(ctx) = agent_panel_ctx {
+                col.set_agent_panel_context(ctx);
+            }
             // Observe workspace for remote service state changes
             // (instead of local ServiceManager which has no data for remote projects)
             col.observe_remote_services(ws_for_observe, cx);

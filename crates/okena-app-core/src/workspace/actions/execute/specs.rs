@@ -264,7 +264,7 @@ fn brief(idea: &str, change_dir: &str) -> String {
 /// stays interactive, while `copilot`'s only prompt flag is non-interactive and
 /// exits when it is done — a drafted spec either way, but only one of them
 /// leaves you in a conversation.
-fn prompt_args(command: &str, prompt: &str) -> Vec<String> {
+pub(super) fn prompt_args(command: &str, prompt: &str) -> Vec<String> {
     let program = Path::new(command)
         .file_stem()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())

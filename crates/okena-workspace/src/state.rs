@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
-    DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
-    PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
-    WorkspaceData, WorktreeMetadata, now_unix_seconds,
+    AgentSortMode, DropZone, FocusedTerminalState, FolderData, HookTerminalEntry,
+    HookTerminalStatus, PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds,
+    WindowId, WindowState, WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -1402,12 +1402,24 @@ impl Workspace {
         self.mutate_data(cx, |data| data.set_sidebar_open(window_id, open));
     }
 
-    /// Read the project-grid orientation for the targeted window. Falls back
-    /// to the default (`Columns`) for an unknown window id.
-    pub fn project_layout_mode(&self, window_id: WindowId) -> ProjectLayoutMode {
+    /// Read the orientation of whichever grid the window is showing.
+    ///
+    /// The agents overview carries its own orientation, so this picks by what
+    /// is on screen rather than always reporting the projects one. Every
+    /// consumer — the grid container, the panes inside it, and the split
+    /// transposition — reads through here, so they cannot disagree about which
+    /// axis they are on. Falls back to the default (`Columns`) for an unknown
+    /// window id.
+    pub fn grid_layout_mode(&self, window_id: WindowId) -> ProjectLayoutMode {
         self.data
             .window(window_id)
-            .map(|w| w.project_layout)
+            .map(|w| {
+                if w.agents_overview {
+                    w.agent_layout
+                } else {
+                    w.project_layout
+                }
+            })
             .unwrap_or_default()
     }
 
@@ -1422,22 +1434,102 @@ impl Workspace {
     /// sizing is preserved across the flip. The pixel scale is not — it is
     /// pixels per weight unit along the *current* axis, so it is dropped and
     /// recomputed from the new axis' viewport. Persisted via `notify_data`.
-    pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+    pub fn toggle_grid_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.window(window_id).is_none() {
             return;
         }
 
         if let Some(w) = self.data.window_mut(window_id) {
-            w.project_layout = w.project_layout.toggled();
+            // Flip whichever grid is on screen, so the control and the
+            // keybinding both act on what the user is actually looking at.
+            if w.agents_overview {
+                w.agent_layout = w.agent_layout.toggled();
+            } else {
+                w.project_layout = w.project_layout.toggled();
+            }
             w.project_width_scale = None;
         }
         self.notify_data(cx);
+    }
+
+    /// Set the orientation of whichever grid the window is showing.
+    pub fn set_grid_layout_mode(
+        &mut self,
+        window_id: WindowId,
+        mode: ProjectLayoutMode,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(w) = self.data.window_mut(window_id) else {
+            return;
+        };
+        let current = if w.agents_overview {
+            w.agent_layout
+        } else {
+            w.project_layout
+        };
+        if current == mode {
+            return;
+        }
+        if w.agents_overview {
+            w.agent_layout = mode;
+        } else {
+            w.project_layout = mode;
+        }
+        // Pixels per weight unit along the old axis; meaningless on the new one.
+        w.project_width_scale = None;
+        self.notify_data(cx);
+    }
+
+    /// Whether agent columns in this window open on their info.
+    pub fn agents_show_info(&self, window_id: WindowId) -> bool {
+        self.data
+            .window(window_id)
+            .is_some_and(|w| w.agents_show_info)
+    }
+
+    /// Show or hide session info on every agent column. Persisted via
+    /// `notify_data`.
+    pub fn set_agents_show_info(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_agents_show_info(window_id, on).is_some() {
+            self.notify_data(cx);
+        }
     }
 
     /// Flip the sidebar project sort mode (manual ↔ activity) for a window.
     /// Persisted via `notify_data`.
     pub fn toggle_project_sort_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
         if self.data.toggle_project_sort_mode(window_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Set how a window's sidebar orders agent sessions. Persisted via
+    /// `notify_data`.
+    pub fn set_agent_sort_mode(
+        &mut self,
+        window_id: WindowId,
+        mode: okena_state::AgentSortMode,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_agent_sort_mode(window_id, mode).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Show or hide the agents overview — every agent session at once — in a
+    /// window's main area. Persisted via `notify_data`.
+    pub fn set_agents_overview(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_agents_overview(window_id, on).is_some() {
             self.notify_data(cx);
         }
     }
@@ -2625,6 +2717,7 @@ mod workspace_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -3675,6 +3768,7 @@ mod gpui_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -3851,6 +3945,7 @@ mod gpui_tests {
                     task_ref: None,
                     agent: None,
                     spec_change: None,
+                    custom_session: None,
                     id: "p1".to_string(),
                     name: "proj-p1".to_string(),
                     path: "/srv/p1".to_string(),
@@ -4668,7 +4763,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_flips_and_persists(cx: &mut gpui::TestAppContext) {
+    fn toggle_grid_layout_mode_flips_and_persists(cx: &mut gpui::TestAppContext) {
         // Per-window orientation defaults to Columns, flips to Rows on the
         // first toggle and back on the second. Each flip bumps data_version
         // so the auto-save observer persists the new orientation.
@@ -4678,28 +4773,25 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(
-                ws.project_layout_mode(WindowId::Main),
+                ws.grid_layout_mode(WindowId::Main),
                 ProjectLayoutMode::Columns
             );
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(
-                ws.project_layout_mode(WindowId::Main),
-                ProjectLayoutMode::Rows
-            );
+            assert_eq!(ws.grid_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
             assert_eq!(ws.data_version(), 1);
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(
-                ws.project_layout_mode(WindowId::Main),
+                ws.grid_layout_mode(WindowId::Main),
                 ProjectLayoutMode::Columns
             );
             assert_eq!(ws.data_version(), 2);
@@ -4707,7 +4799,62 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_keeps_weights_but_drops_scale(cx: &mut gpui::TestAppContext) {
+    fn each_overview_keeps_its_own_orientation(cx: &mut gpui::TestAppContext) {
+        // The two overviews hold different things in different numbers, so the
+        // orientation that suits one rarely suits the other. Flipping the
+        // agents grid must not silently restack the projects grid.
+        use crate::state::ProjectLayoutMode;
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // On the agents overview, the toggle writes to the agents orientation.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_agents_overview(WindowId::Main, true, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.grid_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
+        });
+
+        // Back on the projects overview, its own orientation is untouched.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_agents_overview(WindowId::Main, false, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(
+                ws.grid_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Columns,
+                "the projects grid was restacked by an agents-only flip"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn setting_the_orientation_to_what_it_already_is_does_nothing(cx: &mut gpui::TestAppContext) {
+        // No data_version bump, so an idempotent set does not trigger a save or
+        // a relayout of every pane.
+        use crate::state::ProjectLayoutMode;
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_grid_layout_mode(WindowId::Main, ProjectLayoutMode::Columns, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), 0);
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_grid_layout_mode(WindowId::Main, ProjectLayoutMode::Rows, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.grid_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_grid_layout_mode_keeps_weights_but_drops_scale(cx: &mut gpui::TestAppContext) {
         // Weights are axis-agnostic and survive the flip; the pixel scale is
         // pixels per unit along the old axis, so carrying it over would size
         // stacked rows by the grid's *width*.
@@ -4718,7 +4865,7 @@ mod gpui_tests {
             let mut widths = HashMap::new();
             widths.insert("p1".to_string(), 23.5);
             ws.update_project_widths_with_scale(WindowId::Main, widths, 35.4, cx);
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -4728,7 +4875,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_is_scoped_to_its_window(cx: &mut gpui::TestAppContext) {
+    fn toggle_grid_layout_mode_is_scoped_to_its_window(cx: &mut gpui::TestAppContext) {
         let extra = WindowState::default();
         let extra_id = extra.id;
         let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
@@ -4736,23 +4883,20 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.grid_layout_mode(WindowId::Main), ProjectLayoutMode::Rows);
             assert_eq!(
-                ws.project_layout_mode(WindowId::Main),
-                ProjectLayoutMode::Rows
-            );
-            assert_eq!(
-                ws.project_layout_mode(WindowId::Extra(extra_id)),
+                ws.grid_layout_mode(WindowId::Extra(extra_id)),
                 ProjectLayoutMode::Columns
             );
         });
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_keeps_canonical_splits_unchanged(cx: &mut gpui::TestAppContext) {
+    fn toggle_grid_layout_mode_keeps_canonical_splits_unchanged(cx: &mut gpui::TestAppContext) {
         // Orientation is per-window presentation; the shared daemon mirror must
         // remain canonical so a state snapshot and another window cannot fight it.
         use crate::state::SplitDirection;
@@ -4776,7 +4920,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_layout_mode(WindowId::Main, cx);
+            ws.toggle_grid_layout_mode(WindowId::Main, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
