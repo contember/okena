@@ -1343,6 +1343,7 @@ impl Render for FileViewer {
         let is_image = tab.is_image;
         let is_svg = tab.is_svg;
         let is_font = tab.is_font;
+        let is_pdf = tab.is_pdf;
         let has_revision = tab.revision.is_some();
         let file_renderer = tab.file_renderer.clone();
         let display_mode = tab.display_mode;
@@ -1350,22 +1351,15 @@ impl Render for FileViewer {
         let wrap_lines = tab.wrap_lines;
         let json_pretty = tab.json_pretty;
         let can_pretty_print = tab.json_alternate.is_some();
-        // Body view selectors. Each tab renders exactly one of these branches:
-        //   * show_image   — raster image, or SVG in Preview mode
-        //   * show_font    — font preview (sample text + metadata)
-        //   * show_md_preview — markdown rendered preview
-        //   * show_source  — text source / markdown source / SVG XML source
-        // Markdown / image / font are mutually exclusive (the loader picks
-        // one), so these four are also mutually exclusive in practice.
         let show_image = is_image && (!is_svg || is_preview_mode);
         let show_font = is_font;
         let show_md_preview = is_markdown && is_preview_mode;
-        let show_source = !show_image && !show_font && !show_md_preview;
+        let show_source = !show_image && !show_font && !is_pdf && !show_md_preview;
         // Whether the header should expose the Preview/Source toggle.
         let supports_view_toggle = is_markdown || is_svg;
         let sidebar_visible = self.sidebar_visible;
         let history_available =
-            self.history_provider.is_some() && has_file && !is_image && !is_font;
+            self.history_provider.is_some() && has_file && !is_image && !is_font && !is_pdf;
         let history_visible = self.history_visible && history_available;
         let show_tabs = self.tabs.len() > 1;
 
@@ -1518,6 +1512,7 @@ impl Render for FileViewer {
                 let is_img = tab.is_image;
                 let is_svg_tab = tab.is_svg;
                 let is_font_tab = tab.is_font;
+                let is_pdf_tab = tab.is_pdf;
                 // SVG in preview mode behaves like a raster image (no source).
                 // In source mode the highlighted XML is shown, so selection
                 // / search / copy / select-all all work normally.
@@ -1525,11 +1520,11 @@ impl Render for FileViewer {
                 // Image-zoom chords only apply when the user is actually
                 // looking at the image (SVG in Source mode shows XML; we
                 // don't want Cmd+= to silently zoom a hidden preview).
-                let img_zoom_chord = is_img_view;
+                let img_zoom_chord = is_img_view || is_pdf_tab;
 
                 match key {
                     "f" if (modifiers.platform || modifiers.control)
-                        && !is_preview && !is_img_view && !is_font_tab => {
+                        && !is_preview && !is_img_view && !is_font_tab && !is_pdf_tab => {
                             this.open_search(window, cx);
                         }
                     "tab" if (is_md || is_svg_tab) && !modifiers.control && !modifiers.shift => {
@@ -1542,7 +1537,7 @@ impl Render for FileViewer {
                         this.next_tab(cx);
                     }
                     "b" if (modifiers.platform || modifiers.control) && modifiers.alt
-                        && this.blame_provider.is_some() => {
+                        && this.blame_provider.is_some() && !is_pdf_tab => {
                             this.toggle_blame(cx);
                             let visible = this.blame_visible();
                             cx.emit(super::FileViewerEvent::BlamePreferenceChanged(visible));
@@ -1550,11 +1545,11 @@ impl Render for FileViewer {
                     "b" if !modifiers.platform && !modifiers.control => {
                         this.toggle_sidebar(cx);
                     }
-                    "z" if modifiers.alt && !is_preview && !is_img_view && !is_font_tab => {
+                    "z" if modifiers.alt && !is_preview && !is_img_view && !is_font_tab && !is_pdf_tab => {
                         this.toggle_line_wrap(cx);
                     }
                     "c" if modifiers.platform || modifiers.control => {
-                        if is_img_view || is_font_tab {
+                        if is_img_view || is_font_tab || is_pdf_tab {
                             // No text selection while previewing an image or font.
                         } else if is_preview {
                             this.copy_markdown_selection(cx);
@@ -1563,7 +1558,7 @@ impl Render for FileViewer {
                         }
                     }
                     "a" if modifiers.platform || modifiers.control => {
-                        if is_img_view || is_font_tab {
+                        if is_img_view || is_font_tab || is_pdf_tab {
                             // Nothing to select.
                         } else if is_preview {
                             this.select_all_markdown(cx);
@@ -1582,6 +1577,12 @@ impl Render for FileViewer {
                     }
                     "-" if (modifiers.platform || modifiers.control) && img_zoom_chord => {
                         this.image_zoom_by(1.0 / 1.25, cx);
+                    }
+                    "pageup" | "pagedown" if is_pdf_tab && !modifiers.platform && !modifiers.control && !modifiers.alt => {
+                        if let Some(renderer) = this.active_tab().file_renderer.clone() {
+                            let delta = if key == "pageup" { -1 } else { 1 };
+                            renderer.update(cx, |renderer, cx| renderer.change_pdf_page(delta, cx));
+                        }
                     }
                     "r" if !modifiers.platform && !modifiers.control => {
                         this.refresh_file_tree_async(cx);
@@ -1794,7 +1795,7 @@ impl Render for FileViewer {
                                             .child(source_action_label),
                                     ),
                             ))
-                            .when(self.blame_provider.is_some() && !is_image && !is_font && !has_revision, |d| {
+                            .when(self.blame_provider.is_some() && !is_image && !is_font && !is_pdf && !has_revision, |d| {
                                 let on = self.blame_visible;
                                 d.child(
                                     div()
@@ -2094,7 +2095,7 @@ impl Render for FileViewer {
                                 )
                             })
                             .when(
-                                !tab_loading && !has_error && (show_image || show_font),
+                                !tab_loading && !has_error && (show_image || show_font || is_pdf),
                                 |d| {
                                     d.when_some(file_renderer.clone(), |d, renderer| {
                                         d.child(renderer)

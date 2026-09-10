@@ -41,6 +41,7 @@ impl FileViewer {
         if tab.is_empty()
             || tab.is_image
             || tab.is_font
+            || tab.is_pdf
             || matches!(
                 tab.history,
                 FileHistoryLoadState::Loading | FileHistoryLoadState::Loaded(_)
@@ -165,6 +166,17 @@ impl FileViewer {
         tab.selection.clear();
         tab.markdown_selection.clear();
         tab.blame = BlameLoadState::NotLoaded;
+        if tab.is_pdf {
+            tab.apply_loaded_content(
+                Err("PDF previews of historical revisions are not supported yet".to_string()),
+                None,
+                &syntax_set,
+                is_dark,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         cx.notify();
 
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {

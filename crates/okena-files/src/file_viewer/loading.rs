@@ -129,15 +129,7 @@ fn pretty_json_preserving_order(source: &str) -> Option<String> {
     Some(output)
 }
 
-pub(super) fn build_image_content(
-    path: &Path,
-    bytes: Vec<u8>,
-    svg_renderer: &SvgRenderer,
-) -> Result<LoadedContent, String> {
-    FileRenderer::prepare(path, bytes, svg_renderer).map(LoadedContent::Rendered)
-}
-
-pub(super) fn build_font_content(
+pub(super) fn build_rendered_content(
     path: &Path,
     bytes: Vec<u8>,
     svg_renderer: &SvgRenderer,
