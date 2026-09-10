@@ -682,6 +682,7 @@ pub fn execute_action(
             root,
             project_ids,
             agent_command,
+            task,
         } => tasks::start_custom_session(
             ws,
             window_id,
@@ -690,6 +691,7 @@ pub fn execute_action(
             root,
             project_ids,
             agent_command,
+            task,
             backend,
             terminals,
             settings,
@@ -731,6 +733,26 @@ pub fn execute_action(
         }
         ActionRequest::TasksDisconnect { provider } => tasks::disconnect(provider),
         ActionRequest::TasksList { provider } => tasks::list(provider),
+        ActionRequest::TaskContainers { provider } => tasks::containers(provider),
+        ActionRequest::TaskCreate {
+            provider,
+            title,
+            description,
+            kind,
+            parent_external_id,
+            container_id,
+        } => tasks::create(
+            provider,
+            title,
+            description,
+            kind,
+            parent_external_id,
+            container_id,
+        ),
+        ActionRequest::TaskChildren {
+            provider,
+            task_external_id,
+        } => tasks::children(provider, task_external_id),
         ActionRequest::TaskStartWork {
             provider,
             task_external_id,

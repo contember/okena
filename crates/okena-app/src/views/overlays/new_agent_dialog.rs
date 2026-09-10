@@ -142,6 +142,8 @@ impl NewAgentDialog {
                         root,
                         project_ids,
                         agent_command,
+                        // Started from the sidebar, not from a task.
+                        task: None,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))
             })

@@ -95,6 +95,55 @@ pub enum TaskError {
         provider: &'static str,
         message: String,
     },
+    /// The provider has no concept of what was asked, or okena has not taught
+    /// it yet. Distinct from a failure: nothing went wrong and retrying will
+    /// not help, so the UI hides the affordance rather than showing an error.
+    #[error("{provider} does not support {what}")]
+    Unsupported {
+        provider: &'static str,
+        what: &'static str,
+    },
+    /// The request was well-formed but the caller has to decide something
+    /// first — most often which team or project a new task belongs to.
+    #[error("{message}")]
+    NeedsChoice { message: String },
+}
+
+/// Where tasks live on a provider: a Linear team, an Azure DevOps project.
+///
+/// Named for what it does rather than after any one provider's word for it,
+/// since the next backend will call it something else again.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskContainer {
+    pub id: String,
+    pub name: String,
+    /// Short prefix the provider puts on keys, e.g. `QBL`. Empty when it has
+    /// no such notion.
+    #[serde(default)]
+    pub key: String,
+}
+
+/// A task to be created.
+///
+/// Deliberately not a `Task`: a draft has no id, key, url or state, and
+/// modelling it as a half-filled `Task` would put five meaningless fields in
+/// front of every caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskDraft {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where it sits in the breakdown. Providers map this onto whatever they
+    /// have — Linear has no native kind, so okena carries it as a label.
+    #[serde(default)]
+    pub kind: okena_core::tasks::TaskKind,
+    /// Parent's provider id, when this is a sub-task. A child inherits its
+    /// parent's container, so `container_id` is ignored when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_external_id: Option<String>,
+    /// Which team or project to create it in. Ignored for a sub-task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
 }
 
 /// A task source. Implementations are expected to be cheap to construct and
@@ -117,6 +166,42 @@ pub trait TaskProvider: Send + Sync {
     /// onto one of their own workflow states; when a team has several states in
     /// the same category the provider picks its canonical one.
     fn set_state(&self, id: &TaskId, state: TaskState) -> Result<(), TaskError>;
+
+    /// Teams or projects the authenticated user can file tasks in.
+    ///
+    /// Only needed to create a top-level task; a sub-task inherits its
+    /// parent's. Providers that cannot enumerate them say so, and the UI then
+    /// offers sub-tasks only.
+    fn list_containers(&self) -> Result<Vec<TaskContainer>, TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "listing teams",
+        })
+    }
+
+    /// Create a task and return it as the provider now sees it.
+    ///
+    /// Returns the created task rather than an id so the caller can show it
+    /// without a second round-trip — and so the key, url and branch name the
+    /// provider assigns are the provider's, not a guess.
+    fn create_task(&self, _draft: &TaskDraft) -> Result<Task, TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "creating tasks",
+        })
+    }
+
+    /// Sub-tasks of `id`, whether or not they are assigned to the user.
+    ///
+    /// Distinct from `list_assigned`, which is a personal work queue: breaking
+    /// a task down means seeing every child, including ones assigned to
+    /// somebody else or to nobody.
+    fn list_children(&self, _id: &TaskId) -> Result<Vec<Task>, TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "listing sub-tasks",
+        })
+    }
 
     /// Branch name to use when starting a worktree for `task`.
     ///

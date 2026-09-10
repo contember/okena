@@ -100,6 +100,20 @@ impl TaskKind {
 
     /// Broadest first, so a task carrying both `epic` and `story` labels reads
     /// as the wider one rather than depending on label order.
+    /// Stable lowercase name used on the wire and by agents.
+    ///
+    /// Separate from `label`, which is for reading: a display string that
+    /// changed would silently change the protocol.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            TaskKind::Epic => "epic",
+            TaskKind::Feature => "feature",
+            TaskKind::Story => "story",
+            TaskKind::Defect => "defect",
+            TaskKind::Task => "task",
+        }
+    }
+
     pub const fn all() -> [TaskKind; 5] {
         [
             TaskKind::Epic,

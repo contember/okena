@@ -108,6 +108,85 @@ pub(super) fn disconnect(provider: String) -> ActionResult {
     }
 }
 
+/// Teams or projects the user can file a new task in.
+pub(super) fn containers(provider: String) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    match p.list_containers() {
+        Ok(list) => match serde_json::to_value(&list) {
+            Ok(v) => ActionResult::Ok(Some(serde_json::json!({ "containers": v }))),
+            Err(e) => ActionResult::Err(format!("could not serialize teams: {e}")),
+        },
+        Err(e) => ActionResult::Err(describe(e)),
+    }
+}
+
+/// Create a task, optionally as a child of another.
+pub(super) fn create(
+    provider: String,
+    title: String,
+    description: String,
+    kind: String,
+    parent_external_id: Option<String>,
+    container_id: Option<String>,
+) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let description = description.trim().to_string();
+    let draft = okena_tasks::provider::TaskDraft {
+        title,
+        // Empty means "no body", not an empty body — the provider should not
+        // be asked to store a blank description.
+        description: (!description.is_empty()).then_some(description),
+        kind: parse_kind(&kind),
+        parent_external_id,
+        container_id,
+    };
+    match p.create_task(&draft) {
+        Ok(task) => match serde_json::to_value(&task) {
+            Ok(v) => ActionResult::Ok(Some(v)),
+            Err(e) => ActionResult::Err(format!("could not serialize the new task: {e}")),
+        },
+        Err(e) => ActionResult::Err(describe(e)),
+    }
+}
+
+/// Sub-tasks of a task, whoever they are assigned to.
+pub(super) fn children(provider: String, task_external_id: String) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let id = okena_core::tasks::TaskId::new(provider, task_external_id);
+    match p.list_children(&id) {
+        Ok(tasks) => match serde_json::to_value(&tasks) {
+            Ok(v) => ActionResult::Ok(Some(serde_json::json!({ "tasks": v }))),
+            Err(e) => ActionResult::Err(format!("could not serialize sub-tasks: {e}")),
+        },
+        Err(e) => ActionResult::Err(describe(e)),
+    }
+}
+
+/// Read a kind off the wire.
+///
+/// Unknown values fall back to `Task` rather than failing: a newer client — or
+/// an agent guessing — asking for a kind this build does not model should still
+/// get a task, not an error.
+pub(super) fn parse_kind(raw: &str) -> okena_core::tasks::TaskKind {
+    use okena_core::tasks::TaskKind;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "epic" | "initiative" => TaskKind::Epic,
+        "feature" => TaskKind::Feature,
+        "story" | "user story" => TaskKind::Story,
+        "defect" | "bug" | "fix" | "hotfix" => TaskKind::Defect,
+        _ => TaskKind::Task,
+    }
+}
+
 /// Tasks assigned to the authenticated user.
 pub(super) fn list(provider: String) -> ActionResult {
     let p = match resolve(&provider) {
@@ -751,6 +830,7 @@ pub(super) fn start_custom_session(
     root: String,
     project_ids: Vec<String>,
     agent_command: Option<String>,
+    task: Option<okena_core::tasks::TaskRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -801,6 +881,10 @@ pub(super) fn start_custom_session(
     // first snapshot the client sees.
     if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
         p.custom_session = Some(label.clone());
+        // Both markers: it is a free-form session (so it gets no worktrees and
+        // does not read as work in progress) that is nonetheless about a task,
+        // so the task can list it and the agent's own MCP calls resolve it.
+        p.task_ref = task;
     }
 
     let brief = custom_brief(&goal, &context);
@@ -1316,5 +1400,43 @@ mod custom_session_tests {
     #[test]
     fn a_brief_without_projects_is_just_the_goal() {
         assert_eq!(custom_brief("Do the thing", &[]), "Do the thing");
+    }
+}
+
+#[cfg(test)]
+mod kind_wire_tests {
+    use super::parse_kind;
+    use okena_core::tasks::TaskKind;
+
+    #[test]
+    fn every_kind_round_trips_through_its_wire_name() {
+        // The UI and the MCP tools both send `wire_name`, so a kind that does
+        // not survive the trip is silently created as a plain task.
+        for kind in TaskKind::all() {
+            assert_eq!(parse_kind(kind.wire_name()), kind, "{:?}", kind);
+        }
+    }
+
+    #[test]
+    fn a_providers_own_vocabulary_is_accepted() {
+        // Agents and humans write "bug", not "defect".
+        assert_eq!(parse_kind("bug"), TaskKind::Defect);
+        assert_eq!(parse_kind("hotfix"), TaskKind::Defect);
+        assert_eq!(parse_kind("initiative"), TaskKind::Epic);
+        assert_eq!(parse_kind("user story"), TaskKind::Story);
+    }
+
+    #[test]
+    fn matching_ignores_case_and_padding() {
+        assert_eq!(parse_kind("  Epic "), TaskKind::Epic);
+        assert_eq!(parse_kind("FEATURE"), TaskKind::Feature);
+    }
+
+    #[test]
+    fn an_unknown_kind_becomes_a_task_rather_than_an_error() {
+        // A newer client, or an agent guessing, should still get a task —
+        // refusing the whole creation over a label would be the wrong trade.
+        assert_eq!(parse_kind("spike"), TaskKind::Task);
+        assert_eq!(parse_kind(""), TaskKind::Task);
     }
 }

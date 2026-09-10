@@ -914,7 +914,7 @@ impl OverlayManager {
                         this.close_modal(cx);
                     }
                     SessionManagerEvent::Action(action) => {
-                        cx.emit(OverlayManagerEvent::SessionAction(action.clone()));
+                        cx.emit(OverlayManagerEvent::SessionAction((**action).clone()));
                         // Load/import close the manager (state swaps); save/export
                         // are quick fire-and-forget — close in all cases.
                         this.close_modal(cx);

@@ -1951,6 +1951,31 @@ mod tests {
     }
 
     #[test]
+    fn a_session_about_a_task_is_still_a_free_form_session() {
+        // An agent asked to break a task down carries both markers: the task
+        // link so the task can list it, and the custom marker so it is not
+        // mistaken for work on the task. Reading it as a task session would
+        // give it worktrees it should not have and move the task out of Todo.
+        let p: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "s1",
+            "name": "QBL-1 breakdown (agent)",
+            "path": "/p",
+            "custom_session": "QBL-1 breakdown",
+            "task_ref": {
+                "id": { "provider": "linear", "external_id": "u1" },
+                "display_key": "QBL-1", "title": "t", "url": "http://x",
+            },
+        }))
+        .unwrap();
+        assert!(p.is_custom_session());
+        assert!(p.is_any_agent_session());
+        assert!(
+            p.task_ref.is_some(),
+            "the link is what lets the task list it"
+        );
+    }
+
+    #[test]
     fn a_plain_project_is_neither_kind_of_session() {
         let p: ProjectData = serde_json::from_value(serde_json::json!({
             "id": "p1",

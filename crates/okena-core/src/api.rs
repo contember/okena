@@ -1137,6 +1137,34 @@ pub enum ActionRequest {
     TasksList {
         provider: String,
     },
+    /// Teams or projects the user can file a new task in.
+    TaskContainers {
+        provider: String,
+    },
+    /// Create a task, optionally as a child of another.
+    ///
+    /// `kind` is one of `epic` / `feature` / `story` / `defect` / `task`;
+    /// unknown values fall back to `task` rather than failing, so a newer
+    /// client asking an older daemon still gets a task.
+    TaskCreate {
+        provider: String,
+        title: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        kind: String,
+        /// Parent's provider id. A child inherits the parent's team, so
+        /// `container_id` is ignored when this is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_external_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        container_id: Option<String>,
+    },
+    /// Sub-tasks of a task, whoever they are assigned to.
+    TaskChildren {
+        provider: String,
+        task_external_id: String,
+    },
     /// Start work on a task across one or more projects.
     ///
     /// Creates a worktree on the provider's branch name in every project in
@@ -1213,6 +1241,13 @@ pub enum ActionRequest {
         /// empty string opens the session on a plain shell.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Task this session is about, when it was started from one.
+        ///
+        /// Links the session to the task without making it a *work* session:
+        /// an agent breaking a task down is not doing the task, so it gets no
+        /// worktrees and must not move the task into "in progress".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<crate::tasks::TaskRef>,
     },
     // ─── Engineering harness: OpenSpec ────────────────────────────────────
     //

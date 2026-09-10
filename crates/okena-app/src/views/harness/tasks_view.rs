@@ -208,6 +208,14 @@ pub(super) struct TaskLinks {
     pub session: Option<String>,
     /// Sessions running a detected coding agent.
     pub agents_running: usize,
+    /// Sessions started *about* this task rather than to do it — an agent
+    /// breaking it down, say. `(project_id, name)`.
+    ///
+    /// Kept apart from `session` because they answer different questions:
+    /// one is where the work is happening, the other is who is helping think
+    /// about it. Counting a helper as work would move the task into "in
+    /// progress" the moment you asked an agent for a breakdown.
+    pub helpers: Vec<(String, String)>,
 }
 
 /// What okena knows about the sessions linked to one task.
@@ -318,6 +326,12 @@ impl HarnessPane {
                         Ok(tasks) => {
                             this.tasks.tasks = tasks;
                             this.tasks.error = None;
+                            // Children may have been created since — by an
+                            // agent through MCP, or by someone else entirely —
+                            // so a refresh drops what was cached rather than
+                            // showing a breakdown that is missing its newest
+                            // half.
+                            this.tasks.children.clear();
                             // Drop a selection whose task is gone — closed,
                             // reassigned, or filtered out by the provider.
                             // Leaving it would show detail for a task no
@@ -596,6 +610,16 @@ impl HarnessPane {
             if !linked {
                 continue;
             }
+            // A free-form session carries a task link so the task can list it,
+            // but it is not work on the task: no worktrees, and it must not
+            // move the task out of Todo.
+            if project.is_custom_session() {
+                links
+                    .helpers
+                    .push((project.id.clone(), project.name.clone()));
+                continue;
+            }
+
             links.signals.linked = true;
 
             // The agent session spans every repo, so it is the better landing
@@ -658,6 +682,127 @@ impl HarnessPane {
             }
         }
         links
+    }
+
+    /// Select a task and make sure its children are on the way.
+    ///
+    /// Every path into the detail pane goes through here, so a task reached by
+    /// clicking its parent gets the same treatment as one clicked in the list.
+    pub(super) fn select_task(&mut self, external_id: String, cx: &mut Context<Self>) {
+        self.tasks.selected = Some(external_id.clone());
+        self.fetch_children(external_id, cx);
+        cx.notify();
+    }
+
+    /// Any task okena currently knows about, by provider id.
+    ///
+    /// Looks past the user's own queue into the fetched children: a sub-task
+    /// assigned to somebody else is still one you can open from its parent,
+    /// and refusing to show it would make the hierarchy a dead end.
+    pub(super) fn known_task(&self, external_id: &str) -> Option<Task> {
+        self.tasks
+            .tasks
+            .iter()
+            .chain(self.tasks.children.values().flatten())
+            .find(|t| t.id.external_id == external_id)
+            .cloned()
+    }
+
+    /// Read a task's sub-tasks, once.
+    fn fetch_children(&mut self, external_id: String, cx: &mut Context<Self>) {
+        if self.tasks.children.contains_key(&external_id)
+            || self.tasks.children_loading.as_deref() == Some(external_id.as_str())
+        {
+            return;
+        }
+        self.tasks.children_loading = Some(external_id.clone());
+
+        let client = self.client.clone();
+        let provider = self.tasks.provider.clone();
+        let key = external_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::TaskChildren {
+                        provider,
+                        task_external_id: external_id,
+                    })
+                    .and_then(|v| v.ok_or_else(|| "Missing sub-tasks".to_string()))
+                    .map(|v| {
+                        v.get("tasks")
+                            .and_then(|t| serde_json::from_value::<Vec<Task>>(t.clone()).ok())
+                            .unwrap_or_default()
+                    })
+            })
+            .await;
+
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.tasks.children_loading = None;
+                    // Cache the empty answer too: a leaf task should not be
+                    // asked about again every time it is selected.
+                    this.tasks.children.insert(key, result.unwrap_or_default());
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// A clickable row for a task in the hierarchy section.
+    fn render_related_task(&self, task: &Task, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let id = task.id.external_id.clone();
+        let state_label = if task.state_name.is_empty() {
+            "—".to_string()
+        } else {
+            task.state_name.clone()
+        };
+        v_flex()
+            .id(SharedString::from(format!(
+                "related-{}",
+                task.id.external_id
+            )))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .gap(px(3.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(task.display_key.clone()),
+                    )
+                    .child(self.chip(task.kind.label().to_string(), kind_color(task.kind, &t), cx))
+                    .child(self.chip(state_label, state_color(task.state, &t), cx)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(task.title.clone()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.select_task(id.clone(), cx);
+                }),
+            )
+            .into_any_element()
     }
 
     /// Group the loaded tasks into board lanes.
@@ -842,13 +987,7 @@ impl HarnessPane {
             .tasks
             .selected
             .as_ref()
-            .and_then(|id| {
-                self.tasks
-                    .tasks
-                    .iter()
-                    .find(|task| &task.id.external_id == id)
-            })
-            .cloned();
+            .and_then(|id| self.known_task(id));
 
         let Some(task) = selected else {
             return v_flex()
@@ -929,6 +1068,10 @@ impl HarnessPane {
                 ),
         };
 
+        let task_for_agent = task.clone();
+        let starting_breakdown =
+            self.tasks.breaking_down.as_deref() == Some(task.id.external_id.as_str());
+
         let mut body = v_flex()
             .id("task-detail-body")
             .flex_1()
@@ -959,14 +1102,96 @@ impl HarnessPane {
             )
             .child(action);
 
-        if let Some(parent) = task.parent_key.as_ref() {
-            body = body.child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(format!("Sub-task of {parent}")),
-            );
+        // Where it sits in the breakdown. The parent is clickable when okena
+        // knows it; when it does not — a parent assigned to somebody else and
+        // never fetched — the key still says what it is.
+        if let Some(parent_id) = task.parent_id.as_ref() {
+            body = body.child(self.detail_label("PARENT", cx));
+            match self.known_task(parent_id) {
+                Some(parent) => body = body.child(self.render_related_task(&parent, cx)),
+                None => {
+                    body = body.child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(
+                                task.parent_key
+                                    .clone()
+                                    .unwrap_or_else(|| "A parent task".to_string()),
+                            ),
+                    );
+                }
+            }
         }
+
+        let children = self.tasks.children.get(&task.id.external_id);
+        let loading_children =
+            self.tasks.children_loading.as_deref() == Some(task.id.external_id.as_str());
+        body = body.child(self.detail_label_with_count("SUB-TASKS", children.map(|c| c.len()), cx));
+        match children {
+            Some(list) if !list.is_empty() => {
+                for child in list {
+                    body = body.child(self.render_related_task(child, cx));
+                }
+            }
+            Some(_) => {
+                body = body.child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("None yet — break it down, or add one."),
+                );
+            }
+            None => {
+                body = body.child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(if loading_children {
+                            "Loading…"
+                        } else {
+                            "Not loaded."
+                        }),
+                );
+            }
+        }
+
+        // The breakdown control belongs to the list it acts on, so it sits at
+        // the foot of it. One slot, four states: open the agent that exists,
+        // wait for the one starting, or start one — worded for whether there
+        // is anything to refine.
+        let has_children = children.is_some_and(|c| !c.is_empty());
+        body = body.child(match links.helpers.first() {
+            Some((id, _)) => {
+                let open_id = id.clone();
+                self.small_button(
+                    "detail-open-breakdown",
+                    "Open breakdown agent",
+                    cx.listener(move |this, _, _window, cx| {
+                        this.open_session(open_id.clone(), cx);
+                    }),
+                    cx,
+                )
+            }
+            None if starting_breakdown => {
+                self.small_button("detail-break-down", "Starting…", |_, _, _| {}, cx)
+            }
+            None => self.small_button(
+                "detail-break-down",
+                if has_children {
+                    // Same agent, same tools: it lists what exists before
+                    // adding, so refining is breaking down again with the
+                    // children already there.
+                    "Refine sub-tasks"
+                } else {
+                    "Break down with agent"
+                },
+                cx.listener(move |this, _, _window, cx| {
+                    this.break_down_with_agent(&task_for_agent, cx);
+                }),
+                cx,
+            ),
+        });
 
         body = body
             .child(self.detail_label("BRANCH", cx))
@@ -1012,20 +1237,45 @@ impl HarnessPane {
                 id,
             )
         });
-        match &session_info {
-            Some(info) => body = body.child(self.render_session_facts(info, cx)),
-            None => {
-                body = body.child(self.detail_label("IN OKENA", cx)).child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child(if links.signals.linked {
-                            "A worktree exists, with no agent session."
-                        } else {
-                            "No worktree or session yet."
-                        }),
-                );
+        // One list for every agent on this task, whatever it is doing. They
+        // were two sections — the helper's name in one, the work session's
+        // chips in another — which made the same question ("what is running
+        // for this task?") take two places to answer.
+        let mut agents: Vec<(String, bool)> = Vec::new();
+        if let Some(id) = links.session.clone() {
+            agents.push((id, true));
+        }
+        agents.extend(links.helpers.iter().map(|(id, _)| (id.clone(), false)));
+
+        if agents.is_empty() {
+            body = body.child(self.detail_label("IN OKENA", cx)).child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(if links.signals.linked {
+                        "A worktree exists, with no agent session."
+                    } else {
+                        "No worktree or session yet."
+                    }),
+            );
+        } else {
+            body = body.child(self.detail_label("AGENTS", cx));
+            for (id, is_work) in &agents {
+                let Some(info) = crate::views::agent_session::AgentSessionInfo::collect(
+                    self.workspace.read(cx),
+                    &self.terminals,
+                    id,
+                ) else {
+                    continue;
+                };
+                body = body.child(self.render_agent_row(&info, *is_work, cx));
             }
+        }
+
+        // Checkouts and output belong to the session doing the work; a
+        // breakdown agent has neither.
+        if let Some(info) = session_info.as_ref() {
+            body = body.child(self.render_session_facts(info, cx));
         }
 
         if let Some(description) = task
@@ -1053,21 +1303,22 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// What okena's own session for this task is doing.
+    /// One agent working on this task: what it is, how it is doing, and a way
+    /// into it.
     ///
-    /// Read through the shared `AgentSessionInfo`, so this says exactly what
-    /// the session's own panel says rather than a second derivation of it.
-    /// Shown only where the task detail does not already cover it: the task
-    /// itself is above, so this is the session, its checkouts and its output.
-    fn render_session_facts(
+    /// `is_work` separates the agent doing the task from one started about it —
+    /// a breakdown, say. Both belong in the list, but conflating them would
+    /// make "is anyone working on this?" unanswerable.
+    fn render_agent_row(
         &self,
         info: &crate::views::agent_session::AgentSessionInfo,
+        is_work: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
 
-        // Terminal state, not the agent's claim: an agent that stopped
-        // reporting still shows as waiting when its prompt is waiting.
+        // Terminal state, not the agent's claim: one that stopped reporting
+        // still shows as waiting when its prompt is waiting.
         let (status_color, status) = if !info.running {
             (t.text_muted, "stopped".to_string())
         } else if info.waiting {
@@ -1083,33 +1334,84 @@ impl HarnessPane {
             (t.success, "running".to_string())
         };
 
-        let mut chips = vec![self.chip(status, status_color, cx)];
+        let mut chips = vec![
+            self.chip(
+                if is_work { "work" } else { "breakdown" }.to_string(),
+                if is_work {
+                    t.button_primary_bg
+                } else {
+                    t.warning
+                },
+                cx,
+            ),
+            self.chip(status, status_color, cx),
+        ];
         if let Some(agent) = &info.agent {
             chips.push(self.chip(agent.clone(), t.text_secondary, cx));
         }
         if !info.mcp {
-            // Explains a permanently empty PRODUCED list: the agent was never
-            // handed okena's MCP, so it cannot report anything.
+            // Explains a permanently empty PRODUCED list, and for a breakdown
+            // agent it explains why no sub-tasks are appearing.
             chips.push(self.chip("no okena mcp".to_string(), t.text_muted, cx));
         }
 
-        let mut out = v_flex()
-            .gap(px(6.0))
-            .child(self.detail_label("AGENT SESSION", cx))
-            .child(h_flex().gap(px(4.0)).flex_wrap().children(chips));
-
-        if let Some(reported) = &info.status {
-            out = out.child(
+        let open_id = info.project_id.clone();
+        v_flex()
+            .id(SharedString::from(format!(
+                "task-agent-{}",
+                info.project_id
+            )))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .gap(px(3.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
                 div()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(with_alpha(t.success, 0.1))
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_primary))
-                    .child(format!("“{reported}”")),
-            );
-        }
+                    .child(info.name.clone()),
+            )
+            .child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
+            .children(info.status.clone().map(|reported| {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(format!("\u{201c}{reported}\u{201d}"))
+                    .into_any_element()
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.open_session(open_id.clone(), cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// What okena's own session for this task is doing.
+    ///
+    /// Read through the shared `AgentSessionInfo`, so this says exactly what
+    /// the session's own panel says rather than a second derivation of it.
+    /// The session's own state is in the AGENTS list above; this is what the
+    /// work left behind — its checkouts and its output.
+    fn render_session_facts(
+        &self,
+        info: &crate::views::agent_session::AgentSessionInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let mut out = v_flex().gap(px(6.0));
 
         out = out.child(self.detail_label("WORKTREES", cx));
         if info.workspaces.is_empty() {
@@ -1184,6 +1486,34 @@ impl HarnessPane {
         }
 
         out.into_any_element()
+    }
+
+    /// A heading with a count beside it, when there is one to give.
+    fn detail_label_with_count(
+        &self,
+        label: &'static str,
+        count: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .items_center()
+            .justify_between()
+            .pt(px(6.0))
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(label),
+            )
+            .children(count.map(|n| {
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(format!("{n}"))
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn detail_label(&self, label: &'static str, cx: &Context<Self>) -> AnyElement {
@@ -1297,8 +1627,7 @@ impl HarnessPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
-                    this.tasks.selected = Some(select_id.clone());
-                    cx.notify();
+                    this.select_task(select_id.clone(), cx);
                 }),
             )
             .when(depth > 0, |d| {
@@ -1728,6 +2057,12 @@ impl HarnessPane {
                 .child(account_label)
                 .into_any_element(),
             self.small_button(
+                "tasks-new",
+                "New task",
+                cx.listener(|this, _, _window, cx| this.open_new_task(cx)),
+                cx,
+            ),
+            self.small_button(
                 "tasks-refresh",
                 if loading { "Refreshing…" } else { "Refresh" },
                 cx.listener(|this, _, _window, cx| this.refresh_tasks(cx)),
@@ -1744,6 +2079,17 @@ impl HarnessPane {
                 cx,
             ),
         ];
+
+        // The form takes the whole view while it is open, the way drafting a
+        // spec replaces the Specs view: filling it in is a different job from
+        // scanning the board.
+        if self.tasks.new_task.is_some() {
+            return v_flex()
+                .size_full()
+                .child(self.render_toolbar(actions, cx))
+                .child(self.render_new_task_form(cx))
+                .into_any_element();
+        }
 
         v_flex()
             .size_full()

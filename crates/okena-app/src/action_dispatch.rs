@@ -967,12 +967,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             root,
             project_ids,
             agent_command,
+            task,
         } => ActionRequest::AgentStartSession {
             goal,
             name,
             root,
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
             agent_command,
+            task,
         },
         // Spec actions carry no ids — root keys and paths are the daemon's
         // own, discovered and checked on its side.
@@ -1005,6 +1007,31 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             idea,
             name,
             agent_command,
+        },
+        // Task actions carry provider ids, not okena ids, so they cross
+        // unchanged.
+        ActionRequest::TaskContainers { provider } => ActionRequest::TaskContainers { provider },
+        ActionRequest::TaskCreate {
+            provider,
+            title,
+            description,
+            kind,
+            parent_external_id,
+            container_id,
+        } => ActionRequest::TaskCreate {
+            provider,
+            title,
+            description,
+            kind,
+            parent_external_id,
+            container_id,
+        },
+        ActionRequest::TaskChildren {
+            provider,
+            task_external_id,
+        } => ActionRequest::TaskChildren {
+            provider,
+            task_external_id,
         },
         ActionRequest::TasksAuthStatus => ActionRequest::TasksAuthStatus,
         ActionRequest::TasksConnectApiKey { provider, api_key } => {

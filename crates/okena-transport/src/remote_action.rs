@@ -76,9 +76,14 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // timeout is 20 s, so the fast bucket would abandon the request before
         // the provider had given up — reporting a transport failure for what is
         // really a slow API.
-        ActionRequest::TasksList { .. } | ActionRequest::TasksConnectApiKey { .. } => {
-            ActionClientKind::Search
-        }
+        ActionRequest::TasksList { .. }
+        | ActionRequest::TasksConnectApiKey { .. }
+        // Creating a task is several round-trips — resolve the team, resolve
+        // or create the kind label, then the mutation — so it needs the same
+        // budget as the reads.
+        | ActionRequest::TaskContainers { .. }
+        | ActionRequest::TaskCreate { .. }
+        | ActionRequest::TaskChildren { .. } => ActionClientKind::Search,
         _ => ActionClientKind::Fast,
     }
 }
