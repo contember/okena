@@ -1,8 +1,7 @@
-//! Shared chrome plus the still-stubbed views.
+//! Chrome shared by every harness view, and the per-section dispatch.
 //!
-//! Tasks and Specs are implemented in their own modules; Knowledge remains a
-//! placeholder that states what will live there rather than inventing content
-//! that looks real.
+//! Tasks, Specs and Knowledge live in their own modules; this file holds the
+//! toolbar, banners and buttons they all wear.
 
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm};
@@ -94,9 +93,9 @@ impl HarnessPane {
     /// The toolbar every harness view wears.
     ///
     /// One shape for all of them — the view's name on the left, its own
-    /// controls on the right — so moving between Projects, Tasks and Specs does
-    /// not mean relearning where things are. Views differ only in what they put
-    /// in `actions`.
+    /// controls on the right — so moving between Tasks, Specs and Knowledge
+    /// does not mean relearning where things are. Views differ only in what
+    /// they put in `actions`.
     pub(super) fn render_toolbar(
         &self,
         actions: Vec<AnyElement>,
@@ -168,46 +167,17 @@ impl HarnessPane {
             );
         });
     }
-
-    /// Placeholder body for a view that isn't built yet.
-    fn render_stub(&self, section: HarnessSection, cx: &Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let lines: Vec<&str> = match section {
-            HarnessSection::Knowledge => vec![
-                "Collections of skills, technical designs and feature docs.",
-                "Git-backed, with PR / branch support for changes.",
-            ],
-            // These are real views; they never reach here.
-            HarnessSection::Tasks | HarnessSection::Specs => vec![],
-        };
-
-        v_flex()
-            .p(px(16.0))
-            .gap(px(6.0))
-            .child(
-                div()
-                    .text_size(ui_text(13.0, cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(section.blurb()),
-            )
-            .children(lines.into_iter().map(|l| {
-                div()
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(format!("• {l}"))
-                    .into_any_element()
-            }))
-            .into_any_element()
-    }
 }
 
 impl Render for HarnessPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        // Exhaustive on purpose: a new section must choose its view here rather
+        // than silently falling through to a placeholder.
         let body = match self.section {
             HarnessSection::Tasks => self.render_tasks_view(cx),
             HarnessSection::Specs => self.render_specs_view(cx),
-            other => self.render_stub(other, cx),
+            HarnessSection::Knowledge => self.render_knowledge_view(cx),
         };
 
         // No title bar and no close button: the sidebar's HARNESS nav already

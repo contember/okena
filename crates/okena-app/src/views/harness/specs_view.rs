@@ -26,7 +26,7 @@ use super::HarnessPane;
 
 /// Agents offered for drafting. Same list the Tasks view launches from, so
 /// anything okena can start work with can also write a spec.
-const AGENT_CHOICES: &[&str] = &["claude", "copilot"];
+pub(super) const AGENT_CHOICES: &[&str] = &["claude", "copilot"];
 
 /// Width of the root and document list. Fixed rather than draggable: the list
 /// holds short names, and a second resizable divider in the harness would be
@@ -817,7 +817,7 @@ impl HarnessPane {
     }
 
     /// A label over a form field.
-    fn field_label(&self, label: &str, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn field_label(&self, label: &str, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
             .text_size(ui_text_ms(cx))
@@ -827,7 +827,7 @@ impl HarnessPane {
     }
 
     /// Explanatory line under a form field.
-    fn field_hint(&self, hint: &str, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn field_hint(&self, hint: &str, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
             .text_size(ui_text_ms(cx))
@@ -836,7 +836,7 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    fn choice_chip(
+    pub(super) fn choice_chip(
         &self,
         id: String,
         label: String,

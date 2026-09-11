@@ -13,6 +13,7 @@ mod render_font;
 mod render_general;
 mod render_harness;
 mod render_hooks;
+mod render_knowledge;
 mod render_paired_devices;
 mod render_specs;
 mod render_tasks;
@@ -103,6 +104,8 @@ pub struct SettingsPanel {
     pub(super) harness_agent_root_input: Entity<SimpleInputState>,
     /// The Specs page: OpenSpec stores, discovery and folders.
     specs: render_specs::SpecsPage,
+    /// The Knowledge page: stores, adding one, and discovery.
+    knowledge: render_knowledge::KnowledgePage,
     pub(super) harness_agent_args_input: Entity<SimpleInputState>,
     pub(super) harness_agent_mcp_args_input: Entity<SimpleInputState>,
     // File opener input
@@ -910,6 +913,8 @@ impl SettingsPanel {
             s.harness.specs.config_dir.clone(),
             cx,
         );
+        let knowledge =
+            render_knowledge::KnowledgePage::new(s.harness.knowledge.clone_dir.clone(), cx);
 
         let harness_agent_args_input = cx.new(|cx| {
             SimpleInputState::new(cx)
@@ -1032,6 +1037,7 @@ impl SettingsPanel {
             worktree_dir_suffix_input,
             harness_agent_root_input,
             specs,
+            knowledge,
             harness_agent_args_input,
             harness_agent_mcp_args_input,
             file_opener_input,
@@ -1418,6 +1424,7 @@ impl SettingsPanel {
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
             SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
             SettingsCategory::Specs => self.render_specs(cx),
+            SettingsCategory::Knowledge => self.render_knowledge(cx),
             SettingsCategory::Tasks => self.render_tasks(cx).into_any_element(),
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),
