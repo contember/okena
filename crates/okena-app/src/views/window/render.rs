@@ -1558,26 +1558,11 @@ impl Render for WindowView {
                                         // lives in its own column, behind the
                                         // header's info toggle — not in a
                                         // second panel repeating the same
-                                        // thing. The bar above the grid picks
-                                        // how every column is shown.
-                                        None => d.child(
-                                            div()
-                                                .id("projects-grid-wrap")
-                                                .flex_1()
-                                                .min_h_0()
-                                                .min_w_0()
-                                                .flex()
-                                                .flex_col()
-                                                .children(self.render_view_mode_bar(cx))
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_h_0()
-                                                        .min_w_0()
-                                                        .flex()
-                                                        .child(self.render_projects_grid(cx)),
-                                                ),
-                                        ),
+                                        // thing. How every column is arranged
+                                        // and what it opens on are picked from
+                                        // the footer, so nothing sits between
+                                        // this and the grid.
+                                        None => d.child(self.render_projects_grid(cx)),
                                     }),
                             ),
                     ),
