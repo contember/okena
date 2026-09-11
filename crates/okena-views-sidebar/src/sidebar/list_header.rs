@@ -35,26 +35,16 @@ use okena_workspace::state::WindowId;
 
 impl Sidebar {
     /// Whether the main area is showing everything in the current list.
-    ///
-    /// "Nothing focused" is the shared half; the agents list adds its own flag,
-    /// because with it off the grid is showing the projects overview instead.
     fn overview_is_active(&self, cx: &App) -> bool {
-        if self.focus_manager.read(cx).focused_project_id().is_some() {
-            return false;
-        }
-        match self.list {
-            SidebarList::Projects => self
-                .workspace
-                .read(cx)
-                .active_folder_filter(self.window_id)
-                .is_none(),
-            SidebarList::Agents => self
-                .workspace
-                .read(cx)
-                .data()
+        let ws = self.workspace.read(cx);
+        overview_is_showing(
+            self.list,
+            self.focus_manager.read(cx).focused_project_id().is_some(),
+            ws.data()
                 .window(self.window_id)
                 .is_some_and(|w| w.agents_overview),
-        }
+            ws.active_folder_filter(self.window_id).is_some(),
+        )
     }
 
     /// Show everything in the current list in the main area.
@@ -114,15 +104,12 @@ impl Sidebar {
                 // An open menu belongs to the tab that is leaving; its contents
                 // and its anchor both change.
                 this.header_menu = None;
-                // The agents overview filters the grid to sessions, so it must
-                // not survive onto the projects tab, where it would hide every
-                // repo. Invisible while a project is focused, since focus wins.
-                if mode == SidebarList::Projects {
-                    let window_id = this.window_id;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_agents_overview(window_id, false, cx);
-                    });
-                }
+                // Deliberately nothing else: the tabs choose which list you
+                // are browsing, not what the main area shows. Clearing the
+                // agents overview here made switching to Projects silently
+                // replace whatever you were watching with the projects grid,
+                // while switching the other way left it alone — the same
+                // gesture doing two different things.
                 cx.notify();
             }))
             .into_any_element()
@@ -599,5 +586,74 @@ impl Sidebar {
                 cx,
             ))
             .into_any_element()
+    }
+}
+
+/// Whether the grid is currently showing the whole of `list`.
+///
+/// The two overviews share the grid, so each has to account for the other:
+/// with the agents overview on, the grid is showing sessions, and the projects
+/// Overview button must not light up as though its own view were on screen.
+fn overview_is_showing(
+    list: SidebarList,
+    project_focused: bool,
+    agents_overview: bool,
+    folder_filtered: bool,
+) -> bool {
+    // One project fills the grid, whichever list the sidebar is browsing.
+    if project_focused {
+        return false;
+    }
+    match list {
+        SidebarList::Projects => !agents_overview && !folder_filtered,
+        SidebarList::Agents => agents_overview,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SidebarList, overview_is_showing};
+
+    #[test]
+    fn the_two_overviews_share_one_grid() {
+        assert!(overview_is_showing(
+            SidebarList::Projects,
+            false,
+            false,
+            false
+        ));
+        assert!(overview_is_showing(SidebarList::Agents, false, true, false));
+
+        // Only one of them can be on screen, so neither may claim the grid
+        // while the other holds it.
+        assert!(!overview_is_showing(
+            SidebarList::Projects,
+            false,
+            true,
+            false
+        ));
+        assert!(!overview_is_showing(
+            SidebarList::Agents,
+            false,
+            false,
+            false
+        ));
+
+        // A folder filter is a narrowed projects grid, not the overview.
+        assert!(!overview_is_showing(
+            SidebarList::Projects,
+            false,
+            false,
+            true
+        ));
+
+        // Focus wins over every list: one project is filling the grid.
+        assert!(!overview_is_showing(
+            SidebarList::Projects,
+            true,
+            false,
+            false
+        ));
+        assert!(!overview_is_showing(SidebarList::Agents, true, true, false));
     }
 }
