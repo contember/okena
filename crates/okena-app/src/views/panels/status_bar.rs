@@ -133,6 +133,7 @@ fn push_sample(history: &mut Vec<f32>, value: f32) {
 
 /// Status bar component showing system info and time
 pub struct StatusBar {
+    window_id: crate::workspace::state::WindowId,
     workspace: Entity<Workspace>,
     focus_manager: Entity<crate::workspace::focus::FocusManager>,
     cache: Arc<Mutex<SystemInfoCache>>,
@@ -149,6 +150,7 @@ pub struct StatusBar {
 
 impl StatusBar {
     pub fn new(
+        window_id: crate::workspace::state::WindowId,
         workspace: Entity<Workspace>,
         focus_manager: Entity<crate::workspace::focus::FocusManager>,
         cx: &mut Context<Self>,
@@ -211,8 +213,14 @@ impl StatusBar {
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         // Also re-render when focus state changes (focus_manager moved off Workspace in slice 03)
         cx.observe(&focus_manager, |_, _, cx| cx.notify()).detach();
+        // And when a harness view opens or closes, which hides the focused
+        // project indicator.
+        if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
+            cx.observe(&harness, |_, _, cx| cx.notify()).detach();
+        }
 
         Self {
+            window_id,
             workspace,
             focus_manager,
             cache,
@@ -935,8 +943,14 @@ impl Render for StatusBar {
                     self.remote_popover_visible = false;
                 }
 
-                // Focused project indicator
-                let focused_project = {
+                // Focused project indicator. Project focus narrows the projects
+                // grid, so it is hidden while a harness view replaces the grid —
+                // otherwise it names a project the user isn't looking at.
+                let harness_showing =
+                    okena_workspace::harness_state::active_harness(self.window_id, cx).is_some();
+                let focused_project = if harness_showing {
+                    None
+                } else {
                     let ws = self.workspace.read(cx);
                     let fm = self.focus_manager.read(cx);
                     fm.focused_project_id()
