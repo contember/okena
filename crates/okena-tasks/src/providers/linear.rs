@@ -9,7 +9,7 @@
 //! data path.
 
 use crate::provider::{AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider};
-use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
+use okena_core::tasks::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest};
 use std::time::Duration;
 
@@ -48,6 +48,9 @@ query AssignedIssues($first: Int!) {
         state { name type }
         parent { id identifier }
         labels(first: 20) { nodes { name } }
+        team { id key name }
+        project { id name }
+        cycle { id number name }
       }
     }
   }
@@ -133,6 +136,9 @@ mutation CreateIssue(
       state { name type }
       parent { id identifier }
       labels(first: 20) { nodes { name } }
+      team { id key name }
+      project { id name }
+      cycle { id number name }
     }
   }
 }
@@ -154,6 +160,9 @@ query IssueChildren($id: String!) {
         state { name type }
         parent { id identifier }
         labels(first: 20) { nodes { name } }
+        team { id key name }
+        project { id name }
+        cycle { id number name }
       }
     }
   }
@@ -406,6 +415,54 @@ fn team_id_of(team: &serde_json::Value) -> Result<String, TaskError> {
         })
 }
 
+/// Linear's groupings for one issue, in the harness's own vocabulary.
+///
+/// Linear's Project is a body of work and its Cycle is a time box, which is
+/// what [`GroupAxis::Project`] and [`GroupAxis::Iteration`] mean — Azure
+/// DevOps will map its area and iteration paths onto the same two.
+///
+/// A group with no usable name is dropped rather than shown blank: an
+/// unnamed row in a filter list is worse than one fewer row. The exception is
+/// a cycle, which Linear routinely leaves unnamed and numbers instead.
+fn parse_groups(node: &serde_json::Value) -> Vec<TaskGroup> {
+    let mut groups = Vec::new();
+    let named = |key: &str, axis: GroupAxis| -> Option<TaskGroup> {
+        let v = node.get(key)?;
+        let id = v.get("id")?.as_str()?;
+        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
+        (!name.is_empty()).then(|| TaskGroup::new(axis, id, name))
+    };
+    groups.extend(named("team", GroupAxis::Team));
+    groups.extend(named("project", GroupAxis::Project));
+    groups.extend(cycle_group(node.get("cycle")));
+    groups
+}
+
+/// A cycle as a group, naming it by number when Linear has no name for it.
+///
+/// Split out because it is the only axis whose display name may have to be
+/// composed, and burying that in a closure hid the one case worth testing.
+fn cycle_group(cycle: Option<&serde_json::Value>) -> Option<TaskGroup> {
+    let cycle = cycle?;
+    let id = cycle.get("id")?.as_str()?;
+    let name = cycle
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .trim();
+    if !name.is_empty() {
+        return Some(TaskGroup::new(GroupAxis::Iteration, id, name));
+    }
+    // Most Linear cycles are never named; they are "Cycle 42" to everyone
+    // reading the board, so that is what the filter should say.
+    let number = cycle.get("number").and_then(|n| n.as_u64())?;
+    Some(TaskGroup::new(
+        GroupAxis::Iteration,
+        id,
+        format!("Cycle {number}"),
+    ))
+}
+
 fn parse_issue(node: &serde_json::Value) -> Option<Task> {
     let str_at = |k: &str| node.get(k).and_then(|v| v.as_str());
     let id = str_at("id")?;
@@ -461,6 +518,7 @@ fn parse_issue(node: &serde_json::Value) -> Option<Task> {
         parent_id: parent.as_ref().map(|(id, _)| id.clone()),
         parent_key: parent.as_ref().map(|(_, key)| key.clone()),
         labels,
+        groups: parse_groups(node),
     })
 }
 
@@ -852,5 +910,71 @@ mod tests {
             p.set_state(&foreign, TaskState::Done),
             Err(TaskError::Protocol { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::{cycle_group, parse_groups};
+    use okena_core::tasks::GroupAxis;
+    use serde_json::json;
+
+    #[test]
+    fn an_issue_reports_its_team_project_and_cycle() {
+        let groups = parse_groups(&json!({
+            "team": { "id": "t1", "key": "QBL", "name": "Qblok" },
+            "project": { "id": "p1", "name": "Harness" },
+            "cycle": { "id": "c1", "number": 9, "name": "Hardening" },
+        }));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| (g.axis.clone(), &*g.name))
+                .collect::<Vec<_>>(),
+            vec![
+                (GroupAxis::Team, "Qblok"),
+                (GroupAxis::Project, "Harness"),
+                (GroupAxis::Iteration, "Hardening"),
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_groupings_are_simply_absent() {
+        // Verified against the live API: an issue with no project and no cycle
+        // comes back with both keys present and null, which must not produce
+        // two blank filter rows.
+        let groups = parse_groups(&json!({
+            "team": { "id": "t1", "key": "QBL", "name": "Qblok" },
+            "project": serde_json::Value::Null,
+            "cycle": serde_json::Value::Null,
+        }));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].axis, GroupAxis::Team);
+    }
+
+    #[test]
+    fn an_unnamed_cycle_is_named_by_its_number() {
+        let g = cycle_group(Some(&json!({ "id": "c1", "number": 42, "name": "" })))
+            .expect("a numbered cycle is still a cycle");
+        assert_eq!(g.name, "Cycle 42");
+        assert_eq!(g.id, "c1");
+    }
+
+    #[test]
+    fn a_cycle_with_neither_name_nor_number_is_dropped() {
+        // Nothing to call it, so it would render as an empty filter row.
+        assert!(cycle_group(Some(&json!({ "id": "c1" }))).is_none());
+        assert!(cycle_group(None).is_none());
+    }
+
+    #[test]
+    fn a_group_with_a_blank_name_is_dropped_rather_than_shown_empty() {
+        let groups = parse_groups(&json!({
+            "team": { "id": "t1", "name": "   " },
+            "project": { "id": "p1", "name": "Harness" },
+        }));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].axis, GroupAxis::Project);
     }
 }

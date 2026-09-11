@@ -10,11 +10,14 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
-use okena_core::tasks::{Task, TaskAuthState, TaskAuthStatusResponse, TaskKind, TaskState};
+use okena_core::tasks::{
+    GroupAxis, Task, TaskAuthState, TaskAuthStatusResponse, TaskKind, TaskState,
+};
 use okena_ui::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::DragState;
 
 use super::HarnessPane;
+use super::task_filter::{FacetValue, LABELS_HEADING, STATUS_HEADING, collect_facets, status_name};
 
 /// Agents offered in the "Start work" dialog. Mirrors the detection list in
 /// `agents_view`, so anything okena can launch is also something it recognizes
@@ -157,44 +160,6 @@ fn kind_color(kind: TaskKind, t: &crate::theme::ThemeColors) -> u32 {
     }
 }
 
-/// Where a task sits on the board.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Lane {
-    /// Not started: nothing of okena's is running for it yet.
-    Todo,
-    InProgress(Stage),
-}
-
-/// Sub-state within the in-progress lane.
-///
-/// These come from okena's own view of the work, not the task manager's — the
-/// provider cannot know that an agent is sitting at a prompt. "Needs attention"
-/// is the same signal (and the same word) the sidebar's activity tiers use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Stage {
-    /// A session for this task is blocked waiting for input.
-    NeedsAttention,
-    /// Work is out for review: a pull request exists.
-    ReadyForTesting,
-    /// Being worked on.
-    Active,
-}
-
-impl Stage {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Stage::NeedsAttention => "Needs attention",
-            Stage::ReadyForTesting => "Ready for testing",
-            Stage::Active => "Active",
-        }
-    }
-
-    /// Ordered most-urgent first — a blocked agent is what the user must act on.
-    pub(super) const fn all() -> [Stage; 3] {
-        [Stage::NeedsAttention, Stage::ReadyForTesting, Stage::Active]
-    }
-}
-
 /// Projects linked to a task, and what to do about them.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TaskLinks {
@@ -229,23 +194,82 @@ pub(super) struct TaskSignals {
     pub open_pr: bool,
 }
 
-/// Decide which lane a task belongs in.
+/// Whether a task belongs in the Active section.
 ///
-/// okena's own signals win over the provider's state: a task Linear still calls
-/// "Todo" is genuinely in progress once a worktree and an agent exist for it,
-/// and that is the state the user cares about.
-pub(super) fn lane_for(provider_in_progress: bool, signals: TaskSignals) -> Lane {
-    if !signals.linked && !provider_in_progress {
-        return Lane::Todo;
+/// One question, asked of okena rather than of the provider: is an agent
+/// running on this right now. It deliberately ignores the provider's workflow
+/// state — that is what the status chip and the status filter are for now —
+/// and ignores helper sessions, which are agents thinking *about* a task
+/// rather than doing it. A breakdown you asked for must not make a task look
+/// like work in flight.
+pub(super) fn is_active(agents_running: usize) -> bool {
+    agents_running > 0
+}
+
+/// Which set of values a row of facet chips belongs to.
+///
+/// Three kinds rather than "a group axis or not", because status is neither a
+/// grouping the provider defines nor a free tag: it is the workflow state the
+/// list used to be split by, and it toggles its own half of the filter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Facet {
+    Group(GroupAxis),
+    Label,
+    Status,
+}
+
+impl Facet {
+    /// Distinguishes one chip's element id from another's. Only has to be
+    /// stable and unique per facet; it is never shown.
+    fn slug(&self) -> &str {
+        match self {
+            Facet::Group(axis) => axis.wire_name(),
+            Facet::Label => "label",
+            Facet::Status => "status",
+        }
     }
-    // Blocked beats everything: it is the only state needing a human right now.
-    if signals.waiting {
-        return Lane::InProgress(Stage::NeedsAttention);
+}
+
+/// How the list is ordered within each section.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TaskSort {
+    /// The provider's own order — most recently updated first. The default,
+    /// because it is the order the queue arrives in.
+    #[default]
+    Updated,
+    /// By workflow state, furthest along first.
+    Status,
+}
+
+impl TaskSort {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            TaskSort::Updated => "Updated",
+            TaskSort::Status => "Status",
+        }
     }
-    if signals.open_pr {
-        return Lane::InProgress(Stage::ReadyForTesting);
+
+    /// The other one. Two options, so the control is a toggle rather than a
+    /// menu costing a click to show two words.
+    pub(super) const fn next(self) -> TaskSort {
+        match self {
+            TaskSort::Updated => TaskSort::Status,
+            TaskSort::Status => TaskSort::Updated,
+        }
     }
-    Lane::InProgress(Stage::Active)
+}
+
+/// Apply `sort` to a section's tasks.
+///
+/// Stable, and `Updated` reorders nothing: the provider already returns its
+/// queue newest-first, and re-sorting on the timestamp string would only risk
+/// disagreeing with it. Sorting by status keeps that recency within each
+/// status, for the same reason.
+pub(super) fn sort_tasks(tasks: &mut [Task], sort: TaskSort) {
+    match sort {
+        TaskSort::Updated => {}
+        TaskSort::Status => tasks.sort_by_key(|t| t.state.sort_rank()),
+    }
 }
 
 impl HarnessPane {
@@ -341,6 +365,11 @@ impl HarnessPane {
                             {
                                 this.tasks.selected = None;
                             }
+                            // Same for the filter: a sprint that closed takes
+                            // its tasks with it, and a selection nothing can
+                            // satisfy reads as "you have no work" rather than
+                            // "you are filtered to something that is gone".
+                            this.tasks.filter.prune(&collect_facets(&this.tasks.tasks));
                         }
                         Err(e) => {
                             // A rejected credential is the one failure with a
@@ -688,6 +717,10 @@ impl HarnessPane {
     /// Every path into the detail pane goes through here, so a task reached by
     /// clicking its parent gets the same treatment as one clicked in the list.
     pub(super) fn select_task(&mut self, external_id: String, cx: &mut Context<Self>) {
+        // The form and a task's detail share the one panel, so picking a row
+        // is how you leave the form. Without this, clicking a task while
+        // drafting looked like nothing had happened.
+        self.tasks.new_task = None;
         self.tasks.selected = Some(external_id.clone());
         self.fetch_children(external_id, cx);
         cx.notify();
@@ -752,11 +785,7 @@ impl HarnessPane {
     fn render_related_task(&self, task: &Task, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let id = task.id.external_id.clone();
-        let state_label = if task.state_name.is_empty() {
-            "—".to_string()
-        } else {
-            task.state_name.clone()
-        };
+        let state_label = status_name(task).to_string();
         v_flex()
             .id(SharedString::from(format!(
                 "related-{}",
@@ -804,25 +833,29 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// Group the loaded tasks into board lanes.
-    fn board(&self, cx: &Context<Self>) -> (Vec<Task>, Vec<(Stage, Vec<Task>)>) {
-        let mut todo = Vec::new();
-        let mut staged: Vec<(Stage, Vec<Task>)> =
-            Stage::all().into_iter().map(|s| (s, Vec::new())).collect();
+    /// Split the loaded tasks into `(active, rest)`.
+    ///
+    /// A partition, not an overlap: a task with an agent on it appears in
+    /// Active and nowhere else, so scrolling never shows the same row twice.
+    fn board(&self, cx: &Context<Self>) -> (Vec<Task>, Vec<Task>) {
+        let mut active = Vec::new();
+        let mut rest = Vec::new();
 
-        for task in &self.tasks.tasks {
-            let provider_in_progress =
-                matches!(task.state, TaskState::InProgress | TaskState::InReview);
-            match lane_for(provider_in_progress, self.links_for(task, cx).signals) {
-                Lane::Todo => todo.push(task.clone()),
-                Lane::InProgress(stage) => {
-                    if let Some((_, list)) = staged.iter_mut().find(|(s, _)| *s == stage) {
-                        list.push(task.clone());
-                    }
-                }
+        for task in self
+            .tasks
+            .tasks
+            .iter()
+            .filter(|t| self.tasks.filter.matches(t))
+        {
+            if is_active(self.links_for(task, cx).agents_running) {
+                active.push(task.clone());
+            } else {
+                rest.push(task.clone());
             }
         }
-        (todo, staged)
+        sort_tasks(&mut active, self.tasks.sort);
+        sort_tasks(&mut rest, self.tasks.sort);
+        (active, rest)
     }
 
     /// A collapsible section heading in the task list.
@@ -883,21 +916,274 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// The task list: in progress above todo, each foldable.
+    /// The list toolbar: how the list is ordered, and what it is narrowed to.
     ///
-    /// One column rather than two side-by-side lanes. The lanes forced every
-    /// row into half the width, which a task's key, kind, state and title do
-    /// not fit into, and left one column idle whenever the work was all in one
-    /// state. In progress sits on top because it is what needs acting on.
+    /// Always present, because the sort always applies. The Filters half hides
+    /// itself when the loaded tasks have nothing worth filtering by — a
+    /// control that cannot change the list is worse than no control.
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let facets = collect_facets(&self.tasks.tasks);
+        let has_facets = !facets.is_empty();
+        let t = theme(cx);
+        let open = self.tasks.filter_open;
+        let selected = self.tasks.filter.selected_count();
+        // The count of what is actually on screen, so the effect of a filter
+        // is legible without counting rows.
+        let shown = self
+            .tasks
+            .tasks
+            .iter()
+            .filter(|task| self.tasks.filter.matches(task))
+            .count();
+        let total = self.tasks.tasks.len();
+
+        let sort = self.tasks.sort;
+        let summary = h_flex()
+            .id("task-filter-summary")
+            .when(has_facets, |d| d.cursor_pointer())
+            .w_full()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .when(has_facets, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .children(has_facets.then(|| {
+                div()
+                    .w(px(10.0))
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(if open { "⌄" } else { "›" })
+                    .into_any_element()
+            }))
+            .children(has_facets.then(|| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(if selected > 0 {
+                        t.text_primary
+                    } else {
+                        t.text_muted
+                    }))
+                    .child(if selected > 0 {
+                        format!("Filters · {selected}")
+                    } else {
+                        "Filters".to_string()
+                    })
+                    .into_any_element()
+            }))
+            .child(div().flex_1().min_w_0())
+            .child(
+                // Its own button inside the row: clicking the row opens the
+                // facets, and changing the order is not that.
+                h_flex()
+                    .id("task-sort")
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                    .child("Sort")
+                    .child(div().text_color(rgb(t.text_secondary)).child(sort.label()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.tasks.sort = this.tasks.sort.next();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .children((selected > 0).then(|| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(format!("{shown} of {total}"))
+                    .into_any_element()
+            }))
+            .children((selected > 0).then(|| {
+                div()
+                    .id("task-filter-clear")
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                    .child("Clear")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            // Clearing is not also collapsing: you clear to
+                            // pick something else.
+                            cx.stop_propagation();
+                            this.tasks.filter.clear();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    // Nothing to open when there is nothing to filter by.
+                    if has_facets {
+                        this.tasks.filter_open = !this.tasks.filter_open;
+                        cx.notify();
+                    }
+                }),
+            );
+
+        let mut bar = v_flex().w_full().flex_shrink_0().child(summary);
+        if open && has_facets {
+            let mut panel = v_flex()
+                .w_full()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .bg(rgb(t.bg_secondary))
+                .border_b_1()
+                .border_color(rgb(t.border));
+            for (axis, values) in &facets.axes {
+                panel = panel.child(self.render_facet_group(
+                    axis.label(),
+                    values,
+                    Facet::Group(axis.clone()),
+                    cx,
+                ));
+            }
+            // Status first among the non-group facets: it is the one the
+            // list used to be split by, so it is the one people reach for.
+            if !facets.statuses.is_empty() {
+                panel = panel.child(self.render_facet_group(
+                    STATUS_HEADING,
+                    &facets.statuses,
+                    Facet::Status,
+                    cx,
+                ));
+            }
+            if !facets.labels.is_empty() {
+                panel = panel.child(self.render_facet_group(
+                    LABELS_HEADING,
+                    &facets.labels,
+                    Facet::Label,
+                    cx,
+                ));
+            }
+            bar = bar.child(panel);
+        }
+        Some(bar.into_any_element())
+    }
+
+    /// One heading and its values as togglable chips.
+    ///
+    /// Chips rather than a dropdown per axis: what is selected is the thing
+    /// you most need to see while filtering, and a popover hides exactly that
+    /// behind the control you just used.
+    ///
+    /// `facet` says which set the values belong to, and so which half of the
+    /// filter a click toggles.
+    fn render_facet_group(
+        &self,
+        heading: &str,
+        values: &[FacetValue],
+        facet: Facet,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let mut row = h_flex().gap(px(4.0)).flex_wrap();
+        for value in values {
+            let on = match &facet {
+                Facet::Group(a) => self.tasks.filter.group_selected(a, &value.id),
+                Facet::Label => self.tasks.filter.label_selected(&value.id),
+                Facet::Status => self.tasks.filter.status_selected(&value.id),
+            };
+            let facet_for_click = facet.clone();
+            let id = value.id.clone();
+            row = row.child(
+                h_flex()
+                    .id(SharedString::from(format!(
+                        "facet-{}-{}",
+                        facet.slug(),
+                        value.id
+                    )))
+                    .cursor_pointer()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .text_size(ui_text_ms(cx))
+                    .map(|el| {
+                        if on {
+                            el.bg(with_alpha(t.button_primary_bg, 0.22))
+                                .border_color(rgb(t.border_active))
+                                .text_color(rgb(t.text_primary))
+                        } else {
+                            el.border_color(rgb(t.border))
+                                .text_color(rgb(t.text_secondary))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                        }
+                    })
+                    .child(value.name.clone())
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("{}", value.count)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            match facet_for_click.clone() {
+                                Facet::Group(a) => this.tasks.filter.toggle_group(a, &id),
+                                Facet::Label => this.tasks.filter.toggle_label(&id),
+                                Facet::Status => this.tasks.filter.toggle_status(&id),
+                            }
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        v_flex()
+            .w_full()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(heading.to_uppercase()),
+            )
+            .child(row)
+            .into_any_element()
+    }
+
+    /// The task list: what has an agent on it, then everything else.
+    ///
+    /// Split by whether okena is running something rather than by the
+    /// provider's workflow state — which the list now carries as a chip you
+    /// can filter and sort on, where one task has one answer rather than
+    /// being scattered across headings. Active sits on top because it is what
+    /// is happening now.
     fn render_task_list(
         &self,
-        todo: Vec<Task>,
-        staged: Vec<(Stage, Vec<Task>)>,
+        active: Vec<Task>,
+        rest: Vec<Task>,
         share: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let in_progress_total: usize = staged.iter().map(|(_, v)| v.len()).sum();
 
         let mut body = v_flex()
             .id("tasks-list")
@@ -906,51 +1192,50 @@ impl HarnessPane {
             .overflow_y_scroll();
 
         body = body.child(self.render_section_header(
-            "in-progress",
-            "In progress",
-            in_progress_total,
+            "active",
+            "Active tasks",
+            active.len(),
             t.success,
             cx,
         ));
-        if !self.tasks.sections_collapsed.contains("in-progress") {
-            if in_progress_total == 0 {
-                body = body.child(self.list_note("Nothing in flight.", cx));
+        if !self.tasks.sections_collapsed.contains("active") {
+            if active.is_empty() {
+                body = body.child(self.list_note(
+                    if self.tasks.filter.is_empty() {
+                        "No agent is running on anything."
+                    } else {
+                        "Nothing active matches these filters."
+                    },
+                    cx,
+                ));
             }
-            for (stage, tasks) in staged {
-                if tasks.is_empty() {
-                    continue;
-                }
-                let accent = match stage {
-                    Stage::NeedsAttention => t.warning,
-                    Stage::ReadyForTesting => t.success,
-                    Stage::Active => t.text_secondary,
-                };
-                body = body.child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(4.0))
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(accent))
-                        .child(format!("{} · {}", stage.label(), tasks.len())),
-                );
-                for row in order_by_hierarchy(tasks, &self.tasks.collapsed) {
-                    body = body.child(self.render_task_row(&row, cx));
-                }
+            for row in order_by_hierarchy(active, &self.tasks.collapsed) {
+                body = body.child(self.render_task_row(&row, cx));
             }
         }
 
         body = body.child(self.render_section_header(
-            "todo",
-            "Todo",
-            todo.len(),
+            "tasks",
+            "Tasks",
+            rest.len(),
             t.text_secondary,
             cx,
         ));
-        if !self.tasks.sections_collapsed.contains("todo") {
-            if todo.is_empty() {
-                body = body.child(self.list_note("Nothing waiting.", cx));
+        if !self.tasks.sections_collapsed.contains("tasks") {
+            if rest.is_empty() {
+                // Said differently when a filter is on: an empty list and a
+                // narrowed one look identical, and only one of them means you
+                // are out of work.
+                body = body.child(self.list_note(
+                    if self.tasks.filter.is_empty() {
+                        "Nothing waiting."
+                    } else {
+                        "Nothing here matches these filters."
+                    },
+                    cx,
+                ));
             }
-            for row in order_by_hierarchy(todo, &self.tasks.collapsed) {
+            for row in order_by_hierarchy(rest, &self.tasks.collapsed) {
                 body = body.child(self.render_task_row(&row, cx));
             }
         }
@@ -959,6 +1244,9 @@ impl HarnessPane {
             .w(relative(share))
             .min_w_0()
             .h_full()
+            // Above the scroll, not inside it: a filter that scrolls away
+            // from the rows it is narrowing leaves them looking unexplained.
+            .children(self.render_filter_bar(cx))
             .child(body)
             .into_any_element()
     }
@@ -1009,11 +1297,7 @@ impl HarnessPane {
         let links = self.links_for(&task, cx);
         let busy = self.tasks.starting.is_some();
         let is_starting = self.tasks.starting.as_deref() == Some(task.id.external_id.as_str());
-        let state_label = if task.state_name.is_empty() {
-            "—".to_string()
-        } else {
-            task.state_name.clone()
-        };
+        let state_label = status_name(&task).to_string();
         let task_for_start = task.clone();
 
         let action = match links.open_target.clone() {
@@ -1228,6 +1512,23 @@ impl HarnessPane {
                 .text_color(rgb(t.text_secondary))
                 .child(task.branch_name.clone()),
         );
+
+        // Each axis on its own line, headed by the provider's word for it:
+        // "Cycle 9" under ITERATION says something a bare chip in a row of
+        // chips does not.
+        for group in &task.groups {
+            body = body
+                .child(self.detail_label(group.axis.label().to_uppercase(), cx))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(group.name.clone()),
+                );
+        }
 
         if !task.labels.is_empty() {
             body = body.child(self.detail_label("LABELS", cx)).child(
@@ -1561,13 +1862,17 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    fn detail_label(&self, label: &'static str, cx: &Context<Self>) -> AnyElement {
+    /// A small heading in the detail pane.
+    ///
+    /// Takes an owned string as well as a literal: an axis heading is the
+    /// provider's word for the thing, known only at runtime.
+    fn detail_label(&self, label: impl Into<SharedString>, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
             .pt(px(6.0))
             .text_size(ui_text_ms(cx))
             .text_color(rgb(t.text_muted))
-            .child(label)
+            .child(label.into())
             .into_any_element()
     }
 
@@ -1636,17 +1941,41 @@ impl HarnessPane {
             )
     }
 
+    /// A task's groupings, as chips for its row.
+    ///
+    /// Team is left out on purpose. A row's chips are there to tell it apart
+    /// from the rows around it, and almost everyone's queue is one team's
+    /// work — a chip repeated down every row costs width and says nothing.
+    /// The detail pane shows the team, where there is room and where you are
+    /// asking about one task rather than scanning many.
+    fn row_group_chips(&self, task: &Task, cx: &Context<Self>) -> Vec<AnyElement> {
+        let t = theme(cx);
+        task.groups
+            .iter()
+            .filter(|g| g.axis != GroupAxis::Team)
+            .map(|g| {
+                div()
+                    .flex_shrink_0()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(g.name.clone())
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn render_task_row(&self, row: &TaskRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let task = &row.task;
         let depth = row.depth;
         let t = theme(cx);
         let links = self.links_for(task, cx);
         let collapsed = self.tasks.collapsed.contains(&task.id.external_id);
-        let state_label = if task.state_name.is_empty() {
-            "—".to_string()
-        } else {
-            task.state_name.clone()
-        };
+        let state_label = status_name(task).to_string();
 
         // Indent per level, with a rail on nested rows so containment is
         // visible rather than implied by a few pixels of whitespace.
@@ -1751,9 +2080,25 @@ impl HarnessPane {
                                     .text_color(rgb(state_color(task.state, &t)))
                                     .child(state_label),
                             )
+                            .children(self.row_group_chips(task, cx))
                             // The parent's key, so a sub-task is readable on its
                             // own row even when the parent sits in another lane
                             // or isn't assigned to you at all.
+                            // The section no longer says this: work used to
+                            // sit under a "Needs attention" heading, and with
+                            // one flat Active section the row has to carry it.
+                            .children(links.signals.waiting.then(|| {
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    .bg(with_alpha(t.warning, 0.15))
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.warning))
+                                    .child("Waiting")
+                                    .into_any_element()
+                            }))
                             .children((links.agents_running > 0).then(|| {
                                 div()
                                     .flex_shrink_0()
@@ -2100,6 +2445,11 @@ impl HarnessPane {
         // The board renders the rows itself; only emptiness matters here.
         // Building a throwaway element per task would render every row twice.
         let has_rows = !self.tasks.tasks.is_empty();
+        let composing = self.tasks.new_task.is_some();
+        // The form stands where a task's detail stands, so the two columns
+        // have to exist for it — including on a first run with no tasks yet,
+        // which is exactly when someone reaches for "New task".
+        let show_board = has_rows || composing;
         let loading = self.tasks.loading;
 
         let account_label = match &account {
@@ -2137,24 +2487,13 @@ impl HarnessPane {
             ),
         ];
 
-        // The form takes the whole view while it is open, the way drafting a
-        // spec replaces the Specs view: filling it in is a different job from
-        // scanning the board.
-        if self.tasks.new_task.is_some() {
-            return v_flex()
-                .size_full()
-                .child(self.render_toolbar(actions, cx))
-                .child(self.render_new_task_form(cx))
-                .into_any_element();
-        }
-
         v_flex()
             .size_full()
             .child(self.render_toolbar(actions, cx))
             .children(self.tasks.status.clone().map(|m| self.info_banner(m, cx)))
             .children(self.tasks.error.clone().map(|e| self.error_banner(e, cx)))
-            .child(if has_rows {
-                let (todo, staged) = self.board(cx);
+            .child(if show_board {
+                let (active, rest) = self.board(cx);
                 let fraction = self.tasks.lane_fraction;
                 let board_width = self.board_width.clone();
                 let active_drag = self.active_drag.clone();
@@ -2175,7 +2514,7 @@ impl HarnessPane {
                         .absolute()
                         .size_full(),
                     )
-                    .child(self.render_task_list(todo, staged, fraction, cx))
+                    .child(self.render_task_list(active, rest, fraction, cx))
                     .child({
                         let width = self.board_width.clone();
                         ResizeHandle::new(false, t.border, t.border_active, move |pos, _cx| {
@@ -2186,7 +2525,11 @@ impl HarnessPane {
                             });
                         })
                     })
-                    .child(self.render_task_detail(1.0 - fraction, cx))
+                    .child(if composing {
+                        self.render_new_task_form(1.0 - fraction, cx)
+                    } else {
+                        self.render_task_detail(1.0 - fraction, cx)
+                    })
                     .into_any_element()
             } else {
                 div()
@@ -2207,73 +2550,91 @@ impl HarnessPane {
 }
 
 #[cfg(test)]
-mod lane_tests {
+mod section_tests {
     // Explicit imports: `use super::*` would pull in the `gpui::*` glob, whose
     // `test` macro shadows the built-in one and recurses forever.
-    use super::{Lane, Stage, TaskSignals, lane_for};
+    use super::{TaskSort, is_active, sort_tasks};
+    use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
 
-    #[test]
-    fn untouched_task_is_a_todo() {
-        assert_eq!(lane_for(false, TaskSignals::default()), Lane::Todo);
+    fn task(key: &str, state: TaskState) -> Task {
+        Task {
+            id: TaskId::new("linear", key),
+            display_key: key.into(),
+            title: key.into(),
+            description: None,
+            state,
+            state_name: state.label().into(),
+            url: String::new(),
+            branch_name: String::new(),
+            updated_at: String::new(),
+            kind: TaskKind::Task,
+            parent_id: None,
+            parent_key: None,
+            labels: Vec::new(),
+            groups: Vec::new(),
+        }
+    }
+
+    fn keys(tasks: &[Task]) -> Vec<&str> {
+        tasks.iter().map(|t| &*t.display_key).collect()
     }
 
     #[test]
-    fn provider_in_progress_counts_even_with_no_session() {
-        // Someone may be working on it outside okena.
-        assert_eq!(
-            lane_for(true, TaskSignals::default()),
-            Lane::InProgress(Stage::Active)
-        );
+    fn a_task_is_active_only_while_an_agent_runs_on_it() {
+        assert!(is_active(1));
+        assert!(is_active(3));
+        assert!(!is_active(0));
     }
 
     #[test]
-    fn a_linked_session_moves_a_todo_into_progress() {
-        // okena's own signal wins: a worktree exists, so it is underway even if
-        // Linear still says Todo.
-        let s = TaskSignals {
-            linked: true,
-            ..Default::default()
-        };
-        assert_eq!(lane_for(false, s), Lane::InProgress(Stage::Active));
+    fn the_providers_own_state_no_longer_decides_the_section() {
+        // This is the change: a task Linear calls "In Progress" with nothing
+        // of okena's running sits in Tasks, where its status chip says so.
+        // The sections answer "is an agent on it", and only that.
+        assert!(!is_active(0));
     }
 
     #[test]
-    fn waiting_for_input_needs_attention() {
-        let s = TaskSignals {
-            linked: true,
-            waiting: true,
-            open_pr: false,
-        };
-        assert_eq!(lane_for(false, s), Lane::InProgress(Stage::NeedsAttention));
+    fn sorting_by_updated_leaves_the_providers_order_alone() {
+        // Linear already returns the queue newest-first; re-deriving that from
+        // a timestamp string could only disagree with it.
+        let mut tasks = vec![
+            task("A", TaskState::Backlog),
+            task("B", TaskState::InReview),
+            task("C", TaskState::Todo),
+        ];
+        sort_tasks(&mut tasks, TaskSort::Updated);
+        assert_eq!(keys(&tasks), ["A", "B", "C"]);
     }
 
     #[test]
-    fn an_open_pr_is_ready_for_testing() {
-        let s = TaskSignals {
-            linked: true,
-            waiting: false,
-            open_pr: true,
-        };
-        assert_eq!(lane_for(false, s), Lane::InProgress(Stage::ReadyForTesting));
+    fn sorting_by_status_puts_the_furthest_along_first() {
+        let mut tasks = vec![
+            task("A", TaskState::Backlog),
+            task("B", TaskState::InReview),
+            task("C", TaskState::Todo),
+            task("D", TaskState::InProgress),
+        ];
+        sort_tasks(&mut tasks, TaskSort::Status);
+        assert_eq!(keys(&tasks), ["B", "D", "C", "A"]);
     }
 
     #[test]
-    fn blocked_beats_having_a_pr() {
-        // A raised PR does not matter while the agent is stuck at a prompt.
-        let s = TaskSignals {
-            linked: true,
-            waiting: true,
-            open_pr: true,
-        };
-        assert_eq!(lane_for(false, s), Lane::InProgress(Stage::NeedsAttention));
+    fn tasks_sharing_a_status_keep_the_order_they_arrived_in() {
+        // So within a status you still see the most recently updated first.
+        let mut tasks = vec![
+            task("A", TaskState::Todo),
+            task("B", TaskState::InProgress),
+            task("C", TaskState::Todo),
+        ];
+        sort_tasks(&mut tasks, TaskSort::Status);
+        assert_eq!(keys(&tasks), ["B", "A", "C"]);
     }
 
     #[test]
-    fn stage_order_is_most_urgent_first() {
-        assert_eq!(
-            Stage::all(),
-            [Stage::NeedsAttention, Stage::ReadyForTesting, Stage::Active]
-        );
+    fn the_sort_toggle_returns_to_where_it_started() {
+        assert_eq!(TaskSort::Updated.next(), TaskSort::Status);
+        assert_eq!(TaskSort::Updated.next().next(), TaskSort::Updated);
     }
 }
 
@@ -2342,6 +2703,7 @@ mod hierarchy_tests {
             parent_id: parent.map(str::to_string),
             parent_key: parent.map(str::to_uppercase),
             labels: Vec::new(),
+            groups: Vec::new(),
         }
     }
 

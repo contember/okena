@@ -648,6 +648,7 @@ pub(super) mod agent_shell_tests {
             parent_id: None,
             parent_key: None,
             labels: Vec::new(),
+            groups: Vec::new(),
         }
     }
 

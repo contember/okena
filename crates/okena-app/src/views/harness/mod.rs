@@ -11,6 +11,7 @@ mod markdown;
 mod new_task_form;
 mod sections;
 mod specs_view;
+mod task_filter;
 mod tasks_view;
 
 use crate::views::components::SimpleInputState;
@@ -70,6 +71,14 @@ pub(crate) struct TasksState {
     pub(crate) new_task_body: Entity<SimpleInputState>,
     /// Open "Start work" dialog, if any.
     pub(crate) start_form: Option<StartWorkForm>,
+    /// What the list is narrowed to. Empty means everything.
+    pub(crate) filter: task_filter::TaskFilter,
+    /// Whether the facet panel is open. Shut by default: the filters are a
+    /// tool you reach for, and a permanent wall of chips above the list would
+    /// cost every reader space to show nothing most of the time.
+    pub(crate) filter_open: bool,
+    /// How the list is ordered within each section.
+    pub(crate) sort: tasks_view::TaskSort,
     /// Agent command configured on the daemon, used as the dialog's default.
     /// `None` until settings have been read.
     pub(crate) default_agent: Option<String>,
@@ -248,6 +257,9 @@ impl HarnessPane {
                 new_task_title,
                 new_task_body,
                 start_form: None,
+                filter: task_filter::TaskFilter::default(),
+                filter_open: false,
+                sort: tasks_view::TaskSort::default(),
                 default_agent: None,
             },
             specs: SpecsState {

@@ -4,7 +4,6 @@ mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
-mod view_mode_bar;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
@@ -316,8 +315,12 @@ impl WindowView {
         let workspace_for_status = workspace.clone();
         let focus_manager_for_status = focus_manager.clone();
         let status_bar = cx.new(|cx| {
-            let mut sb =
-                StatusBar::new(window_id, workspace_for_status, focus_manager_for_status, cx);
+            let mut sb = StatusBar::new(
+                window_id,
+                workspace_for_status,
+                focus_manager_for_status,
+                cx,
+            );
             sb.set_sidebar_open(sidebar_initially_open, cx);
             sb
         });

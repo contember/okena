@@ -4,7 +4,7 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::metrics::{SparklineStyle, StatusBarStyle, metric_bar, sparkline};
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{ProjectLayoutMode, WindowId, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -15,6 +15,7 @@ use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
@@ -133,7 +134,10 @@ fn push_sample(history: &mut Vec<f32>, value: f32) {
 
 /// Status bar component showing system info and time
 pub struct StatusBar {
-    window_id: crate::workspace::state::WindowId,
+    /// The window this footer belongs to. The grid controls act on one
+    /// window's grid, and another window's must not move with it; the focused
+    /// project indicator is per-window for the same reason.
+    window_id: WindowId,
     workspace: Entity<Workspace>,
     focus_manager: Entity<crate::workspace::focus::FocusManager>,
     cache: Arc<Mutex<SystemInfoCache>>,
@@ -146,11 +150,73 @@ pub struct StatusBar {
     remote_manager: Option<Entity<RemoteConnectionManager>>,
     remote_status_bounds: Bounds<Pixels>,
     remote_popover_visible: bool,
+    /// Which grid menu is open, if any, and where each button ended up so the
+    /// menu can hang off the right one.
+    grid_menu: Option<GridMenu>,
+    grid_button_bounds: HashMap<GridMenu, Bounds<Pixels>>,
+    /// Where the pointer is. Read together by `sync_grid_menu`, because the
+    /// two elements report their hovers independently and in no fixed order.
+    grid_hover_button: Option<GridMenu>,
+    grid_hover_panel: bool,
+    /// Invalidates a pending open or close, so the latest reading wins.
+    ///
+    /// The button and its menu are separate elements, so crossing from one to
+    /// the other reports "not hovering" for an instant. Without a delay that a
+    /// later reading can cancel, the menu would shut under the pointer on its
+    /// way in.
+    grid_hover_token: Arc<AtomicU64>,
+}
+
+/// How long a hover has to settle before a menu opens.
+///
+/// Enough that sweeping the pointer across the footer to reach the clock does
+/// not flash both menus on the way past.
+const GRID_MENU_OPEN_MS: u64 = 140;
+
+/// How long the menu survives the pointer leaving it, which is the window in
+/// which the pointer can cross the gap between button and menu.
+const GRID_MENU_CLOSE_MS: u64 = 160;
+
+/// The two questions the footer's grid buttons ask.
+///
+/// Separate buttons rather than one, because the answers are unrelated:
+/// rearranging the columns has nothing to do with whether they open on a
+/// terminal or on a session's facts, and pairing them made a menu you had to
+/// read past half of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GridMenu {
+    /// How the columns are arranged.
+    Layout,
+    /// What each column opens on.
+    Content,
+}
+
+impl GridMenu {
+    fn button_id(self) -> &'static str {
+        match self {
+            GridMenu::Layout => "grid-layout-button",
+            GridMenu::Content => "grid-content-button",
+        }
+    }
+
+    fn panel_id(self) -> &'static str {
+        match self {
+            GridMenu::Layout => "grid-layout-menu",
+            GridMenu::Content => "grid-content-menu",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            GridMenu::Layout => "How the columns are arranged",
+            GridMenu::Content => "What each column opens on",
+        }
+    }
 }
 
 impl StatusBar {
     pub fn new(
-        window_id: crate::workspace::state::WindowId,
+        window_id: WindowId,
         workspace: Entity<Workspace>,
         focus_manager: Entity<crate::workspace::focus::FocusManager>,
         cx: &mut Context<Self>,
@@ -213,8 +279,9 @@ impl StatusBar {
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         // Also re-render when focus state changes (focus_manager moved off Workspace in slice 03)
         cx.observe(&focus_manager, |_, _, cx| cx.notify()).detach();
-        // And when a harness view opens or closes, which hides the focused
-        // project indicator.
+        // And when a harness view opens or closes: it hides the focused
+        // project indicator, and it replaces the grid, so the grid controls
+        // have to leave with it. That selection lives in neither entity above.
         if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
             cx.observe(&harness, |_, _, cx| cx.notify()).detach();
         }
@@ -230,6 +297,11 @@ impl StatusBar {
             remote_manager: None,
             remote_status_bounds: Bounds::default(),
             remote_popover_visible: false,
+            grid_menu: None,
+            grid_button_bounds: HashMap::new(),
+            grid_hover_button: None,
+            grid_hover_panel: false,
+            grid_hover_token: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -455,6 +527,340 @@ impl StatusBar {
     }
 
     /// One system metric (CPU or MEM) as the status bar draws it.
+    /// The grid controls, or `None` when a grid is not what is on screen.
+    ///
+    /// Two buttons, because they answer two unrelated questions: how the
+    /// columns are arranged, and what each one opens on. Both are about a grid
+    /// of several things, so a single focused project, a zoomed one, or a
+    /// harness view in the grid's place all leave nothing for them to act on.
+    fn render_grid_controls(
+        &self,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.grid_controls_apply(cx) {
+            return None;
+        }
+        let window_id = self.window_id;
+        let (rows, show_info) = {
+            let ws = self.workspace.read(cx);
+            (
+                ws.grid_layout_mode(window_id).is_rows(),
+                ws.grid_show_info(window_id),
+            )
+        };
+
+        Some(
+            h_flex()
+                .gap(px(2.0))
+                .child(self.grid_button(GridMenu::Layout, layout_label(rows), t, cx))
+                .child(self.grid_button(GridMenu::Content, content_label(show_info), t, cx))
+                .into_any_element(),
+        )
+    }
+
+    /// One footer button: what it is set to now, and a menu to change it.
+    fn grid_button(
+        &self,
+        menu: GridMenu,
+        label: &'static str,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.grid_menu == Some(menu);
+        let entity = cx.entity().clone();
+        h_flex()
+            .id(menu.button_id())
+            .cursor_pointer()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(3.0))
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .when(open, |d| d.bg(rgb(t.bg_hover)))
+            .when(!open, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .text_color(rgb(t.text_secondary))
+            // The current setting is the label: a button that only said
+            // "Layout" would hide the one thing worth seeing at a glance.
+            .child(label)
+            // The menu opens against this button, and the bounds a canvas
+            // reports are window-absolute — which is what `anchored` wants.
+            .child(
+                canvas(
+                    move |bounds, _window, app| {
+                        entity.update(app, |this, _cx| {
+                            this.grid_button_bounds.insert(menu, bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .tooltip(move |window, cx| Tooltip::new(menu.tooltip()).build(window, cx))
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                this.hover_grid_button(menu, *hovered, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Note that the pointer entered or left one of the buttons.
+    fn hover_grid_button(&mut self, menu: GridMenu, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.grid_hover_button = Some(menu);
+        } else if self.grid_hover_button == Some(menu) {
+            // Only clear what this button set: moving to its sibling may
+            // already have claimed the flag.
+            self.grid_hover_button = None;
+        }
+        self.sync_grid_menu(cx);
+    }
+
+    /// Note that the pointer entered or left the open menu.
+    fn hover_grid_panel(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.grid_hover_panel = hovered;
+        self.sync_grid_menu(cx);
+    }
+
+    /// Decide what should be showing from where the pointer actually is.
+    ///
+    /// Deliberately not driven by the hover events themselves. `on_hover` is
+    /// edge-triggered and the two elements fire independently: crossing from
+    /// the button into its menu produces both a "left the button" and an
+    /// "entered the menu", in no guaranteed order. Acting on each event in
+    /// turn meant a late-arriving "left the button" scheduled a close that
+    /// nothing was left to cancel — and the menu vanished as you reached it.
+    /// Reading both flags together has no such order to get wrong.
+    fn sync_grid_menu(&mut self, cx: &mut Context<Self>) {
+        let wanted = match self.grid_hover_button {
+            // A button wins over the panel, so sliding onto the sibling
+            // button swaps menus rather than keeping the old one alive.
+            Some(menu) => Some(menu),
+            None if self.grid_hover_panel => self.grid_menu,
+            None => None,
+        };
+
+        // Whatever was pending is now stale either way.
+        let token = self.grid_hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let hover_token = self.grid_hover_token.clone();
+
+        let Some(menu) = wanted else {
+            if self.grid_menu.is_none() {
+                return;
+            }
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                smol::Timer::after(Duration::from_millis(GRID_MENU_CLOSE_MS)).await;
+                if hover_token.load(Ordering::SeqCst) != token {
+                    return;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    if hover_token.load(Ordering::SeqCst) == token {
+                        this.close_grid_menu(cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        };
+
+        if self.grid_menu == Some(menu) {
+            return;
+        }
+        // Moving along a row of menus that are already showing is browsing
+        // them, not opening one; pausing over each would feel broken.
+        if self.grid_menu.is_some() {
+            self.grid_menu = Some(menu);
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            smol::Timer::after(Duration::from_millis(GRID_MENU_OPEN_MS)).await;
+            if hover_token.load(Ordering::SeqCst) != token {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if hover_token.load(Ordering::SeqCst) == token {
+                    this.grid_menu = Some(menu);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Shut the menu and forget where the pointer was.
+    ///
+    /// The panel only exists while a menu is open, so a stale "the pointer is
+    /// on the menu" would otherwise keep the next one alive forever.
+    fn close_grid_menu(&mut self, cx: &mut Context<Self>) {
+        self.grid_menu = None;
+        self.grid_hover_panel = false;
+        self.grid_hover_token.fetch_add(1, Ordering::SeqCst);
+        cx.notify();
+    }
+
+    /// Whether the grid controls have anything to act on right now.
+    fn grid_controls_apply(&self, cx: &App) -> bool {
+        let focus = self.focus_manager.read(cx);
+        shows_grid_controls(
+            okena_workspace::harness_state::active_harness(self.window_id, cx).is_some(),
+            focus.fullscreen_project_id().is_some(),
+            focus.focused_project_id().is_some(),
+        )
+    }
+
+    /// The open grid menu, growing upward from its own button.
+    ///
+    /// Rendered off the bar's root rather than inside it: the footer is 22px
+    /// tall and would clip this, and the bounds captured above are
+    /// window-absolute, so placing it inside a positioned ancestor would
+    /// offset it by that ancestor's own origin.
+    fn render_grid_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.grid_menu?;
+        // Focusing a project or opening Tasks takes the buttons away with the
+        // rest of the controls. Forgetting the menu was open, rather than only
+        // hiding it, stops it reappearing unbidden on the way back.
+        if !self.grid_controls_apply(cx) {
+            self.close_grid_menu(cx);
+            return None;
+        }
+        let t = theme(cx);
+        let window_id = self.window_id;
+        let (rows, show_info) = {
+            let ws = self.workspace.read(cx);
+            (
+                ws.grid_layout_mode(window_id).is_rows(),
+                ws.grid_show_info(window_id),
+            )
+        };
+        let bounds = self
+            .grid_button_bounds
+            .get(&menu)
+            .copied()
+            .unwrap_or_default();
+        // Anchored by its bottom-right to the button's top-right: the buttons
+        // sit at the bottom of the window on its right-hand side, so a menu
+        // has to grow up and leftward to have anywhere to go.
+        //
+        // Flush rather than offset, because the pointer has to travel from the
+        // button into the menu — a gap between them is dead space that would
+        // start closing the very menu you are reaching for.
+        let position = point(bounds.origin.x + bounds.size.width, bounds.origin.y);
+
+        let panel = okena_ui::menu::context_menu_panel(menu.panel_id(), &t)
+            .min_w(px(180.0))
+            // On the panel itself, not on a wrapper around it: the hitbox that
+            // occludes is the one that has to receive the hover keeping this
+            // menu alive, and nesting the two put a layer between them.
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_grid_menu(cx);
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                this.hover_grid_panel(*hovered, cx);
+            }));
+        let panel = match menu {
+            GridMenu::Layout => panel
+                .child(self.grid_menu_toggle(
+                    "grid-menu-columns",
+                    "Columns",
+                    !rows,
+                    "icons/split-vertical.svg",
+                    move |this, cx| {
+                        let ws = this.workspace.clone();
+                        ws.update(cx, |ws, cx| {
+                            ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Columns, cx)
+                        });
+                    },
+                    cx,
+                ))
+                .child(self.grid_menu_toggle(
+                    "grid-menu-stacked",
+                    "Stacked",
+                    rows,
+                    "icons/split-horizontal.svg",
+                    move |this, cx| {
+                        let ws = this.workspace.clone();
+                        ws.update(cx, |ws, cx| {
+                            ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Rows, cx)
+                        });
+                    },
+                    cx,
+                ))
+                // Listed before it exists, so the menu keeps its shape when it
+                // lands. Disabled rather than absent: "coming soon" is an
+                // answer, and a missing entry is not.
+                .child(okena_ui::menu::menu_item_disabled(
+                    "grid-menu-canvas",
+                    "icons/select-all.svg",
+                    "Canvas — coming soon",
+                    &t,
+                )),
+            GridMenu::Content => panel
+                .child(self.grid_menu_toggle(
+                    "grid-menu-info",
+                    "Info",
+                    show_info,
+                    "icons/lightbulb.svg",
+                    move |this, cx| {
+                        let ws = this.workspace.clone();
+                        ws.update(cx, |ws, cx| ws.set_grid_show_info(window_id, true, cx));
+                    },
+                    cx,
+                ))
+                .child(self.grid_menu_toggle(
+                    "grid-menu-terminals",
+                    "Terminals",
+                    !show_info,
+                    "icons/terminal.svg",
+                    move |this, cx| {
+                        let ws = this.workspace.clone();
+                        ws.update(cx, |ws, cx| ws.set_grid_show_info(window_id, false, cx));
+                    },
+                    cx,
+                )),
+        };
+
+        Some(
+            deferred(
+                anchored()
+                    .position(position)
+                    .anchor(Anchor::BottomRight)
+                    .snap_to_window()
+                    .child(panel),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    /// One row of the grid menu, with a check when it is the current choice.
+    fn grid_menu_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        on: bool,
+        idle_icon: &'static str,
+        apply: impl Fn(&mut StatusBar, &mut Context<StatusBar>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        okena_ui::menu::menu_item(
+            id,
+            if on { "icons/check.svg" } else { idle_icon },
+            label,
+            &t,
+        )
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            // Picking one of two exclusive options answers the question the
+            // menu asked, so it closes.
+            this.close_grid_menu(cx);
+            apply(this, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
     fn render_system_metric(
         metric: SystemMetric,
         style: StatusBarStyle,
@@ -712,6 +1118,25 @@ impl StatusBar {
     }
 }
 
+/// What the current layout is called, on the button and in the menu.
+fn layout_label(rows: bool) -> &'static str {
+    if rows { "Stacked" } else { "Columns" }
+}
+
+/// What the current column contents are called.
+fn content_label(show_info: bool) -> &'static str {
+    if show_info { "Info" } else { "Terminals" }
+}
+
+/// Whether the grid controls belong in the footer.
+///
+/// They configure a grid of several things. A harness view has taken the
+/// grid's place; focus and zoom have narrowed it to one project, which has no
+/// columns to arrange and no second thing to show info for.
+fn shows_grid_controls(harness_view: bool, fullscreen: bool, focused: bool) -> bool {
+    !harness_view && !fullscreen && !focused
+}
+
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -758,6 +1183,10 @@ impl Render for StatusBar {
             color: mem_color,
         };
 
+        // Built before the widget borrows below, which hold `&self` for the
+        // rest of this function.
+        let grid_menu = self.render_grid_menu(cx);
+
         // Collect widgets in stable registry order from active extensions
         let left_widgets: Vec<&Vec<AnyView>> = self
             .activate_fns
@@ -785,6 +1214,9 @@ impl Render for StatusBar {
             .border_t_1()
             .border_color(rgb(t.border))
             .text_size(ui_text_ms(cx))
+            // Deferred and window-anchored, so it escapes this 22px strip
+            // rather than being clipped by it.
+            .children(grid_menu)
             // Left side - sidebar toggle (macOS only) + system stats
             .child({
                 let mut left = h_flex()
@@ -833,7 +1265,12 @@ impl Render for StatusBar {
             })
             // Right side - remote info + version + time
             .child({
-                let mut right = h_flex().gap(px(8.0));
+                // First in the right-hand group: it is a control rather than a
+                // reading, so it sits away from the clock and the connection
+                // status at the far edge.
+                let mut right = h_flex()
+                    .gap(px(8.0))
+                    .children(self.render_grid_controls(&t, cx));
 
                 // Right-side extension widgets
                 for widgets in &right_widgets {
@@ -1011,5 +1448,42 @@ impl Render for StatusBar {
                     .child(div().text_color(rgb(t.text_secondary)).child(time_str))
                     .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `use super::*`: the gpui glob would shadow `#[test]` with
+    // `gpui::test`, which expands into itself forever.
+    use super::{content_label, layout_label, shows_grid_controls};
+
+    #[test]
+    fn the_button_and_its_menu_call_each_mode_the_same_thing() {
+        // The button wears the current choice and the menu offers it; two
+        // spellings of "Stacked" would read as two different settings.
+        assert_eq!(layout_label(false), "Columns");
+        assert_eq!(layout_label(true), "Stacked");
+        assert_eq!(content_label(true), "Info");
+        assert_eq!(content_label(false), "Terminals");
+    }
+
+    #[test]
+    fn the_grid_controls_belong_to_a_grid_and_nothing_else() {
+        assert!(
+            shows_grid_controls(false, false, false),
+            "an overview is a grid"
+        );
+        // Each of these on its own means there is no grid to arrange, and the
+        // controls would sit in the footer offering to rearrange columns that
+        // are not on screen.
+        assert!(
+            !shows_grid_controls(true, false, false),
+            "Tasks took the grid"
+        );
+        assert!(
+            !shows_grid_controls(false, false, true),
+            "one project is not a grid"
+        );
+        assert!(!shows_grid_controls(false, true, false), "zoom is for room");
     }
 }

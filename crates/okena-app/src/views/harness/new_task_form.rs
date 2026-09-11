@@ -44,6 +44,11 @@ pub(crate) struct NewTaskForm {
 impl HarnessPane {
     /// Open the form.
     pub(super) fn open_new_task(&mut self, cx: &mut Context<Self>) {
+        // The form takes the detail panel, so nothing is selected while it is
+        // open: a highlighted row whose detail you cannot see reads as a bug,
+        // and closing the form would then restore a selection you had stopped
+        // thinking about.
+        self.tasks.selected = None;
         self.tasks.new_task = Some(NewTaskForm {
             kind: TaskKind::Task,
             container_id: None,
@@ -284,7 +289,12 @@ impl HarnessPane {
         .detach();
     }
 
-    pub(super) fn render_new_task_form(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The form, shaped as the board's right-hand panel.
+    ///
+    /// It sits where a task's detail sits rather than replacing the whole
+    /// view: filling it in is a small job, and taking the board away to do it
+    /// hid the list you are adding to.
+    pub(super) fn render_new_task_form(&self, share: f32, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(form) = self.tasks.new_task.as_ref() else {
             return div().into_any_element();
@@ -327,9 +337,15 @@ impl HarnessPane {
         }
 
         let mut body = v_flex()
-            .w_full()
-            .max_w(px(720.0))
-            .gap(px(16.0))
+            .id("new-task-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            // Matching the detail panel it stands in for, so the right-hand
+            // column does not shift as you open and close the form.
+            .gap(px(14.0))
+            .px(px(16.0))
+            .py(px(14.0))
             .child(
                 v_flex().gap(px(4.0)).child(
                     div()
@@ -360,7 +376,9 @@ impl HarnessPane {
                     .child(
                         okena_ui::input::input_container(&t, None)
                             .w_full()
-                            .h(px(140.0))
+                            // Shorter than the full-page form was: in a panel
+                            // this shares the height with everything below it.
+                            .h(px(110.0))
                             .px(px(8.0))
                             .py(px(6.0))
                             .child(
@@ -467,11 +485,11 @@ impl HarnessPane {
 
         v_flex()
             .id("new-task-form")
-            .size_full()
-            .overflow_y_scroll()
-            .items_center()
-            .px(px(24.0))
-            .py(px(24.0))
+            .w(relative(share))
+            .min_w_0()
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(t.border))
             .child(body)
             .into_any_element()
     }

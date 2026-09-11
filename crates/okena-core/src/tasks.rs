@@ -66,6 +66,38 @@ impl TaskState {
     pub fn is_closed(self) -> bool {
         matches!(self, TaskState::Done | TaskState::Canceled)
     }
+
+    /// Normalized name, for when a provider supplied none of its own.
+    pub const fn label(self) -> &'static str {
+        match self {
+            TaskState::Backlog => "Backlog",
+            TaskState::Todo => "Todo",
+            TaskState::InProgress => "In progress",
+            TaskState::InReview => "In review",
+            TaskState::Done => "Done",
+            TaskState::Canceled => "Canceled",
+            TaskState::Unknown => "Unknown",
+        }
+    }
+
+    /// Where this sits when sorting by status: furthest along first.
+    ///
+    /// A work queue sorted by status is being asked "what is closest to
+    /// finishing", so review comes before in-progress and both come before
+    /// anything not started. Closed states trail because the harness does not
+    /// list them at all — they are here so the ordering is total rather than
+    /// because anyone will see them.
+    pub const fn sort_rank(self) -> u8 {
+        match self {
+            TaskState::InReview => 0,
+            TaskState::InProgress => 1,
+            TaskState::Todo => 2,
+            TaskState::Backlog => 3,
+            TaskState::Done => 4,
+            TaskState::Canceled => 5,
+            TaskState::Unknown => 6,
+        }
+    }
 }
 
 /// Where a task sits in the work breakdown.
@@ -162,6 +194,100 @@ impl TaskKind {
     }
 }
 
+/// Which axis a [`TaskGroup`] groups on.
+///
+/// Every backend has its own words for the same few shapes: Linear calls a
+/// body of work a Project and a time box a Cycle; Azure DevOps calls them an
+/// Area Path and an Iteration Path. Normalizing to the shape rather than the
+/// word means the harness can offer "filter by iteration" without knowing
+/// whose iteration it is.
+///
+/// [`GroupAxis::Other`] is the escape hatch, and it carries its name rather
+/// than discarding it: a backend with an axis this build has never heard of
+/// still gets grouped and filtered under whatever it calls the thing, instead
+/// of vanishing. Ordering is display order — derived, so the known axes come
+/// in the order above and unknown ones sort alphabetically after them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum GroupAxis {
+    /// The owning team, or an Azure DevOps team project.
+    Team,
+    /// A named body of work: a Linear project, an ADO area path.
+    Project,
+    /// A time box: a Linear cycle, an ADO iteration path, a sprint.
+    Iteration,
+    /// An axis this build doesn't model, kept under the provider's own name.
+    Other(String),
+}
+
+impl GroupAxis {
+    /// Stable lowercase name used on the wire.
+    pub fn wire_name(&self) -> &str {
+        match self {
+            GroupAxis::Team => "team",
+            GroupAxis::Project => "project",
+            GroupAxis::Iteration => "iteration",
+            GroupAxis::Other(name) => name,
+        }
+    }
+
+    /// Heading to show above this axis's values, upper-cased by the caller if
+    /// that is the house style.
+    pub fn label(&self) -> &str {
+        match self {
+            GroupAxis::Team => "Team",
+            GroupAxis::Project => "Project",
+            GroupAxis::Iteration => "Iteration",
+            GroupAxis::Other(name) => name,
+        }
+    }
+}
+
+impl From<String> for GroupAxis {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "team" => GroupAxis::Team,
+            "project" => GroupAxis::Project,
+            "iteration" => GroupAxis::Iteration,
+            _ => GroupAxis::Other(s),
+        }
+    }
+}
+
+impl From<GroupAxis> for String {
+    fn from(a: GroupAxis) -> Self {
+        match a {
+            GroupAxis::Other(name) => name,
+            other => other.wire_name().to_string(),
+        }
+    }
+}
+
+/// One grouping a task belongs to, beyond its labels.
+///
+/// Carries the provider's own id alongside the name because filtering has to
+/// survive a rename: a sprint renamed mid-week must not silently empty the
+/// board for anyone who had it selected.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskGroup {
+    pub axis: GroupAxis,
+    /// The provider's stable id for this group.
+    pub id: String,
+    /// What to show. Never empty — a provider with only a number to go on
+    /// (Linear's unnamed cycles) composes one.
+    pub name: String,
+}
+
+impl TaskGroup {
+    pub fn new(axis: GroupAxis, id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            axis,
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+}
+
 /// A task assigned to the authenticated user.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -199,6 +325,20 @@ pub struct Task {
     /// stays inspectable rather than a black box.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Groupings this task belongs to — its team, project, iteration.
+    ///
+    /// A list rather than a field per axis so a provider can report an axis
+    /// this build has never heard of (see [`GroupAxis::Other`]) without a
+    /// schema change on the way through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<TaskGroup>,
+}
+
+impl Task {
+    /// This task's group on `axis`, if it has one.
+    pub fn group(&self, axis: &GroupAxis) -> Option<&TaskGroup> {
+        self.groups.iter().find(|g| &g.axis == axis)
+    }
 }
 
 /// Backlink stored on a worktree project, pointing at the task it was started
@@ -433,5 +573,149 @@ mod kind_tests {
     fn unknown_kind_decodes_as_task() {
         let k: TaskKind = serde_json::from_str("\"chore\"").expect("decode");
         assert_eq!(k, TaskKind::Task);
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
+
+    fn task(groups: Vec<TaskGroup>) -> Task {
+        Task {
+            id: TaskId::new("linear", "x"),
+            display_key: "X-1".into(),
+            title: "t".into(),
+            description: None,
+            state: TaskState::Todo,
+            state_name: "Todo".into(),
+            url: String::new(),
+            branch_name: String::new(),
+            updated_at: String::new(),
+            kind: TaskKind::Task,
+            parent_id: None,
+            parent_key: None,
+            labels: Vec::new(),
+            groups,
+        }
+    }
+
+    #[test]
+    fn a_known_axis_round_trips_through_its_wire_name() {
+        for axis in [GroupAxis::Team, GroupAxis::Project, GroupAxis::Iteration] {
+            let wire = serde_json::to_string(&axis).expect("serialize");
+            let back: GroupAxis = serde_json::from_str(&wire).expect("deserialize");
+            assert_eq!(back, axis, "{wire}");
+        }
+    }
+
+    #[test]
+    fn an_unmodelled_axis_keeps_its_name_instead_of_collapsing() {
+        // The point of `Other`: an ADO area path reaching a build that has
+        // never heard of one is still filterable, under ADO's own word.
+        let axis: GroupAxis = serde_json::from_str("\"area_path\"").expect("deserialize");
+        assert_eq!(axis, GroupAxis::Other("area_path".into()));
+        assert_eq!(axis.label(), "area_path");
+        assert_eq!(serde_json::to_string(&axis).unwrap(), "\"area_path\"");
+    }
+
+    #[test]
+    fn axes_sort_in_display_order_with_unknown_ones_last() {
+        let mut axes = vec![
+            GroupAxis::Other("area".into()),
+            GroupAxis::Iteration,
+            GroupAxis::Team,
+            GroupAxis::Project,
+        ];
+        axes.sort();
+        assert_eq!(
+            axes,
+            vec![
+                GroupAxis::Team,
+                GroupAxis::Project,
+                GroupAxis::Iteration,
+                GroupAxis::Other("area".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_finds_its_group_by_axis() {
+        let t = task(vec![
+            TaskGroup::new(GroupAxis::Team, "t1", "Qblok"),
+            TaskGroup::new(GroupAxis::Iteration, "c9", "Cycle 9"),
+        ]);
+        assert_eq!(
+            t.group(&GroupAxis::Iteration).map(|g| &*g.name),
+            Some("Cycle 9")
+        );
+        assert_eq!(t.group(&GroupAxis::Project), None);
+    }
+
+    #[test]
+    fn a_task_from_an_older_daemon_decodes_with_no_groups() {
+        // `groups` is additive: a daemon that predates it must not fail to
+        // decode, it must simply report nothing to group by.
+        let json = serde_json::json!({
+            "id": { "provider": "linear", "external_id": "x" },
+            "display_key": "X-1", "title": "t",
+            "state": "todo", "state_name": "Todo",
+            "url": "", "branch_name": "", "updated_at": ""
+        });
+        let t: Task = serde_json::from_value(json).expect("decode");
+        assert!(t.groups.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::TaskState;
+
+    #[test]
+    fn sorting_by_status_puts_the_furthest_along_first() {
+        let mut states = vec![
+            TaskState::Backlog,
+            TaskState::InProgress,
+            TaskState::Todo,
+            TaskState::InReview,
+        ];
+        states.sort_by_key(|s| s.sort_rank());
+        assert_eq!(
+            states,
+            vec![
+                TaskState::InReview,
+                TaskState::InProgress,
+                TaskState::Todo,
+                TaskState::Backlog,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_state_ranks_distinctly_so_the_order_is_total() {
+        let all = [
+            TaskState::Backlog,
+            TaskState::Todo,
+            TaskState::InProgress,
+            TaskState::InReview,
+            TaskState::Done,
+            TaskState::Canceled,
+            TaskState::Unknown,
+        ];
+        let mut ranks: Vec<u8> = all.iter().map(|s| s.sort_rank()).collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), all.len(), "two states share a rank");
+    }
+
+    #[test]
+    fn closed_states_rank_after_open_ones() {
+        for closed in [TaskState::Done, TaskState::Canceled] {
+            for open in [TaskState::InReview, TaskState::InProgress, TaskState::Todo] {
+                assert!(
+                    closed.sort_rank() > open.sort_rank(),
+                    "{closed:?} vs {open:?}"
+                );
+            }
+        }
     }
 }
