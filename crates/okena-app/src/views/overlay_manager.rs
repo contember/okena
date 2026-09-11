@@ -709,6 +709,7 @@ impl OverlayManager {
         client: okena_transport::remote_action::RemoteActionClient,
         focus_manager: Entity<crate::workspace::focus::FocusManager>,
         default_agent: Option<String>,
+        prefill: okena_workspace::requests::NewAgentPrefill,
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
@@ -720,6 +721,7 @@ impl OverlayManager {
                 focus_manager,
                 window_id,
                 default_agent,
+                prefill,
                 cx,
             )
         });

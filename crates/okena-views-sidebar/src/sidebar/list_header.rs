@@ -279,7 +279,9 @@ impl Sidebar {
                 if agents {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            okena_workspace::requests::OverlayRequest::NewAgentDialog,
+                            okena_workspace::requests::OverlayRequest::NewAgentDialog(
+                                Default::default(),
+                            ),
                             cx,
                         );
                     });

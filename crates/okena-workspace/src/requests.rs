@@ -142,6 +142,21 @@ pub enum FolderOverlayKind {
     },
 }
 
+/// What the New agent dialog opens with.
+///
+/// Empty for a session started from nothing. A launcher whose "configure"
+/// hands off to the dialog fills in what it would have started, so configuring
+/// is adjusting that rather than retyping it.
+#[derive(Clone, Debug, Default)]
+pub struct NewAgentPrefill {
+    /// Replaces the dialog's "New agent" heading.
+    pub heading: Option<String>,
+    pub goal: String,
+    pub name: String,
+    /// Task the session is about, carried through to the start.
+    pub task: Option<okena_core::tasks::TaskRef>,
+}
+
 /// Requests consumed by WindowView::process_pending_requests().
 ///
 /// Project-scoped and folder-scoped variants are grouped into
@@ -153,8 +168,8 @@ pub enum OverlayRequest {
     Project(ProjectOverlay),
     Folder(FolderOverlay),
     AddProjectDialog,
-    /// Configure and start a free-form agent session.
-    NewAgentDialog,
+    /// Configure and start a free-form agent session, starting from `prefill`.
+    NewAgentDialog(Box<NewAgentPrefill>),
     /// Open the settings modal, optionally on a named page.
     ///
     /// A string rather than the panel's own enum: that type lives in the app

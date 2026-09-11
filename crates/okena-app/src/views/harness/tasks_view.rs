@@ -19,11 +19,6 @@ use okena_views_terminal::layout::split_pane::DragState;
 use super::HarnessPane;
 use super::task_filter::{FacetValue, LABELS_HEADING, STATUS_HEADING, collect_facets, status_name};
 
-/// Agents offered in the "Start work" dialog. Mirrors the detection list in
-/// `agents_view`, so anything okena can launch is also something it recognizes
-/// afterwards.
-const AGENT_CHOICES: &[&str] = &["claude", "copilot"];
-
 /// Accent colour for a workflow-state category.
 ///
 /// Keyed on the normalized category, not the provider's state name, so a team
@@ -204,6 +199,34 @@ pub(super) struct TaskSignals {
 /// like work in flight.
 pub(super) fn is_active(agents_running: usize) -> bool {
     agents_running > 0
+}
+
+/// Where a one-click "start work" works, or `None` to ask.
+///
+/// In order: the projects the last start used, so a run of tasks in the same
+/// repos is one click each; the repo you were last focused in; the only repo
+/// there is. Anything past that is a guess, and a wrong guess starts work in a
+/// repo nobody chose — so it asks instead.
+pub(super) fn pick_start_projects(
+    last: &[String],
+    focused: Option<&str>,
+    candidates: &[String],
+) -> Option<Vec<String>> {
+    let still_there: Vec<String> = last
+        .iter()
+        .filter(|id| candidates.contains(id))
+        .cloned()
+        .collect();
+    if !still_there.is_empty() {
+        return Some(still_there);
+    }
+    if let Some(focused) = focused.filter(|id| candidates.iter().any(|c| c == id)) {
+        return Some(vec![focused.to_string()]);
+    }
+    match candidates {
+        [only] => Some(vec![only.clone()]),
+        _ => None,
+    }
 }
 
 /// Which set of values a row of facet chips belongs to.
@@ -438,8 +461,9 @@ impl HarnessPane {
     /// Open the "Start work" dialog for `task`.
     ///
     /// Pre-filled rather than blank: the provider's branch name (which keeps
-    /// its branch-to-issue linking working), the first top-level project, and
-    /// the daemon's configured agent.
+    /// its branch-to-issue linking working), and the projects a one-click
+    /// start would have used. When those cannot be told, none are picked —
+    /// guessing one would start work in a repo nobody chose.
     pub(super) fn open_start_form(&mut self, task: &Task, cx: &mut Context<Self>) {
         let branch = task.branch_name.clone();
         let branch_input = cx.new(|cx| {
@@ -447,23 +471,63 @@ impl HarnessPane {
                 .placeholder("Branch / worktree name")
                 .default_value(branch)
         });
-        let project_ids = self
-            .workspace
-            .read(cx)
-            .projects()
-            .iter()
-            .find(|p| p.worktree_info.is_none())
-            .map(|p| vec![p.id.clone()])
-            .unwrap_or_default();
+        let project_ids = self.quick_start_projects(cx).unwrap_or_default();
 
         self.tasks.start_form = Some(super::StartWorkForm {
             task: task.clone(),
             project_ids,
             branch_input,
-            agent: self.tasks.default_agent.clone(),
         });
         self.tasks.error = None;
         cx.notify();
+    }
+
+    /// Projects that can hold a task's worktrees: repos, not worktrees of
+    /// them and not agent sessions.
+    fn start_candidates(&self, cx: &App) -> Vec<String> {
+        self.workspace
+            .read(cx)
+            .projects()
+            .iter()
+            .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// Where a one-click start works, if okena can tell without asking.
+    fn quick_start_projects(&self, cx: &App) -> Option<Vec<String>> {
+        let ws = self.workspace.read(cx);
+        let focused = self
+            .focus_manager
+            .read(cx)
+            .focused_project_id()
+            .and_then(|id| ws.project(id))
+            .map(|p| match p.worktree_info.as_ref() {
+                // Focus inside a worktree still says which repo you are in.
+                Some(wi) => wi.parent_project_id.clone(),
+                None => p.id.clone(),
+            });
+        pick_start_projects(
+            &self.tasks.last_projects,
+            focused.as_deref(),
+            &self.start_candidates(cx),
+        )
+    }
+
+    /// Start work on `task` with `agent_command` right away, or ask where when
+    /// that cannot be told.
+    pub(super) fn quick_start_work(
+        &mut self,
+        task: &Task,
+        agent_command: String,
+        cx: &mut Context<Self>,
+    ) {
+        match self.quick_start_projects(cx) {
+            Some(project_ids) => self.start_work(task, project_ids, None, agent_command, cx),
+            // The dialog's own launcher says to pick a project, and offers
+            // the agents once one is picked.
+            None => self.open_start_form(task, cx),
+        }
     }
 
     /// Focus an existing session for a task and leave the harness view.
@@ -483,7 +547,8 @@ impl HarnessPane {
         cx.notify();
     }
 
-    /// Read the daemon's configured agent so the dialog can default to it.
+    /// Read the daemon's configured agent so launchers can mark it as the
+    /// default.
     pub(super) fn refresh_default_agent(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
@@ -503,11 +568,6 @@ impl HarnessPane {
                             .and_then(|c| c.as_str())
                             .filter(|c| !c.trim().is_empty())
                             .map(str::to_string);
-                        // The Specs picker follows the same default until the
-                        // user chooses for themselves.
-                        if !this.specs.agent_picked {
-                            this.specs.agent = this.tasks.default_agent.clone();
-                        }
                     }
                     cx.notify();
                 });
@@ -516,8 +576,8 @@ impl HarnessPane {
         .detach();
     }
 
-    /// Dispatch the configured run.
-    pub(super) fn confirm_start(&mut self, cx: &mut Context<Self>) {
+    /// Dispatch the configured run with `agent_command`.
+    pub(super) fn confirm_start(&mut self, agent_command: String, cx: &mut Context<Self>) {
         let Some(form) = self.tasks.start_form.as_ref() else {
             return;
         };
@@ -526,23 +586,39 @@ impl HarnessPane {
             cx.notify();
             return;
         }
+        let task = form.task.clone();
+        let project_ids = form.project_ids.clone();
+        let branch = form.branch_input.read(cx).value().trim().to_string();
+        self.start_work(
+            &task,
+            project_ids,
+            (!branch.is_empty()).then_some(branch),
+            agent_command,
+            cx,
+        );
+    }
+
+    /// Create `task`'s worktrees in `project_ids` and start `agent_command` on
+    /// them. An empty command creates the worktrees only; `branch` of `None`
+    /// keeps the provider's branch name.
+    fn start_work(
+        &mut self,
+        task: &Task,
+        project_ids: Vec<String>,
+        branch: Option<String>,
+        agent_command: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.tasks.starting.is_some() {
             return;
         }
+        self.tasks.last_projects = project_ids.clone();
 
         // Harness panes post straight through `RemoteActionClient`, bypassing
         // the dispatcher's id stripping — see `HarnessPane::daemon_id`.
-        let project_ids: Vec<String> = form
-            .project_ids
-            .iter()
-            .map(|id| self.daemon_id(id))
-            .collect();
-        let branch = form.branch_input.read(cx).value().trim().to_string();
-        // An empty string tells the daemon "no agent" explicitly, which is not
-        // the same as `None` (fall back to the configured default).
-        let agent_command = Some(form.agent.clone().unwrap_or_default());
-        let external_id = form.task.id.external_id.clone();
-        let display_key = form.task.display_key.clone();
+        let project_ids: Vec<String> = project_ids.iter().map(|id| self.daemon_id(id)).collect();
+        let external_id = task.id.external_id.clone();
+        let display_key = task.display_key.clone();
 
         self.tasks.starting = Some(external_id.clone());
         self.tasks.error = None;
@@ -561,8 +637,11 @@ impl HarnessPane {
                         task_external_id: external_id,
                         project_ids,
                         agent_root: None,
-                        branch: (!branch.is_empty()).then_some(branch),
-                        agent_command,
+                        branch,
+                        // An empty string tells the daemon "no agent"
+                        // explicitly, which is not the same as `None` (fall
+                        // back to the configured default).
+                        agent_command: Some(agent_command),
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing start-work result".to_string()))
             })
@@ -1295,65 +1374,7 @@ impl HarnessPane {
         };
 
         let links = self.links_for(&task, cx);
-        let busy = self.tasks.starting.is_some();
-        let is_starting = self.tasks.starting.as_deref() == Some(task.id.external_id.as_str());
         let state_label = status_name(&task).to_string();
-        let task_for_start = task.clone();
-
-        let action = match links.open_target.clone() {
-            // A session already exists for this task: starting another would
-            // create a second set of worktrees on the same branch.
-            Some(project_id) => div()
-                .id("detail-open")
-                .cursor_pointer()
-                .px(px(14.0))
-                .py(px(6.0))
-                .rounded(px(4.0))
-                .bg(rgb(t.bg_secondary))
-                .hover(|s| s.bg(rgb(t.bg_hover)))
-                .text_size(ui_text_md(cx))
-                .text_color(rgb(t.text_primary))
-                .child("Open session")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _window, cx| {
-                        this.open_session(project_id.clone(), cx);
-                    }),
-                ),
-            None => div()
-                .id("detail-start")
-                .cursor_pointer()
-                .px(px(14.0))
-                .py(px(6.0))
-                .rounded(px(4.0))
-                .bg(if busy {
-                    rgb(t.bg_secondary)
-                } else {
-                    rgb(t.button_primary_bg)
-                })
-                .when(!busy, |d| d.hover(|s| s.bg(rgb(t.button_primary_hover))))
-                .text_size(ui_text_md(cx))
-                .text_color(if busy {
-                    rgb(t.text_secondary)
-                } else {
-                    rgb(t.button_primary_fg)
-                })
-                .child(if is_starting {
-                    "Starting…"
-                } else {
-                    "Start work"
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _window, cx| {
-                        this.open_start_form(&task_for_start, cx);
-                    }),
-                ),
-        };
-
-        let task_for_agent = task.clone();
-        let starting_breakdown =
-            self.tasks.breaking_down.as_deref() == Some(task.id.external_id.as_str());
 
         let mut body = v_flex()
             .id("task-detail-body")
@@ -1410,7 +1431,7 @@ impl HarnessPane {
                     .text_color(rgb(t.text_primary))
                     .child(task.title.clone()),
             )
-            .child(action);
+            .child(self.render_work_launcher(&task, &links, cx));
 
         // Where it sits in the breakdown. The parent is clickable when okena
         // knows it; when it does not — a parent assigned to somebody else and
@@ -1467,41 +1488,9 @@ impl HarnessPane {
         }
 
         // The breakdown control belongs to the list it acts on, so it sits at
-        // the foot of it. One slot, four states: open the agent that exists,
-        // wait for the one starting, or start one — worded for whether there
-        // is anything to refine.
+        // the foot of it.
         let has_children = children.is_some_and(|c| !c.is_empty());
-        body = body.child(match links.helpers.first() {
-            Some((id, _)) => {
-                let open_id = id.clone();
-                self.small_button(
-                    "detail-open-breakdown",
-                    "Open breakdown agent",
-                    cx.listener(move |this, _, _window, cx| {
-                        this.open_session(open_id.clone(), cx);
-                    }),
-                    cx,
-                )
-            }
-            None if starting_breakdown => {
-                self.small_button("detail-break-down", "Starting…", |_, _, _| {}, cx)
-            }
-            None => self.small_button(
-                "detail-break-down",
-                if has_children {
-                    // Same agent, same tools: it lists what exists before
-                    // adding, so refining is breaking down again with the
-                    // children already there.
-                    "Refine sub-tasks"
-                } else {
-                    "Break down with agent"
-                },
-                cx.listener(move |this, _, _window, cx| {
-                    this.break_down_with_agent(&task_for_agent, cx);
-                }),
-                cx,
-            ),
-        });
+        body = body.child(self.render_breakdown_launcher(&task, &links, has_children, cx));
 
         body = body.child(self.detail_label("BRANCH", cx)).child(
             div()
@@ -1541,10 +1530,8 @@ impl HarnessPane {
             );
         }
 
-        // What okena itself has running for this task, which the provider
-        // cannot know. With a session there is a great deal to say and the
-        // block below says it; without one there is a single line, and the two
-        // must not both appear.
+        // What the work left behind — its checkouts and its output. The
+        // sessions themselves, and how they are doing, are on the launchers.
         let session_info = links.session.as_ref().and_then(|id| {
             crate::views::agent_session::AgentSessionInfo::collect(
                 self.workspace.read(cx),
@@ -1552,43 +1539,6 @@ impl HarnessPane {
                 id,
             )
         });
-        // One list for every agent on this task, whatever it is doing. They
-        // were two sections — the helper's name in one, the work session's
-        // chips in another — which made the same question ("what is running
-        // for this task?") take two places to answer.
-        let mut agents: Vec<(String, bool)> = Vec::new();
-        if let Some(id) = links.session.clone() {
-            agents.push((id, true));
-        }
-        agents.extend(links.helpers.iter().map(|(id, _)| (id.clone(), false)));
-
-        if agents.is_empty() {
-            body = body.child(self.detail_label("IN OKENA", cx)).child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(if links.signals.linked {
-                        "A worktree exists, with no agent session."
-                    } else {
-                        "No worktree or session yet."
-                    }),
-            );
-        } else {
-            body = body.child(self.detail_label("AGENTS", cx));
-            for (id, is_work) in &agents {
-                let Some(info) = crate::views::agent_session::AgentSessionInfo::collect(
-                    self.workspace.read(cx),
-                    &self.terminals,
-                    id,
-                ) else {
-                    continue;
-                };
-                body = body.child(self.render_agent_row(&info, *is_work, cx));
-            }
-        }
-
-        // Checkouts and output belong to the session doing the work; a
-        // breakdown agent has neither.
         if let Some(info) = session_info.as_ref() {
             body = body.child(self.render_session_facts(info, cx));
         }
@@ -1619,85 +1569,146 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// One agent working on this task: what it is, how it is doing, and a way
-    /// into it.
-    ///
-    /// `is_work` separates the agent doing the task from one started about it —
-    /// a breakdown, say. Both belong in the list, but conflating them would
-    /// make "is anyone working on this?" unanswerable.
-    fn render_agent_row(
+    /// Sessions in `project_ids`, as a launcher lists them. A project that has
+    /// gone since is skipped rather than shown blank.
+    fn launcher_sessions(
         &self,
-        info: &crate::views::agent_session::AgentSessionInfo,
-        is_work: bool,
+        project_ids: impl IntoIterator<Item = String>,
+        cx: &App,
+    ) -> Vec<okena_ui::agent_launcher::LauncherSession> {
+        let t = theme(cx);
+        project_ids
+            .into_iter()
+            .filter_map(|id| {
+                crate::views::agent_session::AgentSessionInfo::collect(
+                    self.workspace.read(cx),
+                    &self.terminals,
+                    &id,
+                )
+            })
+            .map(|info| crate::views::agent_session::launcher_session(&info, &t))
+            .collect()
+    }
+
+    /// Doing the task: start it with an agent, configure the start first, or —
+    /// once it has begun — see how it is going and get into it.
+    ///
+    /// No second start once there is a session: it would create a second set
+    /// of worktrees on the same branch.
+    fn render_work_launcher(
+        &self,
+        task: &Task,
+        links: &TaskLinks,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        let external_id = task.id.external_id.clone();
+        let starting = self.tasks.starting.as_deref() == Some(external_id.as_str());
+        // The agent session spans every repo, so it is the one to show; a
+        // single-repo start runs its agent in the worktree itself.
+        let sessions = self.launcher_sessions(links.open_target.clone(), cx);
 
-        // Terminal state, not the agent's claim: one that stopped reporting
-        // still shows as waiting when its prompt is waiting.
-        let activity = info.activity();
-        let mut chips = vec![
-            self.chip(
-                if is_work { "work" } else { "breakdown" }.to_string(),
-                if is_work {
-                    t.button_primary_bg
-                } else {
-                    t.warning
-                },
-                cx,
-            ),
-            self.chip(activity.label(), activity.color(&t), cx),
-        ];
-        if let Some(agent) = &info.agent {
-            chips.push(self.chip(agent.clone(), t.text_secondary, cx));
-        }
-        if !info.mcp {
-            // Explains a permanently empty PRODUCED list, and for a breakdown
-            // agent it explains why no sub-tasks are appearing.
-            chips.push(self.chip("no okena mcp".to_string(), t.text_muted, cx));
-        }
-
-        let open_id = info.project_id.clone();
-        v_flex()
-            .id(SharedString::from(format!(
-                "task-agent-{}",
-                info.project_id
-            )))
-            .cursor_pointer()
-            .w_full()
-            .min_w_0()
-            .gap(px(3.0))
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_secondary))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(info.name.clone()),
+        let (title, subtitle) = if sessions.is_empty() {
+            let place = match self.quick_start_projects(cx) {
+                Some(ids) => {
+                    let ws = self.workspace.read(cx);
+                    let names: Vec<String> = ids
+                        .iter()
+                        .filter_map(|id| ws.project(id).map(|p| p.name.clone()))
+                        .collect();
+                    format!("in {}", names.join(", "))
+                }
+                None => "pick where to work".to_string(),
+            };
+            (
+                "Start work".to_string(),
+                format!("{} · {place}", task.branch_name),
             )
-            .child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
-            .children(info.status.clone().map(|reported| {
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(format!("\u{201c}{reported}\u{201d}"))
-                    .into_any_element()
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.open_session(open_id.clone(), cx);
+        } else {
+            ("Work session".to_string(), task.branch_name.clone())
+        };
+
+        let mut options =
+            crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
+        options.push(crate::views::agent_session::no_agent_option(
+            "Worktrees only",
+            &t,
+        ));
+
+        let for_launch = task.clone();
+        let for_configure = task.clone();
+        okena_ui::agent_launcher::AgentLauncher::new(format!("task-work-{external_id}"), title)
+            .subtitle(subtitle)
+            .options(options)
+            .preferred(self.tasks.default_agent.clone())
+            .sessions(sessions)
+            .busy(starting.then_some("Creating worktrees…"))
+            .on_launch(
+                cx.listener(move |this, command: &SharedString, _window, cx| {
+                    this.quick_start_work(&for_launch, command.to_string(), cx);
                 }),
             )
+            .on_configure(
+                "Choose projects and branch…",
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.open_start_form(&for_configure, cx);
+                }),
+            )
+            .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+                this.open_session(id.to_string(), cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Thinking about the task: an agent that breaks it into sub-tasks, and
+    /// the ones already doing so.
+    fn render_breakdown_launcher(
+        &self,
+        task: &Task,
+        links: &TaskLinks,
+        has_children: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let external_id = task.id.external_id.clone();
+        let starting = self.tasks.breaking_down.as_deref() == Some(external_id.as_str());
+        let sessions = self.launcher_sessions(links.helpers.iter().map(|(id, _)| id.clone()), cx);
+
+        let title = if !sessions.is_empty() {
+            "Breaking down"
+        } else if has_children {
+            // Same agent, same tools: it lists what exists before adding, so
+            // refining is breaking down again with the children already there.
+            "Refine sub-tasks"
+        } else {
+            "Break down with agent"
+        };
+
+        let for_launch = task.clone();
+        let for_configure = task.clone();
+        okena_ui::agent_launcher::AgentLauncher::new(format!("task-breakdown-{external_id}"), title)
+            .subtitle("Writes sub-tasks back through okena's MCP")
+            .options(crate::views::agent_session::launch_options(
+                self.tasks.default_agent.as_deref(),
+                &t,
+            ))
+            .preferred(self.tasks.default_agent.clone())
+            .sessions(sessions)
+            .busy(starting.then_some("Starting…"))
+            .on_launch(
+                cx.listener(move |this, command: &SharedString, _window, cx| {
+                    this.break_down_with_agent(&for_launch, command.to_string(), cx);
+                }),
+            )
+            .on_configure(
+                "Edit the brief first…",
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.configure_breakdown(&for_configure, cx);
+                }),
+            )
+            .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+                this.open_session(id.to_string(), cx);
+            }))
             .into_any_element()
     }
 
@@ -2158,16 +2169,16 @@ impl HarnessPane {
         let form = self.tasks.start_form.as_ref()?;
         let t = theme(cx);
         let selected = form.project_ids.clone();
-        let chosen_agent = form.agent.clone();
 
-        // Worktree children can't parent another worktree, so only top-level
-        // projects are offered.
+        // Worktree children can't parent another worktree, and an agent
+        // session is not a repo, so only repos are offered.
+        let candidates = self.start_candidates(cx);
         let projects: Vec<(String, String)> = self
             .workspace
             .read(cx)
             .projects()
             .iter()
-            .filter(|p| p.worktree_info.is_none())
+            .filter(|p| candidates.contains(&p.id))
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
 
@@ -2215,64 +2226,34 @@ impl HarnessPane {
             })
             .collect();
 
-        // "None" first so creating worktrees without an agent stays one click.
-        let mut agent_options: Vec<Option<String>> = vec![None];
-        for name in AGENT_CHOICES {
-            agent_options.push(Some((*name).to_string()));
-        }
-        // A configured agent that isn't in the built-in list must still be
-        // selectable, or the daemon's own default would be unreachable here.
-        if let Some(default) = self.tasks.default_agent.as_ref()
-            && !AGENT_CHOICES.contains(&default.as_str())
-        {
-            agent_options.push(Some(default.clone()));
-        }
-
-        let agent_chips: Vec<AnyElement> = agent_options
-            .into_iter()
-            .map(|option| {
-                let is_selected = chosen_agent == option;
-                let label = option.clone().unwrap_or_else(|| "No agent".to_string());
-                let for_click = option.clone();
-                div()
-                    .id(SharedString::from(format!("sw-agent-{label}")))
-                    .cursor_pointer()
-                    .px(px(8.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(rgb(if is_selected {
-                        t.border_active
-                    } else {
-                        t.border
-                    }))
-                    .when(is_selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(if is_selected {
-                        t.text_primary
-                    } else {
-                        t.text_secondary
-                    }))
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            if let Some(form) = this.tasks.start_form.as_mut() {
-                                form.agent = for_click.clone();
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
         let count = selected.len();
         let summary = match count {
             0 => "No projects selected".to_string(),
             1 => "1 worktree".to_string(),
             n => format!("{n} worktrees · agent session rooted above them"),
         };
+
+        let mut options =
+            crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
+        options.push(crate::views::agent_session::no_agent_option(
+            "Worktrees only",
+            &t,
+        ));
+        let start_launcher = okena_ui::agent_launcher::AgentLauncher::new(
+            "sw-launcher",
+            match count {
+                0 => "Pick a project to start".to_string(),
+                1 => "Start in 1 worktree".to_string(),
+                n => format!("Start across {n} worktrees"),
+            },
+        )
+        .style(okena_ui::agent_launcher::LauncherStyle::Inline)
+        // Nothing to start until there is somewhere to start it.
+        .options(if count == 0 { Vec::new() } else { options })
+        .preferred(self.tasks.default_agent.clone())
+        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+            this.confirm_start(command.to_string(), cx);
+        }));
 
         Some(
             div()
@@ -2368,20 +2349,12 @@ impl HarnessPane {
                                                      branch-to-issue link working.",
                                                 ),
                                         ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .gap(px(5.0))
-                                        .child(self.form_label("Agent", cx))
-                                        .child(
-                                            h_flex().gap(px(6.0)).flex_wrap().children(agent_chips),
-                                        ),
                                 ),
                         )
                         .child(
                             h_flex()
-                                .justify_end()
-                                .gap(px(8.0))
+                                .items_center()
+                                .gap(px(12.0))
                                 .px(px(16.0))
                                 .py(px(12.0))
                                 .border_t_1()
@@ -2392,25 +2365,7 @@ impl HarnessPane {
                                     cx.listener(|this, _, _window, cx| this.close_start_form(cx)),
                                     cx,
                                 ))
-                                .child(
-                                    div()
-                                        .id("sw-confirm")
-                                        .cursor_pointer()
-                                        .px(px(12.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.button_primary_bg))
-                                        .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.button_primary_fg))
-                                        .child("Start")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.confirm_start(cx)
-                                            }),
-                                        ),
-                                ),
+                                .child(div().flex_1().min_w_0().child(start_launcher)),
                         ),
                 )
                 .into_any_element(),
@@ -2553,8 +2508,56 @@ impl HarnessPane {
 mod section_tests {
     // Explicit imports: `use super::*` would pull in the `gpui::*` glob, whose
     // `test` macro shadows the built-in one and recurses forever.
-    use super::{TaskSort, is_active, sort_tasks};
+    use super::{TaskSort, is_active, pick_start_projects, sort_tasks};
     use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_quick_start_reuses_the_last_projects() {
+        let candidates = ids(&["a", "b", "c"]);
+        assert_eq!(
+            pick_start_projects(&ids(&["b", "c"]), Some("a"), &candidates),
+            Some(ids(&["b", "c"]))
+        );
+    }
+
+    #[test]
+    fn a_last_project_since_removed_is_dropped() {
+        let candidates = ids(&["a", "b"]);
+        assert_eq!(
+            pick_start_projects(&ids(&["gone", "b"]), None, &candidates),
+            Some(ids(&["b"]))
+        );
+    }
+
+    #[test]
+    fn with_no_history_the_focused_repo_is_used() {
+        let candidates = ids(&["a", "b"]);
+        assert_eq!(
+            pick_start_projects(&[], Some("b"), &candidates),
+            Some(ids(&["b"]))
+        );
+    }
+
+    #[test]
+    fn focus_on_something_that_cannot_hold_worktrees_is_ignored() {
+        // An agent session, say: focused, but not a repo.
+        let candidates = ids(&["a"]);
+        assert_eq!(
+            pick_start_projects(&[], Some("session"), &candidates),
+            Some(ids(&["a"]))
+        );
+    }
+
+    #[test]
+    fn several_repos_and_nothing_to_go_on_asks() {
+        let candidates = ids(&["a", "b"]);
+        assert_eq!(pick_start_projects(&[], None, &candidates), None);
+        assert_eq!(pick_start_projects(&[], None, &[]), None);
+    }
 
     fn task(key: &str, state: TaskState) -> Task {
         Task {

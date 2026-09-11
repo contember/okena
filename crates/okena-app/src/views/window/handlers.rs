@@ -1476,7 +1476,7 @@ impl WindowView {
                         om.open_settings_panel_at(workspace, page, endpoint, client, cx);
                     });
                 }
-                OverlayRequest::NewAgentDialog => {
+                OverlayRequest::NewAgentDialog(prefill) => {
                     match self.local_daemon_action_client(cx) {
                         Ok(client) => {
                             let fm = self.focus_manager.clone();
@@ -1489,7 +1489,7 @@ impl WindowView {
                                 .map(|c| c.trim().to_string())
                                 .filter(|c| !c.is_empty());
                             self.overlay_manager.update(cx, |om, cx| {
-                                om.toggle_new_agent_dialog(client, fm, default_agent, cx);
+                                om.toggle_new_agent_dialog(client, fm, default_agent, *prefill, cx);
                             });
                         }
                         Err(error) => {

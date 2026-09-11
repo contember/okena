@@ -6,9 +6,8 @@
 //! configuring a session and reading knowledge are separate tasks.
 
 use super::HarnessPane;
-use super::specs_view::AGENT_CHOICES;
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text, ui_text_md};
+use crate::ui::tokens::ui_text;
 use crate::views::components::{SimpleInput, SimpleInputState};
 use gpui::prelude::*;
 use gpui::*;
@@ -22,9 +21,6 @@ pub(crate) struct DraftForm {
     pub(crate) request: Entity<SimpleInputState>,
     /// Root to write in. Follows the open root until picked in the form.
     pub(crate) root: Option<String>,
-    /// The agent the user picked. Until they pick, the form follows the
-    /// daemon's configured agent, so settings landing late still apply.
-    pub(crate) agent: Option<String>,
     pub(crate) starting: bool,
     pub(crate) error: Option<String>,
     /// What the last start did, shown above the view once the form closes.
@@ -42,7 +38,6 @@ impl DraftForm {
             open: false,
             request,
             root: None,
-            agent: None,
             starting: false,
             error: None,
             notice: None,
@@ -67,17 +62,7 @@ impl HarnessPane {
             .or_else(|| self.knowledge.root_key.clone())
     }
 
-    /// The agent to start: the user's pick, else the configured agent, else
-    /// the first one okena knows how to launch.
-    fn knowledge_draft_agent(&self) -> Option<String> {
-        self.knowledge_draft
-            .agent
-            .clone()
-            .or_else(|| self.tasks.default_agent.clone())
-            .or_else(|| AGENT_CHOICES.first().map(|a| a.to_string()))
-    }
-
-    fn start_knowledge_draft(&mut self, cx: &mut Context<Self>) {
+    fn start_knowledge_draft(&mut self, agent: String, cx: &mut Context<Self>) {
         if self.knowledge_draft.starting {
             return;
         }
@@ -93,11 +78,6 @@ impl HarnessPane {
             cx.notify();
             return;
         }
-        let Some(agent) = self.knowledge_draft_agent() else {
-            self.knowledge_draft.error = Some("Pick an agent to write with.".into());
-            cx.notify();
-            return;
-        };
         self.knowledge_draft.starting = true;
         self.knowledge_draft.error = None;
         cx.notify();
@@ -181,27 +161,6 @@ impl HarnessPane {
             None => "Pick where the knowledge should live.".to_string(),
         };
 
-        // The configured agent is offered even when it is not one okena
-        // names, so a custom command stays selectable.
-        let chosen = self.knowledge_draft_agent();
-        let mut choices: Vec<String> = AGENT_CHOICES.iter().map(|a| a.to_string()).collect();
-        if let Some(default) = self.tasks.default_agent.clone()
-            && !choices.contains(&default)
-        {
-            choices.insert(0, default);
-        }
-        let mut agents = h_flex().gap(px(6.0)).flex_wrap();
-        for agent in choices {
-            let value = agent.clone();
-            agents = agents.child(self.choice_chip(
-                format!("knowledge-draft-agent-{agent}"),
-                agent.clone(),
-                chosen.as_deref() == Some(agent.as_str()),
-                move |this, _cx| this.knowledge_draft.agent = Some(value.clone()),
-                cx,
-            ));
-        }
-
         let starting = self.knowledge_draft.starting;
         let mut body = v_flex()
             .w_full()
@@ -250,42 +209,35 @@ impl HarnessPane {
                          one. This is the agent's brief, so context beats brevity.",
                         cx,
                     )),
-            )
-            .child(
-                v_flex()
-                    .gap(px(6.0))
-                    .child(self.field_label("Agent", cx))
-                    .child(agents),
             );
 
         if let Some(err) = self.knowledge_draft.error.clone() {
             body = body.child(self.error_banner(err, cx));
         }
 
+        // No "without an agent" here: writing is the agent's whole job, and
+        // an empty entry is something you can make without okena.
+        let launcher = okena_ui::agent_launcher::AgentLauncher::new(
+            "knowledge-draft-launcher",
+            match target.as_deref().and_then(|k| stores.root(k)) {
+                Some(root) => format!("Write in {}", root.name),
+                None => "Write with an agent".to_string(),
+            },
+        )
+        .options(crate::views::agent_session::launch_options(
+            self.tasks.default_agent.as_deref(),
+            &t,
+        ))
+        .preferred(self.tasks.default_agent.clone())
+        .busy(starting.then_some("Starting…"))
+        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+            this.start_knowledge_draft(command.to_string(), cx);
+        }));
+
         body = body.child(
             h_flex()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .id("knowledge-draft-start")
-                        .cursor_pointer()
-                        .px(px(16.0))
-                        .py(px(7.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(t.button_primary_bg))
-                        .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.button_primary_fg))
-                        .child(if starting {
-                            "Starting…"
-                        } else {
-                            "Start session"
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _window, cx| this.start_knowledge_draft(cx)),
-                        ),
-                )
+                .items_center()
+                .gap(px(12.0))
                 .child(self.small_button(
                     "knowledge-draft-cancel",
                     "Cancel",
@@ -296,7 +248,8 @@ impl HarnessPane {
                         cx.notify();
                     }),
                     cx,
-                )),
+                ))
+                .child(div().flex_1().min_w_0().child(launcher)),
         );
 
         v_flex()

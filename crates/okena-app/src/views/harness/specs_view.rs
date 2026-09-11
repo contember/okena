@@ -23,10 +23,6 @@ use okena_core::specs::{
 use super::HarnessPane;
 use super::markdown::OpenDocument;
 
-/// Agents offered for drafting. Same list the Tasks view launches from, so
-/// anything okena can start work with can also write a spec.
-pub(super) const AGENT_CHOICES: &[&str] = &["claude", "copilot"];
-
 /// Width of the root and document list. Fixed rather than draggable: the list
 /// holds short names, and a second resizable divider in the harness would be
 /// more chrome than it earns.
@@ -220,8 +216,9 @@ impl HarnessPane {
             .or_else(|| self.specs.root_key.clone())
     }
 
-    /// Scaffold the configured change, start its agent, and return to the specs.
-    pub(super) fn draft_spec_change(&mut self, cx: &mut Context<Self>) {
+    /// Scaffold the configured change, start `agent_command` on it, and return
+    /// to the specs. An empty command scaffolds only.
+    pub(super) fn draft_spec_change(&mut self, agent_command: String, cx: &mut Context<Self>) {
         if self.specs.drafting {
             return;
         }
@@ -238,7 +235,7 @@ impl HarnessPane {
 
         let client = self.client.clone();
         // An explicit empty string is the daemon's "scaffold only, no agent".
-        let agent_command = Some(self.specs.agent.clone().unwrap_or_default());
+        let agent_command = Some(agent_command);
         let name = (!name.is_empty()).then_some(name);
         let root = self.draft_target();
         cx.spawn(async move |this, cx| {
@@ -897,23 +894,6 @@ impl HarnessPane {
             None => "Pick where the change should live.".to_string(),
         };
 
-        let mut agents = h_flex().gap(px(6.0)).flex_wrap();
-        // "No agent" first: scaffolding a change without launching anything is
-        // a legitimate choice, not a fallback.
-        for choice in std::iter::once(None).chain(AGENT_CHOICES.iter().map(|a| Some(*a))) {
-            let value = choice.map(str::to_string);
-            agents = agents.child(self.choice_chip(
-                format!("spec-agent-{}", choice.unwrap_or("none")),
-                choice.unwrap_or("No agent").to_string(),
-                self.specs.agent.as_deref() == choice,
-                move |this, _cx| {
-                    this.specs.agent = value.clone();
-                    this.specs.agent_picked = true;
-                },
-                cx,
-            ));
-        }
-
         let drafting = self.specs.drafting;
         let mut body = v_flex()
             .w_full()
@@ -983,44 +963,39 @@ impl HarnessPane {
                          briefed with, so context beats brevity.",
                         cx,
                     )),
-            )
-            .child(
-                v_flex()
-                    .gap(px(6.0))
-                    .child(self.field_label("Agent", cx))
-                    .child(agents),
             );
 
         if let Some(err) = self.specs.error.clone() {
             body = body.child(self.error_banner(err, cx));
         }
 
+        let mut options =
+            crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
+        // Last: scaffolding without an agent is a legitimate choice, not the
+        // one most people came for.
+        options.push(crate::views::agent_session::no_agent_option(
+            "Scaffold only",
+            &t,
+        ));
+        let launcher = okena_ui::agent_launcher::AgentLauncher::new(
+            "spec-launcher",
+            match target.as_deref().and_then(|k| stores.root(k)) {
+                Some(root) => format!("Draft the change in {}", root.name),
+                None => "Draft the change".to_string(),
+            },
+        )
+        .subtitle("okena scaffolds it, then briefs the agent")
+        .options(options)
+        .preferred(self.tasks.default_agent.clone())
+        .busy(drafting.then_some("Starting…"))
+        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+            this.draft_spec_change(command.to_string(), cx);
+        }));
+
         body = body.child(
             h_flex()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .id("spec-start")
-                        .cursor_pointer()
-                        .px(px(16.0))
-                        .py(px(7.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(t.button_primary_bg))
-                        .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.button_primary_fg))
-                        .child(if drafting {
-                            "Starting…"
-                        } else {
-                            "Start session"
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| {
-                                this.draft_spec_change(cx);
-                            }),
-                        ),
-                )
+                .items_center()
+                .gap(px(12.0))
                 .child(self.small_button(
                     "spec-cancel",
                     "Cancel",
@@ -1031,7 +1006,8 @@ impl HarnessPane {
                         cx.notify();
                     }),
                     cx,
-                )),
+                ))
+                .child(div().flex_1().min_w_0().child(launcher)),
         );
 
         v_flex()
@@ -1142,7 +1118,7 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{AGENT_CHOICES, cli_hint};
+    use super::cli_hint;
     use okena_core::specs::{SpecChange, SpecDoc, SpecRoot, SpecRootKind, SpecTree};
 
     fn doc(path: &str, name: &str) -> SpecDoc {
@@ -1292,10 +1268,5 @@ mod tests {
             "spec_change": "x",
         }));
         assert!(p.is_spec_session() && !p.is_agent_session());
-    }
-
-    #[test]
-    fn the_draft_agents_are_the_ones_okena_can_launch() {
-        assert_eq!(AGENT_CHOICES, ["claude", "copilot"]);
     }
 }

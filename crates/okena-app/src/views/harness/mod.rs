@@ -79,9 +79,12 @@ pub(crate) struct TasksState {
     pub(crate) filter_open: bool,
     /// How the list is ordered within each section.
     pub(crate) sort: tasks_view::TaskSort,
-    /// Agent command configured on the daemon, used as the dialog's default.
-    /// `None` until settings have been read.
+    /// Agent command configured on the daemon, drawn as every launcher's
+    /// default. `None` until settings have been read.
     pub(crate) default_agent: Option<String>,
+    /// Projects the last start worked in, so the next one-click start on
+    /// another task lands in the same repos.
+    pub(crate) last_projects: Vec<String>,
 }
 
 /// Specs-view state.
@@ -104,8 +107,6 @@ pub(crate) struct SpecsState {
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
     pub(crate) idea_input: Entity<SimpleInputState>,
-    /// Agent to draft with; `None` scaffolds the change and launches nothing.
-    pub(crate) agent: Option<String>,
     /// Whether the view is showing the new-change form instead of the specs.
     ///
     /// A full-view swap rather than a pane: configuring a session and reading
@@ -115,11 +116,6 @@ pub(crate) struct SpecsState {
     /// Directory name for the change being configured. Blank derives one from
     /// the prompt.
     pub(crate) name_input: Entity<SimpleInputState>,
-    /// Whether the user has chosen an agent themselves. Until they have, the
-    /// picker follows the daemon's configured default; afterwards it must not,
-    /// or an explicit "No agent" would be silently overwritten when settings
-    /// land.
-    pub(crate) agent_picked: bool,
     /// Root a new change is drafted into. Follows the open root until the
     /// user picks another in the form.
     pub(crate) draft_root: Option<String>,
@@ -161,8 +157,6 @@ pub(crate) struct StartWorkForm {
     pub(crate) project_ids: Vec<String>,
     /// Branch name, which also determines each worktree's directory name.
     pub(crate) branch_input: Entity<SimpleInputState>,
-    /// Agent to launch; `None` means create worktrees only.
-    pub(crate) agent: Option<String>,
 }
 
 /// Smallest share either lane may be squeezed to, so a drag can never collapse
@@ -261,6 +255,7 @@ impl HarnessPane {
                 filter_open: false,
                 sort: tasks_view::TaskSort::default(),
                 default_agent: None,
+                last_projects: Vec::new(),
             },
             specs: SpecsState {
                 stores: None,
@@ -273,8 +268,6 @@ impl HarnessPane {
                 content: None,
                 content_error: None,
                 idea_input,
-                agent: None,
-                agent_picked: false,
                 composing: false,
                 name_input,
                 draft_root: None,

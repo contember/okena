@@ -12,10 +12,12 @@
 //! manager and a daemon client of their own.
 
 mod detect;
+mod launch;
 mod model;
 mod render;
 
 pub use detect::{AGENT_COMMANDS, detect_agent};
+pub use launch::{launch_option, launch_options, launcher_session, no_agent_option};
 pub use model::{
     AgentSessionInfo, AgentSessionKind, RelatedWorkspace, SessionActivity, session_kind,
 };

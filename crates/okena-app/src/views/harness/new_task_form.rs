@@ -205,44 +205,20 @@ impl HarnessPane {
         .detach();
     }
 
-    /// Start an agent whose job is to break `task` into sub-tasks.
+    /// Start `agent` on breaking `task` into sub-tasks.
     ///
     /// A free-form session rather than a task session: it is not doing the
     /// work, it is deciding what the work is, so it gets no worktrees. okena's
     /// MCP server is what makes it useful — the agent reads the existing
     /// children and writes new ones back through `okena_create_subtask`,
     /// rather than handing the user a list to retype.
-    pub(super) fn break_down_with_agent(&mut self, task: &Task, cx: &mut Context<Self>) {
-        let goal = format!(
-            "Break {} down into sub-tasks.\n\n\
-             Title: {}\n\
-             Kind: {}\n\
-             Link: {}\n\n\
-             {}\n\n\
-             Work through okena's MCP tools:\n\
-             - `okena_list_subtasks` first, so you do not duplicate a child \
-             that already exists.\n\
-             - `okena_create_subtask` once per child, with `parent` set to \
-             `{}`.\n\n\
-             Prefer several small children over one large one. Give each a \
-             short imperative title and say in its description what \"done\" \
-             means. A child is normally one step narrower than its parent — \
-             a {} under a {}. Ask me before inventing scope that is not \
-             implied by the parent.",
-            task.display_key,
-            task.title,
-            task.kind.label(),
-            task.url,
-            task.description
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .map(|d| format!("Description:\n{d}"))
-                .unwrap_or_else(|| "It has no description.".to_string()),
-            task.id.external_id,
-            narrower_than(task.kind).label(),
-            task.kind.label(),
-        );
+    pub(super) fn break_down_with_agent(
+        &mut self,
+        task: &Task,
+        agent: String,
+        cx: &mut Context<Self>,
+    ) {
+        let goal = breakdown_brief(task);
 
         if self.tasks.breaking_down.is_some() {
             return;
@@ -252,10 +228,9 @@ impl HarnessPane {
         cx.notify();
 
         let client = self.client.clone();
-        let name = format!("{} breakdown", task.display_key);
+        let name = breakdown_name(task);
         // The session is linked to the task so the agent's `okena_whoami`
         // resolves it, and so the MCP tools default to the right parent.
-        let agent = self.tasks.default_agent.clone().unwrap_or_default();
         let link = okena_core::tasks::TaskRef::from(task);
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
@@ -277,8 +252,8 @@ impl HarnessPane {
                     this.tasks.breaking_down = None;
                     // Deliberately not opening it: you asked for a breakdown
                     // while reading the task, and yanking you into a terminal
-                    // loses the place you were reading. The button becomes the
-                    // way in once the session appears.
+                    // loses the place you were reading. The launcher becomes
+                    // the way in once the session appears.
                     if let Err(e) = result {
                         this.tasks.error = Some(e);
                     }
@@ -287,6 +262,23 @@ impl HarnessPane {
             });
         })
         .detach();
+    }
+
+    /// Open the New agent dialog on the breakdown this task's launcher would
+    /// start, to adjust the brief, point it at projects, or pick a directory.
+    pub(super) fn configure_breakdown(&mut self, task: &Task, cx: &mut Context<Self>) {
+        let prefill = okena_workspace::requests::NewAgentPrefill {
+            heading: Some(format!("Break down {}", task.display_key)),
+            goal: breakdown_brief(task),
+            name: breakdown_name(task),
+            task: Some(okena_core::tasks::TaskRef::from(task)),
+        };
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(
+                okena_workspace::requests::OverlayRequest::NewAgentDialog(Box::new(prefill)),
+                cx,
+            );
+        });
     }
 
     /// The form, shaped as the board's right-hand panel.
@@ -506,6 +498,49 @@ impl HarnessPane {
 
 /// The kind a child of `parent` most likely is.
 ///
+/// The brief a breakdown agent starts from — the task, and how to write its
+/// children back through okena's MCP tools.
+///
+/// One function for both ways in, so the brief the dialog opens with is the
+/// one a one-click start would have sent.
+pub(super) fn breakdown_brief(task: &Task) -> String {
+    format!(
+        "Break {} down into sub-tasks.\n\n\
+         Title: {}\n\
+         Kind: {}\n\
+         Link: {}\n\n\
+         {}\n\n\
+         Work through okena's MCP tools:\n\
+         - `okena_list_subtasks` first, so you do not duplicate a child \
+         that already exists.\n\
+         - `okena_create_subtask` once per child, with `parent` set to \
+         `{}`.\n\n\
+         Prefer several small children over one large one. Give each a \
+         short imperative title and say in its description what \"done\" \
+         means. A child is normally one step narrower than its parent — \
+         a {} under a {}. Ask me before inventing scope that is not \
+         implied by the parent.",
+        task.display_key,
+        task.title,
+        task.kind.label(),
+        task.url,
+        task.description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("Description:\n{d}"))
+            .unwrap_or_else(|| "It has no description.".to_string()),
+        task.id.external_id,
+        narrower_than(task.kind).label(),
+        task.kind.label(),
+    )
+}
+
+/// Session name for a breakdown of `task`.
+pub(super) fn breakdown_name(task: &Task) -> String {
+    format!("{} breakdown", task.display_key)
+}
+
 /// One step down the breakdown, because that is what breaking something down
 /// means. A task's children are tasks — there is nothing narrower — and a
 /// defect's children are tasks rather than more defects.
