@@ -7,6 +7,7 @@
 
 mod knowledge_draft;
 mod knowledge_view;
+mod markdown;
 mod new_task_form;
 mod sections;
 mod specs_view;
@@ -54,6 +55,8 @@ pub(crate) struct TasksState {
     pub(crate) children_loading: Option<String>,
     /// The task shown in the detail pane, by provider id.
     pub(crate) selected: Option<String>,
+    /// The selected task's description, parsed as Markdown.
+    pub(crate) description: markdown::MarkdownCache,
     /// Sections folded shut in the list. Collapsed rather than expanded state,
     /// so a fresh view shows everything.
     pub(crate) sections_collapsed: std::collections::HashSet<String>,
@@ -88,7 +91,7 @@ pub(crate) struct SpecsState {
     pub(crate) error: Option<String>,
     /// Path of the document being read, relative to the root.
     pub(crate) selected: Option<String>,
-    pub(crate) content: Option<String>,
+    pub(crate) content: Option<markdown::OpenDocument>,
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
     pub(crate) idea_input: Entity<SimpleInputState>,
@@ -238,6 +241,7 @@ impl HarnessPane {
                 children: std::collections::HashMap::new(),
                 children_loading: None,
                 selected: None,
+                description: markdown::MarkdownCache::default(),
                 sections_collapsed: std::collections::HashSet::new(),
                 breaking_down: None,
                 new_task: None,
