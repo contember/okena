@@ -174,8 +174,17 @@ impl CommandPalette {
             // Restore focus to the terminal pane before dispatching so that
             // context-scoped actions (e.g. CloseTerminal on "TerminalPane")
             // are routed to the correct element.
+            //
+            // Not while a harness view fills the main area: the pane is alive
+            // but not rendered, and GPUI dispatches an action whose focus handle
+            // is missing from the rendered frame at the window's outermost
+            // element — above WindowView, so its handlers (ShowSettings and the
+            // rest) never see it and the command silently does nothing.
+            let harness_showing =
+                okena_workspace::harness_state::active_harness(self.window_id, cx).is_some();
             let pane_map = okena_views_terminal::layout::navigation::get_pane_map(self.window_id);
-            if let Some(focused) = self.focus_manager.read(cx).focused_terminal_state()
+            if !harness_showing
+                && let Some(focused) = self.focus_manager.read(cx).focused_terminal_state()
                 && let Some(pane) = pane_map.find_pane(&focused.project_id, &focused.layout_path)
                 && let Some(ref fh) = pane.focus_handle
             {
