@@ -1,9 +1,12 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod api;
+pub mod diagnostic;
+pub mod fs;
 pub mod git_poll;
 pub mod harness;
 pub mod keys;
+pub mod knowledge;
 pub mod latency_probe;
 pub mod process;
 pub mod profiles;

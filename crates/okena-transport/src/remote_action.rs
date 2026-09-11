@@ -72,6 +72,20 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // Same shape as drafting a change: creates a project, runs its hooks,
         // and launches an agent. Hooks are arbitrary shell with no bound.
         ActionRequest::AgentStartSession { .. } => ActionClientKind::LongMutation,
+        // A clone is network-bound and unbounded, a pull fetches first, and
+        // setup commits with git, running the user's commit hooks.
+        ActionRequest::KnowledgeStoreClone { .. }
+        | ActionRequest::KnowledgeStoreFetch { .. }
+        | ActionRequest::KnowledgeStorePull { .. }
+        | ActionRequest::KnowledgeStoreSetup { .. } => ActionClientKind::LongMutation,
+        // Same shape as drafting a spec change: creates a project, runs its
+        // hooks, and launches an agent.
+        ActionRequest::KnowledgeDraft { .. } => ActionClientKind::LongMutation,
+        // Listing runs `git status` in every store, and a tree reads the head
+        // of every entry: more than the fast bucket allows on a large store.
+        ActionRequest::KnowledgeStores | ActionRequest::KnowledgeTree { .. } => {
+            ActionClientKind::Search
+        }
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before
         // the provider had given up — reporting a transport failure for what is

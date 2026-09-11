@@ -67,42 +67,9 @@ impl OpenSpecDirs {
     }
 }
 
-/// Expand a leading `~`, the form people naturally type into a path field.
-pub fn expand_home(p: &str) -> PathBuf {
-    let t = p.trim();
-    if let Some(home) = dirs::home_dir() {
-        if t == "~" {
-            return home;
-        }
-        if let Some(rest) = t.strip_prefix("~/").or_else(|| t.strip_prefix("~\\")) {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(t)
-}
-
-/// The canonical form of an existing path, or the path unchanged.
-///
-/// OpenSpec compares and stores canonical paths (`realpath`), so okena must
-/// too or the same checkout reached through a symlink reads as two stores. The
-/// Windows verbatim prefix `canonicalize` adds is stripped: the CLI never
-/// writes it, and a registry entry carrying it would not match.
-pub fn canonical(p: &Path) -> PathBuf {
-    match p.canonicalize() {
-        Ok(real) => strip_verbatim(real),
-        Err(_) => p.to_path_buf(),
-    }
-}
-
-fn strip_verbatim(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\")
-        && !rest.starts_with("UNC\\")
-    {
-        return PathBuf::from(rest);
-    }
-    p
-}
+// OpenSpec compares and stores canonical paths (`realpath`), so okena must too
+// or the same checkout reached through a symlink reads as two stores.
+pub use okena_core::fs::{canonical, expand_home};
 
 /// Display/storage form of a path.
 pub fn display(p: &Path) -> String {
@@ -176,17 +143,5 @@ mod tests {
         assert_eq!(d.data_dir, Path::new("/custom/data"));
         // A blank override must not turn into a relative empty path.
         assert!(d.config_dir.ends_with("openspec"));
-    }
-
-    #[test]
-    fn verbatim_prefix_is_stripped_but_unc_is_kept() {
-        assert_eq!(
-            strip_verbatim(PathBuf::from(r"\\?\C:\stores\a")),
-            PathBuf::from(r"C:\stores\a")
-        );
-        assert_eq!(
-            strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share")),
-            PathBuf::from(r"\\?\UNC\srv\share")
-        );
     }
 }

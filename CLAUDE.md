@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Thin `okena` binary entry point (main.rs, assets.rs, smoke_tests.rs)
-crates/                     # All logic — 34 crates, see below
+crates/                     # All logic — 39 crates, see below
 docs/                       # Project docs (see "Docs" at the bottom)
 mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
@@ -64,6 +64,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-remote-client` | Remote client connection manager |
 | `okena-services` | Docker Compose, port detection |
 | `okena-openspec` | OpenSpec on disk, CLI-compatible: store registry (with the CLI's lock), store identity, root discovery, planning tree, store setup. GPUI-free. |
+| `okena-knowledge` | Knowledge stores on disk (ADR-0003): store identity, project `.okena/knowledge.yaml`, okena's per-profile store registry, discovery, the entry tree (docs/skills/agents/templates), clone/fetch/fast-forward sync and store setup over `okena-git`. GPUI-free. |
 | `okena-extensions` | Extension system |
 | `okena-ext-claude` | Claude AI extension |
 | `okena-ext-codex` | Codex extension |

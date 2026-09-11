@@ -51,7 +51,7 @@ pub(super) struct SpecsPage {
     config_dir_input: Entity<SimpleInputState>,
 }
 
-fn text_input(
+pub(super) fn text_input(
     cx: &mut Context<SettingsPanel>,
     placeholder: &'static str,
     value: Option<String>,
@@ -142,7 +142,7 @@ fn health(root: &SpecRoot, t: &ThemeColors) -> (&'static str, u32) {
     }
 }
 
-fn badge(label: &str, color: u32, cx: &App) -> Div {
+pub(super) fn badge(label: &str, color: u32, cx: &App) -> Div {
     div()
         .flex_shrink_0()
         .px(px(6.0))
@@ -154,7 +154,7 @@ fn badge(label: &str, color: u32, cx: &App) -> Div {
         .child(label.to_string())
 }
 
-fn muted(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
+pub(super) fn muted(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
     div()
         .min_w_0()
         .text_size(ui_text_ms(cx))
@@ -162,18 +162,18 @@ fn muted(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
         .child(text.into())
 }
 
-fn muted_row(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
+pub(super) fn muted_row(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
     muted(text, t, cx).px(px(12.0)).py(px(10.0))
 }
 
 /// A path on one line, cut with an ellipsis. Paths have no spaces to wrap at,
 /// so letting them wrap breaks them mid-segment, and in a row that gives them
 /// no width they collapse to a character per line.
-fn path_line(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
+pub(super) fn path_line(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
     muted(text, t, cx).w_full().truncate()
 }
 
-fn banner(text: String, color: u32, cx: &App) -> Div {
+pub(super) fn banner(text: String, color: u32, cx: &App) -> Div {
     div()
         .mx(px(12.0))
         .mt(px(8.0))
@@ -186,7 +186,7 @@ fn banner(text: String, color: u32, cx: &App) -> Div {
         .child(text)
 }
 
-fn diagnostic(d: &SpecDiagnostic, t: &ThemeColors, cx: &App) -> AnyElement {
+pub(super) fn diagnostic(d: &SpecDiagnostic, t: &ThemeColors, cx: &App) -> AnyElement {
     let color = match d.severity {
         SpecSeverity::Error => t.error,
         SpecSeverity::Warning => t.warning,
@@ -226,7 +226,7 @@ fn reference(r: &SpecReference, t: &ThemeColors, cx: &App) -> AnyElement {
     }
 }
 
-fn labeled_input(
+pub(super) fn labeled_input(
     label: &str,
     hint: &str,
     input: &Entity<SimpleInputState>,

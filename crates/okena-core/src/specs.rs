@@ -101,52 +101,12 @@ pub enum SpecRootKind {
     Folder,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpecSeverity {
-    Error,
-    Warning,
-}
-
 /// A problem with a root, a reference or the registry.
 ///
 /// `code` reuses OpenSpec's own diagnostic codes where one exists
 /// (`unknown_store`, `reference_unresolved`, …), so what okena reports matches
 /// what `openspec doctor` says about the same setup.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecDiagnostic {
-    pub severity: SpecSeverity,
-    pub code: String,
-    pub message: String,
-    /// A concrete next step, often a pasteable command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix: Option<String>,
-}
-
-impl SpecDiagnostic {
-    pub fn error(code: &str, message: impl Into<String>) -> Self {
-        Self {
-            severity: SpecSeverity::Error,
-            code: code.to_string(),
-            message: message.into(),
-            fix: None,
-        }
-    }
-
-    pub fn warning(code: &str, message: impl Into<String>) -> Self {
-        Self {
-            severity: SpecSeverity::Warning,
-            code: code.to_string(),
-            message: message.into(),
-            fix: None,
-        }
-    }
-
-    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
-        self
-    }
-}
+pub use crate::diagnostic::{Diagnostic as SpecDiagnostic, Severity as SpecSeverity};
 
 /// A store a root's `openspec/config.yaml` declares under `references:` —
 /// read-only upstream context for the root's work.

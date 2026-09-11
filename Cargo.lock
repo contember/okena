@@ -6252,6 +6252,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-hooks",
+ "okena-knowledge",
  "okena-openspec",
  "okena-review",
  "okena-tasks",
@@ -6497,6 +6498,18 @@ dependencies = [
  "okena-state",
  "okena-terminal",
  "parking_lot",
+]
+
+[[package]]
+name = "okena-knowledge"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-git",
+ "serde",
+ "serde_yaml_ng",
+ "tempfile",
 ]
 
 [[package]]

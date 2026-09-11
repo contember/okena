@@ -5,6 +5,8 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod knowledge_draft;
+mod knowledge_view;
 mod new_task_form;
 mod sections;
 mod specs_view;
@@ -173,6 +175,9 @@ pub struct HarnessPane {
     pub(crate) section: HarnessSection,
     pub(crate) tasks: TasksState,
     pub(crate) specs: SpecsState,
+    pub(crate) knowledge: knowledge_view::KnowledgeState,
+    /// The Knowledge view's "New with agent" form.
+    pub(crate) knowledge_draft: knowledge_draft::DraftForm,
 }
 
 /// Everything a harness pane needs from its window.
@@ -206,6 +211,8 @@ impl HarnessPane {
                      email flow",
             )
         });
+        let knowledge = knowledge_view::KnowledgeState::new(cx);
+        let knowledge_draft = knowledge_draft::DraftForm::new(cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -258,15 +265,24 @@ impl HarnessPane {
                 drafting: false,
                 collapsed: std::collections::HashSet::new(),
             },
+            knowledge,
+            knowledge_draft,
         };
-        if section == HarnessSection::Tasks {
-            pane.refresh_auth(cx);
-            // So the dialog can default to the daemon's configured agent.
-            pane.refresh_default_agent(cx);
-        }
-        if section == HarnessSection::Specs {
-            pane.refresh_specs(cx);
-            pane.refresh_default_agent(cx);
+        match section {
+            HarnessSection::Tasks => {
+                pane.refresh_auth(cx);
+                // So the dialog can default to the daemon's configured agent.
+                pane.refresh_default_agent(cx);
+            }
+            HarnessSection::Specs => {
+                pane.refresh_specs(cx);
+                pane.refresh_default_agent(cx);
+            }
+            HarnessSection::Knowledge => {
+                pane.refresh_knowledge(cx);
+                // So "New with agent" defaults to the configured agent.
+                pane.refresh_default_agent(cx);
+            }
         }
         pane
     }

@@ -13,7 +13,6 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_yaml_ng::Value as Yaml;
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const STORE_METADATA_DIR: &str = ".openspec-store";
@@ -510,52 +509,9 @@ impl Serialize for OrderedObject {
 
 // ─── Writing ─────────────────────────────────────────────────────────────────
 
-/// Write through a sibling temp file and rename, so a reader never sees a
-/// half-written file — the CLI's `writeFileAtomically`. `private` makes the
+/// Temp file and rename — the CLI's `writeFileAtomically`. `private` makes the
 /// file owner-only, as the CLI does for the registry.
-pub(crate) fn write_atomically(path: &Path, content: &str, private: bool) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let tmp = dir.join(format!(
-        ".{name}.{}.{millis}.{}.tmp",
-        std::process::id(),
-        &nonce[..8]
-    ));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            if private {
-                options.mode(0o600);
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = private;
-        let mut file = options.open(&tmp)?;
-        file.write_all(content.as_bytes())?;
-        match file.sync_all() {
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {}
-            other => other?,
-        }
-        drop(file);
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
+pub(crate) use okena_core::fs::write_atomically;
 
 #[cfg(test)]
 mod tests {

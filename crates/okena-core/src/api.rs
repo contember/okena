@@ -1337,6 +1337,93 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
     },
+    // ─── Engineering harness: knowledge ───────────────────────────────────
+    //
+    // Knowledge stores (ADR-0003) are git repositories of engineering docs,
+    // skills, agents and prompt templates, registered in okena's per-profile
+    // registry, plus the kind folders projects carry. The daemon reads, clones
+    // and fast-forwards them through `okena-knowledge`; none of these touch the
+    // workspace, so the daemon runs them off its lock.
+    /// Every knowledge root okena can see, with health, sync state and project
+    /// pointers — an `okena_core::knowledge::KnowledgeStores`.
+    KnowledgeStores,
+    /// One root's entries — a `KnowledgeTree`.
+    ///
+    /// `root` is a key from `KnowledgeStores`; `None` opens the default root.
+    /// The daemon refuses keys it did not discover itself.
+    KnowledgeTree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
+    /// Read one file from a root — a `KnowledgeDocument`.
+    ///
+    /// `path` is relative to the root, as `KnowledgeTree` returns it. Anything
+    /// resolving outside the root is refused.
+    KnowledgeRead {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Clone a store and register the checkout.
+    KnowledgeStoreClone {
+        url: String,
+        /// Destination folder. `None` clones into
+        /// `harness.knowledge.clone_dir`, named the way `git clone` would.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// Register an existing checkout. Its id is its committed identity, else
+    /// its folder name.
+    KnowledgeStoreRegister {
+        path: String,
+    },
+    /// Forget a registered store. The checkout stays on disk.
+    KnowledgeStoreUnregister {
+        id: String,
+    },
+    /// Create and register a new store, with one initial commit when
+    /// `init_git`.
+    KnowledgeStoreSetup {
+        id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Canonical clone source, recorded in the store's identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<String>,
+        #[serde(default = "crate::specs::default_init_git")]
+        init_git: bool,
+    },
+    /// `git fetch` in a store's checkout. Replies with its sync state — a
+    /// `KnowledgeGitStatus`.
+    KnowledgeStoreFetch {
+        root: String,
+    },
+    /// Fetch, then fast-forward a store's checkout. Anything but a
+    /// fast-forward is refused with the reason. Replies with the sync state.
+    KnowledgeStorePull {
+        root: String,
+    },
+    /// Open an agent session in a knowledge root, briefed to add to or update
+    /// the knowledge there.
+    ///
+    /// Nothing is scaffolded: where an entry belongs is the agent's call, made
+    /// from the layout the brief states and the entries already there. Runs on
+    /// the workspace path, since it creates a session project.
+    KnowledgeDraft {
+        /// Root to work in, a key from `KnowledgeStores`. `None` uses the
+        /// default root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        /// What to write or change, in the user's words.
+        request: String,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
     // ─── Agent reporting (written by agents through okena's MCP server) ───
     /// Record something an agent produced against its session project.
     ///
