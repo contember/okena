@@ -325,8 +325,9 @@ pub(super) fn prompt_args(command: &str, prompt: &str) -> Vec<String> {
     }
 }
 
-/// Shell for a spec-drafting agent session.
-fn spec_agent_shell(
+/// Shell for an agent session opened with `prompt` — a spec draft here, and a
+/// knowledge draft in `knowledge.rs`.
+pub(super) fn spec_agent_shell(
     settings: &AppSettings,
     override_command: Option<&str>,
     prompt: &str,

@@ -2974,6 +2974,50 @@ pub async fn daemon_command_loop(
                 });
                 continue;
             }
+            // ── Knowledge: off the queue and the workspace lock ──
+            // Every knowledge action runs git — `status` in each store even for
+            // a listing, `clone` and `fetch` over the network — and none of them
+            // changes the workspace. The project list is copied under a brief
+            // lock; the work runs on the blocking pool with a settings snapshot.
+            RemoteCommand::Action(
+                action @ (ActionRequest::KnowledgeStores
+                | ActionRequest::KnowledgeTree { .. }
+                | ActionRequest::KnowledgeRead { .. }
+                | ActionRequest::KnowledgeStoreClone { .. }
+                | ActionRequest::KnowledgeStoreRegister { .. }
+                | ActionRequest::KnowledgeStoreUnregister { .. }
+                | ActionRequest::KnowledgeStoreSetup { .. }
+                | ActionRequest::KnowledgeStoreFetch { .. }
+                | ActionRequest::KnowledgeStorePull { .. }),
+            ) => {
+                let app_settings = settings.lock().clone();
+                let projects =
+                    okena_app_core::workspace::actions::execute::knowledge_project_sources(
+                        &workspace.lock().data.projects,
+                        &app_settings,
+                    );
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            okena_app_core::workspace::actions::execute::execute_knowledge_action(
+                                &action,
+                                &projects,
+                                &app_settings,
+                            )
+                            .map(|r| r.into_command_result())
+                            .unwrap_or_else(|| CommandResult::Err("not a knowledge action".into()))
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            CommandResult::Err(format!("knowledge worker failed: {e}"))
+                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
             // The path-scoped twin runs the same executor and is the one the
             // remote file search fires per keystroke, so it needs the same
             // concurrency cap and drop-cancellation, not a bare offload.

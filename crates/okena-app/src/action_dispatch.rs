@@ -1008,6 +1008,18 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             name,
             agent_command,
         },
+        // Knowledge actions likewise carry only root keys the daemon
+        // discovered, paths and URLs.
+        passthrough @ (ActionRequest::KnowledgeStores
+        | ActionRequest::KnowledgeTree { .. }
+        | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeStoreClone { .. }
+        | ActionRequest::KnowledgeStoreRegister { .. }
+        | ActionRequest::KnowledgeStoreUnregister { .. }
+        | ActionRequest::KnowledgeStoreSetup { .. }
+        | ActionRequest::KnowledgeStoreFetch { .. }
+        | ActionRequest::KnowledgeStorePull { .. }
+        | ActionRequest::KnowledgeDraft { .. }) => passthrough,
         // Task actions carry provider ids, not okena ids, so they cross
         // unchanged.
         ActionRequest::TaskContainers { provider } => ActionRequest::TaskContainers { provider },

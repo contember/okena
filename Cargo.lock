@@ -6252,6 +6252,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-hooks",
+ "okena-knowledge",
  "okena-openspec",
  "okena-review",
  "okena-tasks",

@@ -470,6 +470,19 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Find knowledge in okena projects' `.okena/` folders.
+    pub fn set_knowledge_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness.knowledge.projects = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Where a store is cloned when no destination is given. Blank is
+    /// `~/knowledge`.
+    pub fn set_knowledge_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.harness.knowledge.clone_dir = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
     pub fn set_harness_agent_root(&mut self, value: String, cx: &mut Context<Self>) {
         // Blank means "unset", not a literal empty path — the daemon falls back
         // to the first project's parent directory.

@@ -11,6 +11,7 @@
 
 mod files;
 mod git;
+mod knowledge;
 mod project;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
@@ -36,6 +37,7 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
@@ -722,6 +724,38 @@ pub fn execute_action(
             name,
             agent_command,
             root,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        // ── Engineering harness: knowledge ─────────────────────────────────
+        // The daemon runs these off the workspace lock before they reach this
+        // match; the arm keeps any other caller of `execute_action` correct.
+        action @ (ActionRequest::KnowledgeStores
+        | ActionRequest::KnowledgeTree { .. }
+        | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeStoreClone { .. }
+        | ActionRequest::KnowledgeStoreRegister { .. }
+        | ActionRequest::KnowledgeStoreUnregister { .. }
+        | ActionRequest::KnowledgeStoreSetup { .. }
+        | ActionRequest::KnowledgeStoreFetch { .. }
+        | ActionRequest::KnowledgeStorePull { .. }) => knowledge::execute_knowledge_action(
+            &action,
+            &knowledge::knowledge_project_sources(&ws.data.projects, settings),
+            settings,
+        )
+        .unwrap_or_else(|| ActionResult::Err("not a knowledge action".into())),
+        ActionRequest::KnowledgeDraft {
+            root,
+            request,
+            agent_command,
+        } => knowledge::draft(
+            ws,
+            window_id,
+            root,
+            request,
+            agent_command,
             backend,
             terminals,
             settings,

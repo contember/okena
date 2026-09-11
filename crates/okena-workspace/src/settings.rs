@@ -114,6 +114,10 @@ pub struct HarnessConfig {
     #[serde(default)]
     pub specs: SpecDiscoveryConfig,
 
+    /// Knowledge discovery, and where cloned knowledge stores go.
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+
     /// Override the flags used to hand an agent its MCP config.
     ///
     /// `{config}` is replaced with the generated file's path. Set this when an
@@ -135,6 +139,7 @@ impl Default for HarnessConfig {
             agent_mcp_args: None,
             spec_repo: None,
             specs: SpecDiscoveryConfig::default(),
+            knowledge: KnowledgeConfig::default(),
         }
     }
 }
@@ -208,6 +213,50 @@ impl Default for SpecDiscoveryConfig {
             data_dir: None,
             config_dir: None,
         }
+    }
+}
+
+/// Where a clone goes when no destination is given, before `~` expansion.
+pub const DEFAULT_KNOWLEDGE_CLONE_DIR: &str = "~/knowledge";
+
+/// Knowledge stores (ADR-0003).
+///
+/// The stores themselves are not listed here: checkout paths are machine
+/// state, kept in okena's per-profile registry (`knowledge/stores.yaml`), so a
+/// synced `settings.json` never carries paths that don't exist elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    /// Find knowledge in okena projects: the stores a repo follows in
+    /// `.okena/knowledge.yaml`, and its own `.okena/knowledge/` folders.
+    #[serde(default = "default_true")]
+    pub projects: bool,
+
+    /// Folder a store is cloned into when no destination is given. Unset is
+    /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            // Must match the serde default above.
+            projects: true,
+            clone_dir: None,
+        }
+    }
+}
+
+impl KnowledgeConfig {
+    /// The clone folder with `~` expanded; blank counts as unset.
+    pub fn clone_dir(&self) -> std::path::PathBuf {
+        let dir = self
+            .clone_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(DEFAULT_KNOWLEDGE_CLONE_DIR);
+        okena_core::fs::expand_home(dir)
     }
 }
 

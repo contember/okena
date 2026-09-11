@@ -230,6 +230,19 @@ the first healthy store, else the first healthy root. "New change" writes the
 the chosen root. When that root is a store, the drafting agent is told to pass
 `--store <id>` to the CLI.
 
+#### Knowledge
+
+Knowledge stores are git repositories of engineering docs, skills, agents and
+prompt templates; [`knowledge.md`](knowledge.md) describes their layout and
+behaviour. The stores on a machine are listed in okena's registry,
+`<profile config dir>/knowledge/stores.yaml`, not in `settings.json`: checkout
+paths are machine state. Settings only shape discovery and cloning.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `harness.knowledge.projects` | bool | `true` | Find knowledge in okena projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
+| `harness.knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
+
 ---
 
 ## keybindings.json

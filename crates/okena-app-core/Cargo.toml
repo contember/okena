@@ -13,6 +13,7 @@ okena-core = { path = "../okena-core" }
 dirs = "5.0"
 okena-tasks = { path = "../okena-tasks" }
 okena-openspec = { path = "../okena-openspec" }
+okena-knowledge = { path = "../okena-knowledge" }
 okena-terminal = { path = "../okena-terminal" }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-git = { path = "../okena-git" }
