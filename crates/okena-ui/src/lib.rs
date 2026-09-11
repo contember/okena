@@ -5,6 +5,7 @@
 //! Reusable UI components, design tokens, and theme helpers for the Okena terminal.
 
 pub mod activity_repaint;
+pub mod agent_launcher;
 pub mod badge;
 pub mod button;
 pub mod chip;
