@@ -5,10 +5,6 @@
 //! registry and the kind folders projects carry. Reading, fetching and pulling
 //! all go through the daemon, which refuses roots it did not discover and paths
 //! outside a root; the client never touches the filesystem.
-//!
-//! Markdown entries render formatted, unlike the Specs view's plain text: a
-//! knowledge doc is read by people first, while a spec is shown the way the
-//! agent editing it will read it.
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
@@ -21,11 +17,11 @@ use okena_core::knowledge::{
     Diagnostic, KnowledgeDocument, KnowledgeEntry, KnowledgeGitStatus, KnowledgeKind,
     KnowledgeRoot, KnowledgeRootKind, KnowledgeStores, KnowledgeTree, Severity,
 };
-use okena_markdown::{MarkdownDocument, RenderedNode};
 use okena_ui::simple_input::InputChangedEvent;
 use std::collections::HashSet;
 
 use super::HarnessPane;
+use super::markdown::OpenDocument;
 
 /// Width of the root and entry list, matching the Specs view.
 const TREE_WIDTH: f32 = 280.0;
@@ -55,12 +51,6 @@ pub(crate) struct KnowledgeState {
     /// Groups (`docs`) and doc folders (`docs/ci`) folded shut. Collapsed
     /// rather than expanded state, so a fresh view shows everything.
     pub(crate) collapsed: HashSet<String>,
-}
-
-/// An opened file, parsed once when it arrives rather than on every frame.
-pub(crate) enum OpenDocument {
-    Markdown(MarkdownDocument),
-    Text(String),
 }
 
 impl KnowledgeState {
@@ -434,16 +424,11 @@ impl HarnessPane {
                     }
                     match result {
                         Ok(doc) => {
-                            let markdown = std::path::Path::new(&doc.path)
-                                .extension()
-                                .is_some_and(|x| x.eq_ignore_ascii_case("md"));
-                            this.knowledge.document = Some(if markdown {
-                                let mut parsed = MarkdownDocument::parse(&doc.content);
-                                parsed.highlight_code_blocks(theme(cx).is_dark());
-                                OpenDocument::Markdown(parsed)
-                            } else {
-                                OpenDocument::Text(doc.content)
-                            });
+                            this.knowledge.document = Some(OpenDocument::from_file(
+                                &doc.path,
+                                doc.content,
+                                theme(cx).is_dark(),
+                            ));
                         }
                         Err(e) => this.knowledge.content_error = Some(e),
                     }
@@ -1128,44 +1113,6 @@ impl HarnessPane {
         col.into_any_element()
     }
 
-    /// Every block of a parsed Markdown document, spaced the way the file
-    /// viewer spaces them.
-    fn render_markdown_blocks(
-        &self,
-        doc: &MarkdownDocument,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let t = theme(cx);
-        (0..doc.node_count())
-            .filter_map(|idx| {
-                let (above, below) = doc.node_spacing(idx);
-                let block: AnyElement = match doc.render_node(idx, &t, cx, None)? {
-                    RenderedNode::Simple { div, .. } => div.into_any_element(),
-                    RenderedNode::CodeBlock { lines, .. } => v_flex()
-                        .w_full()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(t.bg_secondary))
-                        .children(lines.into_iter().map(|line| line.div))
-                        .into_any_element(),
-                    RenderedNode::Table { header, rows } => v_flex()
-                        .w_full()
-                        .children(header.into_iter().chain(rows).map(|row| row.div))
-                        .into_any_element(),
-                };
-                Some(
-                    div()
-                        .w_full()
-                        .pt(above)
-                        .pb(below)
-                        .child(block)
-                        .into_any_element(),
-                )
-            })
-            .collect()
-    }
-
     /// Right column: the opened file, or the root's overview.
     fn render_knowledge_document(
         &self,
@@ -1208,20 +1155,8 @@ impl HarnessPane {
             page.child(self.error_banner(err.clone(), cx))
         } else {
             match &self.knowledge.document {
-                Some(OpenDocument::Markdown(doc)) => {
-                    page.children(self.render_markdown_blocks(doc, cx))
-                }
-                Some(OpenDocument::Text(content)) => {
-                    page.children(content.lines().enumerate().map(|(i, line)| {
-                        div()
-                            .id(SharedString::from(format!("knowledge-line-{i}")))
-                            .w_full()
-                            .min_h(px(16.0))
-                            .text_size(ui_text(12.5, cx))
-                            .text_color(rgb(t.text_primary))
-                            .child(line.to_string())
-                            .into_any_element()
-                    }))
+                Some(document) => {
+                    page.children(self.render_open_document(document, "knowledge", cx))
                 }
                 None => page.child(self.info_banner("Loading…".into(), cx)),
             }

@@ -1298,12 +1298,13 @@ impl HarnessPane {
             .map(|d| d.trim())
             .filter(|d| !d.is_empty())
         {
+            // Providers store descriptions as Markdown.
+            let doc = self.tasks.description.get(description, t.is_dark());
             body = body.child(self.detail_label("DESCRIPTION", cx)).child(
-                div()
+                v_flex()
                     .w_full()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(description.to_string()),
+                    .min_w_0()
+                    .children(self.render_markdown_blocks(&doc, cx)),
             );
         }
 

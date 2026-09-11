@@ -6,10 +6,8 @@
 //! refuses any root it did not discover and any path that resolves outside a
 //! root. The client never touches the filesystem itself.
 //!
-//! Documents render as plain text rather than formatted Markdown. OpenSpec is
-//! deliberately plain Markdown, and showing the file as written is honest about
-//! what an agent will read and edit — rich rendering can come later without
-//! changing anything here.
+//! Documents render as formatted Markdown, through the same renderer as
+//! knowledge entries.
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
@@ -23,6 +21,7 @@ use okena_core::specs::{
 };
 
 use super::HarnessPane;
+use super::markdown::OpenDocument;
 
 /// Agents offered for drafting. Same list the Tasks view launches from, so
 /// anything okena can start work with can also write a spec.
@@ -196,7 +195,13 @@ impl HarnessPane {
                         return;
                     }
                     match result {
-                        Ok(content) => this.specs.content = Some(content),
+                        Ok(content) => {
+                            this.specs.content = Some(OpenDocument::from_file(
+                                &wanted,
+                                content,
+                                theme(cx).is_dark(),
+                            ));
+                        }
                         Err(e) => this.specs.content_error = Some(e),
                     }
                     cx.notify();
@@ -714,29 +719,22 @@ impl HarnessPane {
 
         let body: AnyElement = if let Some(err) = &self.specs.content_error {
             self.error_banner(err.clone(), cx)
-        } else if let Some(content) = &self.specs.content {
-            let mut doc = v_flex()
+        } else if let Some(document) = &self.specs.content {
+            v_flex()
                 .id("spec-document-body")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .px(px(16.0))
-                .py(px(10.0));
-            // Rendered line by line so long documents wrap and select the way
-            // the file viewer's do; a single text node would collapse blank
-            // lines and lose the document's shape.
-            for (i, line) in content.lines().enumerate() {
-                doc = doc.child(
-                    div()
-                        .id(SharedString::from(format!("spec-line-{i}")))
+                .px(px(20.0))
+                .py(px(14.0))
+                .child(
+                    v_flex()
                         .w_full()
-                        .min_h(px(16.0))
-                        .text_size(ui_text(12.5, cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(line.to_string()),
-                );
-            }
-            doc.into_any_element()
+                        .max_w(okena_markdown::DOC_MAX_WIDTH)
+                        .min_w_0()
+                        .children(self.render_open_document(document, "spec", cx)),
+                )
+                .into_any_element()
         } else {
             self.info_banner("Loading…".into(), cx)
         };
