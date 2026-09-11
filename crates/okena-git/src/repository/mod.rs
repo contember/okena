@@ -12,6 +12,8 @@
 //! | [`ci`]       | GitHub PR info + CI check aggregation |
 //! | [`github`]   | GitHub base-repo resolution, token cache, REST/GraphQL client |
 //! | [`paths`]    | repo-root resolution and worktree/project path computation |
+//! | [`upstream`] | the checked-out branch's upstream, fast-forward to it, `origin` URL |
+//! | [`init`]     | `git init`, commit of given paths, commit-identity check |
 
 use okena_core::process::command;
 use std::path::Path;
@@ -23,9 +25,14 @@ pub mod ci;
 pub mod clone;
 mod diff_memo;
 pub(crate) mod github;
+pub mod init;
 pub mod paths;
 pub mod status;
+pub mod upstream;
 pub mod worktree;
+
+pub use init::{commit_paths, has_commit_identity, init_repository, is_repository_at_root};
+pub use upstream::{current_upstream, fast_forward_to_upstream, origin_url};
 
 pub use branch::{
     BranchDetail, BranchList, UpstreamState, checkout_local_branch, checkout_remote_branch,

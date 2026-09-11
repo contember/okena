@@ -6500,6 +6500,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-knowledge"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-git",
+ "serde",
+ "serde_yaml_ng",
+ "tempfile",
+]
+
+[[package]]
 name = "okena-layout"
 version = "0.1.0"
 dependencies = [

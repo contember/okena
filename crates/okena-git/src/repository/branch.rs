@@ -406,7 +406,7 @@ fn parse_branch_details(stdout: &str) -> HashMap<String, BranchDetail> {
 /// `track` is empty both for a branch without an upstream and for one in sync
 /// with it, which is why the upstream name is read alongside it. Otherwise it
 /// reads `[gone]`, `[ahead N]`, `[behind N]` or `[ahead N, behind M]`.
-fn parse_upstream_track(upstream: &str, track: &str) -> UpstreamState {
+pub(super) fn parse_upstream_track(upstream: &str, track: &str) -> UpstreamState {
     if upstream.is_empty() {
         return UpstreamState::Untracked;
     }
