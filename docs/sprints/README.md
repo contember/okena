@@ -20,3 +20,5 @@ Lifecycle (full detail in [`../CLAUDE.md`](../CLAUDE.md)):
 ## Active
 
 <!-- one line per active sprint; empty between sprints -->
+
+- [Knowledge stores in the harness](sprint-2026-09-10-knowledge-stores.md) — git-backed knowledge stores: format, clone/sync, harness view, settings, agent authoring.

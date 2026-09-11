@@ -26,11 +26,14 @@ Architecture and build rules live next to the code, not here:
 ## Active sprints
 
 <!-- list the sprint files currently in sprints/ ; empty between sprints -->
-- _none active_
+- [Knowledge stores in the harness](sprints/sprint-2026-09-10-knowledge-stores.md) (2026-09-10)
 
 ## What's hot
 
 <!-- hand-maintained, keep short: the few things actually in motion + what's next.
      If everything is "hot", nothing is. -->
-- Nothing scheduled. Three items sit in [`backlog/`](backlog/README.md); all three
-  are deferred for a stated reason, not merely unstarted.
+- **Knowledge stores** — the harness Knowledge view over git-backed org knowledge
+  repos ([sprint](sprints/sprint-2026-09-10-knowledge-stores.md),
+  [ADR-0003](decisions/0003-knowledge-stores.md)). Next: knowledge at agent launch
+  ([backlog 04](backlog/04-knowledge-context-at-launch.md)) and template-driven
+  prompts ([backlog 05](backlog/05-prompt-templates-from-knowledge.md)).
