@@ -32,6 +32,7 @@ use super::context_menu::TreeNodeTarget;
 use super::{DisplayMode, FileViewer, SourceRow};
 
 const MARKDOWN_TABLE_SCROLLBAR_GUTTER: Pixels = px(16.0);
+const SOURCE_SCROLLBAR_GUTTER: Pixels = px(16.0);
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -2133,6 +2134,7 @@ impl Render for FileViewer {
                                         .flex_1()
                                         .min_h_0()
                                         .relative()
+                                        .when(!wrap_lines, |d| d.pb(SOURCE_SCROLLBAR_GUTTER))
                                         .child(
                                             uniform_list(
                                                 "file-lines",
@@ -2597,8 +2599,9 @@ impl FileViewer {
 #[cfg(test)]
 mod markdown_selection_tests {
     use super::{
-        MARKDOWN_TABLE_SCROLLBAR_GUTTER, byte_offset_for_char, char_offset_for_byte,
-        markdown_table_scrollbar, markdown_word_boundaries, source_horizontal_scrollbar,
+        MARKDOWN_TABLE_SCROLLBAR_GUTTER, SOURCE_SCROLLBAR_GUTTER, byte_offset_for_char,
+        char_offset_for_byte, markdown_table_scrollbar, markdown_word_boundaries,
+        source_horizontal_scrollbar,
     };
     use gpui::prelude::*;
     use gpui::{
@@ -2623,6 +2626,7 @@ mod markdown_selection_tests {
                     .relative()
                     .size_full()
                     .debug_selector(|| "test-source-container".to_string())
+                    .pb(SOURCE_SCROLLBAR_GUTTER)
                     .child(
                         uniform_list("test-source-list", 1, |_, _, _| {
                             vec![div().w(px(4000.0)).h(px(20.0))]
@@ -2801,5 +2805,10 @@ mod markdown_selection_tests {
             "wide source rows must produce horizontal overflow"
         );
         assert_eq!(scrollbar_bounds, container_bounds);
+        assert!(
+            container_bounds.bottom() - scroll_handle.0.borrow().base_handle.bounds().bottom()
+                >= SOURCE_SCROLLBAR_GUTTER,
+            "the source viewport must leave room for the horizontal scrollbar"
+        );
     }
 }
