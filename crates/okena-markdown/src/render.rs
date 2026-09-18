@@ -6,13 +6,14 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_highlight::styled::build_styled_text_with_backgrounds;
 use okena_highlight::syntax::HighlightedSpan;
+use okena_ui::code_block::code_block_container;
 use okena_ui::tokens::ui_text_md;
 
 use super::style::{
-    MdColors, body_line_height, body_size, heading_style, inline_code_size, node_spacing,
-    table_line_height,
+    MdColors, body_line_height, body_size, code_block_size, heading_style, inline_code_size,
+    node_spacing, table_line_height,
 };
-use super::types::{FmValue, Frontmatter, Inline, Node, char_len};
+use super::types::{FmValue, Frontmatter, Inline, ListItem, Node, char_len};
 use super::{MarkdownDocument, MarkdownTextRun, RenderedNode, RenderedTextUnit};
 
 /// Height of one code line. Code blocks are laid out line by line (each line is
@@ -130,6 +131,38 @@ fn word_tokens(text: &str) -> Vec<&str> {
     tokens
 }
 
+/// Text style a block inherits from the container it sits in.
+///
+/// Quoted content reads dimmer and italic, and that has to travel down to the
+/// blocks inside the quote rather than being painted over them: a paragraph sets
+/// its own text colour, so a colour on an ancestor would lose to it.
+#[derive(Clone, Copy)]
+struct BlockStyle {
+    text_color: u32,
+    italic: bool,
+}
+
+impl BlockStyle {
+    fn body(t: &ThemeColors) -> Self {
+        Self {
+            text_color: MdColors::new(t).body,
+            italic: false,
+        }
+    }
+
+    fn quoted(t: &ThemeColors) -> Self {
+        Self {
+            text_color: MdColors::new(t).muted,
+            italic: true,
+        }
+    }
+
+    fn apply(self, el: Div) -> Div {
+        el.text_color(rgb(self.text_color))
+            .when(self.italic, |el| el.italic())
+    }
+}
+
 /// Narrow a character selection range to the `len` characters at `offset`.
 fn sub_selection(
     selection: Option<(usize, usize)>,
@@ -186,217 +219,20 @@ impl MarkdownDocument {
                 language,
                 code,
                 highlighted,
-            } => {
-                // Return code blocks with individual lines for per-line selection
-                let selection_bg = rgba(0x3390ff40);
-                let mut lines = Vec::new();
-                let mut line_offset = offset;
-
-                for (line_idx, line) in code.lines().enumerate() {
-                    let line_len = char_len(line);
-                    let line_end = line_offset + line_len + 1; // +1 for newline
-
-                    let line_sel = node_selection.and_then(|(s, e)| {
-                        let rel_offset = line_offset - offset;
-                        let rel_end = rel_offset + line_len + 1;
-                        if e <= rel_offset || s >= rel_end {
-                            None
-                        } else {
-                            Some((s.saturating_sub(rel_offset), (e - rel_offset).min(line_len)))
-                        }
-                    });
-
-                    let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
-                    let display_line = if line.is_empty() { " " } else { line };
-                    let styled = if !spans.is_empty() {
-                        highlighted_code_line(line, spans, line_sel, selection_bg)
-                    } else {
-                        plain_text_run(display_line, line_sel, selection_bg)
-                    };
-                    let text_runs = vec![MarkdownTextRun::new(
-                        styled.layout().clone(),
-                        line.to_string(),
-                        line_offset,
-                    )];
-                    let line_div = div().h(CODE_LINE_HEIGHT).child(styled);
-
-                    lines.push(RenderedTextUnit {
-                        div: line_div,
-                        start_offset: line_offset,
-                        end_offset: line_end,
-                        text_runs,
-                    });
-                    line_offset = line_end;
-                }
-
-                RenderedNode::CodeBlock {
-                    language: language.clone(),
-                    lines,
-                }
-            }
+            } => RenderedNode::CodeBlock {
+                language: language.clone(),
+                // Individual lines, for per-line selection.
+                lines: Self::code_line_units(code, highlighted, node_selection, offset),
+            },
             Node::Table {
                 headers,
                 rows,
                 col_widths,
             } => {
-                // Return tables with individual rows for per-row selection.
-                // Column widths are precomputed at parse time.
-                let c = MdColors::new(t);
-                let mut row_offset = offset;
-                let mut rendered_rows = Vec::new();
-                let mut rendered_header = None;
-
-                // Header row
-                if !headers.is_empty() {
-                    let header_len: usize = headers
-                        .iter()
-                        .map(|h| Self::inlines_text_length(h))
-                        .sum::<usize>()
-                        + headers.len().saturating_sub(1)
-                        + 1; // tabs + newline
-                    let header_end = row_offset + header_len;
-
-                    let header_sel = node_selection.and_then(|(s, e)| {
-                        let rel_start = row_offset - offset;
-                        let rel_end = rel_start + header_len;
-                        if e <= rel_start || s >= rel_end {
-                            None
-                        } else {
-                            Some((s.saturating_sub(rel_start), (e - rel_start).min(header_len)))
-                        }
-                    });
-
-                    let mut header_row = h_flex();
-                    let mut header_runs = Vec::new();
-                    let mut cell_offset = 0usize;
-                    for (i, header) in headers.iter().enumerate() {
-                        let cell_len =
-                            Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 };
-                        let cell_sel = header_sel.and_then(|(s, e)| {
-                            let cell_start = cell_offset + if i > 0 { 1 } else { 0 };
-                            let cell_end = cell_offset + cell_len;
-                            if e <= cell_start || s >= cell_end {
-                                None
-                            } else {
-                                Some((
-                                    s.saturating_sub(cell_start),
-                                    (e - cell_start).min(Self::inlines_text_length(header)),
-                                ))
-                            }
-                        });
-
-                        let width = col_widths.get(i).copied().unwrap_or(10);
-                        let min_w = ((width * 8) + 24).max(80) as f32;
-                        header_row = header_row.child(
-                            div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
-                                Self::render_inlines_with_selection_and_targets(
-                                    header,
-                                    t,
-                                    cx,
-                                    cell_sel,
-                                    row_offset + cell_offset + if i > 0 { 1 } else { 0 },
-                                    &mut header_runs,
-                                )
-                                .text_size(ui_text_md(cx))
-                                .line_height(table_line_height(cx))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c.heading)),
-                            ),
-                        );
-                        cell_offset += cell_len;
-                    }
-
-                    let header_div = header_row
-                        .bg(rgb(c.surface))
-                        .border_b_1()
-                        .border_color(rgb(c.surface_border));
-                    rendered_header = Some(RenderedTextUnit {
-                        div: header_div,
-                        start_offset: row_offset,
-                        end_offset: header_end,
-                        text_runs: header_runs,
-                    });
-                    row_offset = header_end;
-                }
-
-                // Data rows
-                for (row_idx, row) in rows.iter().enumerate() {
-                    let row_len: usize = row
-                        .iter()
-                        .map(|cell| Self::inlines_text_length(cell))
-                        .sum::<usize>()
-                        + row.len().saturating_sub(1)
-                        + 1; // tabs + newline
-                    let row_end = row_offset + row_len;
-
-                    let row_sel = node_selection.and_then(|(s, e)| {
-                        let rel_start = row_offset - offset;
-                        let rel_end = rel_start + row_len;
-                        if e <= rel_start || s >= rel_end {
-                            None
-                        } else {
-                            Some((s.saturating_sub(rel_start), (e - rel_start).min(row_len)))
-                        }
-                    });
-
-                    let mut row_div = h_flex();
-                    let mut row_runs = Vec::new();
-                    if row_idx % 2 == 1 {
-                        row_div = row_div.bg(rgb(c.surface));
-                    }
-                    if row_idx < rows.len() - 1 {
-                        row_div = row_div.border_b_1().border_color(rgb(c.surface_border));
-                    }
-
-                    let mut cell_offset = 0usize;
-                    for (i, cell) in row.iter().enumerate() {
-                        let cell_len = Self::inlines_text_length(cell) + if i > 0 { 1 } else { 0 };
-                        let cell_sel = row_sel.and_then(|(s, e)| {
-                            let cell_start = cell_offset + if i > 0 { 1 } else { 0 };
-                            let cell_end = cell_offset + cell_len;
-                            if e <= cell_start || s >= cell_end {
-                                None
-                            } else {
-                                Some((
-                                    s.saturating_sub(cell_start),
-                                    (e - cell_start).min(Self::inlines_text_length(cell)),
-                                ))
-                            }
-                        });
-
-                        let width = col_widths.get(i).copied().unwrap_or(10);
-                        let min_w = ((width * 8) + 24).max(80) as f32;
-                        row_div = row_div.child(
-                            div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
-                                Self::render_inlines_with_selection_and_targets(
-                                    cell,
-                                    t,
-                                    cx,
-                                    cell_sel,
-                                    row_offset + cell_offset + if i > 0 { 1 } else { 0 },
-                                    &mut row_runs,
-                                )
-                                .text_size(ui_text_md(cx))
-                                .line_height(table_line_height(cx))
-                                .text_color(rgb(c.body)),
-                            ),
-                        );
-                        cell_offset += cell_len;
-                    }
-
-                    rendered_rows.push(RenderedTextUnit {
-                        div: row_div,
-                        start_offset: row_offset,
-                        end_offset: row_end,
-                        text_runs: row_runs,
-                    });
-                    row_offset = row_end;
-                }
-
-                RenderedNode::Table {
-                    header: rendered_header,
-                    rows: rendered_rows,
-                }
+                // Individual rows, for per-row selection.
+                let (header, rows) =
+                    Self::table_units(headers, rows, col_widths, t, cx, node_selection, offset);
+                RenderedNode::Table { header, rows }
             }
             _ => {
                 // Other nodes are simple blocks
@@ -408,6 +244,7 @@ impl MarkdownDocument {
                     node_selection,
                     offset,
                     &mut text_runs,
+                    BlockStyle::body(t),
                 );
                 RenderedNode::Simple {
                     div: node_div,
@@ -421,14 +258,238 @@ impl MarkdownDocument {
         Some(rendered)
     }
 
+    /// Lay out a code block line by line, each line its own selectable unit.
+    ///
+    /// `selection` is a character range relative to the start of the block;
+    /// `base_offset` is the block's own offset in the document's flat text.
+    fn code_line_units(
+        code: &str,
+        highlighted: &[Vec<HighlightedSpan>],
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+    ) -> Vec<RenderedTextUnit> {
+        let selection_bg = rgba(0x3390ff40);
+        let mut lines = Vec::new();
+        let mut line_offset = base_offset;
+
+        for (line_idx, line) in code.lines().enumerate() {
+            let line_len = char_len(line);
+            let line_end = line_offset + line_len + 1; // +1 for newline
+
+            let line_sel = selection.and_then(|(s, e)| {
+                let rel_offset = line_offset - base_offset;
+                let rel_end = rel_offset + line_len + 1;
+                if e <= rel_offset || s >= rel_end {
+                    None
+                } else {
+                    Some((s.saturating_sub(rel_offset), (e - rel_offset).min(line_len)))
+                }
+            });
+
+            let spans = highlighted.get(line_idx).map(Vec::as_slice).unwrap_or(&[]);
+            let display_line = if line.is_empty() { " " } else { line };
+            let styled = if !spans.is_empty() {
+                highlighted_code_line(line, spans, line_sel, selection_bg)
+            } else {
+                plain_text_run(display_line, line_sel, selection_bg)
+            };
+            let text_runs = vec![MarkdownTextRun::new(
+                styled.layout().clone(),
+                line.to_string(),
+                line_offset,
+            )];
+            let line_div = div().h(CODE_LINE_HEIGHT).child(styled);
+
+            lines.push(RenderedTextUnit {
+                div: line_div,
+                start_offset: line_offset,
+                end_offset: line_end,
+                text_runs,
+            });
+            line_offset = line_end;
+        }
+
+        lines
+    }
+
+    /// Lay out a table row by row, each row its own selectable unit. Column
+    /// widths come precomputed from parse time.
+    ///
+    /// `selection` is relative to the start of the table; `base_offset` is the
+    /// table's offset in the document's flat text.
+    #[allow(clippy::too_many_arguments)]
+    fn table_units(
+        headers: &[Vec<Inline>],
+        rows: &[Vec<Vec<Inline>>],
+        col_widths: &[usize],
+        t: &ThemeColors,
+        cx: &App,
+        selection: Option<(usize, usize)>,
+        base_offset: usize,
+    ) -> (Option<RenderedTextUnit>, Vec<RenderedTextUnit>) {
+        let c = MdColors::new(t);
+        let mut row_offset = base_offset;
+        let mut rendered_rows = Vec::new();
+        let mut rendered_header = None;
+
+        // Header row
+        if !headers.is_empty() {
+            let header_len: usize = headers
+                .iter()
+                .map(|h| Self::inlines_text_length(h))
+                .sum::<usize>()
+                + headers.len().saturating_sub(1)
+                + 1; // tabs + newline
+            let header_end = row_offset + header_len;
+
+            let header_sel = selection.and_then(|(s, e)| {
+                let rel_start = row_offset - base_offset;
+                let rel_end = rel_start + header_len;
+                if e <= rel_start || s >= rel_end {
+                    None
+                } else {
+                    Some((s.saturating_sub(rel_start), (e - rel_start).min(header_len)))
+                }
+            });
+
+            let mut header_row = h_flex();
+            let mut header_runs = Vec::new();
+            let mut cell_offset = 0usize;
+            for (i, header) in headers.iter().enumerate() {
+                let cell_len = Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 };
+                let cell_sel = header_sel.and_then(|(s, e)| {
+                    let cell_start = cell_offset + if i > 0 { 1 } else { 0 };
+                    let cell_end = cell_offset + cell_len;
+                    if e <= cell_start || s >= cell_end {
+                        None
+                    } else {
+                        Some((
+                            s.saturating_sub(cell_start),
+                            (e - cell_start).min(Self::inlines_text_length(header)),
+                        ))
+                    }
+                });
+
+                let width = col_widths.get(i).copied().unwrap_or(10);
+                let min_w = ((width * 8) + 24).max(80) as f32;
+                header_row = header_row.child(
+                    div().min_w(px(min_w)).px(px(12.0)).py(px(8.0)).child(
+                        Self::render_inlines_with_selection_and_targets(
+                            header,
+                            t,
+                            cx,
+                            cell_sel,
+                            row_offset + cell_offset + if i > 0 { 1 } else { 0 },
+                            &mut header_runs,
+                            BlockStyle::body(t),
+                        )
+                        .text_size(ui_text_md(cx))
+                        .line_height(table_line_height(cx))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c.heading)),
+                    ),
+                );
+                cell_offset += cell_len;
+            }
+
+            let header_div = header_row
+                .bg(rgb(c.surface))
+                .border_b_1()
+                .border_color(rgb(c.surface_border));
+            rendered_header = Some(RenderedTextUnit {
+                div: header_div,
+                start_offset: row_offset,
+                end_offset: header_end,
+                text_runs: header_runs,
+            });
+            row_offset = header_end;
+        }
+
+        // Data rows
+        for (row_idx, row) in rows.iter().enumerate() {
+            let row_len: usize = row
+                .iter()
+                .map(|cell| Self::inlines_text_length(cell))
+                .sum::<usize>()
+                + row.len().saturating_sub(1)
+                + 1; // tabs + newline
+            let row_end = row_offset + row_len;
+
+            let row_sel = selection.and_then(|(s, e)| {
+                let rel_start = row_offset - base_offset;
+                let rel_end = rel_start + row_len;
+                if e <= rel_start || s >= rel_end {
+                    None
+                } else {
+                    Some((s.saturating_sub(rel_start), (e - rel_start).min(row_len)))
+                }
+            });
+
+            let mut row_div = h_flex();
+            let mut row_runs = Vec::new();
+            if row_idx % 2 == 1 {
+                row_div = row_div.bg(rgb(c.surface));
+            }
+            if row_idx < rows.len() - 1 {
+                row_div = row_div.border_b_1().border_color(rgb(c.surface_border));
+            }
+
+            let mut cell_offset = 0usize;
+            for (i, cell) in row.iter().enumerate() {
+                let cell_len = Self::inlines_text_length(cell) + if i > 0 { 1 } else { 0 };
+                let cell_sel = row_sel.and_then(|(s, e)| {
+                    let cell_start = cell_offset + if i > 0 { 1 } else { 0 };
+                    let cell_end = cell_offset + cell_len;
+                    if e <= cell_start || s >= cell_end {
+                        None
+                    } else {
+                        Some((
+                            s.saturating_sub(cell_start),
+                            (e - cell_start).min(Self::inlines_text_length(cell)),
+                        ))
+                    }
+                });
+
+                let width = col_widths.get(i).copied().unwrap_or(10);
+                let min_w = ((width * 8) + 24).max(80) as f32;
+                row_div = row_div.child(
+                    div().min_w(px(min_w)).px(px(12.0)).py(px(6.0)).child(
+                        Self::render_inlines_with_selection_and_targets(
+                            cell,
+                            t,
+                            cx,
+                            cell_sel,
+                            row_offset + cell_offset + if i > 0 { 1 } else { 0 },
+                            &mut row_runs,
+                            BlockStyle::body(t),
+                        )
+                        .text_size(ui_text_md(cx))
+                        .line_height(table_line_height(cx))
+                        .text_color(rgb(c.body)),
+                    ),
+                );
+                cell_offset += cell_len;
+            }
+
+            rendered_rows.push(RenderedTextUnit {
+                div: row_div,
+                start_offset: row_offset,
+                end_offset: row_end,
+                text_runs: row_runs,
+            });
+            row_offset = row_end;
+        }
+
+        (rendered_header, rendered_rows)
+    }
+
     /// Calculate the text length of a node (for selection offset tracking, in characters).
     pub(crate) fn node_text_length(node: &Node) -> usize {
         match node {
-            Node::Heading { level: _, children }
-            | Node::Paragraph { children }
-            | Node::Blockquote { children } => {
+            Node::Heading { level: _, children } | Node::Paragraph { children } => {
                 Self::inlines_text_length(children) + 1 // +1 for newline
             }
+            Node::Blockquote { blocks } => blocks.iter().map(Self::node_text_length).sum(),
             Node::CodeBlock { code, .. } => {
                 // Sum of character lengths of each line + 1 newline per line
                 code.lines()
@@ -436,10 +497,7 @@ impl MarkdownDocument {
                     .sum::<usize>()
                     .max(1)
             }
-            Node::List { items, .. } => items
-                .iter()
-                .map(|item| Self::inlines_text_length(item) + 1)
-                .sum(),
+            Node::List { items, .. } => items.iter().map(Self::list_item_text_length).sum(),
             Node::Table { headers, rows, .. } => {
                 let header_len: usize = headers.iter().map(|h| Self::inlines_text_length(h)).sum::<usize>()
                     + headers.len().saturating_sub(1) // tabs
@@ -459,6 +517,12 @@ impl MarkdownDocument {
         }
     }
 
+    /// Text length of one list item: the sum of its blocks, each of which
+    /// already accounts for its own trailing newline.
+    pub(crate) fn list_item_text_length(item: &ListItem) -> usize {
+        item.blocks.iter().map(Self::node_text_length).sum()
+    }
+
     /// Calculate the text length of inline elements (in characters, not bytes).
     pub(crate) fn inlines_text_length(inlines: &[Inline]) -> usize {
         inlines
@@ -474,7 +538,10 @@ impl MarkdownDocument {
             .sum()
     }
 
-    /// Render a node with selection highlighting.
+    /// Render a node with selection highlighting. `style` is what the container
+    /// around the node imposes on its text, which is how a quote dims and
+    /// italicises the blocks inside it.
+    #[allow(clippy::too_many_arguments)]
     fn render_node_with_selection(
         node: &Node,
         t: &ThemeColors,
@@ -482,6 +549,7 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
         base_offset: usize,
         text_runs: &mut Vec<MarkdownTextRun>,
+        style: BlockStyle,
     ) -> Div {
         let c = MdColors::new(t);
         match node {
@@ -509,9 +577,14 @@ impl MarkdownDocument {
                 selection,
                 base_offset,
                 text_runs,
+                style,
             )
             .w_full(),
-            Node::List { ordered, items } => {
+            Node::List {
+                ordered,
+                start,
+                items,
+            } => {
                 // One marker column for both list kinds, right-aligned in it, so
                 // the text hangs at the same indent whatever the marker is —
                 // including two-digit numbers.
@@ -519,24 +592,36 @@ impl MarkdownDocument {
                 let mut list = v_flex().w_full().gap(px(6.0)).pl(px(4.0));
                 let mut offset = 0usize;
 
-                for (i, item_inlines) in items.iter().enumerate() {
-                    let item_len = Self::inlines_text_length(item_inlines) + 1;
-                    let item_sel = selection.and_then(|(s, e)| {
-                        if e <= offset || s >= offset + item_len {
-                            None
-                        } else {
-                            Some((
-                                s.saturating_sub(offset),
-                                (e - offset).min(item_len - 1), // -1 to exclude newline
-                            ))
-                        }
-                    });
+                for (i, item) in items.iter().enumerate() {
+                    let item_len = Self::list_item_text_length(item);
+                    let item_sel = sub_selection(selection, offset, item_len);
 
                     let marker = if *ordered {
-                        format!("{}.", i + 1)
+                        // Honour the source numbering: a list written `3.` first
+                        // keeps starting at 3.
+                        format!("{}.", start.saturating_add(i as u64))
                     } else {
                         "\u{2022}".to_string()
                     };
+
+                    // An item is a block container: several paragraphs, a code
+                    // block, or a nested list all stack in this column.
+                    let mut content = v_flex().flex_1().min_w_0().gap(px(6.0));
+                    let mut block_offset = 0usize;
+                    for block in &item.blocks {
+                        let block_len = Self::node_text_length(block);
+                        content = content.child(Self::render_node_with_selection(
+                            block,
+                            t,
+                            cx,
+                            sub_selection(item_sel, block_offset, block_len),
+                            base_offset + offset + block_offset,
+                            text_runs,
+                            style,
+                        ));
+                        block_offset += block_len;
+                    }
+
                     list = list.child(
                         div()
                             .flex()
@@ -554,47 +639,91 @@ impl MarkdownDocument {
                                     .text_right()
                                     .child(marker),
                             )
-                            .child(
-                                Self::render_inlines_with_selection_and_targets(
-                                    item_inlines,
-                                    t,
-                                    cx,
-                                    item_sel,
-                                    base_offset + offset,
-                                    text_runs,
-                                )
-                                .flex_1(),
-                            ),
+                            .child(content),
                     );
                     offset += item_len;
                 }
                 list
             }
-            Node::Blockquote { children } => div()
-                .pl(px(14.0))
-                .border_l_2()
-                .border_color(rgb(c.surface_border))
-                .child(
-                    Self::render_inlines_with_selection_and_targets(
-                        children,
+            Node::Blockquote { blocks } => {
+                // A quote stacks whatever it holds, so several quoted paragraphs
+                // stay separate and a quoted list keeps its markers.
+                let quoted = BlockStyle::quoted(t);
+                let mut quote = v_flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .pl(px(14.0))
+                    .border_l_2()
+                    .border_color(rgb(c.surface_border));
+                let mut block_offset = 0usize;
+                for block in blocks {
+                    let block_len = Self::node_text_length(block);
+                    quote = quote.child(Self::render_node_with_selection(
+                        block,
                         t,
                         cx,
-                        selection,
-                        base_offset,
+                        sub_selection(selection, block_offset, block_len),
+                        base_offset + block_offset,
                         text_runs,
-                    )
-                    .w_full()
-                    .text_color(rgb(c.muted))
-                    .italic(),
-                ),
+                        quoted,
+                    ));
+                    block_offset += block_len;
+                }
+                quote
+            }
             // Whitespace is what separates sections here, so an explicit rule
             // stays as a hairline that barely registers.
             Node::HorizontalRule => div().w_full().h(px(1.0)).bg(rgb(c.rule)),
             Node::Frontmatter { block, .. } => {
                 Self::render_frontmatter(block, t, cx, selection, base_offset, text_runs)
             }
-            // These are rendered by the specialized branches in `render_node`.
-            Node::CodeBlock { .. } | Node::Table { .. } => div(),
+            // A top-level code block or table is drawn by `render_node`, which
+            // hands the viewer its lines/rows as separate selectable units. One
+            // nested in a list item has no such unit of its own, so it is drawn
+            // here (chrome included), and folds its runs into the parent's.
+            Node::CodeBlock {
+                language,
+                code,
+                highlighted,
+            } => {
+                let mut lines = Vec::new();
+                for unit in Self::code_line_units(code, highlighted, selection, base_offset) {
+                    text_runs.extend(unit.text_runs);
+                    lines.push(unit.div);
+                }
+                code_block_container(language.as_deref(), t, cx)
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .font_family("monospace")
+                            .text_size(code_block_size(cx))
+                            .text_color(rgb(c.body))
+                            .children(lines),
+                    )
+            }
+            Node::Table {
+                headers,
+                rows,
+                col_widths,
+            } => {
+                let (header, rows) =
+                    Self::table_units(headers, rows, col_widths, t, cx, selection, base_offset);
+                let mut units = Vec::new();
+                for unit in header.into_iter().chain(rows) {
+                    text_runs.extend(unit.text_runs);
+                    units.push(unit.div);
+                }
+                v_flex()
+                    .items_start()
+                    .max_w_full()
+                    .overflow_hidden()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(c.surface_border))
+                    .children(units)
+            }
         }
     }
 
@@ -893,6 +1022,7 @@ impl MarkdownDocument {
         list
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inlines_with_selection_and_targets(
         inlines: &[Inline],
         t: &ThemeColors,
@@ -900,6 +1030,7 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
         base_offset: usize,
         text_runs: &mut Vec<MarkdownTextRun>,
+        style: BlockStyle,
     ) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         Self::push_inlines(
@@ -913,7 +1044,7 @@ impl MarkdownDocument {
             text_runs,
         );
 
-        div()
+        let row = div()
             .flex()
             .flex_wrap()
             // `min-width: 0` lets this inline-flow container shrink below its
@@ -925,8 +1056,8 @@ impl MarkdownDocument {
             .items_baseline()
             .text_size(body_size(cx))
             .line_height(body_line_height(cx))
-            .text_color(rgb(MdColors::new(t).body))
-            .children(elements)
+            .children(elements);
+        style.apply(row)
     }
 
     /// Text length of one inline element, in characters.
