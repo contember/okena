@@ -36,8 +36,11 @@ pub(crate) enum Node {
         /// rendering does not re-measure every cell on every frame.
         col_widths: Vec<usize>,
     },
+    /// A quote is a block container too: it can hold several paragraphs, or a
+    /// list. Collecting only its inlines merged every quoted paragraph onto one
+    /// line and left a quoted list to render after the quote instead of in it.
     Blockquote {
-        children: Vec<Inline>,
+        blocks: Vec<Node>,
     },
     HorizontalRule,
     /// YAML frontmatter at the top of the document, rendered as a metadata card
