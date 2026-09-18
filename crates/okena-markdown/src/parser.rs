@@ -21,13 +21,16 @@ enum Frame {
     Item {
         blocks: Vec<Node>,
     },
+    Blockquote {
+        blocks: Vec<Node>,
+    },
 }
 
-/// Route a finished block to the innermost open list item, or to the document
-/// root when no item is open.
+/// Route a finished block to the innermost open block container (a list item or
+/// a quote), or to the document root when none is open.
 fn push_block(nodes: &mut Vec<Node>, frames: &mut [Frame], node: Node) {
     match frames.last_mut() {
-        Some(Frame::Item { blocks }) => blocks.push(node),
+        Some(Frame::Item { blocks } | Frame::Blockquote { blocks }) => blocks.push(node),
         _ => nodes.push(node),
     }
 }
@@ -119,9 +122,8 @@ impl MarkdownDocument {
         let mut in_code_block = false;
         let mut code_block_lang: Option<String> = None;
         let mut code_block_content = String::new();
-        // Open list/item containers, innermost last.
+        // Open block containers (lists, items, quotes), innermost last.
         let mut frames: Vec<Frame> = Vec::new();
-        let mut in_blockquote = false;
         let mut in_table = false;
         let mut in_table_head = false;
         let mut table_headers: Vec<Vec<Inline>> = Vec::new();
@@ -157,8 +159,8 @@ impl MarkdownDocument {
                 }
                 Event::End(TagEnd::Paragraph) if in_paragraph => {
                     let children = inline_stack.pop().unwrap_or_default();
-                    if in_blockquote || in_table {
-                        // Collected by the blockquote / table-cell end instead.
+                    if in_table {
+                        // Collected by the table-cell end instead.
                         if let Some(last) = inline_stack.last_mut() {
                             last.extend(children);
                         }
@@ -228,13 +230,12 @@ impl MarkdownDocument {
                     }
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
-                    in_blockquote = true;
-                    inline_stack.push(Vec::new());
+                    frames.push(Frame::Blockquote { blocks: Vec::new() });
                 }
                 Event::End(TagEnd::BlockQuote(_)) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    push_block(&mut nodes, &mut frames, Node::Blockquote { children });
-                    in_blockquote = false;
+                    if let Some(Frame::Blockquote { blocks }) = frames.pop() {
+                        push_block(&mut nodes, &mut frames, Node::Blockquote { blocks });
+                    }
                 }
                 Event::Rule => {
                     push_block(&mut nodes, &mut frames, Node::HorizontalRule);
@@ -367,11 +368,14 @@ impl MarkdownDocument {
     /// Convert a node to flat text (in characters, not bytes).
     pub(crate) fn node_to_flat_text(node: &Node, text: &mut String) {
         match node {
-            Node::Heading { children, .. }
-            | Node::Paragraph { children }
-            | Node::Blockquote { children } => {
+            Node::Heading { children, .. } | Node::Paragraph { children } => {
                 Self::inlines_to_flat_text(children, text);
                 text.push('\n');
+            }
+            Node::Blockquote { blocks } => {
+                for block in blocks {
+                    Self::node_to_flat_text(block, text);
+                }
             }
             Node::CodeBlock { code, .. } => {
                 for line in code.lines() {
@@ -649,6 +653,44 @@ let x = 1;
         ));
     }
 
+    /// A quote holds blocks, so its paragraphs stay separate instead of being
+    /// merged into one inline run, and a quoted list stays inside the quote
+    /// rather than being emitted after it.
+    #[test]
+    fn blockquote_keeps_its_blocks() {
+        let doc = MarkdownDocument::parse("> first para\n>\n> second para\n");
+        assert_eq!(doc.nodes.len(), 1);
+        let Node::Blockquote { blocks } = &doc.nodes[0] else {
+            panic!("expected a blockquote");
+        };
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(doc.plain_text, "first para\nsecond para\n");
+
+        let doc = MarkdownDocument::parse("> Note:\n>\n> - one\n> - two\n");
+        assert_eq!(doc.nodes.len(), 1, "the list must not escape the quote");
+        let Node::Blockquote { blocks } = &doc.nodes[0] else {
+            panic!("expected a blockquote");
+        };
+        assert!(matches!(
+            blocks.as_slice(),
+            [Node::Paragraph { .. }, Node::List { .. }]
+        ));
+    }
+
+    /// The containers nest both ways round.
+    #[test]
+    fn quotes_and_lists_nest_in_each_other() {
+        let doc = MarkdownDocument::parse("1. Step:\n\n   > watch out\n\n2. Next\n");
+        assert_eq!(doc.nodes.len(), 1);
+        let (_, _, items) = expect_list(&doc.nodes[0]);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[0].blocks.as_slice(),
+            [Node::Paragraph { .. }, Node::Blockquote { .. }]
+        ));
+        assert_eq!(item_text(&items[0]), "Step:\nwatch out\n");
+    }
+
     /// Markers follow the source numbering rather than always restarting at 1.
     #[test]
     fn ordered_list_keeps_its_first_number() {
@@ -677,6 +719,10 @@ let x = 1;
    ```
 
 3. Third
+
+> A quote,
+>
+> in two paragraphs.
 ";
         let doc = MarkdownDocument::parse(content);
         let total: usize = doc

@@ -131,6 +131,38 @@ fn word_tokens(text: &str) -> Vec<&str> {
     tokens
 }
 
+/// Text style a block inherits from the container it sits in.
+///
+/// Quoted content reads dimmer and italic, and that has to travel down to the
+/// blocks inside the quote rather than being painted over them: a paragraph sets
+/// its own text colour, so a colour on an ancestor would lose to it.
+#[derive(Clone, Copy)]
+struct BlockStyle {
+    text_color: u32,
+    italic: bool,
+}
+
+impl BlockStyle {
+    fn body(t: &ThemeColors) -> Self {
+        Self {
+            text_color: MdColors::new(t).body,
+            italic: false,
+        }
+    }
+
+    fn quoted(t: &ThemeColors) -> Self {
+        Self {
+            text_color: MdColors::new(t).muted,
+            italic: true,
+        }
+    }
+
+    fn apply(self, el: Div) -> Div {
+        el.text_color(rgb(self.text_color))
+            .when(self.italic, |el| el.italic())
+    }
+}
+
 /// Narrow a character selection range to the `len` characters at `offset`.
 fn sub_selection(
     selection: Option<(usize, usize)>,
@@ -212,6 +244,7 @@ impl MarkdownDocument {
                     node_selection,
                     offset,
                     &mut text_runs,
+                    BlockStyle::body(t),
                 );
                 RenderedNode::Simple {
                     div: node_div,
@@ -348,6 +381,7 @@ impl MarkdownDocument {
                             cell_sel,
                             row_offset + cell_offset + if i > 0 { 1 } else { 0 },
                             &mut header_runs,
+                            BlockStyle::body(t),
                         )
                         .text_size(ui_text_md(cx))
                         .line_height(table_line_height(cx))
@@ -427,6 +461,7 @@ impl MarkdownDocument {
                             cell_sel,
                             row_offset + cell_offset + if i > 0 { 1 } else { 0 },
                             &mut row_runs,
+                            BlockStyle::body(t),
                         )
                         .text_size(ui_text_md(cx))
                         .line_height(table_line_height(cx))
@@ -451,11 +486,10 @@ impl MarkdownDocument {
     /// Calculate the text length of a node (for selection offset tracking, in characters).
     pub(crate) fn node_text_length(node: &Node) -> usize {
         match node {
-            Node::Heading { level: _, children }
-            | Node::Paragraph { children }
-            | Node::Blockquote { children } => {
+            Node::Heading { level: _, children } | Node::Paragraph { children } => {
                 Self::inlines_text_length(children) + 1 // +1 for newline
             }
+            Node::Blockquote { blocks } => blocks.iter().map(Self::node_text_length).sum(),
             Node::CodeBlock { code, .. } => {
                 // Sum of character lengths of each line + 1 newline per line
                 code.lines()
@@ -504,7 +538,10 @@ impl MarkdownDocument {
             .sum()
     }
 
-    /// Render a node with selection highlighting.
+    /// Render a node with selection highlighting. `style` is what the container
+    /// around the node imposes on its text, which is how a quote dims and
+    /// italicises the blocks inside it.
+    #[allow(clippy::too_many_arguments)]
     fn render_node_with_selection(
         node: &Node,
         t: &ThemeColors,
@@ -512,6 +549,7 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
         base_offset: usize,
         text_runs: &mut Vec<MarkdownTextRun>,
+        style: BlockStyle,
     ) -> Div {
         let c = MdColors::new(t);
         match node {
@@ -539,6 +577,7 @@ impl MarkdownDocument {
                 selection,
                 base_offset,
                 text_runs,
+                style,
             )
             .w_full(),
             Node::List {
@@ -578,6 +617,7 @@ impl MarkdownDocument {
                             sub_selection(item_sel, block_offset, block_len),
                             base_offset + offset + block_offset,
                             text_runs,
+                            style,
                         ));
                         block_offset += block_len;
                     }
@@ -605,23 +645,32 @@ impl MarkdownDocument {
                 }
                 list
             }
-            Node::Blockquote { children } => div()
-                .pl(px(14.0))
-                .border_l_2()
-                .border_color(rgb(c.surface_border))
-                .child(
-                    Self::render_inlines_with_selection_and_targets(
-                        children,
+            Node::Blockquote { blocks } => {
+                // A quote stacks whatever it holds, so several quoted paragraphs
+                // stay separate and a quoted list keeps its markers.
+                let quoted = BlockStyle::quoted(t);
+                let mut quote = v_flex()
+                    .w_full()
+                    .gap(px(8.0))
+                    .pl(px(14.0))
+                    .border_l_2()
+                    .border_color(rgb(c.surface_border));
+                let mut block_offset = 0usize;
+                for block in blocks {
+                    let block_len = Self::node_text_length(block);
+                    quote = quote.child(Self::render_node_with_selection(
+                        block,
                         t,
                         cx,
-                        selection,
-                        base_offset,
+                        sub_selection(selection, block_offset, block_len),
+                        base_offset + block_offset,
                         text_runs,
-                    )
-                    .w_full()
-                    .text_color(rgb(c.muted))
-                    .italic(),
-                ),
+                        quoted,
+                    ));
+                    block_offset += block_len;
+                }
+                quote
+            }
             // Whitespace is what separates sections here, so an explicit rule
             // stays as a hairline that barely registers.
             Node::HorizontalRule => div().w_full().h(px(1.0)).bg(rgb(c.rule)),
@@ -973,6 +1022,7 @@ impl MarkdownDocument {
         list
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inlines_with_selection_and_targets(
         inlines: &[Inline],
         t: &ThemeColors,
@@ -980,6 +1030,7 @@ impl MarkdownDocument {
         selection: Option<(usize, usize)>,
         base_offset: usize,
         text_runs: &mut Vec<MarkdownTextRun>,
+        style: BlockStyle,
     ) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         Self::push_inlines(
@@ -993,7 +1044,7 @@ impl MarkdownDocument {
             text_runs,
         );
 
-        div()
+        let row = div()
             .flex()
             .flex_wrap()
             // `min-width: 0` lets this inline-flow container shrink below its
@@ -1005,8 +1056,8 @@ impl MarkdownDocument {
             .items_baseline()
             .text_size(body_size(cx))
             .line_height(body_line_height(cx))
-            .text_color(rgb(MdColors::new(t).body))
-            .children(elements)
+            .children(elements);
+        style.apply(row)
     }
 
     /// Text length of one inline element, in characters.
