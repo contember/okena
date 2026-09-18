@@ -3,7 +3,72 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::MarkdownDocument;
-use super::types::{FmValue, Frontmatter, Inline, Node};
+use super::types::{FmValue, Frontmatter, Inline, ListItem, Node};
+
+/// A block container that is currently open.
+///
+/// Lists nest (a list inside an item inside a list), so the parser keeps them
+/// on a stack. The flat `in_list` / `list_items` state this replaced could only
+/// describe one list at a time: a nested list cleared the outer list's items,
+/// took its ordered-ness, and closed it early, which dropped every item after
+/// the nesting point out of the list entirely.
+enum Frame {
+    List {
+        ordered: bool,
+        start: u64,
+        items: Vec<ListItem>,
+    },
+    Item {
+        blocks: Vec<Node>,
+    },
+}
+
+/// Route a finished block to the innermost open list item, or to the document
+/// root when no item is open.
+fn push_block(nodes: &mut Vec<Node>, frames: &mut [Frame], node: Node) {
+    match frames.last_mut() {
+        Some(Frame::Item { blocks }) => blocks.push(node),
+        _ => nodes.push(node),
+    }
+}
+
+/// Turn the inline text collected directly under the innermost item into a
+/// paragraph block.
+///
+/// A *tight* list item (no blank line between items) carries its text as bare
+/// inline events with no `Paragraph` around it, so the text has to be closed off
+/// by hand: before any block opens inside the item, and when the item ends.
+fn flush_item_inlines(inline_stack: &mut [Vec<Inline>], frames: &mut [Frame]) {
+    let Some(Frame::Item { blocks }) = frames.last_mut() else {
+        return;
+    };
+    let Some(pending) = inline_stack.last_mut() else {
+        return;
+    };
+    if pending.is_empty() {
+        return;
+    }
+    blocks.push(Node::Paragraph {
+        children: std::mem::take(pending),
+    });
+}
+
+/// Whether an event opens or closes a block inside a list item, and so has to
+/// be preceded by [`flush_item_inlines`].
+fn is_item_block_boundary(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Start(
+            Tag::Paragraph
+                | Tag::Heading { .. }
+                | Tag::CodeBlock(_)
+                | Tag::List(_)
+                | Tag::BlockQuote(_)
+                | Tag::Table(_)
+        ) | Event::End(TagEnd::Item)
+            | Event::Rule
+    )
+}
 
 /// Append `text` to the innermost inline run, merging it into the preceding text
 /// rather than starting a new one. The renderer lays each run out as its own
@@ -54,9 +119,8 @@ impl MarkdownDocument {
         let mut in_code_block = false;
         let mut code_block_lang: Option<String> = None;
         let mut code_block_content = String::new();
-        let mut in_list = false;
-        let mut list_ordered = false;
-        let mut list_items: Vec<Vec<Inline>> = Vec::new();
+        // Open list/item containers, innermost last.
+        let mut frames: Vec<Frame> = Vec::new();
         let mut in_blockquote = false;
         let mut in_table = false;
         let mut in_table_head = false;
@@ -65,6 +129,9 @@ impl MarkdownDocument {
         let mut current_row: Vec<Vec<Inline>> = Vec::new();
 
         for event in parser {
+            if is_item_block_boundary(&event) {
+                flush_item_inlines(&mut inline_stack, &mut frames);
+            }
             match event {
                 // Block elements
                 Event::Start(Tag::Heading { level, .. }) => {
@@ -81,7 +148,7 @@ impl MarkdownDocument {
                 Event::End(TagEnd::Heading(_)) => {
                     if let Some(level) = in_heading.take() {
                         let children = inline_stack.pop().unwrap_or_default();
-                        nodes.push(Node::Heading { level, children });
+                        push_block(&mut nodes, &mut frames, Node::Heading { level, children });
                     }
                 }
                 Event::Start(Tag::Paragraph) => {
@@ -90,23 +157,13 @@ impl MarkdownDocument {
                 }
                 Event::End(TagEnd::Paragraph) if in_paragraph => {
                     let children = inline_stack.pop().unwrap_or_default();
-                    if in_blockquote {
-                        // Add to blockquote
-                        if let Some(last) = inline_stack.last_mut() {
-                            last.extend(children);
-                        }
-                    } else if in_list {
-                        // Will be collected by Item end
-                        if let Some(last) = inline_stack.last_mut() {
-                            last.extend(children);
-                        }
-                    } else if in_table {
-                        // Table cell content
+                    if in_blockquote || in_table {
+                        // Collected by the blockquote / table-cell end instead.
                         if let Some(last) = inline_stack.last_mut() {
                             last.extend(children);
                         }
                     } else {
-                        nodes.push(Node::Paragraph { children });
+                        push_block(&mut nodes, &mut frames, Node::Paragraph { children });
                     }
                     in_paragraph = false;
                 }
@@ -119,31 +176,56 @@ impl MarkdownDocument {
                     code_block_content.clear();
                 }
                 Event::End(TagEnd::CodeBlock) => {
-                    nodes.push(Node::CodeBlock {
-                        language: code_block_lang.take(),
-                        code: std::mem::take(&mut code_block_content),
-                        highlighted: Vec::new(),
-                    });
+                    push_block(
+                        &mut nodes,
+                        &mut frames,
+                        Node::CodeBlock {
+                            language: code_block_lang.take(),
+                            code: std::mem::take(&mut code_block_content),
+                            highlighted: Vec::new(),
+                        },
+                    );
                     in_code_block = false;
                 }
                 Event::Start(Tag::List(first_item)) => {
-                    in_list = true;
-                    list_ordered = first_item.is_some();
-                    list_items.clear();
+                    frames.push(Frame::List {
+                        ordered: first_item.is_some(),
+                        start: first_item.unwrap_or(1),
+                        items: Vec::new(),
+                    });
                 }
                 Event::End(TagEnd::List(_)) => {
-                    nodes.push(Node::List {
-                        ordered: list_ordered,
-                        items: std::mem::take(&mut list_items),
-                    });
-                    in_list = false;
+                    if let Some(Frame::List {
+                        ordered,
+                        start,
+                        items,
+                    }) = frames.pop()
+                    {
+                        push_block(
+                            &mut nodes,
+                            &mut frames,
+                            Node::List {
+                                ordered,
+                                start,
+                                items,
+                            },
+                        );
+                    }
                 }
                 Event::Start(Tag::Item) => {
+                    frames.push(Frame::Item { blocks: Vec::new() });
+                    // Holds text written straight into the item (a tight list);
+                    // `flush_item_inlines` turns it into a paragraph block.
                     inline_stack.push(Vec::new());
                 }
                 Event::End(TagEnd::Item) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    list_items.push(children);
+                    // Emptied by the flush that ran for this event.
+                    inline_stack.pop();
+                    if let Some(Frame::Item { blocks }) = frames.pop()
+                        && let Some(Frame::List { items, .. }) = frames.last_mut()
+                    {
+                        items.push(ListItem { blocks });
+                    }
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
                     in_blockquote = true;
@@ -151,11 +233,11 @@ impl MarkdownDocument {
                 }
                 Event::End(TagEnd::BlockQuote(_)) => {
                     let children = inline_stack.pop().unwrap_or_default();
-                    nodes.push(Node::Blockquote { children });
+                    push_block(&mut nodes, &mut frames, Node::Blockquote { children });
                     in_blockquote = false;
                 }
                 Event::Rule => {
-                    nodes.push(Node::HorizontalRule);
+                    push_block(&mut nodes, &mut frames, Node::HorizontalRule);
                 }
 
                 // Table elements
@@ -168,11 +250,15 @@ impl MarkdownDocument {
                     let headers = std::mem::take(&mut table_headers);
                     let rows = std::mem::take(&mut table_rows);
                     let col_widths = Self::table_col_widths(&headers, &rows);
-                    nodes.push(Node::Table {
-                        headers,
-                        rows,
-                        col_widths,
-                    });
+                    push_block(
+                        &mut nodes,
+                        &mut frames,
+                        Node::Table {
+                            headers,
+                            rows,
+                            col_widths,
+                        },
+                    );
                     in_table = false;
                 }
                 Event::Start(Tag::TableHead) => {
@@ -295,8 +381,9 @@ impl MarkdownDocument {
             }
             Node::List { items, .. } => {
                 for item in items {
-                    Self::inlines_to_flat_text(item, text);
-                    text.push('\n');
+                    for block in &item.blocks {
+                        Self::node_to_flat_text(block, text);
+                    }
                 }
             }
             Node::Table { headers, rows, .. } => {
@@ -473,8 +560,133 @@ let x = 1;
         assert_eq!(doc.node_offsets.first().copied(), Some(0));
     }
 
-    use super::super::types::{FmValue, Frontmatter, Node};
+    use super::super::types::{FmValue, Frontmatter, ListItem, Node};
     use super::split_frontmatter;
+
+    fn expect_list(node: &Node) -> (bool, u64, &[ListItem]) {
+        match node {
+            Node::List {
+                ordered,
+                start,
+                items,
+            } => (*ordered, *start, items),
+            _ => panic!("expected a list"),
+        }
+    }
+
+    fn item_text(item: &ListItem) -> String {
+        let mut out = String::new();
+        for block in &item.blocks {
+            MarkdownDocument::node_to_flat_text(block, &mut out);
+        }
+        out
+    }
+
+    /// A nested list used to clobber the list around it: the inner `Start(List)`
+    /// reset the single flat list state, so the outer list lost its items, took
+    /// the inner list's bullet marker, and closed early. Every item after the
+    /// nesting point fell out of the list and rendered as a bare paragraph.
+    #[test]
+    fn nested_list_keeps_the_list_around_it_intact() {
+        let content = "\
+1. First question.
+
+2. Second, with sub-points:
+   - changed since
+   - paging
+
+3. Third question.
+
+4. Fourth question.
+";
+        let doc = MarkdownDocument::parse(content);
+
+        // The whole thing is one top-level list: nothing leaked out of it.
+        assert_eq!(doc.nodes.len(), 1, "expected a single top-level list");
+        let (ordered, start, items) = expect_list(&doc.nodes[0]);
+        assert!(ordered, "the outer list is numbered");
+        assert_eq!(start, 1);
+        assert_eq!(items.len(), 4);
+
+        // Item 2 holds its own text plus the nested list, in that order.
+        assert_eq!(items[1].blocks.len(), 2);
+        assert!(matches!(items[1].blocks[0], Node::Paragraph { .. }));
+        let (inner_ordered, _, inner_items) = expect_list(&items[1].blocks[1]);
+        assert!(!inner_ordered, "the nested list is a bullet list");
+        assert_eq!(inner_items.len(), 2);
+
+        // The items after the nesting point are still items, with their text.
+        assert_eq!(item_text(&items[2]), "Third question.\n");
+        assert_eq!(item_text(&items[3]), "Fourth question.\n");
+    }
+
+    /// Tight items (no blank line between them) carry their text as bare inline
+    /// events; each still ends up as one paragraph block inside its item.
+    #[test]
+    fn tight_and_multi_paragraph_items_become_blocks() {
+        let doc = MarkdownDocument::parse("- one\n- two\n  - nested\n");
+        let (_, _, items) = expect_list(&doc.nodes[0]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(&items[0]), "one\n");
+        assert_eq!(items[1].blocks.len(), 2, "text plus the nested list");
+
+        let doc = MarkdownDocument::parse("- first para\n\n  second para\n");
+        let (_, _, items) = expect_list(&doc.nodes[0]);
+        assert_eq!(items[0].blocks.len(), 2);
+        assert_eq!(item_text(&items[0]), "first para\nsecond para\n");
+    }
+
+    /// A fenced block indented under an item belongs to that item. It used to be
+    /// hoisted to the document root and drawn after the list it sat inside.
+    #[test]
+    fn code_block_stays_inside_its_item() {
+        let doc = MarkdownDocument::parse("1. Run it:\n\n   ```sh\n   cargo test\n   ```\n");
+        assert_eq!(doc.nodes.len(), 1);
+        let (_, _, items) = expect_list(&doc.nodes[0]);
+        assert!(matches!(
+            items[0].blocks.as_slice(),
+            [Node::Paragraph { .. }, Node::CodeBlock { .. }]
+        ));
+    }
+
+    /// Markers follow the source numbering rather than always restarting at 1.
+    #[test]
+    fn ordered_list_keeps_its_first_number() {
+        let doc = MarkdownDocument::parse("3. three\n4. four\n");
+        let (ordered, start, items) = expect_list(&doc.nodes[0]);
+        assert!(ordered);
+        assert_eq!(start, 3);
+        assert_eq!(items.len(), 2);
+    }
+
+    /// Selection maps a character offset onto `plain_text`, so every node's
+    /// reported length must add up to it, nested blocks included.
+    #[test]
+    fn nested_block_lengths_match_the_flat_text() {
+        let content = "\
+# Title
+
+1. First
+
+2. Second:
+   - a
+   - b
+
+   ```sh
+   run me
+   ```
+
+3. Third
+";
+        let doc = MarkdownDocument::parse(content);
+        let total: usize = doc
+            .nodes
+            .iter()
+            .map(MarkdownDocument::node_text_length)
+            .sum();
+        assert_eq!(total, doc.plain_text.chars().count());
+        assert!(doc.plain_text.contains("run me"));
+    }
 
     #[test]
     fn detects_frontmatter_and_keeps_markdown() {

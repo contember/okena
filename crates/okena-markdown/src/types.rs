@@ -24,7 +24,10 @@ pub(crate) enum Node {
     },
     List {
         ordered: bool,
-        items: Vec<Vec<Inline>>,
+        /// First number of an ordered list: `3.` starts the markers at 3.
+        /// Always 1 for a bullet list.
+        start: u64,
+        items: Vec<ListItem>,
     },
     Table {
         headers: Vec<Vec<Inline>>,
@@ -46,6 +49,16 @@ pub(crate) enum Node {
         block: Frontmatter,
         text_len: usize,
     },
+}
+
+/// One item of a list, as a sequence of blocks rather than a single inline run.
+///
+/// An item is a block container in markdown: it can hold several paragraphs, a
+/// code block, or (the case that matters most) a nested list. Flattening it to
+/// inlines is what used to make a nested list overwrite the list containing it.
+#[derive(Clone)]
+pub(crate) struct ListItem {
+    pub(crate) blocks: Vec<Node>,
 }
 
 /// Parsed YAML frontmatter block.
