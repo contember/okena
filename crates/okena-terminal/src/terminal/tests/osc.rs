@@ -1605,6 +1605,20 @@ fn test_agent_session_captured_from_label_and_survives_clear() {
 }
 
 #[test]
+fn mirror_does_not_queue_agent_sessions_for_persistence() {
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        Arc::new(super::MirrorTransport::new()),
+        "/tmp".into(),
+    );
+    let lbl = b64(r#"{"agent":"claude-code","session_id":"11111111-2222-3333-4444-555555555555"}"#);
+    terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
+    assert!(terminal.agent_session().is_some());
+    assert!(terminal.take_pending_agent_sessions().is_empty());
+}
+
+#[test]
 fn test_osc52_read_is_dropped_without_a_clipboard() {
     let transport = Arc::new(super::HeadlessOwnerTransport::new());
     let terminal = Terminal::new(

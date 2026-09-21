@@ -246,6 +246,7 @@ pub struct Terminal {
     /// `OscSidecar`. Set when `agent_session` changes; the PTY event loop drains
     /// it via `take_agent_session_dirty` to persist the new session.
     pub(super) agent_session_dirty: Arc<AtomicBool>,
+    pub(super) pending_agent_sessions: Arc<Mutex<Vec<AgentSession>>>,
 
     /// Per-renderer focus state for DEC focus reports. A terminal can appear
     /// in multiple windows, so focus reports are derived from the aggregate
@@ -483,6 +484,7 @@ impl Terminal {
         let remote_dirty = Arc::new(AtomicBool::new(false));
         let agent_session = Arc::new(Mutex::new(None));
         let agent_session_dirty = Arc::new(AtomicBool::new(false));
+        let pending_agent_sessions = Arc::new(Mutex::new(Vec::new()));
         let osc_sidecar = Mutex::new(OscSidecar::new(
             reported_cwd.clone(),
             pending_notifications.clone(),
@@ -491,6 +493,7 @@ impl Terminal {
             remote_dirty.clone(),
             agent_session.clone(),
             agent_session_dirty.clone(),
+            pending_agent_sessions.clone(),
             transport.clone(),
             terminal_id.clone(),
         ));
@@ -527,6 +530,7 @@ impl Terminal {
             remote_dirty,
             agent_session,
             agent_session_dirty,
+            pending_agent_sessions,
             focus_report_state: Mutex::new(FocusReportState::default()),
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),

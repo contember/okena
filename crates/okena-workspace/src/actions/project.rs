@@ -1555,6 +1555,7 @@ mod tests {
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1849,6 +1850,7 @@ mod gpui_tests {
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),

@@ -6601,6 +6601,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -7326,6 +7327,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8070,6 +8072,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8327,6 +8330,7 @@ mod tests {
         );
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![parent, child],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -9951,6 +9955,7 @@ mod tests {
         };
         let data = WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![parent],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),

@@ -960,11 +960,11 @@ pub fn spawn_uninitialized_terminals(
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
-        // Claim the agent session this pane carried before the restart, if any.
-        // Taking it makes the resume exactly-once; the session is then re-keyed
-        // onto the new terminal id below so the pane keeps its identity whether
-        // or not we actually resumed.
-        let pending_session = ws.take_pending_agent_resume(project_id, &path);
+        // Keep the pending identity until spawning succeeds so a failed spawn can retry.
+        let pending_session = ws
+            .project(project_id)
+            .and_then(|project| project.pending_agent_resumes.get(&path))
+            .cloned();
         let resume_command = pending_session
             .as_ref()
             .filter(|_| auto_resume)
@@ -989,6 +989,7 @@ pub fn spawn_uninitialized_terminals(
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
+                ws.take_pending_agent_resume(project_id, &path);
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 if let Some(session) = pending_session {
                     ws.set_agent_session(project_id, &terminal_id, session, cx);
@@ -1228,6 +1229,7 @@ mod reconnect_shell_tests {
         created_shells: Mutex<Vec<Option<ShellType>>>,
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
         pub(super) plans: Mutex<Vec<TerminalLaunchPlan>>,
+        pub(super) fail_next_spawn: std::sync::atomic::AtomicBool,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1249,6 +1251,12 @@ mod reconnect_shell_tests {
             plan: &TerminalLaunchPlan,
         ) -> anyhow::Result<String> {
             self.plans.lock().expect("plan lock").push(plan.clone());
+            if self
+                .fail_next_spawn
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("test spawn failure");
+            }
             let shell = plan.initial_command.as_ref().map_or_else(
                 || plan.route.clone(),
                 |command| ShellType::Custom {
@@ -1360,6 +1368,7 @@ mod reconnect_shell_tests {
         };
         Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["project".into()],
             folders: Vec::new(),
@@ -1666,7 +1675,72 @@ mod agent_resume_tests {
         assert_eq!(ws.agent_session("project", "terminal"), None);
     }
 
-    /// docs/agent-status.md promises the session is dropped on a hard close, a
+    #[test]
+    fn failed_spawn_retains_resume_for_a_successful_retry() {
+        stub_registry();
+        let captured = session("test-agent");
+        let mut ws = workspace_with_terminal(
+            ShellType::Default,
+            None,
+            None,
+            HashMap::from([(Vec::new(), captured.clone())]),
+        );
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        backend
+            .fail_next_spawn
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = spawn_uninitialized_terminals(
+            &mut ws,
+            "project",
+            &backend,
+            &terminals,
+            &settings(true),
+            None,
+            &mut TestCx,
+        );
+        assert!(matches!(result, super::ActionResult::Err(_)));
+        assert_eq!(
+            ws.project("project")
+                .unwrap()
+                .pending_agent_resumes
+                .get(&vec![]),
+            Some(&captured)
+        );
+        assert!(terminals.lock().is_empty());
+
+        let result = spawn_uninitialized_terminals(
+            &mut ws,
+            "project",
+            &backend,
+            &terminals,
+            &settings(true),
+            None,
+            &mut TestCx,
+        );
+        assert!(matches!(result, super::ActionResult::Ok(_)));
+        assert!(
+            ws.project("project")
+                .unwrap()
+                .pending_agent_resumes
+                .is_empty()
+        );
+        assert_eq!(ws.agent_session("project", "terminal"), Some(captured));
+        let plans = backend.plans.lock().unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0], plans[1]);
+        assert!(
+            plans[1]
+                .initial_command
+                .as_ref()
+                .unwrap()
+                .args
+                .iter()
+                .any(|a| a.contains(UUID))
+        );
+    }
+
+    /// docs/reference/agent-status.md promises the attachment is dropped on a hard close, a
     /// finalized soft close, or a shell switch. Only the soft close was covered;
     /// these three call sites had no test module at all, so dropping any of them
     /// would leave orphans in workspace.json — and a pane respawned in the same
@@ -1707,6 +1781,10 @@ mod agent_resume_tests {
         );
 
         assert_eq!(ws.agent_session("project", "terminal"), None);
+        assert_eq!(
+            ws.data().agent_session_history.sessions(),
+            &[session("test-agent")]
+        );
     }
 
     #[test]

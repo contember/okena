@@ -40,6 +40,7 @@ fn make_project(id: &str) -> ProjectData {
 
 fn make_workspace(hidden: &[&str]) -> Workspace {
     let mut data = WorkspaceData {
+        agent_session_history: Default::default(),
         version: 1,
         projects: vec![],
         project_order: vec![],

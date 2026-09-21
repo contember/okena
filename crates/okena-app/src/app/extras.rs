@@ -496,6 +496,7 @@ mod tests {
     fn empty_workspace() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),

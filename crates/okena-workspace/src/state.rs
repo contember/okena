@@ -1780,12 +1780,33 @@ impl Workspace {
         session: okena_core::agent_session::AgentSession,
         cx: &mut impl WorkspaceCx,
     ) {
+        if !session.is_valid() {
+            return;
+        }
+        let mut changed = self.data.agent_session_history.record(session.clone());
         if let Some(project) = self.project_mut(project_id)
             && project.agent_sessions.get(terminal_id) != Some(&session)
         {
             project
                 .agent_sessions
                 .insert(terminal_id.to_string(), session);
+            changed = true;
+        }
+        if changed {
+            self.notify_data(cx);
+        }
+    }
+
+    pub fn record_agent_sessions(
+        &mut self,
+        sessions: impl IntoIterator<Item = okena_core::agent_session::AgentSession>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let mut changed = false;
+        for session in sessions {
+            changed |= self.data.agent_session_history.record(session);
+        }
+        if changed {
             self.notify_data(cx);
         }
     }
@@ -2865,6 +2886,7 @@ mod workspace_tests {
         // `ProjectData.show_in_overview` shortcut has been removed.
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -3913,6 +3935,7 @@ mod gpui_tests {
         // that exercise hidden-project behavior.
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),

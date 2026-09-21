@@ -67,6 +67,7 @@ impl OscSidecar {
         remote_dirty: Arc<AtomicBool>,
         agent_session: Arc<Mutex<Option<AgentSession>>>,
         agent_session_dirty: Arc<AtomicBool>,
+        pending_agent_sessions: Arc<Mutex<Vec<AgentSession>>>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
@@ -80,6 +81,7 @@ impl OscSidecar {
                 remote_dirty,
                 agent_session,
                 agent_session_dirty,
+                pending_agent_sessions,
                 transport,
                 terminal_id,
                 osc99_pending: HashMap::new(),
@@ -119,6 +121,7 @@ struct SidecarPerform {
     /// One-shot edge set when `agent_session` changes; drained by the PTY event
     /// loop to persist the session. Mirrors `remote_dirty`.
     agent_session_dirty: Arc<AtomicBool>,
+    pending_agent_sessions: Arc<Mutex<Vec<AgentSession>>>,
     transport: Arc<dyn TerminalTransport>,
     terminal_id: String,
     /// In-progress `OSC 99` notifications keyed by `i=` id, awaiting their
@@ -516,8 +519,13 @@ impl SidecarPerform {
                 true
             }
         };
-        drop(slot);
         if changed {
+            // Only the PTY owner persists identities; mirrors have no queue consumer.
+            if self.transport.answers_terminal_queries()
+                && let Some(session) = slot.as_ref()
+            {
+                self.pending_agent_sessions.lock().push(session.clone());
+            }
             self.agent_session_dirty.store(true, Ordering::Relaxed);
         }
     }

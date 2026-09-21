@@ -305,6 +305,7 @@ mod gpui_tests {
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -571,6 +572,7 @@ mod jump_gpui_tests {
     fn workspace_data(hidden: &[&str]) -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project("p1", "t1"), project("p2", "t2")],
             project_order: vec!["p1".to_string(), "p2".to_string()],
             folders: Vec::new(),

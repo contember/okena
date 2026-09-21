@@ -8,7 +8,7 @@
 # Usage:
 #   okena-agent-status <working|blocked|done|idle|clear> [message]
 #
-# Designed to be wired up as a Claude Code hook (see docs/agent-status.md), but
+# Designed to be wired up as a Claude Code hook (see docs/reference/agent-status.md), but
 # it's agent-agnostic — anything that can run a command can call it.
 #
 # Output device: prefer the pane's *current* slave pty named by
@@ -108,45 +108,17 @@ if [ ! -t 0 ]; then
     event=$(cat 2>/dev/null || true)
 fi
 
-# Reduce $event to just its TOP-LEVEL key/value pairs.
-#
-# The regex below is greedy, so it picks the *last* match on the line — and
-# Claude Code's PreToolUse/PostToolUse payloads embed `tool_input` as nested
-# JSON whose keys are not string-escaped. A tool argument named `session_id` or
-# `transcript_path` (routine for MCP tools) would therefore shadow the real
-# field: the forged value becomes the pane's sticky session, gets persisted, and
-# with auto-resume on becomes the argument to `claude --resume`.
-#
-# Repeatedly collapse the innermost {...} / [...] until only the top level is
-# left. Bounded so a pathological payload can't spin.
-event_top=""
-if [ -n "$event" ]; then
-    event_top=${event#\{}
-    event_top=${event_top%\}}
-    nesting=0
-    while [ "$nesting" -lt 16 ]; do
-        flatter=$(printf '%s' "$event_top" | sed 's/{[^{}]*}/""/g; s/\[[^][]*\]/""/g' 2>/dev/null)
-        [ "$flatter" = "$event_top" ] && break
-        event_top=$flatter
-        nesting=$((nesting + 1))
-    done
-fi
-
-# `jq` gives an exact answer when it's around; the sed path keeps the script
-# dependency-free otherwise.
-has_jq=$(command -v jq 2>/dev/null || true)
-
-# Print the string value of TOP-LEVEL JSON key $1 in $event, or nothing.
-json_str() {
-    if [ -n "$has_jq" ]; then
-        printf '%s' "$event" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null
-        return 0
-    fi
-    printf '%s' "$event_top" | sed -n \
-        "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" 2>/dev/null | head -n1
+# Claude's event supplies these keys at the top level. Skip ambiguous keys
+# (e.g. also present in tool_input) and strings requiring JSON unescaping.
+simple_json_str() {
+    key="\"$1\"[[:space:]]*:"
+    count=$(printf '%s' "$event" | grep -oE "$key" | wc -l | tr -d '[:space:]')
+    [ "$count" = 1 ] || return 0
+    printf '%s' "$event" | grep -oE "$key[[:space:]]*\"[^\"\\\\[:cntrl:]]*\"" |
+        sed 's/^[^:]*:[[:space:]]*"//; s/"$//'
 }
-session_id=$(json_str session_id)
-transcript_path=$(json_str transcript_path)
+session_id=$(simple_json_str session_id | grep -E '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$')
+transcript_path=$(simple_json_str transcript_path)
 
 # Assemble the optional lbl= JSON object only when we actually have a session id
 # (the durable bit Okena persists). Values are JSON-escaped (\\ then ").

@@ -22,6 +22,12 @@ pub struct FolderData {
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
+    /// Local conversation history survives terminal and project removal.
+    #[serde(
+        default,
+        skip_serializing_if = "okena_core::agent_session::AgentSessionHistory::is_empty"
+    )]
+    pub agent_session_history: okena_core::agent_session::AgentSessionHistory,
     /// Schema version for migration support
     #[serde(default = "default_workspace_version")]
     pub version: u32,
@@ -54,6 +60,7 @@ impl WorkspaceData {
     /// (`apply_remote_snapshot`), so the client must not seed a default project.
     pub fn empty() -> Self {
         WorkspaceData {
+            agent_session_history: Default::default(),
             version: default_workspace_version(),
             projects: Vec::new(),
             project_order: Vec::new(),
@@ -585,6 +592,7 @@ mod tests {
     fn make_workspace() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),

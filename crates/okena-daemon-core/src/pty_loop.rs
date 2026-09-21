@@ -206,6 +206,8 @@ pub async fn run_pty_loop(
         // independent of any PTY `Exit`. Mirror the GUI's post-batch dirty-title
         // scan. (Runs whether or not there were exits.)
         if !dirty_terminal_ids.is_empty() {
+            // Hook completion can remove terminals and projects in this batch.
+            persist_agent_sessions(&dirty_terminal_ids, &terminals, &reactor);
             let osc_hook_exits = process_osc_hook_exits(&dirty_terminal_ids, &terminals, &reactor);
             if !osc_hook_exits.is_empty() {
                 resolve_osc_worktree_closes(
@@ -238,11 +240,6 @@ pub async fn run_pty_loop(
             if drain_remote_dirty(&dirty_terminal_ids, &terminals) {
                 state_version.send_modify(|v| *v += 1);
             }
-
-            // Agent sessions are sticky on Terminal but persistent in the
-            // workspace. The workspace tick observer handles the durable save
-            // and subsequent state-version bump.
-            persist_agent_sessions(&dirty_terminal_ids, &terminals, &reactor);
         }
 
         if !exit_events.is_empty() {
@@ -551,6 +548,20 @@ fn persist_agent_sessions(
     terminals: &TerminalsRegistry,
     reactor: &PtyLoopReactor,
 ) {
+    let history_updates: Vec<_> = {
+        let registry = terminals.lock();
+        dirty_terminal_ids
+            .iter()
+            .filter_map(|id| registry.get(id))
+            .flat_map(|terminal| terminal.take_pending_agent_sessions())
+            .collect()
+    };
+    if !history_updates.is_empty() {
+        reactor
+            .workspace
+            .lock()
+            .record_agent_sessions(history_updates, &mut reactor.workspace_cx());
+    }
     // PEEK the edge here, don't consume it. Attribution below can fail — a hook
     // or service terminal, and any pane inside a soft-close grace window, is not
     // in a layout tree — and consuming the edge on a miss lost that pane's
@@ -1199,6 +1210,7 @@ mod tests {
         };
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![parent, child],
             project_order: vec!["parent".into()],
             folders: Vec::new(),
@@ -1256,6 +1268,7 @@ mod tests {
         project.hooks.terminal.on_close = Some("echo closed".into());
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1320,6 +1333,7 @@ mod tests {
         );
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1366,6 +1380,151 @@ mod tests {
         assert_eq!(monitor.drain_pending_toasts().len(), 1);
     }
 
+    #[cfg(unix)]
+    fn agent_hook_output(event: &serde_json::Value) -> Vec<u8> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let output = std::env::temp_dir().join(format!("okena-hook-{}", uuid::Uuid::new_v4()));
+        let mut child = Command::new("sh")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../integrations/claude-code/okena-lifecycle/scripts/okena-agent-status.sh"
+            ))
+            .arg("working")
+            .env("OKENA_AGENT", "claude-code")
+            .env("OKENA_TERMINAL_ID", "agent-terminal")
+            .env("OKENA_TTY", &output)
+            .env_remove("OKENA_TTY_FILE")
+            .env_remove("OKENA_AGENT_STATUS_LOG")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let status = child.wait().unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        std::fs::remove_file(output).unwrap();
+        assert!(status.success());
+        bytes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_sessions_in_one_batch_survive_attachment_and_project_removal() {
+        use okena_core::agent_session::AgentSession;
+
+        let first = AgentSession {
+            agent: "claude-code".into(),
+            session_id: "11111111-2222-3333-4444-555555555555".into(),
+            transcript_path: Some("/home/user/project[old]/session.jsonl".into()),
+        };
+        let second = AgentSession {
+            session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+            transcript_path: None,
+            ..first.clone()
+        };
+        let mut bytes = agent_hook_output(&serde_json::to_value(&first).unwrap());
+        bytes.extend(agent_hook_output(&serde_json::to_value(&second).unwrap()));
+        let reactor = test_reactor(
+            Workspace::new(WorkspaceData::empty()),
+            AppSettings::default(),
+        );
+        let terminal = Arc::new(Terminal::new(
+            "agent-terminal".into(),
+            terminal_size(),
+            reactor.backend.transport(),
+            "/tmp".into(),
+        ));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::from([(
+            "agent-terminal".into(),
+            terminal.clone(),
+        )])));
+        terminal.process_output(&bytes);
+        let dirty = ["agent-terminal".into()];
+        persist_agent_sessions(&dirty, &terminals, &reactor);
+        assert_eq!(
+            reactor
+                .workspace
+                .lock()
+                .data()
+                .agent_session_history
+                .sessions(),
+            &[first.clone(), second.clone()]
+        );
+        assert!(
+            terminal.agent_session_dirty(),
+            "attachment can retry without losing history"
+        );
+
+        let mut data = reactor.workspace.lock().data().clone();
+        data.projects.push(plain_project("agent-terminal"));
+        *reactor.workspace.lock() = Workspace::new(data);
+        persist_agent_sessions(&dirty, &terminals, &reactor);
+        assert_eq!(
+            reactor
+                .workspace
+                .lock()
+                .agent_session("project-1", "agent-terminal"),
+            Some(second.clone())
+        );
+        assert!(!terminal.agent_session_dirty());
+
+        let mut data = reactor.workspace.lock().data().clone();
+        data.projects.clear();
+        let restored: WorkspaceData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        assert_eq!(restored.agent_session_history.sessions(), &[first, second]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_skips_ambiguous_identity_and_escaped_paths_but_keeps_status() {
+        let reactor = test_reactor(
+            Workspace::new(WorkspaceData::empty()),
+            AppSettings::default(),
+        );
+        for (event, expected_session) in [
+            (
+                serde_json::json!({"session_id": "11111111-2222-3333-4444-555555555555", "transcript_path": "/tmp/a\"b.jsonl"}),
+                true,
+            ),
+            (
+                serde_json::json!({"session_id": "11111111-2222-3333-4444-555555555555", "transcript_path": "/tmp/a\\b.jsonl"}),
+                true,
+            ),
+            (
+                serde_json::json!({"session_id": "11111111-2222-3333-4444-555555555555", "tool_input": {"session_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}}),
+                false,
+            ),
+            (serde_json::json!({"session_id": "not-a-uuid"}), false),
+        ] {
+            let terminal = Terminal::new(
+                "agent-terminal".into(),
+                terminal_size(),
+                reactor.backend.transport(),
+                "/tmp".into(),
+            );
+            terminal.process_output(&agent_hook_output(&event));
+            assert!(terminal.agent_status().is_some());
+            assert_eq!(
+                terminal.agent_session().is_some(),
+                expected_session,
+                "{event}"
+            );
+            assert!(
+                terminal
+                    .agent_session()
+                    .and_then(|s| s.transcript_path)
+                    .is_none()
+            );
+        }
+    }
+
     #[test]
     fn osc_hook_exit_evicts_the_oldest_finished_hook_terminals() {
         // A finished hook keeps its entry, its PTY and a full scrollback grid,
@@ -1403,6 +1562,7 @@ mod tests {
 
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1936,6 +2096,7 @@ mod tests {
         );
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),

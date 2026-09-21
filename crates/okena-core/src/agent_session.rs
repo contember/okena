@@ -45,6 +45,50 @@ pub struct AgentSession {
     pub transcript_path: Option<String>,
 }
 
+/// Conversation identities retained independently of their current terminal attachment.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct AgentSessionHistory(Vec<AgentSession>);
+
+impl AgentSessionHistory {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn sessions(&self) -> &[AgentSession] {
+        &self.0
+    }
+
+    /// Merge partial reports without erasing a previously captured transcript path.
+    pub fn record(&mut self, session: AgentSession) -> bool {
+        if !session.is_valid() {
+            return false;
+        }
+        if let Some(existing) = self.0.iter_mut().find(|s| s.is_same_session(&session)) {
+            if session.transcript_path.is_some()
+                && session.transcript_path != existing.transcript_path
+            {
+                existing.transcript_path = session.transcript_path;
+                return true;
+            }
+            return false;
+        }
+        self.0.push(session);
+        true
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentSessionHistory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sessions = Vec::<AgentSession>::deserialize(deserializer)?;
+        let mut history = Self::default();
+        for session in sessions {
+            history.record(session);
+        }
+        Ok(history)
+    }
+}
+
 /// The `lbl=` keys the agent-status OSC reserves for session identity. They are
 /// read out of the **raw** decoded label map before any display-oriented
 /// clamping, so a pane emitting a flood of other labels cannot push its own
@@ -160,6 +204,53 @@ mod tests {
     fn accepts_canonical_uuid() {
         assert!(is_uuid_like("3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b"));
         assert!(is_uuid_like("3B9C1F2A-4D5E-6F70-8A9B-0C1D2E3F4A5B"));
+    }
+
+    #[test]
+    fn history_merges_partial_reports_and_keeps_distinct_harnesses() {
+        let session = AgentSession {
+            agent: "claude-code".into(),
+            session_id: UUID.into(),
+            transcript_path: Some(abs("session.jsonl")),
+        };
+        let mut history = AgentSessionHistory::default();
+        assert!(history.record(session.clone()));
+        assert!(!history.record(AgentSession {
+            transcript_path: None,
+            ..session.clone()
+        }));
+        let other = AgentSession {
+            agent: "codex".into(),
+            ..session.clone()
+        };
+        assert!(history.record(other.clone()));
+        assert_eq!(history.sessions(), &[session, other]);
+    }
+
+    #[test]
+    fn history_load_discards_invalid_records_and_merges_duplicates() {
+        let session = AgentSession {
+            agent: "claude-code".into(),
+            session_id: UUID.into(),
+            transcript_path: Some(abs("session.jsonl")),
+        };
+        let json = serde_json::to_string(&vec![
+            session.clone(),
+            AgentSession {
+                transcript_path: None,
+                ..session.clone()
+            },
+            AgentSession {
+                session_id: "invalid".into(),
+                ..session.clone()
+            },
+        ])
+        .unwrap();
+        let history: AgentSessionHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(history.sessions(), &[session]);
+        let round_trip: AgentSessionHistory =
+            serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
+        assert_eq!(history, round_trip);
     }
 
     #[test]

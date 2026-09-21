@@ -124,6 +124,11 @@ impl Terminal {
         self.agent_session.lock().clone()
     }
 
+    /// Drain every identity update, including successive sessions in a single PTY batch.
+    pub fn take_pending_agent_sessions(&self) -> Vec<okena_core::agent_session::AgentSession> {
+        std::mem::take(&mut *self.pending_agent_sessions.lock())
+    }
+
     /// Whether the "agent session changed since last drain" edge is set, without
     /// consuming it.
     ///

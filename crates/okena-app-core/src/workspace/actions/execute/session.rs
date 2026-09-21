@@ -1043,6 +1043,7 @@ mod tests {
         let project_order = projects.iter().map(|project| project.id.clone()).collect();
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order,
             service_panel_heights: HashMap::new(),

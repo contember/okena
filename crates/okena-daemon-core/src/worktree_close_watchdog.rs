@@ -130,6 +130,7 @@ mod tests {
         );
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["worktree".into()],
             folders: Vec::new(),

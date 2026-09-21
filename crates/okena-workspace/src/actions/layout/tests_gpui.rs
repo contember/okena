@@ -54,6 +54,7 @@ fn terminal(id: &str) -> LayoutNode {
 fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
     WorkspaceData {
         version: 1,
+        agent_session_history: Default::default(),
         projects,
         project_order: order.into_iter().map(String::from).collect(),
         service_panel_heights: HashMap::new(),

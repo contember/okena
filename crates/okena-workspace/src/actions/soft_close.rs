@@ -643,6 +643,7 @@ mod tests {
     fn workspace_data(layout: LayoutNode) -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project_with(layout)],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),

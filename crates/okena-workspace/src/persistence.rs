@@ -177,6 +177,11 @@ pub(crate) fn validate_workspace_data(
     clear_terminal_ids: bool,
     #[cfg_attr(not(windows), allow(unused))] backend_preference: SessionBackend,
 ) {
+    for project in &data.projects {
+        for session in project.agent_sessions.values() {
+            data.agent_session_history.record(session.clone());
+        }
+    }
     // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set.
     // This must run BEFORE clearing terminal IDs so we can check WSL backend availability.
     #[cfg(windows)]
@@ -1281,6 +1286,7 @@ pub fn default_workspace() -> WorkspaceData {
 
     WorkspaceData {
         version: WORKSPACE_VERSION,
+        agent_session_history: Default::default(),
         projects: vec![ProjectData {
             id: project_id.clone(),
             name: "Default".to_string(),
@@ -1739,6 +1745,7 @@ mod tests {
     ) -> WorkspaceData {
         WorkspaceData {
             version: WORKSPACE_VERSION,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -1978,6 +1985,20 @@ mod tests {
             Some(&agent_session(UUID_A))
         );
         assert_eq!(project.pending_agent_resumes.len(), 1);
+        assert_eq!(
+            data.agent_session_history.sessions(),
+            &[agent_session(UUID_A)]
+        );
+
+        data.projects.clear();
+        data.project_order.clear();
+        let mut restored: WorkspaceData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        validate_workspace_data(&mut restored, true, SessionBackend::None);
+        assert_eq!(
+            restored.agent_session_history.sessions(),
+            &[agent_session(UUID_A)]
+        );
     }
 
     #[test]
@@ -2156,6 +2177,7 @@ mod tests {
     fn migrate_v0_bumps_to_current_version() {
         let data = WorkspaceData {
             version: 0,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2526,6 +2548,7 @@ mod tests {
     fn migrate_current_version_noop() {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
