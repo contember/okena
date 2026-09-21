@@ -315,7 +315,7 @@ pub fn remove_orphaned_worktree(orphaned: &OrphanedWorktree) -> GitResult<()> {
         &orphaned.checkout_path,
         &orphaned.identity,
         &orphaned.parent_path,
-        |path| std::fs::remove_dir_all(path),
+        remove_tree,
     )
 }
 
@@ -601,7 +601,7 @@ pub fn remove_worktree(verified: &VerifiedWorktree, force: bool) -> GitResult<()
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
-    remove_worktree_fast_with(verified, |path| std::fs::remove_dir_all(path))
+    remove_worktree_fast_with(verified, remove_tree)
 }
 
 fn remove_worktree_fast_with(
@@ -700,6 +700,80 @@ fn delete_with_retries(
     }
 }
 
+/// Annotate an io error with the path it happened on, keeping its kind so the
+/// retry decision still sees the real one.
+fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// Delete a tree, naming the entry that refused.
+///
+/// `std::fs::remove_dir_all` reports the io error without the path it happened
+/// on, so a refusal deep in the tree reads as a refusal of the whole checkout:
+/// "Permission denied" on the worktree root, when what actually refused was a
+/// `node_modules` that Docker holds as a mount point. Knowing which entry
+/// refused is the difference between a report and a diagnosis.
+///
+/// Symlinks are removed, never followed, matching `remove_dir_all`.
+fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(at_path(path, error)),
+    };
+    if !metadata.is_dir() {
+        return match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(at_path(path, error)),
+            _ => Ok(()),
+        };
+    }
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|error| at_path(path, error))?;
+                // Already annotated by the nested call.
+                remove_tree(&entry.path())?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(at_path(path, error)),
+    }
+    match std::fs::remove_dir(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(at_path(path, error)),
+        _ => Ok(()),
+    }
+}
+
+/// What a half-finished deletion left behind, as a clause to append to the
+/// failure. Empty when the checkout is whole, or when git cannot say.
+///
+/// A delete removes as it walks, so a refusal part-way leaves the checkout
+/// short of whatever went before it. Restoring the directory to its old path
+/// makes the project openable again, but "the checkout remains" is only half
+/// true, and the user has no reason to suspect the rest.
+fn partial_checkout_note(worktree_path: &Path) -> String {
+    let Ok(path) = path_str(worktree_path) else {
+        return String::new();
+    };
+    let Ok(output) = safe_output(command("git").args(["-C", path, "status", "--porcelain"])) else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    let deleted = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(" D") || line.starts_with("D "))
+        .count();
+    if deleted == 0 {
+        return String::new();
+    }
+    format!(
+        "; the deletion had already removed {deleted} tracked file(s) before it failed, \
+         `git restore .` in the checkout puts them back (untracked files it removed are gone)"
+    )
+}
+
 /// Whether a directory name is one this module generated.
 fn is_quarantine_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
@@ -791,9 +865,14 @@ fn quarantine_and_delete(
             // only Finder metadata behind. Delete that narrow, verified class of
             // debris; otherwise restore the still-owned quarantine and fail closed.
             if let Err(cleanup_error) = cleanup_benign_residual(&quarantine) {
+                log::warn!(
+                    "worktree removal: quarantine at '{}' still holds the checkout: {cleanup_error}",
+                    quarantine.display()
+                );
                 let source = match std::fs::rename(&quarantine, worktree_path) {
                     Ok(()) => std::io::Error::other(format!(
-                        "{error}; residual cleanup refused: {cleanup_error}"
+                        "{error}{}",
+                        partial_checkout_note(worktree_path)
                     )),
                     Err(restore_error) => std::io::Error::new(
                         error.kind(),
@@ -1135,6 +1214,61 @@ mod tests {
             ),
             ""
         );
+    }
+
+    /// The failure has to name the entry that refused, not the root it was
+    /// asked to delete. A `node_modules` that Docker holds as a mount point
+    /// refuses with a permission error, and reporting that against the whole
+    /// checkout sends the reader looking at the wrong directory.
+    #[test]
+    fn a_refusal_names_the_entry_that_refused() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("tree");
+        let locked = root.join("pkg").join("held");
+        std::fs::create_dir_all(&locked).expect("create tree");
+        std::fs::write(root.join("keep.txt"), "x").expect("write file");
+        // Take write permission off the parent, so its entry cannot be unlinked.
+        let parent = locked.parent().expect("held has a parent");
+        let mut perms = std::fs::metadata(parent)
+            .expect("read permissions")
+            .permissions();
+        let restore = perms.clone();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+        std::fs::set_permissions(parent, perms).expect("drop write permission");
+
+        let error = remove_tree(&root).expect_err("a locked entry must refuse");
+        let message = error.to_string();
+
+        std::fs::set_permissions(parent, restore).expect("restore permissions");
+
+        assert!(
+            message.contains("held"),
+            "the entry that refused must be named: {message}"
+        );
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the kind must survive annotation, the retry decision reads it"
+        );
+    }
+
+    /// A tree with nothing in the way is removed, symlinks included, and a path
+    /// that is already gone is not an error.
+    #[test]
+    fn a_clear_tree_is_removed_whole() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("tree");
+        std::fs::create_dir_all(root.join("nested")).expect("create tree");
+        std::fs::write(root.join("nested").join("file.txt"), "x").expect("write file");
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "must survive").expect("write outside file");
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("create symlink");
+
+        remove_tree(&root).expect("remove the tree");
+
+        assert!(!root.exists());
+        assert!(outside.exists(), "a symlink is removed, never followed");
+        remove_tree(&root).expect("removing what is already gone is not a failure");
     }
 
     /// A checkout is deleted while the machine keeps running, so a watcher or
