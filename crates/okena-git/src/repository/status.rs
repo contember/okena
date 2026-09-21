@@ -197,14 +197,23 @@ pub fn get_head_sha(path: &Path) -> Option<String> {
     Some(id.to_hex().to_string())
 }
 
-/// Full SHA of the current branch's upstream tracking commit — the last commit
-/// known (from the latest fetch) to be on the remote. `None` if HEAD is
-/// detached or the branch has no upstream (never pushed).
+/// The remote branch the current branch tracks, and that branch's commit.
 ///
-/// Branch-level CI lookups (`/commits/{sha}/check-runs` and `/status`) must use
-/// this rather than the local HEAD: GitHub runs CI against *pushed* commits, so
-/// querying an unpushed local HEAD just returns nothing.
-pub fn get_pushed_sha(path: &Path) -> Option<String> {
+/// The name matters as much as the commit: a branch does not necessarily track
+/// its own counterpart. Git records an upstream whenever a branch is started
+/// from a remote-tracking ref, so a branch created from `origin/main` tracks
+/// `main` until it is pushed, and its "upstream commit" is the default
+/// branch's tip rather than anything this branch did.
+pub struct UpstreamRef {
+    /// Branch name on the remote, without the remote prefix: `main`, `feat/x`.
+    pub branch: String,
+    /// Full SHA that remote branch points at, as of the latest fetch.
+    pub sha: String,
+}
+
+/// The current branch's upstream. `None` if HEAD is detached or the branch has
+/// no upstream (never pushed, and not started from a remote-tracking ref).
+pub fn get_upstream_ref(path: &Path) -> Option<UpstreamRef> {
     let repo = crate::gix_helpers::open(path)?;
     let branch = super::head_branch_short(&repo)?;
     let head_ref = repo
@@ -218,7 +227,29 @@ pub fn get_pushed_sha(path: &Path) -> Option<String> {
         .rev_parse_single(upstream_name.as_bstr())
         .ok()?
         .detach();
-    Some(id.to_hex().to_string())
+    Some(UpstreamRef {
+        branch: remote_branch_name(&upstream_name.as_bstr().to_string())?,
+        sha: id.to_hex().to_string(),
+    })
+}
+
+/// `refs/remotes/origin/feat/x` -> `feat/x`. The remote is one segment, the
+/// branch is everything after it, slashes included.
+fn remote_branch_name(full_ref: &str) -> Option<String> {
+    let (_remote, branch) = full_ref.strip_prefix("refs/remotes/")?.split_once('/')?;
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+/// Full SHA of the current branch's upstream tracking commit: the last commit
+/// known (from the latest fetch) to be on the remote. `None` if HEAD is
+/// detached or the branch has no upstream (never pushed).
+///
+/// Branch-level CI lookups (`/commits/{sha}/check-runs` and `/status`) must use
+/// this rather than the local HEAD: GitHub runs CI against *pushed* commits, so
+/// querying an unpushed local HEAD just returns nothing. They must also check
+/// *whose* upstream it is (see `UpstreamRef`).
+pub fn get_pushed_sha(path: &Path) -> Option<String> {
+    get_upstream_ref(path).map(|upstream| upstream.sha)
 }
 
 /// Tracked per-file diff counts and the untracked-file list, produced by a
@@ -663,6 +694,21 @@ mod tests {
     fn get_current_branch_returns_none_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(get_current_branch(&path).is_none());
+    }
+
+    #[test]
+    fn a_remote_ref_splits_into_remote_and_branch() {
+        assert_eq!(
+            remote_branch_name("refs/remotes/origin/main").as_deref(),
+            Some("main")
+        );
+        // A slash in the branch name belongs to the branch, not the remote.
+        assert_eq!(
+            remote_branch_name("refs/remotes/origin/feat/x").as_deref(),
+            Some("feat/x")
+        );
+        assert_eq!(remote_branch_name("refs/heads/main"), None);
+        assert_eq!(remote_branch_name("refs/remotes/origin/"), None);
     }
 
     #[test]

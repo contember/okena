@@ -19,8 +19,11 @@ pub enum GitError {
     #[error("directory '{path}' is already an active worktree")]
     WorktreeExists { path: PathBuf },
 
-    /// Failed to remove a directory.
-    #[error("failed to remove directory '{path}'")]
+    /// Failed to remove a directory. The cause belongs in the message: this
+    /// error reaches the user as a toast and the log as `{e}`, and neither
+    /// walks the source chain, so without it a failed worktree close reports
+    /// only the path it already named.
+    #[error("failed to remove directory '{path}': {source}")]
     RemoveFailed {
         path: PathBuf,
         #[source]
@@ -98,6 +101,20 @@ mod tests {
             err.user_detail(),
             "could not read Username for 'https://github.com': terminal prompts disabled"
         );
+    }
+
+    /// The io cause is what says whether the close failed on a busy directory,
+    /// a permission, or a vanished path. Dropping it leaves the user with a
+    /// sentence that only repeats the path.
+    #[test]
+    fn a_failed_removal_names_its_cause() {
+        let err = GitError::RemoveFailed {
+            path: PathBuf::from("/tmp/wt"),
+            source: std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty),
+        };
+        let message = err.user_detail();
+        assert!(message.contains("/tmp/wt"), "{message}");
+        assert!(message.contains("not empty"), "{message}");
     }
 
     #[test]

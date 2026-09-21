@@ -1,6 +1,9 @@
 //! Worktree operations: create / remove / list.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use okena_core::process::{command, safe_output};
 
@@ -312,7 +315,7 @@ pub fn remove_orphaned_worktree(orphaned: &OrphanedWorktree) -> GitResult<()> {
         &orphaned.checkout_path,
         &orphaned.identity,
         &orphaned.parent_path,
-        |path| std::fs::remove_dir_all(path),
+        remove_tree,
     )
 }
 
@@ -462,6 +465,17 @@ pub fn create_worktree(
     let mut args = vec!["-C", repo_str, "worktree", "add"];
     match &attachment {
         BranchAttachment::NewBranch(start_point) => {
+            // The start point is `origin/<default>`, and git records a
+            // remote-tracking start point as the new branch's upstream
+            // (`branch.autoSetupMerge`). Nothing has been pushed yet, so that
+            // upstream would be the default branch: every lookup for "this
+            // branch's pushed commit" would answer with the default branch's,
+            // reporting its CI against a worktree that never triggered it.
+            // `git push -u` records the real one when there is something to
+            // record.
+            if start_point.is_some() {
+                args.push("--no-track");
+            }
             args.push("-b");
             args.push(branch);
             args.push(target_str);
@@ -505,9 +519,15 @@ pub fn create_worktree_with_start_point(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
-
     let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));
+
+    let mut args = vec!["-C", repo_str, "worktree", "add"];
+    // See `create_worktree`: a branch that has never been pushed must not claim
+    // the branch it started from as its upstream.
+    if start_point.is_some() {
+        args.push("--no-track");
+    }
+    args.extend(["-b", branch, target_str]);
     if let Some(start_point) = &start_point {
         args.push(start_point);
     }
@@ -581,12 +601,12 @@ pub fn remove_worktree(verified: &VerifiedWorktree, force: bool) -> GitResult<()
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(verified: &VerifiedWorktree) -> GitResult<()> {
-    remove_worktree_fast_with(verified, |path| std::fs::remove_dir_all(path))
+    remove_worktree_fast_with(verified, remove_tree)
 }
 
 fn remove_worktree_fast_with(
     verified: &VerifiedWorktree,
-    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
+    remove_dir_all: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> GitResult<()> {
     revalidate_verified_worktree(verified)?;
     quarantine_and_delete(
@@ -595,6 +615,204 @@ fn remove_worktree_fast_with(
         &verified.parent_path,
         remove_dir_all,
     )
+}
+
+/// Prefix of the hidden directory a checkout is renamed to before deletion.
+const QUARANTINE_PREFIX: &str = ".okena-removing-";
+
+/// How many times a delete is attempted before the failure stands, and how long
+/// to wait between attempts.
+const DELETE_ATTEMPTS: usize = 4;
+const DELETE_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+/// Quarantine directories this process is deleting right now.
+///
+/// The reclaim sweep runs in the same parent directory as live removals, so a
+/// worktree being closed at this moment must not have its quarantine pulled out
+/// from under it by a sweep running for another project.
+static QUARANTINES_IN_FLIGHT: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// A quarantine path registered for as long as its removal is running.
+struct InFlightQuarantine(PathBuf);
+
+impl InFlightQuarantine {
+    fn register(path: &Path) -> Self {
+        let owned = path.to_path_buf();
+        in_flight_quarantines().insert(owned.clone());
+        Self(owned)
+    }
+}
+
+impl Drop for InFlightQuarantine {
+    fn drop(&mut self) {
+        in_flight_quarantines().remove(&self.0);
+    }
+}
+
+/// The in-flight set, usable even after a panic poisoned the lock: the set is
+/// plain paths, so a poisoned one is no less valid than a healthy one.
+fn in_flight_quarantines() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
+    QUARANTINES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether a failed delete is worth another attempt.
+///
+/// `remove_dir_all` walks the tree and then removes the directory itself, so
+/// anything that writes into the checkout during that walk (a watcher that
+/// outlived the shell it was started from, Spotlight, Finder) leaves the final
+/// `rmdir` reporting a directory that is not empty, with nothing actually
+/// wrong. A permission error is not a race: it fails the same way every time,
+/// and retrying only delays the report.
+fn is_transient_delete_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::DirectoryNotEmpty
+            | std::io::ErrorKind::ResourceBusy
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+/// Delete a directory, retrying while the failure looks like a race with
+/// something still writing into it. An already absent directory is a success.
+fn delete_with_retries(
+    path: &Path,
+    mut remove_dir_all: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                if attempt >= DELETE_ATTEMPTS || !is_transient_delete_error(&error) {
+                    return Err(error);
+                }
+                log::info!(
+                    "worktree removal: delete of '{}' hit a transient failure ({error}), attempt {attempt} of {DELETE_ATTEMPTS}",
+                    path.display()
+                );
+                std::thread::sleep(DELETE_RETRY_DELAY);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Annotate an io error with the path it happened on, keeping its kind so the
+/// retry decision still sees the real one.
+fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// Delete a tree, naming the entry that refused.
+///
+/// `std::fs::remove_dir_all` reports the io error without the path it happened
+/// on, so a refusal deep in the tree reads as a refusal of the whole checkout:
+/// "Permission denied" on the worktree root, when what actually refused was a
+/// `node_modules` that Docker holds as a mount point. Knowing which entry
+/// refused is the difference between a report and a diagnosis.
+///
+/// Symlinks are removed, never followed, matching `remove_dir_all`.
+fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(at_path(path, error)),
+    };
+    if !metadata.is_dir() {
+        return match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(at_path(path, error)),
+            _ => Ok(()),
+        };
+    }
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|error| at_path(path, error))?;
+                // Already annotated by the nested call.
+                remove_tree(&entry.path())?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(at_path(path, error)),
+    }
+    match std::fs::remove_dir(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(at_path(path, error)),
+        _ => Ok(()),
+    }
+}
+
+/// What a half-finished deletion left behind, as a clause to append to the
+/// failure. Empty when the checkout is whole, or when git cannot say.
+///
+/// A delete removes as it walks, so a refusal part-way leaves the checkout
+/// short of whatever went before it. Restoring the directory to its old path
+/// makes the project openable again, but "the checkout remains" is only half
+/// true, and the user has no reason to suspect the rest.
+fn partial_checkout_note(worktree_path: &Path) -> String {
+    let Ok(path) = path_str(worktree_path) else {
+        return String::new();
+    };
+    let Ok(output) = safe_output(command("git").args(["-C", path, "status", "--porcelain"])) else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    let deleted = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(" D") || line.starts_with("D "))
+        .count();
+    if deleted == 0 {
+        return String::new();
+    }
+    format!(
+        "; the deletion had already removed {deleted} tracked file(s) before it failed, \
+         `git restore .` in the checkout puts them back (untracked files it removed are gone)"
+    )
+}
+
+/// Whether a directory name is one this module generated.
+fn is_quarantine_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(QUARANTINE_PREFIX))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
+/// Delete quarantines an earlier removal could neither delete nor put back.
+///
+/// Such a directory is a whole checkout under a hidden name: left alone it is a
+/// disk leak the user has no way to see, and the worktree it holds was already
+/// confirmed for deletion. Best effort by design, and never fatal to the
+/// removal that is starting: a quarantine that still refuses to go gets logged
+/// and waits for the next attempt.
+fn reclaim_abandoned_quarantines(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !is_quarantine_name(&entry.file_name())
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        if in_flight_quarantines().contains(&path) {
+            continue;
+        }
+        match delete_with_retries(&path, |path| std::fs::remove_dir_all(path)) {
+            Ok(()) => log::info!(
+                "worktree removal: reclaimed an abandoned quarantine at '{}'",
+                path.display()
+            ),
+            Err(error) => log::warn!(
+                "worktree removal: abandoned quarantine at '{}' could not be reclaimed: {error}",
+                path.display()
+            ),
+        }
+    }
 }
 
 /// Rename the checkout aside, re-prove it is still the directory whose
@@ -606,16 +824,19 @@ fn quarantine_and_delete(
     worktree_path: &Path,
     identity: &FilesystemObjectIdentity,
     parent_path: &Path,
-    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
+    remove_dir_all: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> GitResult<()> {
     let parent = worktree_path
         .parent()
         .ok_or_else(|| unsafe_worktree(worktree_path, "checkout directory has no parent"))?;
-    let quarantine = parent.join(format!(".okena-removing-{}", uuid::Uuid::new_v4()));
+    reclaim_abandoned_quarantines(parent);
+    let quarantine = parent.join(format!("{QUARANTINE_PREFIX}{}", uuid::Uuid::new_v4()));
     std::fs::rename(worktree_path, &quarantine).map_err(|source| GitError::RemoveFailed {
         path: worktree_path.to_path_buf(),
         source,
     })?;
+
+    let _in_flight = InFlightQuarantine::register(&quarantine);
 
     let quarantined_identity = filesystem_object_identity(&quarantine);
     if quarantined_identity.as_ref() != Some(identity) {
@@ -637,17 +858,21 @@ fn quarantine_and_delete(
         return Err(unsafe_worktree(worktree_path, reason));
     }
 
-    match remove_dir_all(&quarantine) {
+    match delete_with_retries(&quarantine, remove_dir_all) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             // `remove_dir_all` can have already removed the checkout and leave
             // only Finder metadata behind. Delete that narrow, verified class of
             // debris; otherwise restore the still-owned quarantine and fail closed.
             if let Err(cleanup_error) = cleanup_benign_residual(&quarantine) {
+                log::warn!(
+                    "worktree removal: quarantine at '{}' still holds the checkout: {cleanup_error}",
+                    quarantine.display()
+                );
                 let source = match std::fs::rename(&quarantine, worktree_path) {
                     Ok(()) => std::io::Error::other(format!(
-                        "{error}; residual cleanup refused: {cleanup_error}"
+                        "{error}{}",
+                        partial_checkout_note(worktree_path)
                     )),
                     Err(restore_error) => std::io::Error::new(
                         error.kind(),
@@ -775,7 +1000,7 @@ fn path_identity(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::test_support::{git_in, init_temp_repo};
+    use crate::repository::test_support::{git_in, init_temp_repo, repo_with_origin};
     use std::path::PathBuf;
 
     #[test]
@@ -939,6 +1164,220 @@ mod tests {
                 .expect("foreign replacement survives"),
             "foreign data"
         );
+    }
+
+    /// A branch a worktree was just created on has never been pushed, so it has
+    /// no upstream. Git sets one when the start point is a remote-tracking ref,
+    /// and the start point here is `origin/<default>`: the new branch would
+    /// claim the default branch as its upstream, and every lookup for "this
+    /// branch's pushed commit" would answer with the default branch's tip.
+    #[test]
+    fn a_new_worktree_branch_claims_no_upstream() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feat");
+
+        create_worktree(&repo, "feat/x", &target, true).expect("create worktree");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feat/x"
+        );
+        assert_eq!(
+            git_out(
+                &repo,
+                &["config", "--default", "", "--get", "branch.feat/x.merge"]
+            ),
+            "",
+            "a branch with nothing pushed must not track the branch it started from"
+        );
+    }
+
+    /// Same for the pre-resolved start point path, which skips the fetch.
+    #[test]
+    fn a_worktree_created_from_a_start_point_claims_no_upstream() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feat");
+
+        create_worktree_with_start_point(&repo, "feat/y", &target, Some("main"))
+            .expect("create worktree");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feat/y"
+        );
+        assert_eq!(
+            git_out(
+                &repo,
+                &["config", "--default", "", "--get", "branch.feat/y.merge"]
+            ),
+            ""
+        );
+    }
+
+    /// The failure has to name the entry that refused, not the root it was
+    /// asked to delete. A `node_modules` that Docker holds as a mount point
+    /// refuses with a permission error, and reporting that against the whole
+    /// checkout sends the reader looking at the wrong directory.
+    ///
+    /// Unix-only because the refusal is staged with unix permissions; the
+    /// annotation it checks is platform-independent.
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_names_the_entry_that_refused() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("tree");
+        let locked = root.join("pkg").join("held");
+        std::fs::create_dir_all(&locked).expect("create tree");
+        std::fs::write(root.join("keep.txt"), "x").expect("write file");
+        // Take write permission off the parent, so its entry cannot be unlinked.
+        let parent = locked.parent().expect("held has a parent");
+        let mut perms = std::fs::metadata(parent)
+            .expect("read permissions")
+            .permissions();
+        let restore = perms.clone();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+        std::fs::set_permissions(parent, perms).expect("drop write permission");
+
+        let error = remove_tree(&root).expect_err("a locked entry must refuse");
+        let message = error.to_string();
+
+        std::fs::set_permissions(parent, restore).expect("restore permissions");
+
+        assert!(
+            message.contains("held"),
+            "the entry that refused must be named: {message}"
+        );
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the kind must survive annotation, the retry decision reads it"
+        );
+    }
+
+    /// A tree with nothing in the way is removed, symlinks included, and a path
+    /// that is already gone is not an error.
+    #[test]
+    fn a_clear_tree_is_removed_whole() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("tree");
+        std::fs::create_dir_all(root.join("nested")).expect("create tree");
+        std::fs::write(root.join("nested").join("file.txt"), "x").expect("write file");
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "must survive").expect("write outside file");
+        // Creating one needs a privilege on Windows that a test cannot assume.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("create symlink");
+
+        remove_tree(&root).expect("remove the tree");
+
+        assert!(!root.exists());
+        #[cfg(unix)]
+        assert!(outside.exists(), "a symlink is removed, never followed");
+        remove_tree(&root).expect("removing what is already gone is not a failure");
+    }
+
+    /// A checkout is deleted while the machine keeps running, so a watcher or
+    /// an indexer can drop a file into the tree between the walk and the final
+    /// `rmdir`. That is a race, not a verdict: the removal used to report the
+    /// whole close as failed and put the checkout back.
+    #[test]
+    fn a_delete_losing_a_race_is_retried() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).expect("verify worktree");
+
+        let attempts = std::cell::Cell::new(0usize);
+        let result = remove_worktree_fast_with(&verified, |quarantine| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                return Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty));
+            }
+            std::fs::remove_dir_all(quarantine)
+        });
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(attempts.get(), 2, "the second attempt should have run");
+        assert!(!wt_path.exists(), "the checkout is gone");
+        assert!(
+            quarantines_in(wt_tmp.path()).next().is_none(),
+            "no quarantine is left behind"
+        );
+    }
+
+    /// A permission failure repeats identically however often it is tried, and
+    /// the cause has to survive into the message: that sentence is the whole of
+    /// what the user is told when a close fails.
+    #[test]
+    fn a_permission_failure_is_reported_once_with_its_cause() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).expect("verify worktree");
+
+        let attempts = std::cell::Cell::new(0usize);
+        let result = remove_worktree_fast_with(&verified, |_| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+
+        let error = result.expect_err("a permission failure must not be swallowed");
+        assert_eq!(attempts.get(), 1, "retrying only delays the same failure");
+        assert!(
+            error.to_string().contains("permission denied"),
+            "the cause must reach the message: {error}"
+        );
+        assert!(wt_path.exists(), "the checkout is restored, not lost");
+    }
+
+    /// A quarantine that could be neither deleted nor restored is a whole
+    /// checkout under a hidden name. The next removal in that directory
+    /// reclaims it; anything else hidden there is left alone.
+    #[test]
+    fn the_next_removal_reclaims_an_abandoned_quarantine() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let abandoned = wt_tmp
+            .path()
+            .join(format!("{QUARANTINE_PREFIX}{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(abandoned.join("src")).expect("create abandoned quarantine");
+        std::fs::write(abandoned.join("src").join("main.rs"), "leaked checkout")
+            .expect("fill abandoned quarantine");
+        let foreign = wt_tmp.path().join(format!("{QUARANTINE_PREFIX}not-a-uuid"));
+        std::fs::create_dir(&foreign).expect("create lookalike directory");
+
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        let verified = verify_linked_worktree_fresh(&repo, &wt_path).expect("verify worktree");
+        remove_worktree_fast(&verified).expect("remove worktree");
+
+        assert!(!abandoned.exists(), "the leaked checkout is reclaimed");
+        assert!(
+            foreign.exists(),
+            "a name this module never wrote is not ours"
+        );
+    }
+
+    /// Every quarantine left in `parent`, whatever its uuid.
+    fn quarantines_in(parent: &Path) -> impl Iterator<Item = PathBuf> {
+        std::fs::read_dir(parent)
+            .expect("inspect worktree parent")
+            .filter_map(Result::ok)
+            .filter(|entry| is_quarantine_name(&entry.file_name()))
+            .map(|entry| entry.path())
     }
 
     #[test]
@@ -1125,19 +1564,6 @@ mod tests {
         std::fs::write(repo.join(name), name).expect("write file");
         git_in(repo, &["add", "."]);
         git_in(repo, &["-c", "commit.gpgsign=false", "commit", "-m", name]);
-    }
-
-    /// A repo whose `main` is pushed to a bare `origin`. The second tempdir owns
-    /// the remote and must stay alive for the repo's lifetime.
-    fn repo_with_origin() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
-        let (tmp, repo) = init_temp_repo();
-        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
-        let remote = remote_tmp.path().join("remote.git");
-        let remote_str = remote.to_str().expect("remote path is utf-8");
-        git_in(&repo, &["init", "--bare", "-b", "main", remote_str]);
-        git_in(&repo, &["remote", "add", "origin", remote_str]);
-        git_in(&repo, &["push", "-q", "origin", "main"]);
-        (tmp, repo, remote_tmp)
     }
 
     /// Push `feature` and drop the local copy, leaving only `origin/feature` —

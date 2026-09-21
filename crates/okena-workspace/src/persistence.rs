@@ -1793,6 +1793,15 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("okena-wt-registry-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).expect("create fixture root");
+            // Git's worktree registry reports resolved paths, and recovery
+            // matches a row's path against them without touching the
+            // filesystem, so that a checkout deleted from disk stays
+            // sweepable. On macOS the temp directory is handed out behind a
+            // symlink (`/var/folders/...` is `/private/var/folders/...`), so a
+            // fixture built from it writes rows the registry can never match
+            // and the recovery under test never runs. Start from the resolved
+            // path, which is what a checkout anywhere else already is.
+            let root = std::fs::canonicalize(&root).expect("resolve fixture root");
             Self { root }
         }
 

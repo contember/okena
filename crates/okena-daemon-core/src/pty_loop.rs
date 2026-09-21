@@ -1137,6 +1137,32 @@ mod tests {
         (repo, worktree)
     }
 
+    /// A shell for a hook PTY a test waits on.
+    ///
+    /// Production hooks go through `ShellType::for_command`, which runs
+    /// `$SHELL -ic` so the hook sees the user's aliases and environment. In a
+    /// test that only buys a dependency on what the developer's interactive
+    /// profile costs to start: an interactive zsh that takes 1.6s to reach the
+    /// command runs these waits out of budget on a machine where nothing is
+    /// wrong. What is under test is PTY exit handling, not shell resolution, so
+    /// run the command in a bare shell.
+    /// How long a test waits for a hook PTY to report its exit.
+    const HOOK_EXIT_BUDGET: Duration = Duration::from_secs(20);
+
+    fn hook_shell(command: &str) -> ShellType {
+        if cfg!(windows) {
+            ShellType::Custom {
+                path: "cmd".to_string(),
+                args: vec!["/C".to_string(), command.to_string()],
+            }
+        } else {
+            ShellType::Custom {
+                path: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), command.to_string()],
+            }
+        }
+    }
+
     fn workspace_with_pending_close(
         main_repo: &Path,
         worktree: &Path,
@@ -1744,7 +1770,7 @@ mod tests {
         let hook_terminal_id = pty_manager
             .create_terminal_with_shell(
                 worktree.to_str().expect("utf-8 worktree path"),
-                Some(&ShellType::for_command("exit 0".to_string())),
+                Some(&hook_shell("exit 0")),
             )
             .expect("create before-remove hook PTY");
         let pty_manager = Arc::new(pty_manager);
@@ -1782,7 +1808,9 @@ mod tests {
                 let mut exit_events = Vec::new();
                 let mut dirty_terminal_ids = Vec::new();
                 let mut budget = TurnBudget::default();
-                tokio::time::timeout(Duration::from_secs(2), async {
+                // Generous on purpose: this budget is here to turn a hang
+                // into a failure, not to assert how fast a PTY starts.
+                tokio::time::timeout(HOOK_EXIT_BUDGET, async {
                     while exit_events.is_empty() {
                         let event = pty_events.recv().await.expect("receive hook PTY event");
                         process_event(
@@ -1868,7 +1896,7 @@ mod tests {
         let hook_terminal_id = pty_manager
             .create_terminal_with_shell(
                 worktree.to_str().expect("utf-8 worktree path"),
-                Some(&ShellType::for_command("exit 0".to_string())),
+                Some(&hook_shell("exit 0")),
             )
             .expect("create before-remove hook PTY");
         let pty_manager = Arc::new(pty_manager);
@@ -1907,7 +1935,9 @@ mod tests {
                 let mut exit_events = Vec::new();
                 let mut dirty_terminal_ids = Vec::new();
                 let mut budget = TurnBudget::default();
-                tokio::time::timeout(Duration::from_secs(2), async {
+                // Generous on purpose: this budget is here to turn a hang
+                // into a failure, not to assert how fast a PTY starts.
+                tokio::time::timeout(HOOK_EXIT_BUDGET, async {
                     while exit_events.is_empty() {
                         let event = pty_events.recv().await.expect("receive hook PTY event");
                         process_event(
@@ -1978,7 +2008,7 @@ mod tests {
         let hook_terminal_id = pty_manager
             .create_terminal_with_shell(
                 worktree.to_str().expect("utf-8 worktree path"),
-                Some(&ShellType::for_command("sleep 30".to_string())),
+                Some(&hook_shell("sleep 30")),
             )
             .expect("create keep-alive before-remove hook PTY");
         let pty_manager = Arc::new(pty_manager);

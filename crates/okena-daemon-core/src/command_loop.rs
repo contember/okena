@@ -37,7 +37,7 @@
 //! before looping.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,7 @@ use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, Co
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_services::config::{PreparedProjectConfig, prepare_project_config};
+use okena_services::docker_compose::{ComposeDown, compose_down};
 use okena_services::manager::{
     ComposeProjectIdentity, ServiceKind, ServiceLoadStatus, ServiceManager,
     ServiceProjectStateToken,
@@ -436,6 +437,33 @@ fn cleanup_created_worktree_if_unclaimed(
             worktree_path.display()
         ),
         Some(Ok(())) => {}
+    }
+}
+
+/// Bring a worktree's own compose stack down before its checkout is deleted,
+/// returning why it could not when it could not.
+///
+/// Best effort on purpose. A stack that refuses to come down leaves the removal
+/// to fail closed with the io cause, which is a better report than a new way to
+/// block a close: Docker not running at all also means nothing is holding the
+/// checkout, and that close should still go through.
+fn stop_project_compose_stack(worktree_path: &Path) -> Option<String> {
+    match compose_down(worktree_path) {
+        ComposeDown::NoComposeFile => None,
+        ComposeDown::Down => {
+            log::info!(
+                "worktree-close: compose stack at {} is down",
+                worktree_path.display()
+            );
+            None
+        }
+        ComposeDown::Failed(reason) => {
+            log::warn!(
+                "worktree-close: compose stack at {} did not come down: {reason}",
+                worktree_path.display()
+            );
+            Some(reason)
+        }
     }
 }
 
@@ -2298,7 +2326,16 @@ pub(crate) fn spawn_background_worktree_removal(
                         .to_string(),
                 )
             } else {
-                plan.remove_fast().map_err(|error| error.to_string())
+                // The checkout is bind-mounted into its own containers, so a
+                // delete that runs while they do keeps losing to whatever they
+                // write next.
+                let stack = stop_project_compose_stack(&worktree_path);
+                plan.remove_fast().map_err(|error| match &stack {
+                    Some(reason) => format!(
+                        "{error} (the project's compose stack did not come down: {reason})"
+                    ),
+                    None => error.to_string(),
+                })
             };
             let surviving_branch = if delete_branch && removal.is_ok() {
                 okena_workspace::actions::worktree::delete_closed_worktree_branch(
