@@ -1220,6 +1220,10 @@ mod tests {
     /// asked to delete. A `node_modules` that Docker holds as a mount point
     /// refuses with a permission error, and reporting that against the whole
     /// checkout sends the reader looking at the wrong directory.
+    ///
+    /// Unix-only because the refusal is staged with unix permissions; the
+    /// annotation it checks is platform-independent.
+    #[cfg(unix)]
     #[test]
     fn a_refusal_names_the_entry_that_refused() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -1262,11 +1266,14 @@ mod tests {
         std::fs::write(root.join("nested").join("file.txt"), "x").expect("write file");
         let outside = tmp.path().join("outside.txt");
         std::fs::write(&outside, "must survive").expect("write outside file");
+        // Creating one needs a privilege on Windows that a test cannot assume.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("link")).expect("create symlink");
 
         remove_tree(&root).expect("remove the tree");
 
         assert!(!root.exists());
+        #[cfg(unix)]
         assert!(outside.exists(), "a symlink is removed, never followed");
         remove_tree(&root).expect("removing what is already gone is not a failure");
     }
