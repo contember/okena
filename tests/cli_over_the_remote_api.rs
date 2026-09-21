@@ -43,7 +43,35 @@ impl Daemon {
 
         let daemon = Self { child, root };
         daemon.wait_for_remote_json();
+        daemon.wait_until_the_cli_gets_an_answer();
         daemon
+    }
+
+    /// Ready means a CLI call has actually been answered.
+    ///
+    /// `remote.json` says only that the port is published; the daemon is still
+    /// finishing startup behind it, and the first CLI call carries the one-off
+    /// token registration on top of the command itself. The CLI gives a request
+    /// 5 seconds, which a busy machine can spend on that first round trip
+    /// alone, so a test that starts asserting the moment the file lands fails
+    /// on a daemon that is merely still waking up. Spend the wait here, where
+    /// it proves nothing, instead of inside an assertion where it looks like a
+    /// verdict.
+    fn wait_until_the_cli_gets_an_answer(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let output = self.cli(&["ls", "--json"]);
+            if output.status.success() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the daemon never answered `okena ls --json`: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn command(root: &Path) -> Command {
@@ -56,9 +84,27 @@ impl Daemon {
         command
     }
 
+    /// Where the daemon keeps the active profile, mirroring
+    /// `okena_core::profiles::config_root`.
+    ///
+    /// That resolves through `dirs::config_dir()`, which is `$XDG_CONFIG_HOME`
+    /// on Linux but `~/Library/Application Support` on macOS. Both are
+    /// redirected into the isolated root, so the daemon is contained either
+    /// way; only the path to look at differs. Watching the Linux one alone made
+    /// every daemon-backed test in this file fail on macOS, waiting out the
+    /// full timeout for a file that was published elsewhere a second in.
+    fn profile_dir(&self) -> PathBuf {
+        let config_root = if cfg!(target_os = "macos") {
+            self.root.join("home/Library/Application Support")
+        } else {
+            self.root.join("cfg")
+        };
+        config_root.join("okena/profiles/default")
+    }
+
     /// The daemon publishes its port here, and the CLI discovers it from here.
     fn wait_for_remote_json(&self) {
-        let published = self.root.join("cfg/okena/profiles/default/remote.json");
+        let published = self.profile_dir().join("remote.json");
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if published.exists() {
@@ -90,7 +136,7 @@ impl Daemon {
 
     /// The bearer token the first CLI call registered for this daemon.
     fn cli_token(&self) -> String {
-        let path = self.root.join("cfg/okena/profiles/default/cli.json");
+        let path = self.profile_dir().join("cli.json");
         let config: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("cli.json"))
                 .expect("cli.json is JSON");
