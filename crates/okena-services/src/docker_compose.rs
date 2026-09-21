@@ -87,6 +87,56 @@ pub fn detect_compose_file(project_path: &str) -> Option<String> {
     None
 }
 
+/// How long a stack gets to come down. `docker compose down` gives each
+/// container a grace period before killing it, and a database with work to
+/// flush uses it, so this is far longer than the few seconds a status poll gets.
+const COMPOSE_DOWN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What happened when a project's stack was asked to come down.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ComposeDown {
+    /// No compose file in the directory, so there is no stack of its own.
+    NoComposeFile,
+    /// The stack is down: stopped just now, or not running to begin with.
+    Down,
+    /// Docker refused, was unavailable, or ran out of time.
+    Failed(String),
+}
+
+/// Bring down the compose stack defined in `project_path`.
+///
+/// A worktree's containers bind-mount its checkout: a Postgres data directory,
+/// an object store, a dev server's state. Deleting that checkout while the
+/// stack runs loses a race it cannot win, because the containers keep writing
+/// into the tree while the delete walks it. Bringing the stack down first is
+/// also what stops a compose project from outliving the directory that defined
+/// it, still running against files that are gone.
+///
+/// `down` without `-f` picks up the default file set, the override file
+/// included, and derives the project name from the directory, which is how the
+/// stack was started in the first place.
+pub fn compose_down(project_path: &Path) -> ComposeDown {
+    let Some(path) = project_path.to_str() else {
+        return ComposeDown::Failed("project path is not valid UTF-8".to_string());
+    };
+    if detect_compose_file(path).is_none() {
+        return ComposeDown::NoComposeFile;
+    }
+    if !is_docker_compose_available() {
+        return ComposeDown::Failed("docker compose is not available".to_string());
+    }
+
+    let mut cmd = process::command("docker");
+    cmd.args(["compose", "down"]).current_dir(path);
+    match process::safe_output_with_timeout(&mut cmd, COMPOSE_DOWN_TIMEOUT) {
+        Ok(output) if output.status.success() => ComposeDown::Down,
+        Ok(output) => {
+            ComposeDown::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+        Err(error) => ComposeDown::Failed(error.to_string()),
+    }
+}
+
 /// Cache of parsed service lists keyed by `(project_path, compose_file)`,
 /// invalidated by the compose file's modification time. `docker compose config`
 /// is a heavy spawn whose output only changes when the file does, yet the
@@ -729,6 +779,19 @@ pub fn map_docker_state(state: &str, exit_code: Option<u32>) -> ServiceStatus {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A project without a compose file has no stack of its own, and must not
+    /// cost a docker spawn to establish that. Worktree removal calls this for
+    /// every checkout it deletes, most of which have nothing to do with Docker.
+    #[test]
+    fn a_directory_without_a_compose_file_has_no_stack() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        assert_eq!(compose_down(tmp.path()), ComposeDown::NoComposeFile);
+
+        // A directory that is gone entirely is the orphaned-checkout case.
+        let missing = tmp.path().join("never-existed");
+        assert_eq!(compose_down(&missing), ComposeDown::NoComposeFile);
+    }
 
     struct FakeDockerPsRunner {
         calls: AtomicUsize,
