@@ -22,6 +22,12 @@ pub struct FolderData {
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
+    /// Local conversation history survives terminal and project removal.
+    #[serde(
+        default,
+        skip_serializing_if = "okena_core::agent_session::AgentSessionHistory::is_empty"
+    )]
+    pub agent_session_history: okena_core::agent_session::AgentSessionHistory,
     /// Schema version for migration support
     #[serde(default = "default_workspace_version")]
     pub version: u32,
@@ -54,6 +60,7 @@ impl WorkspaceData {
     /// (`apply_remote_snapshot`), so the client must not seed a default project.
     pub fn empty() -> Self {
         WorkspaceData {
+            agent_session_history: Default::default(),
             version: default_workspace_version(),
             projects: Vec::new(),
             project_order: Vec::new(),
@@ -216,6 +223,12 @@ pub struct ProjectData {
     /// Used to reconnect to persistent sessions across restarts
     #[serde(default)]
     pub service_terminals: HashMap<String, String>,
+    /// Per-terminal AI agent session (terminal_id -> session) captured in-band
+    /// via the agent-status OSC `lbl=`. Persisted so a pane can offer to resume
+    /// its agent (`claude --resume <id>`, …) after a restart. Harness-agnostic:
+    /// the session's `agent` field selects which harness resumes it.
+    #[serde(default)]
+    pub agent_sessions: HashMap<String, okena_core::agent_session::AgentSession>,
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<ShellType>,
@@ -342,6 +355,7 @@ mod tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -565,6 +579,7 @@ mod tests {
     fn make_workspace() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),

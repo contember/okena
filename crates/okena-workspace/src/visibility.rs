@@ -221,6 +221,7 @@ mod tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -234,6 +235,7 @@ mod tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -266,6 +268,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),

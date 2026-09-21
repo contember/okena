@@ -143,6 +143,7 @@ mod tests {
             path: "/tmp".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -156,6 +157,7 @@ mod tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -166,6 +168,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),

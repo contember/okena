@@ -171,6 +171,11 @@ impl SettingsState {
         bool
     );
     setting_setter!(
+        set_auto_resume_agent_sessions,
+        auto_resume_agent_sessions,
+        bool
+    );
+    setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,
         bool

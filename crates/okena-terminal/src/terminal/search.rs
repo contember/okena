@@ -197,7 +197,10 @@ mod tests {
     fn a_decomposed_grapheme_is_found_at_the_column_it_paints_on() {
         let terminal = terminal_showing("abe\u{0301}f");
 
-        assert_eq!(terminal.search_grid("e\u{0301}", true, false), vec![(0, 2, 1)]);
+        assert_eq!(
+            terminal.search_grid("e\u{0301}", true, false),
+            vec![(0, 2, 1)]
+        );
         assert_eq!(
             terminal.search_grid("e\u{0301}f", true, false),
             vec![(0, 2, 2)],
@@ -240,6 +243,9 @@ mod tests {
     fn a_match_in_the_scrollback_reports_a_negative_line() {
         let terminal = terminal_showing("needle\r\n\r\n\r\n\r\nlast");
 
-        assert_eq!(terminal.search_grid("needle", true, false), vec![(-2, 0, 6)]);
+        assert_eq!(
+            terminal.search_grid("needle", true, false),
+            vec![(-2, 0, 6)]
+        );
     }
 }

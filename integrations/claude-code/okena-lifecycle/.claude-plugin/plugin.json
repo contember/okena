@@ -1,0 +1,11 @@
+{
+  "name": "okena-lifecycle",
+  "description": "Report Claude Code lifecycle to Okena via OSC 9001 — drives the tab indicator, the sidebar Agents section, and desktop notifications.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Okena"
+  },
+  "homepage": "https://github.com/contember/okena",
+  "license": "MIT",
+  "keywords": ["okena", "terminal", "agent-status"]
+}

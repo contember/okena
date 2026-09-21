@@ -624,6 +624,7 @@ mod tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None::<ShellType>,
             hook_terminals: HashMap::<String, HookTerminalEntry>::new(),
             pinned: false,
@@ -695,6 +696,7 @@ mod tests {
 
         let data = WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![make_project("p1", "/p1")],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),

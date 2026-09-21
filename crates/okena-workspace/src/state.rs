@@ -388,6 +388,12 @@ struct ProjectRuntimeSlot {
     path: Vec<usize>,
     terminal_name: Option<String>,
     hidden: Option<bool>,
+    /// Carried for the same reason as the two above: the quiesce mints a new
+    /// terminal id for the pane, and every one of these maps is keyed by the old
+    /// one. Dropping it here would silently destroy the pane's agent identity on
+    /// a `session_backend` switch or a project-directory move — and leave a
+    /// dead-keyed entry behind.
+    agent_session: Option<okena_core::agent_session::AgentSession>,
 }
 
 /// Transient ownership metadata for a terminal awaiting its PTY exit event.
@@ -459,6 +465,7 @@ fn take_project_layout_runtime(
     backend_preference: SessionBackend,
     terminal_names: &mut HashMap<String, String>,
     hidden_terminals: &mut HashMap<String, bool>,
+    agent_sessions: &mut HashMap<String, okena_core::agent_session::AgentSession>,
     path: &mut Vec<usize>,
     slots: &mut Vec<ProjectRuntimeSlot>,
     teardown_sessions: &mut Vec<TerminalSessionTeardown>,
@@ -485,6 +492,7 @@ fn take_project_layout_runtime(
                 path: path.clone(),
                 terminal_name: terminal_names.remove(&terminal_id),
                 hidden: hidden_terminals.remove(&terminal_id),
+                agent_session: agent_sessions.remove(&terminal_id),
             });
         }
         LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -497,6 +505,7 @@ fn take_project_layout_runtime(
                     backend_preference,
                     terminal_names,
                     hidden_terminals,
+                    agent_sessions,
                     path,
                     slots,
                     teardown_sessions,
@@ -647,6 +656,7 @@ impl Workspace {
                         backend_preference,
                         &mut project.terminal_names,
                         &mut project.hidden_terminals,
+                        &mut project.agent_sessions,
                         &mut Vec::new(),
                         &mut layout_slots,
                         &mut teardown_sessions,
@@ -669,6 +679,7 @@ impl Workspace {
                         project.hook_terminals.remove(terminal_id);
                         project.terminal_names.remove(terminal_id);
                         project.hidden_terminals.remove(terminal_id);
+                        project.agent_sessions.remove(terminal_id);
                     } else {
                         preserved_registry_terminal_ids.push(terminal_id.clone());
                     }
@@ -757,7 +768,10 @@ impl Workspace {
                     .insert(terminal_id.clone(), name.clone());
             }
             if let Some(hidden) = slot.hidden {
-                project.hidden_terminals.insert(terminal_id, hidden);
+                project.hidden_terminals.insert(terminal_id.clone(), hidden);
+            }
+            if let Some(session) = &slot.agent_session {
+                project.agent_sessions.insert(terminal_id, session.clone());
             }
         }
         if !self
@@ -792,6 +806,7 @@ impl Workspace {
                 backend_preference,
                 &mut project.terminal_names,
                 &mut project.hidden_terminals,
+                &mut project.agent_sessions,
                 &mut Vec::new(),
                 &mut discarded_slots,
                 &mut teardown_sessions,
@@ -858,6 +873,7 @@ impl Workspace {
             for terminal_id in &project_hook_ids {
                 project.terminal_names.remove(terminal_id);
                 project.hidden_terminals.remove(terminal_id);
+                project.agent_sessions.remove(terminal_id);
             }
             teardown_sessions.extend(
                 project_hook_ids
@@ -1753,6 +1769,99 @@ impl Workspace {
         }
     }
 
+    /// Persist the AI agent session captured for a terminal (agent-status OSC
+    /// `lbl=`). Called from the PTY event loop when
+    /// `Terminal::take_agent_session_dirty` fires. Idempotent — no save when
+    /// unchanged.
+    pub fn set_agent_session(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        session: okena_core::agent_session::AgentSession,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if !session.is_valid() {
+            return;
+        }
+        let mut changed = self.data.agent_session_history.record(session.clone());
+        if let Some(project) = self.project_mut(project_id)
+            && project.agent_sessions.get(terminal_id) != Some(&session)
+        {
+            project
+                .agent_sessions
+                .insert(terminal_id.to_string(), session);
+            changed = true;
+        }
+        if changed {
+            self.notify_data(cx);
+        }
+    }
+
+    pub fn record_agent_sessions(
+        &mut self,
+        sessions: impl IntoIterator<Item = okena_core::agent_session::AgentSession>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let mut changed = false;
+        for session in sessions {
+            changed |= self.data.agent_session_history.record(session);
+        }
+        if changed {
+            self.notify_data(cx);
+        }
+    }
+
+    /// The persisted agent session for a terminal, if any. Read on restore to
+    /// decide whether to offer / auto-run a resume.
+    pub fn agent_session(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+    ) -> Option<okena_core::agent_session::AgentSession> {
+        self.project(project_id)
+            .and_then(|p| p.agent_sessions.get(terminal_id).cloned())
+    }
+
+    /// Drop the persisted agent session for a terminal that is permanently gone
+    /// (hard close, finalized soft close) or that lost its identity (shell
+    /// switch), so `workspace.json` doesn't accumulate orphans and a pane can't
+    /// inherit a stale session.
+    ///
+    /// Scans every project rather than taking a project id: callers reach this
+    /// from paths where the pane is already out of its layout (a finalized soft
+    /// close), and a terminal id maps to at most one session anyway. A
+    /// cross-project *move* must not use this — see the `move_ops` migration,
+    /// which carries the session with the terminal.
+    pub fn forget_agent_session(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
+        let mut removed = false;
+        for project in &mut self.data.projects {
+            removed |= project.agent_sessions.remove(terminal_id).is_some();
+        }
+        if removed {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Consume a leaf's pending session only after its terminal was successfully created.
+    pub fn take_pending_agent_resume(
+        &mut self,
+        project_id: &str,
+        layout_path: &[usize],
+    ) -> Option<okena_core::agent_session::AgentSession> {
+        match self
+            .project_mut(project_id)?
+            .layout
+            .as_mut()?
+            .get_at_path_mut(layout_path)?
+        {
+            LayoutNode::Terminal {
+                pending_agent_resume,
+                ..
+            } => pending_agent_resume.take(),
+            _ => None,
+        }
+    }
+
     pub fn register_hook_terminal(
         &mut self,
         project_id: &str,
@@ -1881,6 +1990,7 @@ impl Workspace {
                     }
                 }
                 project.terminal_names.remove(terminal_id);
+                project.agent_sessions.remove(terminal_id);
                 self.notify_data(cx);
                 return;
             }
@@ -1906,6 +2016,34 @@ impl Workspace {
         })
     }
 
+    /// The id of the project that owns `terminal_id`, by any route.
+    ///
+    /// Broader than [`find_project_for_terminal`](Self::find_project_for_terminal),
+    /// which searches layout trees only. A terminal can legitimately be absent
+    /// from every layout and still belong to a project: hook terminals live in
+    /// `hook_terminals`, service terminals in `service_terminals`, and a pane
+    /// inside a soft-close grace window is out of the tree while its PTY stays
+    /// alive. Callers that must not silently drop per-terminal state (persisting
+    /// an agent session, say) want this one.
+    pub fn find_project_id_owning_terminal(&self, terminal_id: &str) -> Option<String> {
+        if let Some(project) = self.find_project_for_terminal(terminal_id) {
+            return Some(project.id.clone());
+        }
+        if let Some(project) = self.data.projects.iter().find(|project| {
+            project.hook_terminals.contains_key(terminal_id)
+                || project
+                    .service_terminals
+                    .values()
+                    .any(|id| id == terminal_id)
+        }) {
+            return Some(project.id.clone());
+        }
+        self.pending_closes
+            .iter()
+            .find(|pending| pending.terminal_id == terminal_id)
+            .map(|pending| pending.project_id.clone())
+    }
+
     /// Get all hook terminal IDs for a project (for cleanup before deletion).
     pub fn hook_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
         self.project(project_id)
@@ -1929,7 +2067,8 @@ impl Workspace {
         ids
     }
 
-    /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
+    /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout
+    /// tree, terminal_names, and agent_sessions.
     /// Resets status back to Running.
     pub fn swap_hook_terminal_id(
         &mut self,
@@ -1953,6 +2092,12 @@ impl Workspace {
 
         if let Some(name) = project.terminal_names.remove(old_id) {
             project.terminal_names.insert(new_id.to_string(), name);
+        }
+
+        // Keyed by terminal id like the map above, so a rerun would otherwise
+        // strand the session under the dead id.
+        if let Some(session) = project.agent_sessions.remove(old_id) {
+            project.agent_sessions.insert(new_id.to_string(), session);
         }
 
         self.notify_data(cx);
@@ -2251,8 +2396,30 @@ impl Workspace {
             .collect();
         self.lifecycle.retain_closing(&still_closing);
 
+        // Through the revealing primitive, not `set_focused_terminal`: the
+        // terminal was created from another client, and its project may be in
+        // this window's hidden set or outside its folder filter — in which case
+        // focusing by path alone lands on a pane that renders nowhere.
         for target in outcome.focus_targets {
-            self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
+            let terminal_id = self
+                .project(&target.project_id)
+                .and_then(|project| project.layout.as_ref())
+                .and_then(|layout| layout.get_at_path(&target.layout_path))
+                .and_then(|node| match node {
+                    LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+                    _ => None,
+                });
+            if let Some(terminal_id) = terminal_id {
+                self.focus_terminal_by_id(
+                    focus_manager,
+                    window_id,
+                    &target.project_id,
+                    &terminal_id,
+                    cx,
+                );
+            } else {
+                self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
+            }
         }
 
         self.reanchor_focus(focus_manager, anchor.as_ref());
@@ -2691,6 +2858,7 @@ mod workspace_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -2704,6 +2872,7 @@ mod workspace_tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -2721,6 +2890,7 @@ mod workspace_tests {
         // `ProjectData.show_in_overview` shortcut has been removed.
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -2739,6 +2909,7 @@ mod workspace_tests {
                 .iter()
                 .map(|tid| LayoutNode::Terminal {
                     terminal_id: Some((*tid).to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -3073,6 +3244,7 @@ mod workspace_tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: true,
                     shell_type: ShellType::Default,
@@ -3080,6 +3252,7 @@ mod workspace_tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -3738,6 +3911,7 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -3751,6 +3925,7 @@ mod gpui_tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -3767,6 +3942,7 @@ mod gpui_tests {
         // that exercise hidden-project behavior.
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -3780,6 +3956,7 @@ mod gpui_tests {
     fn pane(terminal_id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(terminal_id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -3926,6 +4103,7 @@ mod gpui_tests {
                     layout: Some(layout),
                     terminal_names: HashMap::new(),
                     git_status: None,
+                    terminal_agent_status: HashMap::new(),
                     folder_color: FolderColor::Default,
                     services: Vec::new(),
                     worktree_info: None,

@@ -262,7 +262,12 @@ fn url_char(c: char) -> bool {
 
 /// Runs the detection for the logical line at visual rows `start..=end`:
 /// the regex over the joined rows, then the TUI-wrap extension of its URLs.
-fn scan_logical_line(rows: &[GridText], wrapline: &[bool], start: usize, end: usize) -> ScannedLine {
+fn scan_logical_line(
+    rows: &[GridText],
+    wrapline: &[bool],
+    start: usize,
+    end: usize,
+) -> ScannedLine {
     let regex = link_regex();
     let screen_lines = rows.len();
     let mut last_read = end;

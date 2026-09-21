@@ -23,6 +23,9 @@ fn default_zoom_level() -> f32 {
 pub enum LayoutNode {
     Terminal {
         terminal_id: Option<String>,
+        /// A restored session awaiting successful PTY creation. Travels with this leaf.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_agent_resume: Option<okena_core::agent_session::AgentSession>,
         #[serde(default)]
         minimized: bool,
         #[serde(default)]
@@ -45,6 +48,16 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    pub fn pending_agent_resume(&self) -> Option<&okena_core::agent_session::AgentSession> {
+        match self {
+            Self::Terminal {
+                pending_agent_resume,
+                ..
+            } => pending_agent_resume.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Returns true if this node is effectively hidden (all terminals within it are minimized or detached).
     pub fn is_all_hidden(&self) -> bool {
         match self {
@@ -129,6 +142,7 @@ impl LayoutNode {
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -154,6 +168,7 @@ impl LayoutNode {
 
         LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::for_command(full_cmd),
@@ -866,6 +881,7 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: shell_type.clone(),
@@ -1105,6 +1121,7 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
+                pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
                 shell_type: shell_type.clone(),
@@ -1141,6 +1158,7 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
+                pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
                 shell_type: shell_type.clone(),
@@ -1232,12 +1250,35 @@ impl LayoutNode {
 #[cfg(test)]
 mod tests {
     use super::{LayoutNode, SplitDirection};
+
+    #[test]
+    fn fresh_layouts_and_api_mirrors_do_not_inherit_pending_resumes() {
+        let node = LayoutNode::Terminal {
+            terminal_id: None,
+            pending_agent_resume: Some(okena_core::agent_session::AgentSession {
+                agent: "claude-code".into(),
+                session_id: "11111111-2222-3333-4444-555555555555".into(),
+                transcript_path: None,
+            }),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+        };
+        assert!(node.clone_structure().pending_agent_resume().is_none());
+        assert!(
+            LayoutNode::from_api(&node.to_api())
+                .pending_agent_resume()
+                .is_none()
+        );
+    }
     use okena_core::shell::ShellType;
     use std::collections::HashSet;
 
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -1248,6 +1289,7 @@ mod tests {
     fn terminal_minimized(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: false,
             shell_type: ShellType::Default,
@@ -1258,6 +1300,7 @@ mod tests {
     fn terminal_detached(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: true,
             shell_type: ShellType::Default,
@@ -1310,6 +1353,7 @@ mod tests {
             terminal("a"),
             LayoutNode::Terminal {
                 terminal_id: Some("b".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -2157,6 +2201,7 @@ mod tests {
     fn merge_matching_terminals_preserves_visual_flags() {
         let server = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Custom {
@@ -2167,6 +2212,7 @@ mod tests {
         };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: true,
             shell_type: ShellType::Default,
@@ -2180,6 +2226,7 @@ mod tests {
                 terminal_id,
                 shell_type,
                 zoom_level,
+                ..
             } => {
                 assert_eq!(terminal_id.as_deref(), Some("t1"));
                 assert!(minimized, "local minimized should be preserved");
@@ -2202,6 +2249,7 @@ mod tests {
     fn api_layout_preserves_daemon_shell_type() {
         let node = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Custom {
@@ -2332,6 +2380,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -2439,6 +2488,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: true,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -2475,6 +2525,7 @@ mod tests {
         let server = hsplit(vec![terminal("t1"), terminal("t2")]);
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: false,
             shell_type: ShellType::Default,
@@ -2574,6 +2625,7 @@ mod tests {
     fn single_terminal_is_none_for_zero_or_several() {
         let empty = LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,

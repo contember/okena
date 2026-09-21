@@ -864,6 +864,7 @@ mod hook_action_tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals,
             pinned: false,
@@ -874,6 +875,7 @@ mod hook_action_tests {
         };
         Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),
@@ -1161,6 +1163,7 @@ mod clone_project_tests {
     fn empty_workspace() -> Workspace {
         Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1307,6 +1310,7 @@ mod set_show_in_overview_tests {
     fn make_workspace_data() -> WorkspaceData {
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1331,6 +1335,7 @@ mod set_show_in_overview_tests {
             hooks: HooksConfig::default(),
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -612,9 +612,10 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     let workspace = this.workspace.clone();
+                    let window_id = this.window_id;
                     this.focus_manager.update(cx, |fm, cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.focus_terminal_by_id(fm, &project_id, &terminal_id, cx);
+                            ws.focus_terminal_by_id(fm, window_id, &project_id, &terminal_id, cx);
                         });
                         cx.notify();
                     });
@@ -692,11 +693,12 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 let workspace = this.workspace.clone();
+                                let window_id = this.window_id;
                                 let pid = project_id.clone();
                                 let tid = terminal_id.clone();
                                 this.focus_manager.update(cx, |fm, cx| {
                                     workspace.update(cx, |ws, cx| {
-                                        ws.focus_terminal_by_id(fm, &pid, &tid, cx);
+                                        ws.focus_terminal_by_id(fm, window_id, &pid, &tid, cx);
                                     });
                                     cx.notify();
                                 });

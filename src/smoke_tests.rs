@@ -125,6 +125,7 @@ mod tests {
         init_globals(cx);
         let _workspace = cx.new(|_cx| {
             okena_workspace::state::Workspace::new(okena_workspace::state::WorkspaceData {
+                agent_session_history: Default::default(),
                 version: 1,
                 projects: vec![],
                 project_order: vec![],

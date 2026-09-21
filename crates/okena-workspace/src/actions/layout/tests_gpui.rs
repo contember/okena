@@ -16,6 +16,7 @@ fn make_project(id: &str) -> ProjectData {
         path: "/tmp/test".to_string(),
         layout: Some(LayoutNode::Terminal {
             terminal_id: Some(format!("term_{}", id)),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -29,6 +30,7 @@ fn make_project(id: &str) -> ProjectData {
         hooks: HooksConfig::default(),
         connection_id: None,
         service_terminals: HashMap::new(),
+        agent_sessions: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -42,6 +44,7 @@ fn make_project(id: &str) -> ProjectData {
 fn terminal(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -52,6 +55,7 @@ fn terminal(id: &str) -> LayoutNode {
 fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
     WorkspaceData {
         version: 1,
+        agent_session_history: Default::default(),
         projects,
         project_order: order.into_iter().map(String::from).collect(),
         service_panel_heights: HashMap::new(),
@@ -130,6 +134,7 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -137,6 +142,7 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -198,6 +204,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -205,6 +212,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -212,6 +220,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -266,6 +275,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -273,6 +283,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -280,6 +291,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -359,6 +371,7 @@ fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestApp
     // active tab on t3 (now at index 1), NOT land on t2.
     let term = |id: &str| LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -417,6 +430,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -424,6 +438,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -431,6 +446,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -477,6 +493,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
 fn terminal_node_t(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -498,6 +515,7 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         hooks: HooksConfig::default(),
         connection_id: None,
         service_terminals: HashMap::new(),
+        agent_sessions: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -1312,5 +1330,172 @@ fn test_move_to_tab_group_cross_project(cx: &mut gpui::TestAppContext) {
             }
             _ => panic!("Expected tabs in p2, got {:?}", p2_layout),
         }
+    });
+}
+
+// === cross-project agent session migration ===
+
+fn agent_session(session_id: &str) -> okena_core::agent_session::AgentSession {
+    okena_core::agent_session::AgentSession {
+        agent: "claude-code".to_string(),
+        session_id: session_id.to_string(),
+        transcript_path: None,
+    }
+}
+
+const SESSION_UUID: &str = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
+
+/// Dragging a pane to another project must carry its agent session: the agent
+/// keeps running, but `agent_sessions` is per project, so the identity would
+/// otherwise be stranded in the source project as an orphan.
+#[gpui::test]
+fn move_pane_across_projects_carries_the_agent_session(cx: &mut gpui::TestAppContext) {
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "t1",
+            "p2",
+            "t3",
+            DropZone::Right,
+            cx,
+        );
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.agent_session("p1", "t1"), None, "source keeps no orphan");
+        assert_eq!(
+            ws.agent_session("p2", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "the session follows the pane into its new project"
+        );
+    });
+}
+
+#[gpui::test]
+fn move_to_tab_group_across_projects_carries_the_agent_session(cx: &mut gpui::TestAppContext) {
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout(
+        "p2",
+        LayoutNode::Tabs {
+            children: vec![terminal_node_t("t3"), terminal_node_t("t4")],
+            active_tab: 0,
+        },
+    );
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t1", "p2", &[], Some(1), cx);
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.agent_session("p1", "t1"), None);
+        assert_eq!(
+            ws.agent_session("p2", "t1"),
+            Some(agent_session(SESSION_UUID))
+        );
+    });
+}
+
+#[gpui::test]
+fn close_other_tabs_drops_the_agent_sessions_of_the_panes_it_removed(
+    cx: &mut gpui::TestAppContext,
+) {
+    // A multi-pane close removes several panes at once, and only the explicitly
+    // closed one goes through `forget_agent_session` — the rest are pruned by
+    // `cleanup_orphaned_metadata`, which used to prune the two sibling maps and
+    // leave `agent_sessions` behind. An orphan there is not cosmetic: a later
+    // pane inheriting the id would be handed someone else's session to resume.
+    let layout = LayoutNode::Tabs {
+        children: vec![
+            terminal_node_t("t1"),
+            terminal_node_t("t2"),
+            terminal_node_t("t3"),
+        ],
+        active_tab: 0,
+    };
+    let mut project = make_project_with_layout("p1", layout);
+    for id in ["t1", "t2", "t3"] {
+        project
+            .agent_sessions
+            .insert(id.to_string(), agent_session(SESSION_UUID));
+    }
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.close_other_tabs("p1", &[], 0, cx)
+    });
+
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        let project = ws.project("p1").expect("project");
+        let mut kept: Vec<&str> = project.agent_sessions.keys().map(String::as_str).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec!["t1"], "only the surviving pane keeps a session");
+    });
+}
+
+#[gpui::test]
+fn moving_a_pane_out_spares_a_sibling_inside_its_soft_close_window(cx: &mut gpui::TestAppContext) {
+    // A soft-closed pane is out of the layout while its PTY and metadata are
+    // deliberately kept alive for the undo. The source-side prune after a
+    // cross-project move is keyed on "is it in the layout", so moving ANY other
+    // pane during that window used to delete the soft-closed pane's session —
+    // and undo would then restore the pane without it.
+    let mut p1 = make_project_with_layout(
+        "p1",
+        LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        },
+    );
+    p1.agent_sessions
+        .insert("t1".to_string(), agent_session(SESSION_UUID));
+    let p2 = make_project_with_layout("p2", terminal_node_t("t3"));
+    let data = make_workspace_data(vec![p1, p2], vec!["p1", "p2"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        let mut focus = FocusManager::new();
+        ws.begin_soft_close(&mut focus, "p1", &[0], "t1", "toast-t1", cx);
+        // t2 is unrelated to the pending close — moving it must not touch t1.
+        ws.move_pane(&mut focus, "p1", "t2", "p2", "t3", DropZone::Right, cx);
+
+        assert_eq!(
+            ws.agent_session("p1", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "the soft-closed pane keeps its session until the close is finalized"
+        );
+        assert!(ws.undo_soft_close(&mut focus, "t1", true, cx));
+        assert_eq!(
+            ws.agent_session("p1", "t1"),
+            Some(agent_session(SESSION_UUID)),
+            "and undo brings the pane back with it"
+        );
     });
 }

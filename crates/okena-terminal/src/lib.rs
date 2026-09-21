@@ -11,6 +11,9 @@ mod pty_write_queue;
 pub mod session_backend;
 pub mod shell_config;
 pub mod terminal;
+/// Per-pane pointer to the pane's current slave pty (`$OKENA_TTY_FILE`).
+#[cfg(unix)]
+pub mod tty_pointer;
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
