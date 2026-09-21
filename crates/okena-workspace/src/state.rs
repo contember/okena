@@ -4072,6 +4072,7 @@ mod gpui_tests {
                     layout: Some(layout),
                     terminal_names: HashMap::new(),
                     git_status: None,
+                    terminal_agent_status: HashMap::new(),
                     folder_color: FolderColor::Default,
                     services: Vec::new(),
                     worktree_info: None,

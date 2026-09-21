@@ -337,6 +337,8 @@ mod gpui_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             default_shell: None,
+            agent_sessions: Default::default(),
+            pending_agent_resumes: Default::default(),
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
@@ -552,7 +554,6 @@ mod jump_gpui_tests {
             worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
-            is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
@@ -563,6 +564,7 @@ mod jump_gpui_tests {
             last_activity_at: None,
             is_creating: false,
             is_closing: false,
+            creating_progress: None,
         }
     }
 
