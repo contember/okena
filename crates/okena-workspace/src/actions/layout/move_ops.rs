@@ -711,6 +711,7 @@ mod tests {
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -750,7 +751,6 @@ mod tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,

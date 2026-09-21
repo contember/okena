@@ -963,7 +963,9 @@ pub fn spawn_uninitialized_terminals(
         // Keep the pending identity until spawning succeeds so a failed spawn can retry.
         let pending_session = ws
             .project(project_id)
-            .and_then(|project| project.pending_agent_resumes.get(&path))
+            .and_then(|project| project.layout.as_ref())
+            .and_then(|layout| layout.get_at_path(&path))
+            .and_then(LayoutNode::pending_agent_resume)
             .cloned();
         let resume_command = pending_session
             .as_ref()
@@ -1268,7 +1270,16 @@ mod reconnect_shell_tests {
                 .lock()
                 .expect("created shell lock")
                 .push(Some(shell));
-            Ok("terminal".to_string())
+            let count = self
+                .created_shells
+                .lock()
+                .expect("created shell lock")
+                .len();
+            Ok(if count == 1 {
+                "terminal".to_string()
+            } else {
+                format!("terminal-{count}")
+            })
         }
 
         fn reconnect_terminal(
@@ -1333,9 +1344,7 @@ mod reconnect_shell_tests {
         shell_type: ShellType,
         default_shell: Option<ShellType>,
         terminal_id: Option<&str>,
-        // Sessions queued for the root pane, as `validate_workspace_data` would
-        // leave them after a restore that cleared terminal ids.
-        pending_agent_resumes: HashMap<Vec<usize>, okena_core::agent_session::AgentSession>,
+        pending_agent_resume: Option<okena_core::agent_session::AgentSession>,
     ) -> Workspace {
         let project = ProjectData {
             id: "project".into(),
@@ -1343,6 +1352,7 @@ mod reconnect_shell_tests {
             path: "/project".into(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: terminal_id.map(str::to_string),
+                pending_agent_resume,
                 shell_type,
                 minimized: false,
                 detached: false,
@@ -1357,7 +1367,6 @@ mod reconnect_shell_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: HashMap::new(),
-            pending_agent_resumes,
             default_shell,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1380,7 +1389,7 @@ mod reconnect_shell_tests {
     }
 
     fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
-        workspace_with_terminal(shell_type, default_shell, Some("terminal"), HashMap::new())
+        workspace_with_terminal(shell_type, default_shell, Some("terminal"), None)
     }
 
     #[test]
@@ -1447,7 +1456,7 @@ mod reconnect_shell_tests {
 
     #[test]
     fn failed_reservation_does_not_clear_a_replacement_terminal_id() {
-        let mut ws = workspace_with_terminal(ShellType::Default, None, None, HashMap::new());
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None, None);
         let mut cx = TestCx;
         let launches = reserve_uninitialized_terminal_launches(
             &mut ws,
@@ -1478,7 +1487,7 @@ mod reconnect_shell_tests {
         let wsl = ShellType::Wsl {
             distro: Some("Ubuntu".into()),
         };
-        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None, HashMap::new());
+        let mut create_ws = workspace_with_terminal(ShellType::Default, None, None, None);
         let create_terminals: TerminalsRegistry = Arc::new(Default::default());
         let backend = RecordingBackend::default();
         let mut settings = AppSettings::default();
@@ -1520,8 +1529,8 @@ mod reconnect_shell_tests {
 
 /// Restore-time agent-session resume.
 ///
-/// The daemon owns this: `validate_workspace_data` re-keys a surviving session
-/// onto its pane's layout path, and `spawn_uninitialized_terminals` consumes it
+/// The daemon owns this: `validate_workspace_data` retains a surviving session
+/// on its terminal leaf, and `spawn_uninitialized_terminals` consumes it
 /// as the pane's startup command while assigning the new terminal id.
 #[cfg(test)]
 mod agent_resume_tests {
@@ -1531,7 +1540,6 @@ mod agent_resume_tests {
     use okena_core::agent_session::AgentSession;
     use okena_terminal::TerminalsRegistry;
     use okena_terminal::shell_config::ShellType;
-    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -1583,9 +1591,6 @@ mod agent_resume_tests {
         auto_resume: bool,
     ) -> (Option<Vec<String>>, crate::workspace::state::Workspace) {
         stub_registry();
-        let pending = pending
-            .map(|s| HashMap::from([(Vec::new(), s)]))
-            .unwrap_or_default();
         let mut ws = workspace_with_terminal(ShellType::Default, None, None, pending);
         let terminals: TerminalsRegistry = Arc::new(Default::default());
         let backend = RecordingBackend::default();
@@ -1638,8 +1643,11 @@ mod agent_resume_tests {
         assert!(
             ws.project("project")
                 .expect("project")
-                .pending_agent_resumes
-                .is_empty(),
+                .layout
+                .as_ref()
+                .unwrap()
+                .pending_agent_resume()
+                .is_none(),
             "a consumed resume must not fire again"
         );
     }
@@ -1676,15 +1684,11 @@ mod agent_resume_tests {
     }
 
     #[test]
-    fn failed_spawn_retains_resume_for_a_successful_retry() {
+    fn failed_spawn_retains_resume_across_save_reload_and_retry() {
         stub_registry();
         let captured = session("test-agent");
-        let mut ws = workspace_with_terminal(
-            ShellType::Default,
-            None,
-            None,
-            HashMap::from([(Vec::new(), captured.clone())]),
-        );
+        let mut ws =
+            workspace_with_terminal(ShellType::Default, None, None, Some(captured.clone()));
         let terminals: TerminalsRegistry = Arc::new(Default::default());
         let backend = RecordingBackend::default();
         backend
@@ -1703,11 +1707,19 @@ mod agent_resume_tests {
         assert_eq!(
             ws.project("project")
                 .unwrap()
-                .pending_agent_resumes
-                .get(&vec![]),
+                .layout
+                .as_ref()
+                .unwrap()
+                .pending_agent_resume(),
             Some(&captured)
         );
         assert!(terminals.lock().is_empty());
+
+        let path = std::env::temp_dir().join(format!("okena-resume-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, serde_json::to_vec(ws.data()).unwrap()).unwrap();
+        let restored = okena_workspace::sessions::import_workspace(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        ws = okena_workspace::state::Workspace::new(restored);
 
         let result = spawn_uninitialized_terminals(
             &mut ws,
@@ -1722,8 +1734,11 @@ mod agent_resume_tests {
         assert!(
             ws.project("project")
                 .unwrap()
-                .pending_agent_resumes
-                .is_empty()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pending_agent_resume()
+                .is_none()
         );
         assert_eq!(ws.agent_session("project", "terminal"), Some(captured));
         let plans = backend.plans.lock().unwrap();
@@ -1737,6 +1752,96 @@ mod agent_resume_tests {
                 .args
                 .iter()
                 .any(|a| a.contains(UUID))
+        );
+    }
+
+    #[test]
+    fn failed_resume_follows_its_leaf_when_a_sibling_is_split() {
+        use okena_workspace::state::{LayoutNode, SplitDirection};
+        stub_registry();
+        let captured = session("test-agent");
+        let mut ws =
+            workspace_with_terminal(ShellType::Default, None, None, Some(captured.clone()));
+        let mut data = ws.data().clone();
+        let pending_leaf = data.projects[0].layout.take().unwrap();
+        let live_leaf = LayoutNode::Terminal {
+            terminal_id: Some("survivor".into()),
+            pending_agent_resume: None,
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        };
+        data.projects[0].layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children: vec![live_leaf, pending_leaf],
+        });
+        ws = okena_workspace::state::Workspace::new(data);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        backend
+            .fail_next_spawn
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            spawn_uninitialized_terminals(
+                &mut ws,
+                "project",
+                &backend,
+                &terminals,
+                &settings(true),
+                None,
+                &mut TestCx,
+            ),
+            super::ActionResult::Err(_)
+        ));
+
+        ws.split_terminal(
+            &mut okena_workspace::focus::FocusManager::new(),
+            "project",
+            &[0],
+            SplitDirection::Horizontal,
+            &mut TestCx,
+        );
+        let layout = ws.project("project").unwrap().layout.as_ref().unwrap();
+        assert!(
+            layout
+                .get_at_path(&[1])
+                .unwrap()
+                .pending_agent_resume()
+                .is_none()
+        );
+        assert_eq!(
+            layout.get_at_path(&[2]).unwrap().pending_agent_resume(),
+            Some(&captured)
+        );
+        assert!(matches!(
+            spawn_uninitialized_terminals(
+                &mut ws,
+                "project",
+                &backend,
+                &terminals,
+                &settings(true),
+                None,
+                &mut TestCx,
+            ),
+            super::ActionResult::Ok(_)
+        ));
+        assert_eq!(ws.agent_session("project", "terminal"), None);
+        assert_eq!(ws.agent_session("project", "terminal-2"), Some(captured));
+        let plans = backend.plans.lock().unwrap();
+        assert!(
+            plans[1].initial_command.is_none(),
+            "new sibling must start a plain shell"
+        );
+        assert!(
+            plans[2]
+                .initial_command
+                .as_ref()
+                .unwrap()
+                .args
+                .iter()
+                .any(|arg| arg.contains(UUID))
         );
     }
 

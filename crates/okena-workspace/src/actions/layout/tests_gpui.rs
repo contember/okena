@@ -16,6 +16,7 @@ fn make_project(id: &str) -> ProjectData {
         path: "/tmp/test".to_string(),
         layout: Some(LayoutNode::Terminal {
             terminal_id: Some(format!("term_{}", id)),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -30,7 +31,6 @@ fn make_project(id: &str) -> ProjectData {
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: Default::default(),
-        pending_agent_resumes: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -44,6 +44,7 @@ fn make_project(id: &str) -> ProjectData {
 fn terminal(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -133,6 +134,7 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -140,6 +142,7 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -201,6 +204,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -208,6 +212,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -215,6 +220,7 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -269,6 +275,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -276,6 +283,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -283,6 +291,7 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -362,6 +371,7 @@ fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestApp
     // active tab on t3 (now at index 1), NOT land on t2.
     let term = |id: &str| LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -420,6 +430,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -427,6 +438,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -434,6 +446,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -480,6 +493,7 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
 fn terminal_node_t(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        pending_agent_resume: None,
         minimized: false,
         detached: false,
         shell_type: ShellType::Default,
@@ -502,7 +516,6 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: Default::default(),
-        pending_agent_resumes: Default::default(),
         default_shell: None,
         hook_terminals: HashMap::new(),
         pinned: false,

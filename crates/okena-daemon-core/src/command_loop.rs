@@ -6576,6 +6576,7 @@ mod tests {
             path: path.to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -6590,7 +6591,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -7296,6 +7296,7 @@ mod tests {
             path: path.to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -7316,7 +7317,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -8047,6 +8047,7 @@ mod tests {
             path: "/tmp".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -8061,7 +8062,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -8292,6 +8292,7 @@ mod tests {
                 path: "/tmp".to_string(),
                 layout: Some(LayoutNode::Terminal {
                     terminal_id: None,
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8306,7 +8307,6 @@ mod tests {
                 connection_id: None,
                 service_terminals: Default::default(),
                 agent_sessions: Default::default(),
-                pending_agent_resumes: Default::default(),
                 default_shell: None,
                 hook_terminals: Default::default(),
                 pinned: false,
@@ -8391,6 +8391,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("active-in-checkout".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8398,6 +8399,7 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("second-in-checkout".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8922,6 +8924,7 @@ mod tests {
         nested.terminal_names.clear();
         nested.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("live-in-nested-directory".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -8935,6 +8938,7 @@ mod tests {
         unaffected.terminal_names.clear();
         unaffected.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("unaffected-live".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -9924,6 +9928,7 @@ mod tests {
             path: repo_path.clone(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some("parent-term".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -9944,7 +9949,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,

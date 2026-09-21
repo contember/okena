@@ -1842,20 +1842,24 @@ impl Workspace {
         }
     }
 
-    /// Claim the agent session queued for the pane at `layout_path`, if any.
-    ///
-    /// Consuming is the point: the entry is placed by `validate_workspace_data`
-    /// when a restore drops every terminal id, and taking it makes the resume
-    /// exactly-once — a later respawn of the same pane (or a second caller
-    /// racing this one) must not resume the session again.
+    /// Consume a leaf's pending session only after its terminal was successfully created.
     pub fn take_pending_agent_resume(
         &mut self,
         project_id: &str,
         layout_path: &[usize],
     ) -> Option<okena_core::agent_session::AgentSession> {
-        self.project_mut(project_id)?
-            .pending_agent_resumes
-            .remove(layout_path)
+        match self
+            .project_mut(project_id)?
+            .layout
+            .as_mut()?
+            .get_at_path_mut(layout_path)?
+        {
+            LayoutNode::Terminal {
+                pending_agent_resume,
+                ..
+            } => pending_agent_resume.take(),
+            _ => None,
+        }
     }
 
     pub fn register_hook_terminal(
@@ -2854,6 +2858,7 @@ mod workspace_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -2868,7 +2873,6 @@ mod workspace_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -2905,6 +2909,7 @@ mod workspace_tests {
                 .iter()
                 .map(|tid| LayoutNode::Terminal {
                     terminal_id: Some((*tid).to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -3239,6 +3244,7 @@ mod workspace_tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: true,
                     shell_type: ShellType::Default,
@@ -3246,6 +3252,7 @@ mod workspace_tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -3904,6 +3911,7 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -3918,7 +3926,6 @@ mod gpui_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -3949,6 +3956,7 @@ mod gpui_tests {
     fn pane(terminal_id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(terminal_id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,

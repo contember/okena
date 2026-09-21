@@ -202,11 +202,11 @@ restart:
   Partial reports do not erase a known transcript path. The daemon drains all
   captured identities, including multiple sessions in one PTY batch and sessions
   reported by hook or service terminals outside the layout.
-- **Re-keyed** on load. Without a session backend a restore clears every
-  terminal id — exactly the keys the sessions are stored under. Before dropping
-  them, `validate_workspace_data` moves each surviving session onto its pane's
-  *layout path* (`project.pending_agent_resumes`, never persisted), which is the
-  pane identity that does survive that load.
+- **Retained on the pane** on load. Without a session backend a restore clears
+  terminal IDs. Before dropping them, `validate_workspace_data` copies each
+  surviving session into its terminal leaf's `pending_agent_resume` field. This
+  field is persisted with the layout and moves with the leaf through splits,
+  tab reordering, normalization, and cross-project moves.
 - **Resumed** by the daemon when the **`auto_resume_agent_sessions`** setting is
   on (see [configuration](configuration.md#session-backend)): 
   `spawn_uninitialized_terminals` consumes the queued session as it gives
@@ -217,7 +217,8 @@ restart:
   restored pane and shown, just not auto-run.
 
 The queued entry is consumed only after a successful terminal spawn. A failed
-spawn retains it for retry; a pane respawned after success does not re-resume.
+spawn retains it across saves and restarts; a pane respawned after success does
+not re-resume. New sibling panes do not inherit another leaf's pending session.
 Because resume hangs off the *spawn*
 path, a pane that re-attaches to a live backend session (tmux/dtach — where the
 agent is still running) is never touched.

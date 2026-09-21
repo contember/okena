@@ -339,7 +339,6 @@ mod gpui_tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
@@ -544,6 +543,7 @@ mod jump_gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -558,7 +558,6 @@ mod jump_gpui_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,

@@ -1157,7 +1157,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -1189,7 +1188,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::from([(
                 hook_terminal_id.to_string(),
@@ -1237,6 +1235,7 @@ mod tests {
             path: "/tmp/project-one".into(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.into()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -1251,7 +1250,6 @@ mod tests {
             connection_id: None,
             service_terminals: Default::default(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,

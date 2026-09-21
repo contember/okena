@@ -33,7 +33,6 @@ fn new_project_row(
         connection_id: None,
         service_terminals: HashMap::new(),
         agent_sessions: HashMap::new(),
-        pending_agent_resumes: HashMap::new(),
         default_shell,
         hook_terminals: HashMap::new(),
         pinned: false,
@@ -1413,7 +1412,6 @@ mod worktree_rename_tests {
             service_terminals: HashMap::new(),
             default_shell: None,
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             hook_terminals: HashMap::new(),
             pinned: false,
             last_activity_at: None,
@@ -1541,7 +1539,6 @@ mod tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
@@ -1757,6 +1754,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("layout-terminal".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: Default::default(),
@@ -1764,6 +1762,7 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("stale-hook".to_string()),
+                    pending_agent_resume: None,
                     minimized: true,
                     detached: true,
                     shell_type: Default::default(),
@@ -1808,6 +1807,7 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("stale-hook".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: Default::default(),
@@ -1876,7 +1876,6 @@ mod gpui_tests {
             connection_id: None,
             service_terminals: HashMap::new(),
             agent_sessions: Default::default(),
-            pending_agent_resumes: Default::default(),
             default_shell: None,
             hook_terminals: HashMap::new(),
             pinned: false,
