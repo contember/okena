@@ -1,4 +1,3 @@
-use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -12,9 +11,6 @@ use okena_usage::{
 };
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -35,6 +31,7 @@ const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const USER_AGENT: &str = concat!("okena/", env!("CARGO_PKG_VERSION"));
 
 fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
@@ -78,7 +75,7 @@ struct ResetCreditsInfo {
 }
 
 /// All fetched usage data
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct UsageData {
     plan_type: String,
     primary_window: Option<RateLimitWindow>,
@@ -95,14 +92,48 @@ struct UsageData {
 /// state (popover, hover) lives on [`CodexUsage`] instead.
 struct CodexUsageData {
     data: Arc<Mutex<Option<UsageData>>>,
+    status: Arc<Mutex<FetchStatus>>,
     /// Send on this channel to wake up the fetch loop and retry immediately.
     wake_tx: smol::channel::Sender<()>,
     /// Whether a wake signal has already been sent (avoids spamming from render).
     wake_sent: Arc<AtomicBool>,
-    /// Timestamp of the most recent successful fetch — used to throttle hover-triggered refreshes.
-    last_fetch_at: Arc<Mutex<Option<Instant>>>,
     /// Background polling task. Cancelled automatically when this entity is dropped.
     _poll_task: Task<()>,
+}
+
+#[derive(Default)]
+struct FetchStatus {
+    last_success: Option<Instant>,
+    error: Option<String>,
+    failures: u32,
+    next_attempt: Option<Instant>,
+    fetching: bool,
+}
+
+impl FetchStatus {
+    fn complete(&mut self, result: &Result<UsageData, String>, now: Instant) -> Duration {
+        self.fetching = false;
+        match result {
+            Ok(_) => {
+                self.last_success = Some(now);
+                self.error = None;
+                self.failures = 0;
+            }
+            Err(error) => {
+                self.error = Some(error.clone());
+                self.failures = self.failures.saturating_add(1);
+            }
+        }
+        let delay = if self.failures == 0 {
+            USAGE_INTERVAL
+        } else {
+            MIN_RETRY_DELAY
+                .saturating_mul(1 << self.failures.min(8).saturating_sub(1))
+                .min(Duration::from_secs(3600))
+        };
+        self.next_attempt = Some(now + delay);
+        delay
+    }
 }
 
 /// Read Codex OAuth credentials from ~/.codex/auth.json
@@ -139,6 +170,7 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
                 ),
             )
             .timeout(Duration::from_secs(10))
+            .user_agent(USER_AGENT)
             .label("codex.token-refresh"),
     )
     .ok()?
@@ -176,18 +208,8 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
     let used = v["used_percent"]
         .as_u64()
         .or_else(|| v["used_percent"].as_f64().map(|v| v.round() as u64))?;
-    let window_seconds = v["limit_window_seconds"]
-        .as_u64()
-        .or_else(|| v["window_minutes"].as_u64().map(|v| v.saturating_mul(60)))
-        .unwrap_or(0);
-    // The live `/codex/usage` API uses `reset_at`; the local `token_count`
-    // session events use `resets_at` (plural). Accept either — missing it leaves
-    // the bar with no reset anchor, which silently disables the day/hour grid
-    // and the working-days reshape (the bar collapses to a single block).
-    let reset_at = v["reset_at"]
-        .as_u64()
-        .or_else(|| v["resets_at"].as_u64())
-        .unwrap_or(0);
+    let window_seconds = v["limit_window_seconds"].as_u64().unwrap_or(0);
+    let reset_at = v["reset_at"].as_u64().unwrap_or(0);
 
     let time_elapsed_pct = if window_seconds > 0 && reset_at > 0 {
         let now = std::time::SystemTime::now()
@@ -249,108 +271,6 @@ fn parse_reset_credits(body: &serde_json::Value) -> Option<ResetCreditsInfo> {
     })
 }
 
-fn plan_type_from_access_token(access_token: &str) -> Option<String> {
-    let payload = access_token.split('.').nth(1)?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let jwt_payload: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-
-    jwt_payload["https://api.openai.com/auth"]["chatgpt_plan_type"]
-        .as_str()
-        .map(ToOwned::to_owned)
-}
-
-fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_session_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
-            out.push(path);
-        }
-    }
-}
-
-fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
-    let sessions_dir = dirs::home_dir()?.join(".codex/sessions");
-    let mut session_files = Vec::new();
-
-    collect_session_files(&sessions_dir, &mut session_files);
-    session_files.sort();
-
-    for path in session_files.into_iter().rev() {
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let reader = BufReader::new(file);
-        let mut latest_in_file = None;
-
-        for line in reader.lines().map_while(Result::ok) {
-            let parsed: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-
-            if parsed["type"].as_str() != Some("event_msg")
-                || parsed["payload"]["type"].as_str() != Some("token_count")
-            {
-                continue;
-            }
-
-            let rate_limits = &parsed["payload"]["rate_limits"];
-            if !rate_limits.is_object() {
-                continue;
-            }
-
-            let primary_window = rate_limits["primary"]
-                .as_object()
-                .and_then(|_| parse_window(&rate_limits["primary"]));
-            let secondary_window = rate_limits["secondary"]
-                .as_object()
-                .and_then(|_| parse_window(&rate_limits["secondary"]));
-            let credits = rate_limits["credits"].as_object().map(|c| CreditsInfo {
-                has_credits: c
-                    .get("has_credits")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                unlimited: c
-                    .get("unlimited")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                balance: c.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            });
-
-            if primary_window.is_some() || secondary_window.is_some() {
-                latest_in_file = Some(UsageData {
-                    plan_type: rate_limits["plan_type"]
-                        .as_str()
-                        .map(ToOwned::to_owned)
-                        .or_else(|| plan_type_from_access_token(&auth.access_token))
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    primary_window,
-                    secondary_window,
-                    review_primary: None,
-                    credits,
-                    reset_credits: None,
-                });
-            }
-        }
-
-        if latest_in_file.is_some() {
-            return latest_in_file;
-        }
-    }
-
-    None
-}
-
 fn try_fetch_usage_with_token(
     access_token: &str,
     account_id: &str,
@@ -363,6 +283,8 @@ fn try_fetch_usage_with_token(
             .bearer(access_token)
             .header("chatgpt-account-id", account_id)
             .timeout(Duration::from_secs(10))
+            .user_agent(USER_AGENT)
+            .header("Accept", "application/json")
             .label("codex.usage"),
     )
     .map_err(|_| None)?;
@@ -383,6 +305,8 @@ fn try_fetch_reset_credits_with_token(
             .bearer(access_token)
             .header("chatgpt-account-id", account_id)
             .timeout(Duration::from_secs(10))
+            .user_agent(USER_AGENT)
+            .header("Accept", "application/json")
             .label("codex.reset-credits"),
     )
     .map_err(|_| None)?;
@@ -416,15 +340,17 @@ fn fetch_reset_credits(access_token: &str, account_id: &str) -> Option<ResetCred
     parsed
 }
 
-fn fetch_usage() -> Option<UsageData> {
-    let auth = read_codex_auth()?;
+fn fetch_usage() -> Result<UsageData, String> {
+    let auth =
+        read_codex_auth().ok_or("Codex credentials missing or invalid; sign in with Codex CLI")?;
     let mut access_token = auth.access_token.clone();
 
     // Try cached access token first, refresh on 401
     let resp = match try_fetch_usage_with_token(&access_token, &auth.account_id) {
         Ok(resp) => resp,
         Err(Some(401)) => {
-            let new_token = refresh_access_token(&auth)?;
+            let new_token = refresh_access_token(&auth)
+                .ok_or("Token refresh failed; sign in again with Codex CLI")?;
             access_token = new_token;
             match try_fetch_usage_with_token(&access_token, &auth.account_id) {
                 Ok(resp) => resp,
@@ -433,18 +359,23 @@ fn fetch_usage() -> Option<UsageData> {
                         "[codex-usage] API returned {:?} after token refresh",
                         status
                     );
-                    return fetch_usage_from_local_sessions(&auth);
+                    return Err(usage_error(status));
                 }
             }
         }
         Err(status) => {
             log::warn!("[codex-usage] API returned {:?}", status);
-            return fetch_usage_from_local_sessions(&auth);
+            return Err(usage_error(status));
         }
     };
 
-    let body: serde_json::Value = resp.json().ok()?;
+    let body: serde_json::Value = resp.json().map_err(|_| "Invalid JSON in usage response")?;
+    let mut data = parse_usage(&body)?;
+    data.reset_credits = fetch_reset_credits(&access_token, &auth.account_id);
+    Ok(data)
+}
 
+fn parse_usage(body: &serde_json::Value) -> Result<UsageData, String> {
     let plan_type = body["plan_type"].as_str().unwrap_or("unknown").to_string();
 
     let primary_window = body["rate_limit"]["primary_window"]
@@ -454,6 +385,10 @@ fn fetch_usage() -> Option<UsageData> {
     let secondary_window = body["rate_limit"]["secondary_window"]
         .as_object()
         .and_then(|_| parse_window(&body["rate_limit"]["secondary_window"]));
+
+    if primary_window.is_none() && secondary_window.is_none() {
+        return Err("Usage response contains no rate-limit windows".into());
+    }
 
     let review_primary = body["code_review_rate_limit"]["primary_window"]
         .as_object()
@@ -471,16 +406,21 @@ fn fetch_usage() -> Option<UsageData> {
         balance: c.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0),
     });
 
-    let reset_credits = fetch_reset_credits(&access_token, &auth.account_id);
-
-    Some(UsageData {
+    Ok(UsageData {
         plan_type,
         primary_window,
         secondary_window,
         review_primary,
         credits,
-        reset_credits,
+        reset_credits: None,
     })
+}
+
+fn usage_error(status: Option<u16>) -> String {
+    match status {
+        Some(code) => format!("Usage request failed: HTTP {code}"),
+        None => "Could not connect to usage API (network error or timeout)".into(),
+    }
 }
 
 impl CodexUsageData {
@@ -501,7 +441,11 @@ impl CodexUsageData {
     /// than [`HOVER_REFETCH_THROTTLE`]. Used to refresh on popover open without
     /// hammering the API on rapid hover-on/off.
     fn request_fresh_fetch(&self) {
-        let stale = match *self.last_fetch_at.lock() {
+        let status = self.status.lock();
+        if status.fetching || status.error.is_some() {
+            return;
+        }
+        let stale = match status.last_success {
             None => true,
             Some(last) => last.elapsed() >= HOVER_REFETCH_THROTTLE,
         };
@@ -516,42 +460,34 @@ impl CodexUsageData {
     fn new(cx: &mut Context<Self>) -> Self {
         let data: Arc<Mutex<Option<UsageData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
+        let status = Arc::new(Mutex::new(FetchStatus::default()));
+        let status_for_task = status.clone();
         let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
         let wake_sent = Arc::new(AtomicBool::new(false));
         let wake_sent_for_task = wake_sent.clone();
-        let last_fetch_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-        let last_fetch_at_for_task = last_fetch_at.clone();
 
         let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let mut consecutive_failures: u32 = 0;
             loop {
-                let result = smol::unblock(fetch_usage).await;
-
-                if let Some(fetched) = result {
-                    *data_for_task.lock() = Some(fetched);
-                    *last_fetch_at_for_task.lock() = Some(Instant::now());
-                    consecutive_failures = 0;
-                    wake_sent_for_task.store(false, Ordering::SeqCst);
-                    if this.update(cx, |_this, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                } else {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    if this.update(cx, |_, _| {}).is_err() {
-                        break;
-                    }
+                {
+                    let mut status = status_for_task.lock();
+                    status.fetching = true;
+                    status.next_attempt = None;
                 }
-
-                let delay = if consecutive_failures > 0 {
-                    let backoff = MIN_RETRY_DELAY
-                        .saturating_mul(1 << consecutive_failures.min(6).saturating_sub(1));
-                    backoff.min(Duration::from_secs(3600))
-                } else {
-                    USAGE_INTERVAL
-                };
-                // Race: sleep vs wake signal (e.g. when the popover opens and the
-                // data is stale). Don't reset consecutive_failures on wake — keep
-                // the backoff to avoid retry storms during failures.
+                wake_sent_for_task.store(false, Ordering::SeqCst);
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                let result = smol::unblock(fetch_usage).await;
+                let delay = status_for_task.lock().complete(&result, Instant::now());
+                if let Ok(fetched) = result {
+                    *data_for_task.lock() = Some(fetched);
+                } else if let Err(error) = result {
+                    log::warn!("[codex-usage] {error}");
+                }
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                // Hover can refresh healthy data early; failed attempts keep their backoff.
                 smol::future::or(
                     async {
                         smol::Timer::after(delay).await;
@@ -568,9 +504,9 @@ impl CodexUsageData {
 
         Self {
             data,
+            status,
             wake_tx,
             wake_sent,
-            last_fetch_at,
             _poll_task: poll_task,
         }
     }
@@ -586,6 +522,7 @@ pub struct CodexUsage {
     resets_expanded: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
+    freshness_clock: Option<Task<()>>,
 }
 
 impl CodexUsage {
@@ -599,6 +536,7 @@ impl CodexUsage {
             resets_expanded: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            freshness_clock: None,
         }
     }
 
@@ -620,6 +558,15 @@ impl CodexUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
+                    this.freshness_clock =
+                        Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                            loop {
+                                smol::Timer::after(Duration::from_secs(1)).await;
+                                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                    break;
+                                }
+                            }
+                        }));
                     this.data.read(cx).request_fresh_fetch();
                     cx.notify();
                 }
@@ -647,6 +594,7 @@ impl CodexUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token && this.popover_visible {
                     this.popover_visible = false;
+                    this.freshness_clock = None;
                     this.resets_expanded = false;
                     cx.notify();
                 }
@@ -656,14 +604,15 @@ impl CodexUsage {
     }
 
     fn render_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.popover_visible {
+            return div().size_0().into_any_element();
+        }
         let data = {
             let shared = self.data.read(cx);
             let data = shared.data.lock();
-            match data.as_ref() {
-                Some(data) if self.popover_visible => data.clone(),
-                _ => return div().size_0().into_any_element(),
-            }
+            data.clone().unwrap_or_default()
         };
+        let status_rows = self.render_fetch_status(t, cx);
 
         let working = read_working_days(cx);
         let plan = data.plan_type.clone();
@@ -691,7 +640,7 @@ impl CodexUsage {
                         })
                         .child(usage_popover_header(
                             "CODEX USAGE",
-                            Some(plan.as_str()),
+                            (!plan.is_empty()).then_some(plan.as_str()),
                             "https://chatgpt.com",
                             "Open usage settings on chatgpt.com",
                             t,
@@ -746,7 +695,9 @@ impl CodexUsage {
                                         el.child(usage_divider(t))
                                             .child(self.render_reset_credits(t, resets, cx))
                                     },
-                                ),
+                                )
+                                .child(usage_divider(t))
+                                .child(status_rows),
                         ),
                 ),
         )
@@ -847,6 +798,56 @@ impl CodexUsage {
                 )
             })
     }
+
+    fn render_fetch_status(&self, t: &ThemeColors, cx: &App) -> AnyElement {
+        let status = self.data.read(cx).status.lock();
+        let now = Instant::now();
+        let age = match status.last_success {
+            Some(at) => format!(
+                "Updated {} ago{}",
+                format_age(now.duration_since(at)),
+                if status.error.is_some() || now.duration_since(at) > USAGE_INTERVAL {
+                    " · stale"
+                } else {
+                    ""
+                }
+            ),
+            None => "Usage unavailable · no successful update yet".into(),
+        };
+        v_flex()
+            .gap(px(4.0))
+            .text_size(ui_text_xs(cx))
+            .text_color(rgb(t.text_secondary))
+            .child(age)
+            .when_some(status.error.as_ref(), |el, error| {
+                el.child(format!("Update failed: {error}"))
+                    .child(format!("Failed attempts: {}", status.failures))
+            })
+            .when(status.fetching, |el| el.child("Updating…"))
+            .when_some(status.next_attempt, |el, next| {
+                let label = if status.error.is_some() {
+                    "Retry"
+                } else {
+                    "Next update"
+                };
+                el.child(format!(
+                    "{label} in {}",
+                    format_age(next.saturating_duration_since(now))
+                ))
+            })
+            .into_any_element()
+    }
+}
+
+fn format_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
 }
 
 fn reset_count_label(count: u64) -> String {
@@ -918,27 +919,24 @@ impl Render for CodexUsage {
         let working = read_working_days(cx);
         let data = self.data.read(cx).data.lock();
         let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
-        match data.as_ref() {
-            Some(d) => {
-                for w in [d.primary_window.as_ref(), d.secondary_window.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    let et = effective_time_pct(
-                        (w.reset_at > 0).then_some(w.reset_at as f64),
-                        w.window_seconds as f64,
-                        segment_unit_for_window(w.window_seconds),
-                        working,
-                        w.time_elapsed_pct,
-                    );
-                    items.push((
-                        format_window_label(w.window_seconds).into(),
-                        w.used_percent as f64,
-                        et,
-                    ));
-                }
+        if let Some(d) = data.as_ref() {
+            for w in [d.primary_window.as_ref(), d.secondary_window.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let et = effective_time_pct(
+                    (w.reset_at > 0).then_some(w.reset_at as f64),
+                    w.window_seconds as f64,
+                    segment_unit_for_window(w.window_seconds),
+                    working,
+                    w.time_elapsed_pct,
+                );
+                items.push((
+                    format_window_label(w.window_seconds).into(),
+                    w.used_percent as f64,
+                    et,
+                ));
             }
-            None => return div().size_0().into_any_element(),
         }
         drop(data);
 
@@ -955,6 +953,14 @@ impl Render for CodexUsage {
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .children(usage_trigger_items(&t, cx, &items))
+                    .when(items.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("Codex —"),
+                        )
+                    })
                     .child(
                         canvas(
                             move |bounds, _window, app| {
@@ -1008,19 +1014,66 @@ mod tests {
     }
 
     #[test]
-    fn parse_window_reads_session_field_names() {
-        // Local `token_count` session events use `window_minutes` + `resets_at`
-        // (plural). Both must be picked up; missing the reset anchor used to
-        // collapse the weekly bar to a single block.
-        let v = serde_json::json!({
-            "used_percent": 3.0,
-            "window_minutes": 10080,
-            "resets_at": 1782371508u64,
-        });
-        let w = parse_window(&v).expect("window should parse");
-        assert_eq!(w.used_percent, 3);
-        assert_eq!(w.window_seconds, 10080 * 60, "weekly window = 7 days");
-        assert_eq!(w.reset_at, 1782371508, "must read `resets_at` (plural)");
+    fn failed_updates_preserve_freshness_until_recovery() {
+        let now = Instant::now();
+        let mut status = FetchStatus::default();
+        assert_eq!(
+            status.complete(&Ok(UsageData::default()), now),
+            USAGE_INTERVAL
+        );
+        let failed_at = now + USAGE_INTERVAL;
+        assert_eq!(
+            status.complete(&Err("HTTP 403".into()), failed_at),
+            MIN_RETRY_DELAY
+        );
+        assert_eq!(status.last_success, Some(now));
+        assert_eq!(status.error.as_deref(), Some("HTTP 403"));
+        assert_eq!(status.next_attempt, Some(failed_at + MIN_RETRY_DELAY));
+        assert_eq!(
+            status.complete(&Err("HTTP 403".into()), failed_at + MIN_RETRY_DELAY),
+            MIN_RETRY_DELAY * 2
+        );
+        assert_eq!(status.failures, 2);
+        let recovered_at = failed_at + Duration::from_secs(90);
+        assert_eq!(
+            status.complete(&Ok(UsageData::default()), recovered_at),
+            USAGE_INTERVAL
+        );
+        assert_eq!(status.last_success, Some(recovered_at));
+        assert_eq!(status.failures, 0);
+        assert!(status.error.is_none());
+    }
+
+    #[test]
+    fn failure_before_first_success_does_not_invent_fresh_data() {
+        let mut status = FetchStatus::default();
+        let now = Instant::now();
+        for _ in 0..100 {
+            let delay = status.complete(&Err("Network error".into()), now);
+            assert!(delay <= Duration::from_secs(3600));
+            assert!(status.last_success.is_none());
+        }
+        assert_eq!(status.next_attempt, Some(now + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn usage_response_requires_usage_but_accepts_zero() {
+        assert!(parse_usage(&serde_json::json!({})).is_err());
+        assert!(
+            parse_usage(&serde_json::json!({
+                "rate_limit": {"primary_window": {"reset_at": 1782371508u64}}
+            }))
+            .is_err()
+        );
+        let data = parse_usage(&serde_json::json!({
+            "rate_limit": {"primary_window": {
+                "used_percent": 0,
+                "limit_window_seconds": 604800,
+                "reset_at": 1782371508u64
+            }}
+        }))
+        .unwrap();
+        assert_eq!(data.primary_window.unwrap().used_percent, 0);
     }
 
     #[test]
