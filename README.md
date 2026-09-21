@@ -197,7 +197,7 @@ Settings are stored in the platform's config directory (macOS: `~/Library/Applic
 | [Git Worktrees](docs/reference/worktrees.md) | Worktree management, sync watcher, path templates |
 | [Remote Control API](docs/reference/remote.md) | HTTP/WebSocket API, pairing, authentication |
 | [Mobile Client](docs/reference/mobile.md) | React Native (uniffi) mobile companion app |
-| [Agent Status](docs/agent-status.md) | OSC 9001 agent lifecycle, the Claude Code plugin, session resume |
+| [Agent Status](docs/reference/agent-status.md) | OSC 9001 agent lifecycle, the Claude Code plugin, session resume |
 
 ## Dependencies
 

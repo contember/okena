@@ -77,7 +77,7 @@ pane, or having an agent report again in it, clears it.
 |-------|---------|
 | `lifecycle` | One of `working`, `blocked`, `done`, `idle`. Drives color / sort / notifications. |
 | `custom` | Optional free-form text, e.g. `"running tests 3/5"`. Shown in the tab tooltip and the AGENTS row, flattened to one line and clipped. |
-| `labels` | Optional flat `{ "key": "value" }` map of extras. Carried on the wire; no UI renders them yet. The three reserved session keys are stripped out before this map is built, so session identity never leaves the machine. |
+| `labels` | Optional flat `{ "key": "value" }` map of extras. Carried on the wire; no UI renders them yet. The three reserved session keys are stripped out before this map is built. Raw terminal output can still contain the original OSC sequence. |
 
 ## The wire format (OSC 9001)
 
@@ -196,8 +196,12 @@ restart:
 
 - **Captured** in-band from `OSC 9001` `lbl=` (see above), validated as a UUID,
   and kept on the pane as a *sticky* record that survives `st=clear`.
-- **Persisted** per terminal in `workspace.json` (`project.agent_sessions`), so
-  it outlives the process.
+- **Persisted** in `workspace.json`: `project.agent_sessions` holds the current
+  terminal attachment; `agent_session_history` retains conversation identities
+  independently of terminals and projects, deduplicated by `(agent, session_id)`.
+  Partial reports do not erase a known transcript path. The daemon drains all
+  captured identities, including multiple sessions in one PTY batch and sessions
+  reported by hook or service terminals outside the layout.
 - **Re-keyed** on load. Without a session backend a restore clears every
   terminal id — exactly the keys the sessions are stored under. Before dropping
   them, `validate_workspace_data` moves each surviving session onto its pane's
@@ -212,8 +216,9 @@ restart:
   shell. Off by default — when off, the session is still re-attached to the
   restored pane and shown, just not auto-run.
 
-Consuming the queued entry makes this **exactly-once**: a pane respawned later
-in the same session does not re-resume. And because it hangs off the *spawn*
+The queued entry is consumed only after a successful terminal spawn. A failed
+spawn retains it for retry; a pane respawned after success does not re-resume.
+Because resume hangs off the *spawn*
 path, a pane that re-attaches to a live backend session (tmux/dtach — where the
 agent is still running) is never touched.
 
@@ -227,7 +232,7 @@ whatever agent last lived in each of them.
 > `session ended` signal in the protocol — `st=clear` deliberately keeps the
 > session — so a pane where you finished with Claude an hour ago and then used
 > for something else will still relaunch `claude --resume <that id>` on the next
-> start with auto-resume on. Close the pane to drop the record.
+> start with auto-resume on. Close the pane to drop its resume attachment.
 
 Which command resumes a session is **per-harness** (Claude Code, Codex, …),
 selected by the `agent` id through the harness registry — adding a new agent is
@@ -238,16 +243,22 @@ additive, with no core change.
 > argv element containing whitespace, quotes, or metacharacters rather than
 > quote per dialect. A harness needing more should ship a launcher script.
 
-The session follows its pane: it moves with a cross-project drag, survives the
-undo window of a soft close, and is dropped on a hard close, a finalized soft
-close, or a shell switch. Sessions whose pane is gone — or whose stored
-`session_id` no longer looks like a UUID — are pruned on load.
+The resume attachment follows its pane: it moves with a cross-project drag,
+survives the undo window of a soft close, and is dropped on a hard close,
+finalized soft close, or shell switch. Orphaned attachments are pruned on load.
+Conversation history survives these operations and project deletion. Loading an
+older workspace copies valid attachments into history before clearing terminal
+IDs. Invalid history records are discarded on deserialization.
+
+History stores identities and transcript paths, not transcript contents. It has
+no history browser, automatic expiry, or remote snapshot field yet. Projects and
+terminals remain the primary model; no Work grouping is required.
 
 ## Claude Code integration
 
 The easiest way is the bundled **Claude Code plugin**, which wires up the
 lifecycle hooks for you — no editing of `settings.json`, versioned and cleanly
-uninstallable. The [`integrations/claude-code/`](../integrations/claude-code/)
+uninstallable. The [`integrations/claude-code/`](../../integrations/claude-code/)
 directory is a Claude Code plugin marketplace.
 
 From a clone of this repo:
@@ -295,11 +306,13 @@ race — the pane correctly shows `blocked` while you're being asked.
 The plugin sets `OKENA_AGENT=claude-code` on each hook command, and the script
 mines the hook's stdin event JSON for `session_id` / `transcript_path` and
 forwards them in the reserved `lbl=` keys above — that's how Okena learns the
-pane's Claude session. It uses `jq` when available and falls back to a `sed`
-extraction otherwise, so there is no hard dependency. Only **top-level** keys are
-read: `PreToolUse` / `PostToolUse` payloads embed `tool_input` as nested JSON,
-and a tool argument called `session_id` must not be able to hijack the pane's
-identity.
+pane's Claude session. It uses narrow regular expressions over Claude's generated
+JSON, with no jq dependency: session IDs must be UUID-shaped; paths must be
+strings without escapes or control characters. Unsupported paths are omitted
+without losing the session ID. A key occurring more than once (for example also
+inside `tool_input`) is skipped rather than selecting a potentially wrong value.
+This is not a general-purpose JSON parser; it expects Claude's top-level identity
+fields. Lifecycle reporting continues even when identity capture is skipped.
 
 It bundles `okena-lifecycle/scripts/okena-agent-status.sh`, invoked via
 `${CLAUDE_PLUGIN_ROOT}`. The script writes to the pane's own slave pty — the

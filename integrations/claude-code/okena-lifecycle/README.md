@@ -41,7 +41,7 @@ agent (permission grant, or a question mid-turn) Claude Code does **not** fire
 `UserPromptSubmit`, so without them the pane stays stuck on `blocked` while the
 agent is actually busy again.
 
-See [`docs/agent-status.md`](../../../docs/agent-status.md) for the full model,
+See [`docs/reference/agent-status.md`](../../../docs/reference/agent-status.md) for the full model,
 the `OSC 9001` wire format, and debugging (the `OKENA_AGENT_STATUS_LOG` env var).
 The bundled `scripts/okena-agent-status.sh` is agent-agnostic — anything that can
 run a command can call it directly.

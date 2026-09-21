@@ -29,7 +29,7 @@ struct SidebarAgentInfo {
 /// — breaking ties on display name.
 ///
 /// A free function rather than an inline `sort_by`, because this ordering is
-/// the contract `docs/agent-status.md` states, and `collect_agents` around it
+/// the contract `docs/reference/agent-status.md` states, and `collect_agents` around it
 /// needs a GPUI view plus the terminal registry to call. Inverting the
 /// comparator would sink blocked agents to the bottom with nothing to notice.
 fn sort_agents_by_attention(agents: &mut [SidebarAgentInfo]) {

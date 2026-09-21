@@ -10,7 +10,7 @@
 //! What does survive a restart is the pane's **terminal id**. So key a small
 //! file by that id and rewrite its contents on every spawn: the *path* is stable
 //! enough to hand to the pane's environment once (`$OKENA_TTY_FILE`), while the
-//! device it names is always the pane's current one. See `docs/agent-status.md`.
+//! device it names is always the pane's current one. See `docs/reference/agent-status.md`.
 //!
 //! Unix only — `$OKENA_TTY` itself is Unix-only.
 

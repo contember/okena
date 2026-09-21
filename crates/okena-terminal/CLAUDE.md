@@ -24,7 +24,7 @@ marks, via a separate prompt sidecar), and `XTVERSION`.
 
 ### `OSC 9001` — agent status (Okena private)
 
-A **stable contract** other tools depend on (see `docs/agent-status.md`). An AI
+A **stable contract** other tools depend on (see `docs/reference/agent-status.md`). An AI
 agent reports its own lifecycle by writing to its terminal:
 
 ```
@@ -45,16 +45,17 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
   `okena_core::agent_session::AgentSession` on `Terminal.agent_session` (read via
   `Terminal::agent_session()`). Unlike `agent_status` it survives `st=clear` —
   and is captured on it, since a harness maps session start/end onto `clear`.
-  It's the pane's session identity for resume + transcript stats, persisted by
-  the app layer, and a change sets the `agent_session_dirty` edge (drained via
-  `take_agent_session_dirty`). Per-harness resume/transcript logic is dispatched
+  The daemon drains `take_pending_agent_sessions` into workspace history before
+  terminal cleanup, preserving successive identities in one batch. The latest
+  identity also sets `agent_session_dirty` for terminal attachment; mirrors do
+  not queue persistence updates. Per-harness resume/transcript logic is dispatched
   by `agent` id through the gpui-free `okena_core::agent_harness` registry
   (impls live in `okena-agent-harnesses` — deliberately NOT the `okena-ext-*`
   crates, which pull gpui and so cannot be linked by the headless daemon). A
   non-UUID `session_id` is dropped, and `agent` / `transcript_path` are bounded
   (see `agent_session.rs`) because they are the only agent-status fields that
   reach disk. The three reserved keys are **stripped** from the display labels
-  after capture, so session identity never rides the wire to remote clients.
+  after capture, so session identity is absent from remote status snapshots.
 - A change stores into the shared one-shot `remote_dirty` edge (drained via
   `take_remote_dirty`), which the PTY event loop consumes
   (`okena_daemon_core::pty_loop::drain_remote_dirty` — the daemon owns this
