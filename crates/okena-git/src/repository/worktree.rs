@@ -465,6 +465,17 @@ pub fn create_worktree(
     let mut args = vec!["-C", repo_str, "worktree", "add"];
     match &attachment {
         BranchAttachment::NewBranch(start_point) => {
+            // The start point is `origin/<default>`, and git records a
+            // remote-tracking start point as the new branch's upstream
+            // (`branch.autoSetupMerge`). Nothing has been pushed yet, so that
+            // upstream would be the default branch: every lookup for "this
+            // branch's pushed commit" would answer with the default branch's,
+            // reporting its CI against a worktree that never triggered it.
+            // `git push -u` records the real one when there is something to
+            // record.
+            if start_point.is_some() {
+                args.push("--no-track");
+            }
             args.push("-b");
             args.push(branch);
             args.push(target_str);
@@ -508,9 +519,15 @@ pub fn create_worktree_with_start_point(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
-
     let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));
+
+    let mut args = vec!["-C", repo_str, "worktree", "add"];
+    // See `create_worktree`: a branch that has never been pushed must not claim
+    // the branch it started from as its upstream.
+    if start_point.is_some() {
+        args.push("--no-track");
+    }
+    args.extend(["-b", branch, target_str]);
     if let Some(start_point) = &start_point {
         args.push(start_point);
     }
@@ -904,7 +921,7 @@ fn path_identity(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::test_support::{git_in, init_temp_repo};
+    use crate::repository::test_support::{git_in, init_temp_repo, repo_with_origin};
     use std::path::PathBuf;
 
     #[test]
@@ -1067,6 +1084,56 @@ mod tests {
             std::fs::read_to_string(wt_path.join("must-survive.txt"))
                 .expect("foreign replacement survives"),
             "foreign data"
+        );
+    }
+
+    /// A branch a worktree was just created on has never been pushed, so it has
+    /// no upstream. Git sets one when the start point is a remote-tracking ref,
+    /// and the start point here is `origin/<default>`: the new branch would
+    /// claim the default branch as its upstream, and every lookup for "this
+    /// branch's pushed commit" would answer with the default branch's tip.
+    #[test]
+    fn a_new_worktree_branch_claims_no_upstream() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feat");
+
+        create_worktree(&repo, "feat/x", &target, true).expect("create worktree");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feat/x"
+        );
+        assert_eq!(
+            git_out(
+                &repo,
+                &["config", "--default", "", "--get", "branch.feat/x.merge"]
+            ),
+            "",
+            "a branch with nothing pushed must not track the branch it started from"
+        );
+    }
+
+    /// Same for the pre-resolved start point path, which skips the fetch.
+    #[test]
+    fn a_worktree_created_from_a_start_point_claims_no_upstream() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let target = target_parent.path().join("wt-feat");
+
+        create_worktree_with_start_point(&repo, "feat/y", &target, Some("main"))
+            .expect("create worktree");
+
+        assert_eq!(
+            git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
+            "feat/y"
+        );
+        assert_eq!(
+            git_out(
+                &repo,
+                &["config", "--default", "", "--get", "branch.feat/y.merge"]
+            ),
+            ""
         );
     }
 
@@ -1356,19 +1423,6 @@ mod tests {
         std::fs::write(repo.join(name), name).expect("write file");
         git_in(repo, &["add", "."]);
         git_in(repo, &["-c", "commit.gpgsign=false", "commit", "-m", name]);
-    }
-
-    /// A repo whose `main` is pushed to a bare `origin`. The second tempdir owns
-    /// the remote and must stay alive for the repo's lifetime.
-    fn repo_with_origin() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
-        let (tmp, repo) = init_temp_repo();
-        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
-        let remote = remote_tmp.path().join("remote.git");
-        let remote_str = remote.to_str().expect("remote path is utf-8");
-        git_in(&repo, &["init", "--bare", "-b", "main", remote_str]);
-        git_in(&repo, &["remote", "add", "origin", remote_str]);
-        git_in(&repo, &["push", "-q", "origin", "main"]);
-        (tmp, repo, remote_tmp)
     }
 
     /// Push `feature` and drop the local copy, leaving only `origin/feature` —

@@ -13,7 +13,7 @@ use okena_core::process::{command, safe_output_with_timeout};
 use serde_json::{Value, json};
 
 use super::github::{ApiError, GithubClient, GithubRepo, resolve_base_repo};
-use super::status::get_pushed_sha;
+use super::status::get_upstream_ref;
 
 /// Hard cap on the remaining `gh` invocation. `gh` can hang indefinitely —
 /// auth prompts or a stalled network — and the bus kills the process when
@@ -135,6 +135,33 @@ struct PrNode {
     head_ref_oid: Option<String>,
 }
 
+/// The pushed commit that belongs to *this* branch, or `None` when the branch
+/// tracks somebody else's.
+///
+/// Git records an upstream whenever a branch starts from a remote-tracking ref,
+/// and a worktree branch starts from `origin/<default>`. Until it is pushed,
+/// its upstream is therefore the default branch, and a lookup keyed on that
+/// commit answers with the default branch's CI: a nightly deploy reported as a
+/// failure against a worktree that never triggered it, and a PR head compared
+/// against a commit from another branch.
+///
+/// A branch that deliberately tracks a differently named remote branch still
+/// gets its own answer. Only the default branch is treated as a base rather
+/// than a counterpart, which is the case Okena creates itself.
+fn branch_pushed_sha(path: &Path) -> Option<String> {
+    let upstream = get_upstream_ref(path)?;
+    let branch = super::status::get_current_branch(path)?;
+    if upstream.branch == branch {
+        return Some(upstream.sha);
+    }
+    // Only reached for the mismatch, so the default-branch lookup stays off the
+    // path every well-tracked branch takes.
+    match super::branch::get_default_branch(path) {
+        Some(default) if default == upstream.branch => None,
+        _ => Some(upstream.sha),
+    }
+}
+
 /// Get PR info for the current branch (if any PR exists).
 ///
 /// Matches by head branch name in the base repository, like `gh pr list
@@ -146,7 +173,7 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
         return PrFetch::Fetched(None);
     };
     let current_sha = super::status::get_head_sha(path);
-    let pushed_sha = get_pushed_sha(path);
+    let pushed_sha = branch_pushed_sha(path);
     let Some((mut client, repo)) = github_client(path) else {
         return PrFetch::Fetched(None);
     };
@@ -340,9 +367,9 @@ fn rollup_status(failed: usize, pending: usize) -> crate::CiStatus {
 ///
 /// With a known PR number, reads the PR's status-check rollup (Actions +
 /// external status checks aggregated by the PR, as `gh pr checks` does).
-/// Otherwise falls back to `check-runs` + `status` on the current upstream
-/// commit, which works for any pushed branch — including default branches
-/// without a PR.
+/// Otherwise falls back to `check-runs` + `status` on the branch's own pushed
+/// commit (see `branch_pushed_sha`), which works for any pushed branch,
+/// default branches without a PR included.
 ///
 /// `unchanged_sha` is the upstream commit a *settled* cached summary describes.
 /// Checks on a given commit only move while something is running, so when the
@@ -358,7 +385,7 @@ pub fn fetch_ci_checks(
     unchanged_sha: Option<&str>,
 ) -> CiFetch {
     // Read locally (gix, no network) before deciding to spend a request.
-    let sha = get_pushed_sha(path);
+    let sha = branch_pushed_sha(path);
     if let (Some(sha), Some(cached)) = (sha.as_deref(), unchanged_sha)
         && sha == cached
     {
@@ -1247,10 +1274,62 @@ mod tests {
         );
         super::super::test_support::git_in(&repo, &["push", "-u", "origin", "main"]);
 
-        let sha = super::get_pushed_sha(&repo).expect("branch has an upstream");
+        let sha = super::super::status::get_pushed_sha(&repo).expect("branch has an upstream");
         assert_eq!(
             super::fetch_ci_checks(&repo, None, Some(&sha)),
             super::CiFetch::Unchanged
+        );
+    }
+
+    /// The exact shape a worktree branch had before `--no-track`: it tracks the
+    /// default branch, so its "upstream commit" is main's tip. A lookup keyed
+    /// on that commit answers with main's CI, which is how a nightly deploy
+    /// failure ended up reported against a feature worktree.
+    #[test]
+    fn a_branch_tracking_the_default_branch_is_not_asked_about() {
+        let (_tmp, repo, _remote) = super::super::test_support::repo_with_origin();
+        super::super::test_support::git_in(&repo, &["checkout", "-q", "-b", "feat/x"]);
+        // What `git worktree add -b feat/x <path> origin/main` used to record.
+        super::super::test_support::git_in(&repo, &["config", "branch.feat/x.remote", "origin"]);
+        super::super::test_support::git_in(
+            &repo,
+            &["config", "branch.feat/x.merge", "refs/heads/main"],
+        );
+
+        assert!(
+            super::branch_pushed_sha(&repo).is_none(),
+            "main's tip is not this branch's pushed commit"
+        );
+        // And no request is spent finding that out.
+        assert_eq!(
+            super::fetch_ci_checks(&repo, None, None),
+            super::CiFetch::Fetched {
+                sha: None,
+                summary: None
+            }
+        );
+    }
+
+    /// A branch that tracks its own counterpart still gets its own answer, and
+    /// so does one deliberately tracking a differently named remote branch.
+    #[test]
+    fn a_branch_tracking_its_own_remote_keeps_its_commit() {
+        let (_tmp, repo, _remote) = super::super::test_support::repo_with_origin();
+        super::super::test_support::git_in(&repo, &["checkout", "-q", "-b", "feat/x"]);
+        super::super::test_support::git_in(&repo, &["push", "-q", "-u", "origin", "feat/x"]);
+        let own = super::branch_pushed_sha(&repo).expect("its own upstream counts");
+
+        // Now point it at a non-default remote branch under another name.
+        super::super::test_support::git_in(&repo, &["push", "-q", "origin", "feat/x:other"]);
+        super::super::test_support::git_in(&repo, &["fetch", "-q", "origin"]);
+        super::super::test_support::git_in(
+            &repo,
+            &["config", "branch.feat/x.merge", "refs/heads/other"],
+        );
+        assert_eq!(
+            super::branch_pushed_sha(&repo).as_deref(),
+            Some(own.as_str()),
+            "tracking another branch on purpose is still this branch's answer"
         );
     }
 

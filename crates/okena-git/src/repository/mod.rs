@@ -166,6 +166,18 @@ pub(crate) mod test_support {
             String::from_utf8_lossy(&status.stderr)
         );
     }
+    /// A repo whose `main` is pushed to a bare `origin`. The second tempdir owns
+    /// the remote and must stay alive for the repo's lifetime.
+    pub(crate) fn repo_with_origin() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
+        let (tmp, repo) = init_temp_repo();
+        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
+        let remote = remote_tmp.path().join("remote.git");
+        let remote_str = remote.to_str().expect("remote path is utf-8");
+        git_in(&repo, &["init", "--bare", "-b", "main", remote_str]);
+        git_in(&repo, &["remote", "add", "origin", remote_str]);
+        git_in(&repo, &["push", "-q", "origin", "main"]);
+        (tmp, repo, remote_tmp)
+    }
 }
 
 #[cfg(test)]
