@@ -99,6 +99,8 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             // Focus has left, so the mark no longer needs holding: the bell
             // stays lit and the next visit clears it like any other.
             terminal.release_manual_unread();
+            // AppKit does not always unmark when focus moves mid-composition.
+            terminal.clear_marked_text();
         }
         self.was_focused = is_focused;
 

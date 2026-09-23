@@ -540,11 +540,11 @@ mod tests {
     #[test]
     fn an_application_hidden_cursor_is_never_painted() {
         let mut layout = layout_of(3, 10, &["a", "b", "c"]);
-        assert!(cursor_paints(true, &layout));
+        assert!(cursor_paints(true, false, &layout));
 
         layout.cursor_mode_visible = false;
-        assert!(!cursor_paints(true, &layout));
-        assert!(!cursor_paints(false, &layout));
+        assert!(!cursor_paints(true, false, &layout));
+        assert!(!cursor_paints(false, false, &layout));
     }
 
     #[test]
@@ -552,14 +552,21 @@ mod tests {
         let mut layout = layout_of(3, 10, &["a", "b", "c"]);
         assert!(layout.cursor_mode_visible);
 
-        assert!(!cursor_paints(false, &layout), "blinked off");
-        assert!(cursor_paints(true, &layout), "blinked on");
+        assert!(!cursor_paints(false, false, &layout), "blinked off");
+        assert!(cursor_paints(true, false, &layout), "blinked on");
 
         layout.cursor_visual_line = 3;
         assert!(
-            !cursor_paints(true, &layout),
+            !cursor_paints(true, false, &layout),
             "scrolled out of the viewport"
         );
+    }
+
+    #[test]
+    fn the_marked_text_takes_the_place_of_the_cursor() {
+        let layout = layout_of(3, 10, &["a", "b", "c"]);
+        assert!(cursor_paints(true, false, &layout));
+        assert!(!cursor_paints(true, true, &layout));
     }
 }
 
@@ -1288,11 +1295,12 @@ fn changed_cells(
 /// usual streaming case (a few lines at a time), cheap enough to run per paint.
 const MAX_TRACKED_SCROLL: i32 = 8;
 
-/// Three independent reasons to skip the cursor: the pane's blink phase or
-/// focus (`blink_visible`), the app's own DECTCEM hide, and a cursor scrolled
-/// out of the viewport.
-fn cursor_paints(blink_visible: bool, layout: &TerminalGridLayout) -> bool {
+/// Four independent reasons to skip the cursor: the pane's blink phase or
+/// focus (`blink_visible`), IME text composing in its place, the app's own
+/// DECTCEM hide, and a cursor scrolled out of the viewport.
+fn cursor_paints(blink_visible: bool, composing: bool, layout: &TerminalGridLayout) -> bool {
     blink_visible
+        && !composing
         && layout.cursor_mode_visible
         && layout.cursor_visual_line >= 0
         && layout.cursor_visual_line < layout.screen_lines() as i32
@@ -1689,14 +1697,41 @@ impl Element for TerminalElement {
             }
         });
 
-        // Phase 4: Paint cursor
-        if cursor_paints(cursor_visible, &layout) {
-            let cursor_x =
-                px((f32::from(bounds.origin.x) + layout.cursor_col as f32 * cell_width_f).floor());
-            let cursor_y = px((f32::from(bounds.origin.y)
-                + layout.cursor_visual_line as f32 * line_height_f)
-                .floor());
+        // Phase 4: Paint cursor, or the IME text composing in its place
+        let marked_text = self.terminal.marked_text();
+        let cursor_x =
+            px((f32::from(bounds.origin.x) + layout.cursor_col as f32 * cell_width_f).floor());
+        let cursor_y = px((f32::from(bounds.origin.y)
+            + layout.cursor_visual_line as f32 * line_height_f)
+            .floor());
 
+        let composing = marked_text.is_some();
+        if let Some(marked_text) = marked_text
+            && cursor_paints(true, false, &layout)
+        {
+            let run = TextRun {
+                len: marked_text.len(),
+                font: state.font.clone(),
+                color: rgb(t.term_foreground).into(),
+                background_color: None,
+                underline: Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: None,
+                    wavy: false,
+                }),
+                strikethrough: None,
+            };
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(marked_text.into(), font_size, &[run], None);
+            let origin = point(cursor_x, cursor_y);
+            window.paint_quad(fill(
+                Bounds::new(origin, size(shaped.width, line_height)),
+                rgb(t.term_background),
+            ));
+            let _ = shaped.paint(origin, line_height, TextAlign::Left, None, window, cx);
+        } else if cursor_paints(cursor_visible, composing, &layout) {
             let cursor_rgba = rgb(t.cursor);
             let cursor_color = Hsla::from(Rgba {
                 r: cursor_rgba.r,
