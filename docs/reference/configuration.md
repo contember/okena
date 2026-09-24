@@ -17,9 +17,67 @@ The directory contains:
   workspace.json       # Project layouts and terminal state (auto-managed)
   themes/              # Custom theme JSON files
     example-theme.json
+  usage-history/       # Append-only usage limit samples (shared across profiles)
+    claude.jsonl
+    codex.jsonl
 ```
 
 ---
+
+## Usage limit history
+
+The Claude and Codex desktop widgets append each successful usage fetch to
+`usage-history/claude.jsonl` and `usage-history/codex.jsonl` under the config
+directory above. These files are shared across Okena profiles. Collection runs
+while the widgets are active, normally every five minutes; opening a popover can
+trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
+responses without recognized limits do not add samples.
+
+Each line is a versioned JSON object with `version: 1`, `recorded_at`, `provider`,
+`source`, `plan`, and `limits`. Each limit has `name`, `used_percent`,
+`window_seconds`, and nullable `reset_at`. Timestamps are Unix epoch seconds in
+UTC. `source` identifies the Codex account or the Claude credential directory;
+tokens are not stored. Claude account changes within the same credential
+directory cannot be distinguished by this source identifier.
+
+For charting, group by provider, source, and limit name; use `recorded_at` for the
+time axis and `reset_at` to distinguish quota windows. Claude includes session,
+weekly, and model-specific weekly limits; Codex includes primary, secondary,
+and code-review limits. Paid credits are not included. History persists across
+restarts and has no automatic retention cutoff. A write error is logged without
+interrupting the usage display.
+
+Each limit row also shows a compact history chart for its current window. The
+horizontal axis spans `reset_at - window_seconds` through `reset_at`; the vertical
+axis stays at 0–100%. Only measurements from the same source, limit, reset, and
+window length are used. Reset matching tolerates differences below one second
+because provider timestamps can jitter between fetches. Weekly charts use the
+same working-day compression as the progress bar, including collapsed off-days.
+The vertical time marker and
+grid align with the bar; the faint diagonal represents even consumption.
+
+Measurements are joined by straight lines with a light area fill. Gaps longer
+than 15 minutes use a dashed line. There is no extrapolation before the first
+measurement or after the last one. The endpoint marks the latest measurement;
+hovering shows an interpolated value. Empty windows show "Collecting history",
+and a single measurement appears as a dot. History is loaded on the background
+fetch worker, not while rendering; malformed records and unknown schema versions
+are skipped.
+
+Click a day/hour section in the full-period chart to zoom into its nearest
+growth block. Sections with growth highlight on hover and show the target time
+range in a tooltip; empty sections do not zoom. Flat time before and after growth
+is trimmed. Short plateaus stay inside a block, but an hour without growth,
+a measurement gap over an hour, or a decrease separates blocks. Continuous
+growth is split into blocks of at most 24 hours, independent of calendar midnight.
+
+The zoomed percentage axis fits the selected block with padding and a minimum
+span of 10 percentage points. Its scale, start/end times, and usage change are
+shown below the chart. Zoom uses elapsed wall-clock time, including off-days,
+and hides the full-period pace diagonal and time marker. **Full period** restores
+alignment with the progress bar. The selected block is kept per limit and per
+window for the lifetime of the widget and extends as new measurements arrive,
+up to the block boundary. The bar and persisted history are unaffected.
 
 ## settings.json
 

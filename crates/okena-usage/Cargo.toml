@@ -11,4 +11,9 @@ okena-extensions = { path = "../okena-extensions" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
 jiff = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

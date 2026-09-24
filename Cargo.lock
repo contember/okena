@@ -6742,10 +6742,13 @@ dependencies = [
  "gpui",
  "gpui-component",
  "jiff",
+ "log",
  "okena-core",
  "okena-extensions",
  "okena-ui",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -77,6 +77,7 @@ struct ResetCreditsInfo {
 /// All fetched usage data
 #[derive(Clone, Default)]
 struct UsageData {
+    history: okena_usage::history::History,
     plan_type: String,
     primary_window: Option<RateLimitWindow>,
     secondary_window: Option<RateLimitWindow>,
@@ -371,6 +372,28 @@ fn fetch_usage() -> Result<UsageData, String> {
 
     let body: serde_json::Value = resp.json().map_err(|_| "Invalid JSON in usage response")?;
     let mut data = parse_usage(&body)?;
+    data.history = okena_usage::history::record_and_load(
+        okena_usage::history::Provider::Codex,
+        auth.account_id.clone(),
+        Some(data.plan_type.clone()),
+        [
+            ("primary", &data.primary_window),
+            ("secondary", &data.secondary_window),
+            ("code_review", &data.review_primary),
+        ]
+        .into_iter()
+        .filter_map(|(name, window)| {
+            window
+                .as_ref()
+                .map(|window| okena_usage::history::LimitSample {
+                    name: name.into(),
+                    used_percent: window.used_percent as f64,
+                    window_seconds: window.window_seconds as f64,
+                    reset_at: (window.reset_at > 0).then_some(window.reset_at as f64),
+                })
+        })
+        .collect(),
+    );
     data.reset_credits = fetch_reset_credits(&access_token, &auth.account_id);
     Ok(data)
 }
@@ -407,6 +430,7 @@ fn parse_usage(body: &serde_json::Value) -> Result<UsageData, String> {
     });
 
     Ok(UsageData {
+        history: Default::default(),
         plan_type,
         primary_window,
         secondary_window,
@@ -518,6 +542,7 @@ impl CodexUsageData {
 /// poller and hold only per-window UI state.
 pub struct CodexUsage {
     data: Entity<CodexUsageData>,
+    chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
     resets_expanded: bool,
     trigger_bounds: Bounds<Pixels>,
@@ -528,10 +553,13 @@ pub struct CodexUsage {
 impl CodexUsage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let data = CodexUsageData::shared(cx);
+        let chart_state = cx.new(|_| okena_usage::HistoryChartState::default());
+        cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         // Re-render this window's widget whenever the shared poller updates.
         cx.observe(&data, |_, _, cx| cx.notify()).detach();
         Self {
             data,
+            chart_state,
             popover_visible: false,
             resets_expanded: false,
             trigger_bounds: Bounds::default(),
@@ -654,6 +682,9 @@ impl CodexUsage {
                                         cx,
                                         &window_row("Rate Limit", w, "codex-marker-primary"),
                                         working,
+                                        &data.history,
+                                        "primary",
+                                        &self.chart_state,
                                     ))
                                 })
                                 .when_some(data.secondary_window.as_ref(), |el, w| {
@@ -662,6 +693,9 @@ impl CodexUsage {
                                         cx,
                                         &window_row("Secondary", w, "codex-marker-secondary"),
                                         working,
+                                        &data.history,
+                                        "secondary",
+                                        &self.chart_state,
                                     ))
                                 })
                                 .when_some(data.review_primary.as_ref(), |el, w| {
@@ -670,6 +704,9 @@ impl CodexUsage {
                                         cx,
                                         &window_row("Code Review", w, "codex-marker-review"),
                                         working,
+                                        &data.history,
+                                        "code_review",
+                                        &self.chart_state,
                                     ))
                                 })
                                 .when_some(data.credits.as_ref(), |el, c| {

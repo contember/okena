@@ -8,6 +8,10 @@
 //! the **working-days** feature: a shared user preference that tailors the
 //! multi-day (weekly) bar to the days the user actually works.
 
+pub mod history;
+mod history_chart;
+pub use history_chart::HistoryChartState;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -168,6 +172,18 @@ pub struct Segments {
     /// recomputed on *working* time. `None` → the caller's own linear value is
     /// used instead.
     pub time_pct: Option<f64>,
+    working_dates: Vec<jiff::civil::Date>,
+}
+
+impl Segments {
+    fn time_fraction(&self, epoch: f64, reset: f64, period: f64) -> f32 {
+        if !self.working_dates.is_empty()
+            && let Some(position) = working_day_position(&self.working_dates, epoch)
+        {
+            return (position.time_pct / 100.0) as f32;
+        }
+        ((epoch - (reset - period)) / period).clamp(0.0, 1.0) as f32
+    }
 }
 
 fn epoch_of(z: &jiff::Zoned) -> f64 {
@@ -273,6 +289,7 @@ pub fn reset_aligned_segments(
         dividers,
         current,
         time_pct: None,
+        working_dates: Vec::new(),
     }
 }
 
@@ -334,7 +351,24 @@ fn working_day_reshape(
     let seg_w = 1.0_f32 / n as f32;
     let dividers: Vec<f32> = (1..n).map(|k| k as f32 * seg_w).collect();
 
-    // Place the marker by where today sits among the working dates.
+    let position = working_day_position(&dates, now_epoch)?;
+    Some(Segments {
+        dividers,
+        current: position.current,
+        time_pct: Some(position.time_pct),
+        working_dates: dates,
+    })
+}
+
+struct WorkingDayPosition {
+    current: Option<(f32, f32)>,
+    time_pct: f64,
+}
+
+fn working_day_position(dates: &[jiff::civil::Date], now_epoch: f64) -> Option<WorkingDayPosition> {
+    let tz = jiff::tz::TimeZone::system();
+    let n = dates.len();
+    let seg_w = 1.0_f32 / n as f32;
     let today = epoch_to_local(now_epoch)?.date();
     let (current, time_pct) = if let Some(k) = dates.iter().position(|&dt| dt == today) {
         let midnight = today
@@ -354,11 +388,7 @@ fn working_day_reshape(
         (None, tp)
     };
 
-    Some(Segments {
-        dividers,
-        current,
-        time_pct: Some(time_pct),
-    })
+    Some(WorkingDayPosition { current, time_pct })
 }
 
 /// The time-elapsed fraction a row will actually use: the working-day-reshaped
@@ -561,13 +591,21 @@ pub fn render_usage_row(
     cx: &App,
     row: &UsageRow,
     working: WorkingDays,
+    history: &history::History,
+    limit_name: &str,
+    chart_state: &Entity<HistoryChartState>,
 ) -> impl IntoElement {
     let seg = match (row.unit, row.reset_epoch) {
         (Some(unit), Some(reset)) => reset_aligned_segments(reset, row.period_secs, unit, working),
         _ => Segments::default(),
     };
     // Working-day reshaping overrides the linear pace value when active.
-    let effective_time = seg.time_pct.or(row.time_pct);
+    let now = now_secs().unwrap_or(0.0);
+    let effective_time = row
+        .reset_epoch
+        .filter(|_| row.period_secs > 0.0)
+        .map(|reset| seg.time_fraction(now, reset, row.period_secs) as f64 * 100.0)
+        .or(row.time_pct);
 
     let pct = row.pct;
     let pace = pace_severity(pct, effective_time);
@@ -623,6 +661,20 @@ pub fn render_usage_row(
             row.marker_id.clone(),
             &seg,
         ))
+        .when_some(
+            row.reset_epoch.filter(|_| row.period_secs > 0.0),
+            |el, reset| {
+                el.child(history_chart::render(
+                    t,
+                    cx,
+                    row,
+                    &seg,
+                    history.points(limit_name, reset, row.period_secs, now),
+                    now,
+                    chart_state,
+                ))
+            },
+        )
         .when(pace_msg.is_some() || resets_label.is_some(), |el| {
             el.child(
                 h_flex()

@@ -61,6 +61,7 @@ struct ScopedTierUsage {
 /// All fetched usage data
 #[derive(Clone)]
 struct UsageData {
+    history: okena_usage::history::History,
     /// Subscription plan label (e.g. "Pro", "Max") read from the credentials.
     plan: Option<String>,
     five_hour: Option<TierUsage>,
@@ -327,12 +328,41 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
     });
 
     UsageData {
+        history: Default::default(),
         plan: None,
         five_hour,
         seven_day,
         weekly_scoped,
         extra_usage,
     }
+}
+
+fn record_usage(usage: &mut UsageData, directory: &Path) {
+    let limits = [
+        ("five_hour", usage.five_hour.as_ref()),
+        ("seven_day", usage.seven_day.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, tier)| tier.map(|tier| (name.to_string(), tier)))
+    .chain(usage.weekly_scoped.iter().map(|scoped| {
+        (
+            format!("seven_day_{}", scoped.label.to_lowercase()),
+            &scoped.tier,
+        )
+    }))
+    .map(|(name, tier)| okena_usage::history::LimitSample {
+        name,
+        used_percent: tier.utilization,
+        window_seconds: tier.period_secs,
+        reset_at: tier.reset_epoch,
+    })
+    .collect();
+    usage.history = okena_usage::history::record_and_load(
+        okena_usage::history::Provider::Claude,
+        directory.to_string_lossy().into_owned(),
+        usage.plan.clone(),
+        limits,
+    );
 }
 
 /// Period durations for each tier
@@ -647,6 +677,7 @@ impl ClaudeUsageData {
                             };
                             let mut usage = parse_usage(&parsed);
                             usage.plan = read_subscription_type(&dir);
+                            record_usage(&mut usage, &dir);
                             (Some(usage), None)
                         }
                         Err(e) => {
@@ -724,6 +755,7 @@ impl ClaudeUsageData {
 /// poller and hold only per-window UI state.
 pub struct ClaudeUsage {
     data: Entity<ClaudeUsageData>,
+    chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
@@ -732,10 +764,13 @@ pub struct ClaudeUsage {
 impl ClaudeUsage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let data = ClaudeUsageData::shared(cx);
+        let chart_state = cx.new(|_| okena_usage::HistoryChartState::default());
+        cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         // Re-render this window's widget whenever the shared poller updates.
         cx.observe(&data, |_, _, cx| cx.notify()).detach();
         Self {
             data,
+            chart_state,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
@@ -848,6 +883,9 @@ impl ClaudeUsage {
                                             SegmentUnit::Hour,
                                         ),
                                         working,
+                                        &data.history,
+                                        "five_hour",
+                                        &self.chart_state,
                                     ))
                                 })
                                 .when_some(data.seven_day.as_ref(), |el, tier| {
@@ -862,6 +900,9 @@ impl ClaudeUsage {
                                             SegmentUnit::Day,
                                         ),
                                         working,
+                                        &data.history,
+                                        "seven_day",
+                                        &self.chart_state,
                                     ))
                                 })
                                 .children(
@@ -876,8 +917,19 @@ impl ClaudeUsage {
                                                 marker_id_for_scoped(&scoped.label),
                                                 SegmentUnit::Day,
                                             );
-                                            render_usage_row(t, cx, &row, working)
-                                                .into_any_element()
+                                            render_usage_row(
+                                                t,
+                                                cx,
+                                                &row,
+                                                working,
+                                                &data.history,
+                                                &format!(
+                                                    "seven_day_{}",
+                                                    scoped.label.to_lowercase()
+                                                ),
+                                                &self.chart_state,
+                                            )
+                                            .into_any_element()
                                         }),
                                 )
                                 .when_some(data.extra_usage.as_ref(), |el, extra| {
