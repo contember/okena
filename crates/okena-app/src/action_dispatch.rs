@@ -713,6 +713,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             shell,
         },
+        ActionRequest::SetTerminalNameOverlay {
+            project_id,
+            terminal_id,
+            enabled,
+        } => ActionRequest::SetTerminalNameOverlay {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            enabled,
+        },
         ActionRequest::AddTab {
             project_id,
             path,

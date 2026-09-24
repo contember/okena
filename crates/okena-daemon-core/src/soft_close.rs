@@ -148,6 +148,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),

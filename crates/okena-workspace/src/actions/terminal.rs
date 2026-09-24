@@ -97,6 +97,45 @@ impl Workspace {
         });
     }
 
+    pub fn set_terminal_name_overlay(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        enabled: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.with_project(project_id, cx, |project| {
+            let Some(layout) = project.layout.as_mut() else {
+                return false;
+            };
+            let Some(path) = layout.find_terminal_path(terminal_id) else {
+                return false;
+            };
+            if let Some(LayoutNode::Terminal {
+                show_name_when_inactive,
+                ..
+            }) = layout.get_at_path_mut(&path)
+            {
+                *show_name_when_inactive = enabled;
+                return true;
+            }
+            false
+        });
+    }
+
+    pub fn terminal_name_overlay_enabled(&self, project_id: &str, terminal_id: &str) -> bool {
+        let Some(layout) = self.project(project_id).and_then(|p| p.layout.as_ref()) else {
+            return false;
+        };
+        matches!(
+            layout.find_terminal_node(terminal_id),
+            Some(LayoutNode::Terminal {
+                show_name_when_inactive: true,
+                ..
+            })
+        )
+    }
+
     /// Set terminal hidden state
     #[allow(dead_code)] // API for future terminal visibility control
     pub fn set_terminal_hidden(

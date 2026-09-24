@@ -1397,6 +1397,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.25,
+            show_name_when_inactive: false,
         };
         let layout = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
@@ -1520,6 +1521,7 @@ mod tests {
                     detached: false,
                     shell_type: Default::default(),
                     zoom_level: 1.5,
+                    show_name_when_inactive: false,
                 },
             )]),
             service_panel_heights: HashMap::from([("p1".to_string(), 200.0)]),
@@ -1941,6 +1943,7 @@ mod tests {
             detached: true,
             shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         });
         project
             .service_terminals
@@ -1991,6 +1994,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    show_name_when_inactive: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("tid1".to_string()),
@@ -1999,6 +2003,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    show_name_when_inactive: false,
                 },
             ],
         });
@@ -2144,6 +2149,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    show_name_when_inactive: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
@@ -2152,6 +2158,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    show_name_when_inactive: false,
                 },
             ],
         });
@@ -2707,6 +2714,7 @@ mod tests {
                 detached: false,
                 shell_type: Default::default(),
                 zoom_level: 1.0,
+                show_name_when_inactive: false,
             });
             let data = make_workspace(vec![project], vec!["p1"], vec![]);
             let mut loaded = serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
@@ -2768,6 +2776,7 @@ mod tests {
             detached: false,
             shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         });
         // t1 is in layout, t2 and t3 are orphaned
         project
@@ -3242,6 +3251,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         });
         wt.service_terminals
             .insert("service".to_string(), "stale-service".to_string());
@@ -3323,6 +3333,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         });
         worktree
             .service_terminals
@@ -3378,6 +3389,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         });
         let mut data = make_workspace(
             vec![make_project("p1"), worktree],

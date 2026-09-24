@@ -34,6 +34,8 @@ pub enum LayoutNode {
         shell_type: ShellType,
         #[serde(default = "default_zoom_level")]
         zoom_level: f32,
+        #[serde(default)]
+        show_name_when_inactive: bool,
     },
     Split {
         direction: SplitDirection,
@@ -147,6 +149,7 @@ impl LayoutNode {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         }
     }
 
@@ -173,6 +176,7 @@ impl LayoutNode {
             detached: false,
             shell_type: ShellType::for_command(full_cmd),
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         }
     }
 
@@ -878,6 +882,7 @@ impl LayoutNode {
             LayoutNode::Terminal {
                 shell_type,
                 zoom_level,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: None,
@@ -886,6 +891,7 @@ impl LayoutNode {
                 detached: false,
                 shell_type: shell_type.clone(),
                 zoom_level: *zoom_level,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             LayoutNode::Split {
                 direction,
@@ -1118,6 +1124,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
@@ -1126,6 +1133,7 @@ impl LayoutNode {
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1155,6 +1163,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
@@ -1163,6 +1172,7 @@ impl LayoutNode {
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1205,6 +1215,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                show_name_when_inactive,
                 ..
             } => {
                 let (cols, rows) = terminal_id
@@ -1217,6 +1228,7 @@ impl LayoutNode {
                     minimized: *minimized,
                     detached: *detached,
                     shell_type: shell_type.clone(),
+                    show_name_when_inactive: *show_name_when_inactive,
                     cols,
                     rows,
                 }
@@ -1264,6 +1276,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         };
         assert!(node.clone_structure().pending_agent_resume().is_none());
         assert!(
@@ -1283,6 +1296,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         }
     }
 
@@ -1294,7 +1308,55 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         }
+    }
+
+    #[test]
+    fn name_overlay_defaults_off_in_older_layouts_and_snapshots() {
+        let json = r#"{"type":"terminal","terminal_id":"t1","minimized":false,"detached":false}"#;
+        let stored: LayoutNode = serde_json::from_str(json).unwrap();
+        let api: okena_core::api::ApiLayoutNode = serde_json::from_str(json).unwrap();
+        assert_eq!(stored, terminal("t1"));
+        assert_eq!(LayoutNode::from_api(&api), terminal("t1"));
+    }
+
+    #[test]
+    fn name_overlay_survives_persistence_and_remote_snapshots() {
+        let mut enabled = terminal("t1");
+        if let LayoutNode::Terminal {
+            show_name_when_inactive,
+            ..
+        } = &mut enabled
+        {
+            *show_name_when_inactive = true;
+        }
+        let stored = serde_json::to_string(&enabled).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LayoutNode>(&stored).unwrap(),
+            enabled
+        );
+
+        let api = enabled.to_api();
+        assert_eq!(LayoutNode::from_api(&api), enabled);
+        let mut prefixed = enabled.clone();
+        prefixed.replace_terminal_id("t1", "remote:c1:t1");
+        assert_eq!(LayoutNode::from_api_prefixed(&api, "remote:c1"), prefixed);
+
+        let disabled = terminal("t1");
+        assert_eq!(LayoutNode::merge_visual_state(&enabled, &disabled), enabled);
+        assert_eq!(
+            LayoutNode::merge_visual_state(&disabled, &enabled),
+            disabled
+        );
+        assert!(matches!(
+            enabled.clone_structure(),
+            LayoutNode::Terminal {
+                terminal_id: None,
+                show_name_when_inactive: true,
+                ..
+            }
+        ));
     }
 
     fn terminal_detached(id: &str) -> LayoutNode {
@@ -1305,6 +1367,7 @@ mod tests {
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         }
     }
 
@@ -1358,6 +1421,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 2.5,
+                show_name_when_inactive: false,
             },
         ]);
         let node = tree.find_terminal_node("b").expect("b present");
@@ -2209,6 +2273,7 @@ mod tests {
                 args: Vec::new(),
             },
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
@@ -2217,6 +2282,7 @@ mod tests {
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.75,
+            show_name_when_inactive: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
@@ -2257,6 +2323,7 @@ mod tests {
                 args: vec!["--private".to_string()],
             },
             zoom_level: 2.0,
+            show_name_when_inactive: false,
         };
 
         let restored = LayoutNode::from_api(&node.to_api());
@@ -2385,6 +2452,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.75,
+                    show_name_when_inactive: false,
                 },
                 terminal_minimized("t2"),
             ],
@@ -2493,6 +2561,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    show_name_when_inactive: false,
                 },
                 LayoutNode::Tabs {
                     children: vec![terminal("t2"), terminal("t3")],
@@ -2530,6 +2599,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.5,
+            show_name_when_inactive: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
@@ -2630,6 +2700,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            show_name_when_inactive: false,
         };
         assert_eq!(empty.single_terminal(), None);
 

@@ -559,6 +559,8 @@ pub enum ApiLayoutNode {
         detached: bool,
         #[serde(default)]
         shell_type: ShellType,
+        #[serde(default)]
+        show_name_when_inactive: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cols: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -721,6 +723,11 @@ pub enum ActionRequest {
         project_id: String,
         terminal_id: String,
         name: String,
+    },
+    SetTerminalNameOverlay {
+        project_id: String,
+        terminal_id: String,
+        enabled: bool,
     },
     /// Switch the shell of an existing terminal: the daemon kills the old PTY
     /// and respawns at the same layout path with `shell` (resolving Default →
@@ -1379,6 +1386,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
@@ -1389,6 +1397,7 @@ mod tests {
                                 shell_type: ShellType::Default,
                                 cols: None,
                                 rows: None,
+                                show_name_when_inactive: false,
                             }],
                         },
                     ],
@@ -1673,6 +1682,11 @@ mod tests {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
                 name: "my-term".into(),
+            },
+            ActionRequest::SetTerminalNameOverlay {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                enabled: true,
             },
             ActionRequest::SwitchTerminalShell {
                 project_id: "p1".into(),
@@ -1977,6 +1991,7 @@ mod tests {
                     shell_type: ShellType::Default,
                     cols: None,
                     rows: None,
+                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -1988,6 +2003,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: None,
@@ -1996,6 +2012,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
@@ -2004,6 +2021,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            show_name_when_inactive: false,
                         },
                     ],
                 },

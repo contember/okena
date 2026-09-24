@@ -43,6 +43,11 @@ pub enum TerminalMenuEvent {
         terminal_id: String,
         current_name: String,
     },
+    SetNameOverlay {
+        project_id: String,
+        terminal_id: String,
+        enabled: bool,
+    },
     ChangeShell {
         project_id: String,
         terminal_id: String,
@@ -102,6 +107,7 @@ pub struct TerminalMenu {
     can_export_buffer: bool,
     /// Set by the host, which owns the terminals and so the bell state.
     has_bell: bool,
+    show_name_when_inactive: bool,
     invocation: TerminalMenuInvocation,
     /// Mirrors the terminal header: the shell chip is opt-in via `show_shell_selector`.
     /// Read once on open — the settings lookup is a serde round-trip, and this view
@@ -123,6 +129,7 @@ impl TerminalMenu {
         current_shell: ShellType,
         can_export_buffer: bool,
         has_bell: bool,
+        show_name_when_inactive: bool,
         invocation: TerminalMenuInvocation,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,6 +144,7 @@ impl TerminalMenu {
             current_shell,
             can_export_buffer,
             has_bell,
+            show_name_when_inactive,
             invocation,
             show_shell_selector,
             focus_handle,
@@ -322,6 +330,28 @@ impl Render for TerminalMenu {
                                         ),
                                     )
                                 }),
+                        )
+                        .child(menu_separator(&t))
+                        .child(
+                            menu_item(
+                                "terminal-menu-name-overlay",
+                                if self.show_name_when_inactive {
+                                    "icons/check.svg"
+                                } else {
+                                    "icons/terminal.svg"
+                                },
+                                "Show Name When Inactive",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(TerminalMenuEvent::SetNameOverlay {
+                                        project_id: this.project_id.clone(),
+                                        terminal_id: this.terminal_id.clone(),
+                                        enabled: !this.show_name_when_inactive,
+                                    });
+                                },
+                            )),
                         )
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {

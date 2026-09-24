@@ -65,6 +65,20 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
 
         let is_focused = window.is_window_active() && focus_handle.is_focused(window);
 
+        let overlay_name = self
+            .terminal
+            .as_ref()
+            .filter(|_| !is_focused && !search_active)
+            .and_then(|terminal| {
+                let ws = self.workspace.read(cx);
+                if !ws.terminal_name_overlay_enabled(&self.project_id, &terminal.terminal_id) {
+                    return None;
+                }
+                ws.project(&self.project_id).map(|project| {
+                    project.terminal_display_name(&terminal.terminal_id, terminal.title())
+                })
+            });
+
         let has_bell = self.terminal.as_ref().is_some_and(|t| t.has_bell());
         // A hand-set "unread" mark holds the bell against this clear, or
         // marking the focused pane would be undone on the very next frame.
@@ -352,6 +366,35 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                             AnyView::from(self.content.clone())
                                 .cached(StyleRefinement::default().size_full()),
                         )
+                        .when_some(overlay_name, |content, name| {
+                            content.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_start()
+                                    .justify_center()
+                                    .overflow_hidden()
+                                    .px(px(24.0))
+                                    .pt(px(20.0))
+                                    .text_size(px(48.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgba((t.text_primary << 8) | 0xD9))
+                                    .child(
+                                        div()
+                                            .max_w_full()
+                                            .px(px(20.0))
+                                            .py(px(8.0))
+                                            .rounded(px(8.0))
+                                            .border_1()
+                                            .border_color(rgba((t.text_primary << 8) | 0x33))
+                                            .bg(rgba((t.term_background << 8) | 0xE0))
+                                            .shadow_xl()
+                                            .truncate()
+                                            .child(name),
+                                    ),
+                            )
+                        })
                         .when(show_border, |el| {
                             el.child(
                                 div()
