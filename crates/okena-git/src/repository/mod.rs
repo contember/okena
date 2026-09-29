@@ -10,6 +10,7 @@
 //! | [`status`]   | working-tree status, diff stats, HEAD/branch reads, ahead/behind |
 //! | `diff_memo`  | private: per-file diff counts remembered across status walks |
 //! | [`ci`]       | GitHub PR info + CI check aggregation |
+//! | [`pull_requests`] | open PRs offered as worktree sources, searchable |
 //! | [`github`]   | GitHub base-repo resolution, token cache, REST/GraphQL client |
 //! | [`paths`]    | repo-root resolution and worktree/project path computation |
 
@@ -24,6 +25,7 @@ pub mod clone;
 mod diff_memo;
 pub(crate) mod github;
 pub mod paths;
+pub mod pull_requests;
 pub mod status;
 pub mod worktree;
 
@@ -34,7 +36,7 @@ pub use branch::{
     list_branches_classified, merge_branch, push_branch, rebase_onto, resolve_base_ref,
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
-pub use ci::{CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info, list_pull_requests};
+pub use ci::{CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info};
 pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
@@ -44,6 +46,7 @@ pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
     project_path_in_worktree, resolve_git_root_and_subdir,
 };
+pub use pull_requests::list_pull_requests;
 pub use status::{
     DirtyCheck, HeadSnapshot, StatusFetch, apply_pr_base, count_ahead_behind,
     count_ahead_behind_vs, count_unpushed_commits, get_current_branch, get_head_sha,

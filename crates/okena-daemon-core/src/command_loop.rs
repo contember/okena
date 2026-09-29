@@ -6998,6 +6998,7 @@ mod tests {
                             RemoteCommand::Action(ActionRequest::GitListPullRequests {
                                 project_id: "missing".to_string(),
                                 limit: 5,
+                                query: String::new(),
                             }),
                             "list pull requests",
                         )

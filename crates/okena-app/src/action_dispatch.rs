@@ -795,12 +795,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
             project_id: s(&project_id),
         },
-        ActionRequest::GitListPullRequests { project_id, limit } => {
-            ActionRequest::GitListPullRequests {
-                project_id: s(&project_id),
-                limit,
-            }
-        }
+        ActionRequest::GitListPullRequests {
+            project_id,
+            limit,
+            query,
+        } => ActionRequest::GitListPullRequests {
+            project_id: s(&project_id),
+            limit,
+            query,
+        },
         ActionRequest::GitFileContents {
             project_id,
             file_path,

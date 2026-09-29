@@ -3,14 +3,25 @@
 //!
 //! The `Render` impl lives in `worktree_dialog/view.rs`.
 
-use okena_core::api::{ActionRequest, WorktreePullRequest};
+use okena_core::api::ActionRequest;
 use okena_transport::remote_action::RemoteActionClient;
 
-use crate::simple_input::SimpleInputState;
+use crate::simple_input::{InputChangedEvent, SimpleInputState};
+use list_selection::ListSelection;
+use pr_picker::PrPicker;
 
 use gpui::prelude::*;
 use gpui::*;
+mod list_selection;
+mod pr_picker;
 mod view;
+
+/// Which tab of the dialog is active.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Branch,
+    Pr,
+}
 
 /// Events emitted by the worktree dialog
 #[derive(Clone)]
@@ -43,21 +54,17 @@ pub struct WorktreeDialog {
     client: RemoteActionClient,
     daemon_project_id: String,
     pub(super) project_id: String,
+    mode: Mode,
     pub(super) branches: Vec<String>,
-    pub(super) filtered_branches: Vec<usize>,
-    pub(super) selected_branch_index: Option<usize>,
+    /// Branches matching the search input.
+    branch_selection: ListSelection<String, String>,
     pub(super) branch_search_input: Entity<SimpleInputState>,
+    pr_picker: Entity<PrPicker>,
     pub(super) error_message: Option<String>,
     pub(super) loading_branches: bool,
     pub(super) focus_handle: FocusHandle,
     pub(super) initialized: bool,
-    pub(super) last_search_query: String,
-    pub(super) pr_mode: bool,
-    pub(super) pr_list: Vec<WorktreePullRequest>,
-    pub(super) loading_prs: bool,
-    pub(super) pr_error: Option<String>,
-    pub(super) selected_pr_branch: Option<String>,
-    pub(super) prs_loaded_once: bool,
+    _branch_search_subscription: Subscription,
 }
 
 impl WorktreeDialog {
@@ -73,27 +80,31 @@ impl WorktreeDialog {
                 .icon("icons/search.svg")
         });
 
+        let branch_search_subscription = cx.subscribe(
+            &branch_search_input,
+            |this, _, _: &InputChangedEvent, cx| {
+                this.filter_branches(cx);
+                cx.notify();
+            },
+        );
+        let pr_picker = cx.new(|cx| PrPicker::new(client.clone(), daemon_project_id.clone(), cx));
+
         let focus_handle = cx.focus_handle();
 
         let mut dialog = Self {
             client,
             daemon_project_id,
             project_id,
+            mode: Mode::Branch,
             branches: Vec::new(),
-            filtered_branches: Vec::new(),
-            selected_branch_index: None,
+            branch_selection: ListSelection::new(String::clone),
             branch_search_input,
+            pr_picker,
             error_message: None,
             loading_branches: true,
             focus_handle,
             initialized: false,
-            last_search_query: String::new(),
-            pr_mode: false,
-            pr_list: vec![],
-            loading_prs: false,
-            pr_error: None,
-            selected_pr_branch: None,
-            prs_loaded_once: false,
+            _branch_search_subscription: branch_search_subscription,
         };
         dialog.load_initial_data(cx);
         dialog
@@ -134,8 +145,8 @@ impl WorktreeDialog {
                     let mut errors = Vec::new();
                     match branches {
                         Ok(branches) => {
-                            this.filtered_branches = (0..branches.len()).collect();
                             this.branches = branches;
+                            this.filter_branches(cx);
                         }
                         Err(error) => errors.push(error),
                     }
@@ -160,28 +171,54 @@ impl WorktreeDialog {
         .detach();
     }
 
-    pub(super) fn filter_branches(&mut self, cx: &App) {
+    /// Show the branches matching the search input. A new filter drops the
+    /// selection: with nothing selected, the typed text names a new branch.
+    fn filter_branches(&mut self, cx: &App) {
         let query = self.branch_search_input.read(cx).value().to_lowercase();
+        let matching = self
+            .branches
+            .iter()
+            .filter(|branch| branch.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        self.branch_selection.set_items(matching);
+        self.branch_selection.clear();
+    }
 
-        // Only re-filter and reset selection if the query actually changed
-        if query == self.last_search_query {
-            return;
+    /// Switch tabs and focus the active tab's input.
+    fn set_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = mode;
+        self.error_message = None;
+        match mode {
+            Mode::Branch => self
+                .branch_search_input
+                .update(cx, |input, cx| input.focus(window, cx)),
+            Mode::Pr => self.pr_picker.update(cx, |picker, cx| {
+                picker.ensure_loaded(cx);
+                picker.input.update(cx, |input, cx| input.focus(window, cx));
+            }),
         }
-        self.last_search_query = query.clone();
+        cx.notify();
+    }
 
-        if query.is_empty() {
-            self.filtered_branches = (0..self.branches.len()).collect();
-        } else {
-            self.filtered_branches = self
-                .branches
-                .iter()
-                .enumerate()
-                .filter(|(_, b)| b.to_lowercase().contains(&query))
-                .map(|(i, _)| i)
-                .collect();
+    fn move_selection(&mut self, down: bool, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Branch => {
+                if down {
+                    self.branch_selection.move_down();
+                } else {
+                    self.branch_selection.move_up();
+                }
+                cx.notify();
+            }
+            Mode::Pr => self.pr_picker.update(cx, |picker, cx| {
+                if down {
+                    picker.move_down(cx);
+                } else {
+                    picker.move_up(cx);
+                }
+            }),
         }
-        // Reset selection when filter changes
-        self.selected_branch_index = None;
     }
 
     pub(super) fn close(&mut self, cx: &mut Context<Self>) {
@@ -189,44 +226,21 @@ impl WorktreeDialog {
     }
 
     pub(super) fn create_worktree(&mut self, cx: &mut Context<Self>) {
-        let (branch, create_branch) = if self.pr_mode {
-            // PR mode: use selected PR branch
-            if let Some(ref pr_branch) = self.selected_pr_branch {
-                (pr_branch.clone(), false)
-            } else {
-                self.error_message = Some("Please select a pull request".to_string());
+        let picked = match self.mode {
+            Mode::Pr => self
+                .pr_picker
+                .read(cx)
+                .picked_branch()
+                .map(|branch| (branch, false))
+                .map_err(str::to_string),
+            Mode::Branch => self.picked_branch(cx),
+        };
+        let (branch, create_branch) = match picked {
+            Ok(picked) => picked,
+            Err(message) => {
+                self.error_message = Some(message);
                 cx.notify();
                 return;
-            }
-        } else if let Some(filtered_idx) = self.selected_branch_index {
-            // Use selected existing branch
-            if let Some(&branch_idx) = self.filtered_branches.get(filtered_idx) {
-                if let Some(branch) = self.branches.get(branch_idx) {
-                    (branch.clone(), false)
-                } else {
-                    self.error_message = Some("Invalid branch selection".to_string());
-                    cx.notify();
-                    return;
-                }
-            } else {
-                self.error_message = Some("Invalid branch selection".to_string());
-                cx.notify();
-                return;
-            }
-        } else {
-            // No branch selected — use input text as new branch name
-            let name = self.branch_search_input.read(cx).value().trim().to_string();
-            if name.is_empty() {
-                self.error_message =
-                    Some("Please select a branch or type a new branch name".to_string());
-                cx.notify();
-                return;
-            }
-            // If it exactly matches an existing branch, use it directly
-            if self.branches.iter().any(|b| b == &name) {
-                (name, false)
-            } else {
-                (name, true)
             }
         };
 
@@ -243,43 +257,17 @@ impl WorktreeDialog {
         });
     }
 
-    pub(super) fn load_prs(&mut self, cx: &mut Context<Self>) {
-        self.loading_prs = true;
-        self.pr_error = None;
-        cx.notify();
-
-        let client = self.client.clone();
-        let project_id = self.daemon_project_id.clone();
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                client
-                    .post_action(ActionRequest::GitListPullRequests {
-                        project_id,
-                        limit: 20,
-                    })
-                    .and_then(|value| value.ok_or_else(|| "Missing pull request list".to_string()))
-                    .and_then(|value| {
-                        serde_json::from_value::<Vec<WorktreePullRequest>>(value)
-                            .map_err(|error| format!("Invalid pull request list: {error}"))
-                    })
-            })
-            .await;
-
-            let _ = cx.update(|cx| {
-                this.update(cx, |this, cx| {
-                    match result {
-                        Ok(prs) => {
-                            this.pr_list = prs;
-                        }
-                        Err(e) => {
-                            this.pr_error = Some(e);
-                        }
-                    }
-                    this.loading_prs = false;
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
+    /// The selected branch, or else the typed text — an existing branch if it
+    /// names one exactly, otherwise a branch to create.
+    fn picked_branch(&self, cx: &App) -> Result<(String, bool), String> {
+        if let Some(branch) = self.branch_selection.selected() {
+            return Ok((branch.clone(), false));
+        }
+        let name = self.branch_search_input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return Err("Please select a branch or type a new branch name".to_string());
+        }
+        let create_branch = !self.branches.contains(&name);
+        Ok((name, create_branch))
     }
 }

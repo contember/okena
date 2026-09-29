@@ -84,9 +84,14 @@ pub(super) fn branches(ws: &Workspace, project_id: String) -> ActionResult {
     })
 }
 
-pub(super) fn list_pull_requests(ws: &Workspace, project_id: String, limit: usize) -> ActionResult {
+pub(super) fn list_pull_requests(
+    ws: &Workspace,
+    project_id: String,
+    limit: usize,
+    query: &str,
+) -> ActionResult {
     with_project_path(ws, project_id, |path| {
-        match okena_git::list_pull_requests(path, limit) {
+        match okena_git::list_pull_requests(path, limit, query) {
             Ok(pull_requests) => ActionResult::Ok(Some(
                 serde_json::to_value(pull_requests)
                     .expect("BUG: WorktreePullRequest must serialize"),

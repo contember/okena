@@ -1,7 +1,7 @@
-//! Render impl for the WorktreeDialog: tabs (Branches / From PR), search
-//! input, list of branches or PRs, footer buttons.
+//! Render impl for the WorktreeDialog: tabs (Branches / From PR), the branch
+//! search input and list or the PR picker, footer buttons.
 
-use super::WorktreeDialog;
+use super::{Mode, WorktreeDialog};
 use crate::Cancel;
 use crate::simple_input::SimpleInput;
 
@@ -9,101 +9,13 @@ use okena_core::theme::ThemeColors;
 use okena_files::theme::theme;
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::input_container;
-use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_xl};
+use okena_ui::tokens::{ui_text_md, ui_text_xl};
 
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 
 impl WorktreeDialog {
-    pub(super) fn render_pr_list(
-        &self,
-        t: ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        if self.loading_prs {
-            return div()
-                .p(px(12.0))
-                .text_size(ui_text_md(cx))
-                .text_color(rgb(t.text_muted))
-                .child("Loading PRs...")
-                .into_any_element();
-        }
-
-        if let Some(ref err) = self.pr_error {
-            return div()
-                .p(px(12.0))
-                .text_size(ui_text_md(cx))
-                .text_color(rgb(t.text_muted))
-                .child(err.clone())
-                .into_any_element();
-        }
-
-        if self.pr_list.is_empty() {
-            return div()
-                .p(px(12.0))
-                .text_size(ui_text_md(cx))
-                .text_color(rgb(t.text_muted))
-                .child("No open pull requests")
-                .into_any_element();
-        }
-
-        div()
-            .id("pr-list-scroll")
-            .flex()
-            .flex_col()
-            .max_h(px(200.0))
-            .overflow_y_scroll()
-            .children(self.pr_list.iter().enumerate().map(|(idx, pr)| {
-                let is_selected = self.selected_pr_branch.as_deref() == Some(&pr.branch);
-                let branch = pr.branch.clone();
-
-                div()
-                    .id(ElementId::Name(format!("pr-{}", idx).into()))
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .cursor_pointer()
-                    .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.selected_pr_branch = Some(branch.clone());
-                        this.selected_branch_index = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        h_flex()
-                            .gap(px(6.0))
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_size(ui_text_ms(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("#{}", pr.number)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(ui_text_md(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .flex_1()
-                                    .overflow_x_hidden()
-                                    .whitespace_nowrap()
-                                    .child(pr.title.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pl(px(28.0))
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(pr.branch.clone()),
-                    )
-            }))
-            .into_any_element()
-    }
-
     pub(super) fn render_branch_list(
         &self,
         t: ThemeColors,
@@ -120,7 +32,7 @@ impl WorktreeDialog {
 
         let search_empty = self.branch_search_input.read(cx).value().is_empty();
 
-        if self.filtered_branches.is_empty() {
+        if self.branch_selection.items().is_empty() {
             return div()
                 .p(px(12.0))
                 .text_size(ui_text_md(cx))
@@ -139,36 +51,41 @@ impl WorktreeDialog {
             .flex_col()
             .max_h(px(200.0))
             .overflow_y_scroll()
-            .children(self.filtered_branches.iter().enumerate().map(
-                |(filtered_idx, &branch_idx)| {
-                    let is_selected = self.selected_branch_index == Some(filtered_idx);
-                    let branch_name = self.branches[branch_idx].clone();
+            .children(
+                self.branch_selection
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .map(|(row, branch_name)| {
+                        let is_selected = self.branch_selection.is_selected(branch_name);
+                        let branch_name = branch_name.clone();
+                        let clicked = branch_name.clone();
 
-                    div()
-                        .id(ElementId::Name(format!("branch-{}", filtered_idx).into()))
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .cursor_pointer()
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.text_primary))
-                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .child(
-                            svg()
-                                .path("icons/git-branch.svg")
-                                .size(px(14.0))
-                                .text_color(rgb(t.text_secondary)),
-                        )
-                        .child(branch_name)
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.selected_branch_index = Some(filtered_idx);
-                            cx.notify();
-                        }))
-                },
-            ))
+                        div()
+                            .id(ElementId::Name(format!("branch-{row}").into()))
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_pointer()
+                            .text_size(ui_text_md(cx))
+                            .text_color(rgb(t.text_primary))
+                            .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .child(
+                                svg()
+                                    .path("icons/git-branch.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary)),
+                            )
+                            .child(branch_name)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.branch_selection.select(clicked.clone());
+                                cx.notify();
+                            }))
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -193,16 +110,13 @@ impl Render for WorktreeDialog {
             });
         }
 
-        // Filter branches based on search input
-        self.filter_branches(cx);
-
         let branch_search_input = self.branch_search_input.clone();
         let search_input_focused = self
             .branch_search_input
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let pr_mode = self.pr_mode;
+        let pr_mode = self.mode == Mode::Pr;
 
         div()
             .id("worktree-dialog-backdrop")
@@ -211,38 +125,11 @@ impl Render for WorktreeDialog {
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 this.close(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let search_focused = this
-                    .branch_search_input
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window);
-
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "up" => {
-                        if search_focused
-                            && let Some(idx) = this.selected_branch_index
-                            && idx > 0
-                        {
-                            this.selected_branch_index = Some(idx - 1);
-                            cx.notify();
-                        }
-                    }
-                    "down" if search_focused => {
-                        let max = this.filtered_branches.len().saturating_sub(1);
-                        if let Some(idx) = this.selected_branch_index {
-                            if idx < max {
-                                this.selected_branch_index = Some(idx + 1);
-                                cx.notify();
-                            }
-                        } else if !this.filtered_branches.is_empty() {
-                            this.selected_branch_index = Some(0);
-                            cx.notify();
-                        }
-                    }
-                    "enter" => {
-                        this.create_worktree(cx);
-                    }
+                    "up" => this.move_selection(false, cx),
+                    "down" => this.move_selection(true, cx),
+                    "enter" => this.create_worktree(cx),
                     _ => {}
                 }
             }))
@@ -360,10 +247,8 @@ impl Render for WorktreeDialog {
                                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 })
                                                 .child("Branches")
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.pr_mode = false;
-                                                    this.selected_pr_branch = None;
-                                                    cx.notify();
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.set_mode(Mode::Branch, window, cx);
                                                 })),
                                         )
                                         .child(div().w(px(1.0)).h_full().bg(rgb(t.border)))
@@ -388,18 +273,12 @@ impl Render for WorktreeDialog {
                                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 })
                                                 .child("From PR")
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.pr_mode = true;
-                                                    this.selected_branch_index = None;
-                                                    if !this.prs_loaded_once {
-                                                        this.prs_loaded_once = true;
-                                                        this.load_prs(cx);
-                                                    }
-                                                    cx.notify();
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.set_mode(Mode::Pr, window, cx);
                                                 })),
                                         ),
                                 )
-                                // Search input (only in branch mode)
+                                // Branch mode: search input + branch list
                                 .when(!pr_mode, |d| {
                                     d.child(
                                         input_container(&t, Some(search_input_focused)).child(
@@ -407,10 +286,10 @@ impl Render for WorktreeDialog {
                                                 .text_size(ui_text_md(cx)),
                                         ),
                                     )
+                                    .child(self.render_branch_list(t, cx))
                                 })
-                                // Branch list or PR list
-                                .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
-                                .when(pr_mode, |d| d.child(self.render_pr_list(t, cx))),
+                                // PR mode: the picker owns its input and list
+                                .when(pr_mode, |d| d.child(self.pr_picker.clone())),
                         ),
                     )
                     // Error message

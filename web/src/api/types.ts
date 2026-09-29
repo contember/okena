@@ -293,7 +293,7 @@ export type ActionRequest =
   | { action: "git_diff_summary"; project_id: string }
   | { action: "git_diff"; project_id: string; mode?: DiffMode; ignore_whitespace?: boolean }
   | { action: "git_branches"; project_id: string }
-  | { action: "git_list_pull_requests"; project_id: string; limit?: number }
+  | { action: "git_list_pull_requests"; project_id: string; limit?: number; query?: string }
   | { action: "git_file_contents"; project_id: string; file_path: string; mode?: DiffMode }
   | { action: "git_commit_graph"; project_id: string; count: number; branch?: string | null }
   | { action: "git_list_branches"; project_id: string }
