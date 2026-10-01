@@ -791,6 +791,9 @@ pub enum ActionRequest {
         project_id: String,
         #[serde(default = "default_pull_request_limit")]
         limit: usize,
+        /// Search text; empty lists the newest open PRs.
+        #[serde(default)]
+        query: String,
     },
     GitFileContents {
         project_id: String,
@@ -1723,6 +1726,7 @@ mod tests {
             ActionRequest::GitListPullRequests {
                 project_id: "p1".into(),
                 limit: 20,
+                query: "#42".into(),
             },
             ActionRequest::GitFileContents {
                 project_id: "p1".into(),
@@ -1942,6 +1946,22 @@ mod tests {
             let json = serde_json::to_string(&action).unwrap();
             let _parsed: ActionRequest = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn list_pull_requests_defaults_query_and_limit_when_absent() {
+        let parsed: ActionRequest =
+            serde_json::from_str(r#"{"action":"git_list_pull_requests","project_id":"p1"}"#)
+                .unwrap();
+        let ActionRequest::GitListPullRequests {
+            project_id,
+            limit,
+            query,
+        } = parsed
+        else {
+            panic!("expected GitListPullRequests, got {parsed:?}");
+        };
+        assert_eq!((project_id.as_str(), limit, query.as_str()), ("p1", 20, ""));
     }
 
     #[test]
