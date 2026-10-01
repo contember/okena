@@ -34,7 +34,10 @@ query WorktreePullRequests($owner: String!, $repo: String!, $first: Int!, $newes
 const SEARCH_QUERY: &str = r#"
 query WorktreePullRequestSearch($search: String!, $first: Int!) {
   search(type: ISSUE, query: $search, first: $first) {
-    nodes { ... on PullRequest { number title headRefName state } }
+    nodes { ... on PullRequest {
+      number title headRefName state
+      repository { nameWithOwner }
+    } }
   }
 }"#;
 
@@ -45,8 +48,7 @@ query WorktreePullRequestByNumber($owner: String!, $repo: String!, $number: Int!
   }
 }"#;
 
-/// A `PullRequest` node from either query. Search also yields issues, which
-/// arrive as empty objects and fail to deserialize — they are skipped.
+/// A `PullRequest` node from a repository query.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrNode {
@@ -54,6 +56,19 @@ struct PrNode {
     title: String,
     head_ref_name: String,
     state: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SearchPrNode {
+    #[serde(flatten)]
+    pr: PrNode,
+    repository: SearchRepository,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchRepository {
+    name_with_owner: String,
 }
 
 impl PrNode {
@@ -104,7 +119,7 @@ pub fn list_pull_requests(
             json!({ "search": search_string(name_with_owner, query), "first": first }),
         )
         .map_err(describe_error)
-        .map(|data| parse_nodes(&data, "/search/nodes"))?;
+        .map(|data| parse_search_nodes(&data, name_with_owner))?;
 
     let exact = match parse_pr_number(query) {
         Some(number) => lookup_number(&mut client, &repo, number)?,
@@ -162,6 +177,22 @@ fn parse_nodes(data: &Value, pointer: &str) -> Vec<WorktreePullRequest> {
         .flatten()
         .filter_map(|node| serde_json::from_value::<PrNode>(node.clone()).ok())
         .filter_map(PrNode::into_open)
+        .collect()
+}
+
+fn parse_search_nodes(data: &Value, name_with_owner: &str) -> Vec<WorktreePullRequest> {
+    data.pointer("/search/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| serde_json::from_value::<SearchPrNode>(node.clone()).ok())
+        // Additional repo: qualifiers broaden GitHub search instead of narrowing it.
+        .filter(|node| {
+            node.repository
+                .name_with_owner
+                .eq_ignore_ascii_case(name_with_owner)
+        })
+        .filter_map(|node| node.pr.into_open())
         .collect()
 }
 
@@ -235,12 +266,12 @@ mod tests {
     #[test]
     fn search_parsing_skips_issues_and_closed_prs() {
         let data = json!({ "search": { "nodes": [
-            { "number": 12, "title": "Remote worktree", "headRefName": "feature/remote", "state": "OPEN" },
+            { "number": 12, "title": "Remote worktree", "headRefName": "feature/remote", "state": "OPEN", "repository": { "nameWithOwner": "acme/widgets" } },
             {},
-            { "number": 13, "title": "Old", "headRefName": "old", "state": "MERGED" },
+            { "number": 13, "title": "Old", "headRefName": "old", "state": "MERGED", "repository": { "nameWithOwner": "acme/widgets" } },
         ] } });
         assert_eq!(
-            parse_nodes(&data, "/search/nodes"),
+            parse_search_nodes(&data, "acme/widgets"),
             vec![WorktreePullRequest {
                 number: 12,
                 title: "Remote worktree".into(),
@@ -251,7 +282,24 @@ mod tests {
 
     #[test]
     fn search_parsing_tolerates_missing_nodes() {
-        assert!(parse_nodes(&json!({}), "/search/nodes").is_empty());
+        assert!(parse_search_nodes(&json!({}), "acme/widgets").is_empty());
+    }
+
+    #[test]
+    fn search_results_must_belong_to_the_current_repository() {
+        let data = json!({ "search": { "nodes": [
+            { "number": 12, "title": "Foreign", "headRefName": "main", "state": "OPEN", "repository": { "nameWithOwner": "other/widgets" } },
+            { "number": 12, "title": "Local", "headRefName": "feature/local", "state": "OPEN", "repository": { "nameWithOwner": "Acme/Widgets" } },
+            { "number": 13, "title": "Unknown", "headRefName": "unknown", "state": "OPEN" },
+        ] } });
+        assert_eq!(
+            parse_search_nodes(&data, "acme/widgets"),
+            vec![WorktreePullRequest {
+                number: 12,
+                title: "Local".into(),
+                branch: "feature/local".into(),
+            }]
+        );
     }
 
     #[test]
