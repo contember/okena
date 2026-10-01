@@ -35,6 +35,12 @@ pub(crate) fn inline_code_size(cx: &App) -> Pixels {
     ui_text(INLINE_CODE_PT, cx)
 }
 
+/// Code size for blocks this crate draws itself, one nested inside a list
+/// item, say. A top-level block is sized by the viewer's own file font size.
+pub(crate) fn code_block_size(cx: &App) -> Pixels {
+    ui_text(13.0, cx)
+}
+
 /// Table cells run at UI size, with their own leading — body leading would make
 /// a dense table too airy.
 pub(crate) fn table_line_height(cx: &App) -> Pixels {

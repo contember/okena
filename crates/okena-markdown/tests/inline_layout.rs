@@ -222,6 +222,82 @@ fn table_text_runs_follow_flat_text_offsets(cx: &mut TestAppContext) {
     assert_eq!(doc.plain_text, "Hé\tB🙂\none\ttwo\n");
 }
 
+/// A nested list renders inside the item that holds it, and the text runs of
+/// every block (nested ones included) still carry their global character
+/// offsets, which is what selection and copy are built on.
+#[gpui::test]
+fn nested_list_text_runs_follow_flat_text_offsets(cx: &mut TestAppContext) {
+    let doc = MarkdownDocument::parse("1. First\n\n2. Second:\n   - a\n   - b\n\n3. Third\n");
+    assert_eq!(doc.plain_text, "First\nSecond:\na\nb\nThird\n");
+    // One list, not a list plus the paragraphs that used to fall out of it.
+    assert_eq!(doc.node_count(), 1);
+
+    let captured: Rc<RefCell<Vec<MarkdownTextRun>>> = Default::default();
+    let captured_for_draw = captured.clone();
+    let vcx = cx.add_empty_window();
+
+    vcx.draw(
+        Point::default(),
+        Size {
+            width: AvailableSpace::Definite(px(500.0)),
+            height: AvailableSpace::MinContent,
+        },
+        |_window, cx| {
+            let Some(RenderedNode::Simple { div, text_runs, .. }) =
+                doc.render_node(0, &DARK_THEME, cx, None)
+            else {
+                return div();
+            };
+            captured_for_draw.borrow_mut().extend(text_runs);
+            div
+        },
+    );
+
+    let starts = captured
+        .borrow()
+        .iter()
+        .map(run_start_offset)
+        .collect::<Vec<_>>();
+    assert_eq!(starts, [0, 6, 14, 16, 18]);
+}
+
+/// A quote renders the blocks it holds, so a quoted list keeps its markers and
+/// the offsets behind selection stay in step with the flat text.
+#[gpui::test]
+fn blockquote_text_runs_follow_flat_text_offsets(cx: &mut TestAppContext) {
+    let doc = MarkdownDocument::parse("> Note:\n>\n> - one\n> - two\n");
+    assert_eq!(doc.plain_text, "Note:\none\ntwo\n");
+    assert_eq!(doc.node_count(), 1);
+
+    let captured: Rc<RefCell<Vec<MarkdownTextRun>>> = Default::default();
+    let captured_for_draw = captured.clone();
+    let vcx = cx.add_empty_window();
+
+    vcx.draw(
+        Point::default(),
+        Size {
+            width: AvailableSpace::Definite(px(500.0)),
+            height: AvailableSpace::MinContent,
+        },
+        |_window, cx| {
+            let Some(RenderedNode::Simple { div, text_runs, .. }) =
+                doc.render_node(0, &DARK_THEME, cx, None)
+            else {
+                return div();
+            };
+            captured_for_draw.borrow_mut().extend(text_runs);
+            div
+        },
+    );
+
+    let starts = captured
+        .borrow()
+        .iter()
+        .map(run_start_offset)
+        .collect::<Vec<_>>();
+    assert_eq!(starts, [0, 6, 10]);
+}
+
 #[gpui::test]
 fn frontmatter_text_runs_follow_flat_text_offsets(cx: &mut TestAppContext) {
     let doc = MarkdownDocument::parse("---\ntitle: Žluť\nitems:\n  - one\n---\n");

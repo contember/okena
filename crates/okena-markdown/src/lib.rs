@@ -119,12 +119,19 @@ impl MarkdownDocument {
     /// colour, exactly as before.
     pub fn highlight_code_blocks(&mut self, is_dark: bool) {
         for node in &mut self.nodes {
-            if let Node::CodeBlock {
+            Self::highlight_node(node, is_dark);
+        }
+    }
+
+    /// Walk into list items too: a fenced block inside a numbered step is a
+    /// block of the item, not a top-level node.
+    fn highlight_node(node: &mut Node, is_dark: bool) {
+        match node {
+            Node::CodeBlock {
                 language,
                 code,
                 highlighted,
-            } = node
-            {
+            } => {
                 *highlighted = okena_highlight::syntax::highlight_code_block(
                     code,
                     language.as_deref(),
@@ -134,6 +141,14 @@ impl MarkdownDocument {
                 .map(|line| line.spans)
                 .collect();
             }
+            Node::List { items, .. } => {
+                for item in items {
+                    for block in &mut item.blocks {
+                        Self::highlight_node(block, is_dark);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

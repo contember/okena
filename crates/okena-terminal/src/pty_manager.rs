@@ -2661,7 +2661,8 @@ mod tests {
                 program: "/bin/sh".to_string(),
                 args: vec![
                     "-c".to_string(),
-                    "sleep 30 & echo $! > \"$1\"; wait".to_string(),
+                    // Publish only the complete PID; redirection creates an empty file first.
+                    "sleep 30 & echo $! > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; wait".to_string(),
                     "okena-test".to_string(),
                     child_pid_file.to_string_lossy().into_owned(),
                 ],
