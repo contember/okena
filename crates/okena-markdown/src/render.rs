@@ -16,10 +16,6 @@ use super::style::{
 use super::types::{FmValue, Frontmatter, Inline, ListItem, Node, char_len};
 use super::{MarkdownDocument, MarkdownTextRun, RenderedNode, RenderedTextUnit};
 
-/// Height of one code line. Code blocks are laid out line by line (each line is
-/// its own selectable element), so this stands in for `line_height`.
-const CODE_LINE_HEIGHT: Pixels = px(20.0);
-
 /// One syntax-highlighted code line, drawn as a single text run so indentation
 /// and wide glyphs measure the same as the source.
 ///
@@ -298,7 +294,7 @@ impl MarkdownDocument {
                 line.to_string(),
                 line_offset,
             )];
-            let line_div = div().h(CODE_LINE_HEIGHT).child(styled);
+            let line_div = div().child(styled);
 
             lines.push(RenderedTextUnit {
                 div: line_div,
