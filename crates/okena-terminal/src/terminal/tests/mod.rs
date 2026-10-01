@@ -1,3 +1,4 @@
+mod composition;
 mod focus_report;
 mod helpers;
 mod input_repaint;

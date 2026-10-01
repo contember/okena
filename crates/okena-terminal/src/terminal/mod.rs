@@ -13,6 +13,7 @@ use std::time::Instant;
 mod ansi_snapshot;
 mod app_version;
 mod child_processes;
+mod composition;
 mod event_listener;
 mod idle;
 mod io;
@@ -142,6 +143,9 @@ pub struct Terminal {
     /// Mouse/keyboard selection state. GPUI thread only (selection start,
     /// update, finish, cancel — all driven by UI events).
     pub(super) selection_state: Mutex<SelectionState>,
+
+    /// IME text still being composed; see `composition.rs`. GPUI thread only.
+    pub(super) marked_text: Mutex<Option<String>>,
 
     /// Cumulative scroll delta in the scrollback buffer. GPUI thread only
     /// (scroll, scroll_page). The `Mutex` is for interior mutability; no
@@ -505,6 +509,7 @@ impl Terminal {
             resize_state,
             transport,
             selection_state: Mutex::new(SelectionState::default()),
+            marked_text: Mutex::new(None),
             scroll_offset: Mutex::new(0),
             title,
             has_bell,
