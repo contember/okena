@@ -59,17 +59,86 @@ shown verbatim.
 - **Remote** — `GET /v1/state` includes `terminal_agent_status` per project, and
   a status change bumps `state_version` so subscribed clients re-fetch.
 
-Agent status is **runtime-only** — it is never written to `workspace.json` and
-does not survive a restart. (The *agent session* below is the part that is
-persisted.)
+The current tab/sidebar agent status is **runtime-only** — it is not restored
+from `workspace.json`. Conversation identities and the separate shared attention
+records below are persisted.
 
 ### Stale status
 
 A status is removed only by an explicit `st=clear` or by the pane going away.
-Nothing ties it to the pane's process, so an agent that dies without sending
-`clear` — a crash, `kill -9`, an `exit` that skips its `SessionEnd` hook —
-leaves the tab tinted and the pane listed in AGENTS indefinitely. Closing the
-pane, or having an agent report again in it, clears it.
+Nothing independently verifies the agent's process liveness. If an agent crashes
+without reporting and its shell survives, the last status remains until another
+report, pane exit or daemon restart. This also limits the Inbox: **input-needed
+means last reported blocked**, not proof that the agent is still running. Okena
+does not add screen scraping or an implicit process detector.
+
+## Shared attention inbox
+
+**Inbox** in the desktop navigation lists input-needed observations followed by
+unread completions, oldest first within each group with stable tie-breakers. It
+combines compatible connected daemons and their retained last-known records.
+Agents do not need to belong to a [mission](missions.md).
+
+- **Open terminal** reveals the real project-owned terminal. For a completion,
+  acknowledgment waits for that terminal to be visibly painted and focused in
+  the active target window, including a detached window. A failed reveal does
+  not mark it read. Merely opening Inbox does not acknowledge its contents.
+- **Mark read** explicitly acknowledges a completion, including one without an
+  available terminal. Read state is shared by all clients of the owning daemon.
+- Opening a live input-needed item does not answer it. There are no inferred
+  Allow/Deny controls or synthetic responses.
+- Unavailable observations say **Live status unconfirmed / terminal unavailable**.
+  **Dismiss unavailable observation** removes such an input observation from the
+  inbox; dismissal is not an answer.
+- Disconnected records are dimmed and cannot be mutated. An old daemon without
+  `work_overview` support has no client-local acknowledgment fallback.
+
+### Episodes and lifecycle reports
+
+The daemon maintains attention separately from the last-status indicator. Each
+episode has an opaque ID, revision, source attachment/generation, optional
+conversation identity, kind, bounded summary, daemon timestamps, availability
+and read state.
+
+| Report/event | Attention effect |
+|---|---|
+| `blocked` | Establishes input-needed attention. Repeated identical reports coalesce; a changed summary revises the episode. |
+| `working` | Ends the attachment's current input-needed episode. |
+| `done` | Ends input-needed attention and records a completion of this turn, not completion of a mission. |
+| `idle` | Ends input-needed attention without creating a completion. |
+| `clear`, pane exit, identity replacement | Makes the previous source unavailable; does not claim its question was answered or erase its unread completion. |
+| Daemon restart | Retains unread completions/read state; makes pending input observations unconfirmed until fresh reports. |
+
+A fresh lifecycle cycle creates a new episode even if its text is identical.
+Acknowledgment targets the observed **episode ID and revision**. Repeating it is
+harmless; an old acknowledgment cannot consume a newer completion or changed
+question. Live input-needed episodes cannot be acknowledged away.
+
+This is a bounded current-work model, not an append-only turn transcript. It
+retains at most the latest completion per source plus current input-needed
+observations. Known `(agent, session_id)` identities supersede completions across
+resumed attachments; input-needed observations remain attachment-local. Before
+identity is known, the source is attachment/generation-scoped. Resolved/read
+retired anonymous sources are pruned, and at most 128 unavailable anonymous
+sources are retained. There is no global cap on known conversation identities.
+
+### Ordered owner capture
+
+The PTY owner captures ordered lifecycle transitions with the session identity
+valid at each transition, including multiple transitions within one output
+batch. The daemon checks PTY generation, drains per processed event and ingests
+attention before hook/project cleanup. A client parsing mirrored bytes does not
+produce authoritative attention.
+
+The owner buffer holds at most 128 attention events, coalesces adjacent identical
+events and drops the oldest on overflow while retaining newer state. Loss is
+counted and invalidates previous live assumptions; `work_overview.lost_transitions`
+also counts anonymous retention evictions. The desktop reports unavailable status
+updates instead of presenting this as a complete history.
+
+Snapshots restore authoritative episodes on reconnect without creating new ones.
+The inbox adds no second desktop-notification producer. Existing live OSC
+notifications, terminal bells and pane unread flags remain separate signals.
 
 ## The data model
 
@@ -104,9 +173,9 @@ ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base
   resuming the session. All other keys are free-form.
 
   The reserved keys are read from the raw label map and then **removed** from
-  it, so they never reach `labels` on the wire. They are also the only part of
-  an agent status that gets written to disk, so they are validated rather than
-  trusted: `session_id` must be a canonical UUID, `agent` must be ≤64 chars of
+  it, so they never reach `labels` on the wire. They are persisted as session
+  identity and validated rather than trusted: `session_id` must be a canonical
+  UUID, `agent` must be ≤64 chars of
   `[A-Za-z0-9._-]`, and `transcript_path` must be absolute and free of `..` and
   ≤4096 bytes. Anything else is dropped — a bad `transcript_path` alone doesn't
   discard the session, a bad `agent` or `session_id` does.
@@ -199,9 +268,9 @@ restart:
 - **Persisted** in `workspace.json`: `project.agent_sessions` holds the current
   terminal attachment; `agent_session_history` retains conversation identities
   independently of terminals and projects, deduplicated by `(agent, session_id)`.
-  Partial reports do not erase a known transcript path. The daemon drains all
-  captured identities, including multiple sessions in one PTY batch and sessions
-  reported by hook or service terminals outside the layout.
+  Partial reports do not erase a known transcript path. The daemon drains the
+  bounded owner capture queue, including multiple sessions in one PTY batch and
+  sessions reported by hook or service terminals outside the layout.
 - **Retained on the pane** on load. Without a session backend a restore clears
   terminal IDs. Before dropping them, `validate_workspace_data` copies each
   surviving session into its terminal leaf's `pending_agent_resume` field. This
@@ -251,9 +320,11 @@ Conversation history survives these operations and project deletion. Loading an
 older workspace copies valid attachments into history before clearing terminal
 IDs. Invalid history records are discarded on deserialization.
 
-History stores identities and transcript paths, not transcript contents. It has
-no history browser, automatic expiry, or remote snapshot field yet. Projects and
-terminals remain the primary model; no Work grouping is required.
+History stores identities and transcript paths, not transcript contents, and has
+no automatic expiry or general transcript browser. The mission board can show
+member conversations without live terminals. The remote `work_overview` exposes
+conversation identities and current attachments, not transcript paths or the
+entire history registry. Projects still own terminals; missions are optional.
 
 ## Claude Code integration
 

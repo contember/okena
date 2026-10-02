@@ -4,7 +4,21 @@
 
 **Theme.** A user can find an agent needing input, inspect its real terminal, and follow one piece of work through implementation, review and multiple repository PRs. Missions are optional. The inbox works without them.
 
-This is an implementation plan, not a record of shipped behavior. Work units below are unstarted. The user selected desktop + daemon for the first version and shared read acknowledgment across clients. The detailed contracts below are the proposed implementation baseline to review before WU1.
+Implementation, independent review, automated gates and Linux binary builds are complete. Manual desktop acceptance remains pending, so this sprint stays active. The user approved desktop + daemon scope, shared read acknowledgment, subagent implementation and local commits. Ownership is recorded in [ADR-0003](../decisions/0003-missions-and-shared-attention.md), and implemented behavior in the [mission reference](../reference/missions.md).
+
+## Delivered commits and local trial
+
+- `6473e7bf` — authoritative results from the existing remote action queue.
+- `aa7cda58` — mission/attention model, daemon integration, desktop workflow and regression coverage.
+- `eabc3735`, `01e6b83c` — implementation plan and accepted ownership contracts.
+
+From the repository root, launch the verified debug build in a new profile:
+
+```bash
+./target/debug/okena --new-profile "Missions trial"
+```
+
+Use **Inbox** and **Missions** above the project grid. Existing project/worktree context menus and agent rows provide mission entry points. The full manual acceptance scenario below is the remaining checkpoint before archiving this sprint.
 
 ## Sources and decision
 
@@ -56,6 +70,7 @@ Baseline: `9234dfb885efbbf587507f1e3ae4da4a4ecbcfd5`. Recheck these seams if HEA
 - Store durable conversation references using the existing validated harness/session identity. Do not copy transcript contents or expose transcript paths merely to render a mission.
 - Keep repository participation separate from worktree membership. Adding a main repository does **not** capture every unrelated terminal in it. A linked worktree supplies default membership to work started there.
 - Allow one primary mission per worktree or conversation in v1. A repository may participate in many missions. Conflicting assignments require an explicit move; never silently reassign existing work.
+- Explicitly detaching an individual terminal or conversation overrides its worktree's default membership. Persist this exclusion across reports and restore; a later explicit attachment or move can clear it. A new split sibling does not inherit the detached leaf's exception.
 - For an explicitly attached terminal without a conversation ID, keep an optional mission binding on its layout leaf, not a durable reference to a replaceable PTY ID. It follows moves/restore; a newly split sibling starts without copying an explicit binding. New terminals inside a linked worktree derive membership from that worktree.
 - When a bound terminal reports a conversation identity, record that conversation in the mission. A resumed conversation retains its existing assignment. Do not attach a session that is already assigned elsewhere without an explicit move.
 - Worktree creation from a mission carries the mission ID through the existing creation action. Validate ownership up front; finalize membership through the existing registration/rollback path. Do not enforce a branch-name prefix.
@@ -85,6 +100,10 @@ Baseline: `9234dfb885efbbf587507f1e3ae4da4a4ecbcfd5`. Recheck these seams if HEA
 - Disconnecting one daemon dims its records and disables mutations against them without affecting other daemons. Selection and acknowledgment always retain the source connection; identical raw IDs on two daemons cannot collide.
 
 ## Work units
+
+WU1–WU6 implementation is committed. WU7 automated verification and documentation are complete; manual acceptance remains pending. The final automated run passed **2,551 tests with zero failures**; 11 pre-existing opt-in tests/documentation examples remain ignored. Both actual-render coordinator tests passed, including hidden/minimized/inactive-tab and detached-window paths with connection-isolated HTTP acknowledgments. Full workspace Clippy and changed-file formatting pass.
+
+Manual acceptance with real agent harnesses and OS windows has not been performed. Live GitHub polling, macOS and Windows were not exercised; PR recovery uses the real poller and scheduler against controlled HTTP responses. Full web/mobile feature UI remains out of scope; their existing snapshot compatibility is covered by tests.
 
 ### WU1 — Attention reducer and loss-aware transition capture (effort L)
 
@@ -186,9 +205,22 @@ Implement sequentially by default. Shared API, snapshot, workspace and action fi
 
 Keep additions backward-readable and the existing Projects path usable. Disabling the new UI must not discard mission or read data. Older binaries can ignore new fields but may drop them on save; do not promise downgrade round-trip preservation. Use the existing config checkpoint/recovery behavior and document this before release.
 
-Review the proposed contracts, then begin with WU1. Do not start a broad UI rewrite or cherry-pick the fork as a prerequisite. At each checkpoint, report verified behavior and remaining work before proceeding.
+Next: run the manual acceptance scenario with reporting agents in real OS windows, record the result, and archive this sprint after acceptance. The implementation and automated gates need not be repeated unless new changes or failures justify it.
 
 ## Run log
 
 - 2026-10-02 — Planning only. User selected desktop + daemon scope and daemon-shared read acknowledgment. Baseline and integration seams inspected; no implementation or test run yet.
 - 2026-10-02 — User approved full subagent implementation, disjoint single-checkout waves and local commits. Plan committed as `eabc3735`. Independent contract review clarified source replacement, conversation-level completion supersession and the surviving-shell crash limitation. Web assets built successfully with `cpu-lease run -n 2 -- bun run build`.
+- 2026-10-02 — Git baseline verified: `cpu-lease run -n 2 -- cargo test -p okena-git --lib`, 251 passed. Runtime capture and daemon integration implemented, pending independent review and gates; PR observation work requires exposing the existing repository resolver and preserving failed-versus-empty fetch outcomes. Desktop and client compatibility implementation continue in disjoint territories.
+- 2026-10-02 — User approved persisted individual-member exclusions from worktree default membership. Foundation implementation extended to cover detach, later explicit attach and restore.
+- 2026-10-02 — Independent compatibility review found no defects in the scoped route/DTO/mobile fixture changes; compilation remains pending. Runtime review identified first-identity invalidation; attention review identified project-move routing, simultaneous attachments sharing a conversation, and imported episode invariants. Corrections and regression tests are assigned to their owning implementers. These units are not yet accepted or committed.
+- 2026-10-02 — Leader ran `cpu-lease run -n 2 -- cargo test -p okena-core --lib attention`: 6 passed. This verifies the initial reducer scenarios, not the newly requested review regressions; a post-fix gate is still required.
+- 2026-10-02 — Leader compatibility gate: CLI 14 passed, mobile core 20 passed, remote server 123 passed / 1 failed on WebSocket revocation frame order. The new compatibility tests passed; the failing existing test is being compared against an isolated pre-implementation checkout. Transport tests and daemon build were requeued after a harness restart. User explicitly chose to retain CPU leases despite queue delays.
+- 2026-10-02 — Independent re-review confirms all three attention corrections by inspection. Mission review found leaf-exclusion precedence and move-time conversation promotion; both corrected with regressions. A follow-up detach-idempotence regression was corrected after explicit user approval of a second fix round. Execution gates remain pending.
+- 2026-10-02 — Desktop implementation reached review. Attention presentation review identified minimized-pane reveal as incomplete; correction and production-path coverage assigned. Mission-linked worktree creation is being connected to the existing dialog. An isolated two-client daemon/restart probe is prepared under `/tmp/opencode/okena-missions-smoke`, not yet run.
+- 2026-10-02 — Leader built the standalone daemon successfully with `cpu-lease run -n 2 -- cargo build -p okena-daemon`. The isolated process probe passed all scenarios against that binary: real PTY OSC capture, two authenticated REST clients, two-repository mission attachment, shared acknowledgment, live-block preservation, stale episode/revision rejection, graceful restart persistence and explicit unavailable-question dismissal. Evidence: `/tmp/opencode/okena-missions-smoke/run-511834d659a3`. This does not exercise desktop presentation, external agent harnesses, PR polling or worktree creation.
+- 2026-10-02 — First full workspace run: 2,545 passing tests, four primary failures (a nested subprocess repeats one failure in the output). Two captured the pre-fix PR freshness/retry bugs; one exposed an old test's hard-coded project ID after intentional import rekeying; one was the main-window reveal integration test. Corrections are covered by targeted runs before the final workspace rerun.
+- 2026-10-02 — Leader post-fix `cargo clippy --workspace --all-targets -- -D warnings` passed under a four-core lease. Formatting passed for all 77 changed Rust files. Daemon/client audit found no client-side authoritative mutations; its field-name warnings are client-only `project_width_scale`, `selected_mission` and `work_navigation`. The transport suite with `client,blocking-http` features passed all 56 tests.
+- 2026-10-02 — Leader final `OKENA_REQUIRE_SHELLS=1 OKENA_REQUIRE_TUI=1 cargo test --workspace --no-fail-fast` passed under a four-core lease: **2,551 passed, 0 failed, 11 pre-existing ignored** (one external PDF probe and ten documentation examples). All four previous failures pass. The main-window test correction avoids nesting a window update inside a fixture that already holds that window; production acknowledgment guards were retained. Independent reviews accepted the editor/worktree, reveal, queue and PR corrections.
+- 2026-10-02 — Baseline and current-tree token-revocation probes each passed. The earlier intermittent frame-order failure was not experimentally reproduced on baseline, so its test and production path were left unchanged. A final release-profile compilation check and debug desktop/daemon build are running.
+- 2026-10-02 — Final `cargo check --release` and `cargo build -p okena -p okena-daemon` passed under a four-core lease. Both debug binaries execute `--version` successfully. Implementation committed as `6473e7bf` and `aa7cda58`; no push. Manual desktop/real-harness acceptance remains the next checkpoint.

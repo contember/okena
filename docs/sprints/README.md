@@ -20,4 +20,4 @@ Lifecycle (full detail in [`../CLAUDE.md`](../CLAUDE.md)):
 ## Active
 
 <!-- one line per active sprint; empty between sprints -->
-- [Missions and shared attention](sprint-2026-10-02-missions-and-attention.md) — desktop inbox, durable mission membership and board; implementation plan, work not started.
+- [Missions and shared attention](sprint-2026-10-02-missions-and-attention.md) — desktop inbox, durable mission membership and board; implementation and automated gates complete, manual acceptance pending.

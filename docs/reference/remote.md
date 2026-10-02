@@ -118,11 +118,124 @@ Layout nodes are recursive:
 | `split` | `direction` (horizontal/vertical), `sizes`, `children` |
 | `tabs` | `children`, `active_tab` |
 
+#### Work overview capability
+
+`StateResponse.work_overview` is an optional, additive field. **Presence is the
+capability signal**, including an empty object with empty collections; absence or
+`null` means that the daemon does not advertise missions/shared attention.
+Clients must not substitute local mission or acknowledgment writes for this
+missing capability. Existing `terminal_agent_status` lifecycle meanings are
+unchanged.
+
+A supported daemon returns this shape (empty example):
+
+```json
+{
+  "work_overview": {
+    "missions": [],
+    "attention": [],
+    "lost_transitions": 0,
+    "conversations": [],
+    "terminal_bindings": []
+  }
+}
+```
+
+| Field | Contents |
+|---|---|
+| `missions` | Ordered mission records: ID, title, goal, home project, creation time, lifecycle (`active`, `done`, `archived`), repository/worktree IDs, conversation identities and retained PR observations. |
+| `attention` | Unread episodes, input-needed before completions, then oldest first. Each includes `id`, `revision`, `source`, `kind` (`input_needed` or `completion`), `summary`, `created_at`, `updated_at`, `available`, and `read`. |
+| `lost_transitions` | Cumulative capture losses and anonymous-source retention evictions. This overview is not a complete event history. |
+| `conversations` | Current `{project_id, terminal_id, conversation}` attachments, not the entire conversation-history registry. |
+| `terminal_bindings` | Effective `{project_id, terminal_id, mission_id}` membership, including worktree defaults and explicit exclusions already resolved by the daemon. |
+
+A conversation is `{agent, session_id}`. An attention source also has
+`project_id`, `terminal_id`, `attachment_id`, `generation` and optional
+`conversation`. Work-overview DTOs do not include local transcript paths or
+transcript contents. Reserved session labels are also stripped from
+`terminal_agent_status.labels`; raw PTY output can still contain the original OSC
+bytes. This projection is not a redaction of the terminal stream.
+
+Mission PR records use `{host, repository, number}` identity and contain `info`,
+optional `ci`, `observed_at`, `available` and `source_project_ids`. Unavailable
+observations retain last-known values; they are not evidence of a closed PR or
+healthy CI.
+
+Mission/attention mutations use the normal state-change notification and refetch
+path. Reconnect rehydrates episodes rather than synthesizing new completions.
+See [Missions](missions.md) and [shared attention](agent-status.md#shared-attention-inbox)
+for lifecycle, retention and restart semantics.
+
+**Connection separation:** all IDs in a daemon response are raw IDs scoped to
+that daemon. A multi-daemon client must retain `(connection_id, raw_id)` for
+missions, projects, terminals and episodes, including saved selection and delayed
+acknowledgments. Desktop terminal keys use `remote:<connection>:<raw-id>` locally;
+these prefixed keys are not daemon-persisted identities. Send actions to the
+owning connection with its raw IDs. Equal IDs on different daemons do not imply
+shared membership. A disconnected owner's retained overview is read-only and
+unavailable; another connected daemon cannot acknowledge it.
+
 ### `POST /v1/actions`
 
 Requires `Authorization: Bearer <token>`.
 
 Tagged enum body — the `action` field selects the operation.
+
+#### Mission and attention actions
+
+Use these only when the owning daemon advertises `work_overview`.
+
+```json
+{
+  "action": "mission",
+  "command": {
+    "operation": "create",
+    "title": "Review the parser change",
+    "goal": null,
+    "home_project_id": null,
+    "member": null
+  }
+}
+```
+
+The nested `command.operation` selects the mutation:
+
+| Operation | Fields |
+|---|---|
+| `create` | `title`, optional `goal`, optional `home_project_id`, optional initial `member` |
+| `edit` | `mission_id`, `title`, optional `goal`, optional `home_project_id` (replaces these details; omitted optional values become `null`) |
+| `set_lifecycle` | `mission_id`, `lifecycle`: `active`, `done`, or `archived` |
+| `attach`, `detach`, `move` | `mission_id`, `member` |
+
+Members are tagged by `kind`: `repository` or `worktree` carries `project_id`;
+`terminal` carries `project_id` and `terminal_id`; `conversation` carries
+`conversation: {agent, session_id}`. References must exist on the owning daemon;
+conversation attachment requires a known validated history identity. Conflicting
+primary membership requires `move`, not `attach`. Successful mission actions
+return `mission_id` in their result data.
+
+`create_worktree` has an optional `mission_id` alongside `project_id`, `branch`
+and `create_branch`. Missing or `null` preserves ordinary worktree creation.
+When supplied, the daemon validates ownership before creation and attaches the
+registered worktree to that mission.
+
+To mark a completion read:
+
+```json
+{
+  "action": "acknowledge_attention",
+  "episode_id": "observed-episode-uuid",
+  "revision": 1,
+  "dismiss": false
+}
+```
+
+Use the exact ID/revision from the observed snapshot. The result data contains
+`changed`: `false` includes duplicate, stale and ineligible acknowledgments.
+`dismiss` defaults to `false`. Setting it to `true` also permits dismissal of an
+unavailable input-needed episode; it cannot clear a live input request. Read state
+is daemon-shared and persisted. A new revision or replacement episode requires a
+new acknowledgment. A plain `focus_terminal` request is not an acknowledgment.
 
 #### `send_text`
 
@@ -239,12 +352,15 @@ The server tries ports 19100-19200 in order, falling back to an OS-assigned port
 ## Architecture
 
 ```
-[Tokio thread]                          [GPUI main thread]
-   axum handler                            cx.spawn() loop
+[HTTP/WebSocket server]                 [Daemon command loop]
+   axum handler                            sequential processor
       |                                        |
   async_channel::Sender ──────────►  async_channel::Receiver
       |                                        |
   tokio::sync::oneshot::Receiver ◄── oneshot::Sender (reply)
 ```
 
-All terminal and workspace operations go through a single bridge channel. The GPUI-side processor handles them sequentially, ensuring thread safety without locks on GPUI entities.
+Terminal and workspace mutations go through the bridge to the daemon command
+loop. The daemon owns authoritative workspace state, PTYs, missions and shared
+attention; desktop GPUI views consume snapshots and submit actions. See
+[ADR-0001](../decisions/0001-headless-two-process-daemon.md).
