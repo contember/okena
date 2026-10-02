@@ -23,6 +23,13 @@ struct QueuedAction {
     config: RemoteConnectionConfig,
     token: String,
     action: ActionRequest,
+    result_tx: Option<async_channel::Sender<Result<serde_json::Value, String>>>,
+}
+
+impl QueuedAction {
+    fn can_coalesce_settings(&self) -> bool {
+        self.result_tx.is_none() && matches!(self.action, ActionRequest::SetSettings { .. })
+    }
 }
 
 struct PasteUpload {
@@ -50,7 +57,11 @@ impl ActionQueues {
         }
     }
 
-    fn enqueue(&self, connection_id: &str, action: QueuedAction) {
+    fn enqueue(
+        &self,
+        connection_id: &str,
+        action: QueuedAction,
+    ) -> async_channel::Sender<QueuedAction> {
         let sender = self
             .senders
             .lock()
@@ -69,6 +80,7 @@ impl ActionQueues {
         if sender.try_send(action).is_err() {
             log::error!("action queue unexpectedly closed for {connection_id}");
         }
+        sender
     }
 }
 
@@ -86,9 +98,9 @@ async fn run_action_queue(
                 Err(_) => break,
             },
         };
-        if matches!(&action.action, ActionRequest::SetSettings { .. }) {
+        if action.can_coalesce_settings() {
             while let Ok(next) = receiver.try_recv() {
-                if matches!(&next.action, ActionRequest::SetSettings { .. }) {
+                if next.can_coalesce_settings() {
                     action = coalesce_settings_actions(action, next);
                 } else {
                     pending = Some(next);
@@ -107,6 +119,7 @@ fn coalesce_settings_actions(older: QueuedAction, newer: QueuedAction) -> Queued
         config,
         token,
         action,
+        result_tx,
     } = newer;
     let action = match (older.action, action) {
         (
@@ -122,6 +135,7 @@ fn coalesce_settings_actions(older: QueuedAction, newer: QueuedAction) -> Queued
         config,
         token,
         action,
+        result_tx,
     }
 }
 
@@ -148,26 +162,33 @@ async fn send_queued_action(
         config,
         token,
         action,
+        result_tx,
     } = queued;
     let name = config.name.clone();
     let result = okena_transport::remote_action::post_action_async(&config, &token, action).await;
 
-    let message = match result {
+    let message = match &result {
         Ok(_) => {
             log::debug!("send_action: success for {name}");
-            return;
+            None
         }
         Err(error) => {
             log::error!("send_action: request error for {name}: {error}");
-            format!("Action request failed: {error}")
+            Some(format!("Action request failed: {error}"))
         }
     };
-    let _ = event_tx
-        .send(ConnectionEvent::ServerWarning {
-            connection_id: connection_id.to_string(),
-            message,
-        })
-        .await;
+    if let Some(result_tx) = result_tx {
+        let _ = result_tx
+            .try_send(result.map(|body| body.unwrap_or_else(|| serde_json::json!({ "ok": true }))));
+    }
+    if let Some(message) = message {
+        let _ = event_tx
+            .send(ConnectionEvent::ServerWarning {
+                connection_id: connection_id.to_string(),
+                message,
+            })
+            .await;
+    }
 }
 
 /// Lightweight events emitted by [`RemoteConnectionManager`] that must NOT go
@@ -609,8 +630,55 @@ impl RemoteConnectionManager {
                 config,
                 token,
                 action,
+                result_tx: None,
             },
         );
+    }
+
+    /// Send through the same FIFO as `send_action` and return the API response.
+    /// Void responses use the canonical `{"ok": true}` envelope.
+    pub fn send_action_with_result(
+        &self,
+        connection_id: &str,
+        action: ActionRequest,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<serde_json::Value, String>> {
+        let Some(connection) = self.connections.get(connection_id) else {
+            return Task::ready(Err(format!("Connection {connection_id} not found")));
+        };
+        let config = connection.config().clone();
+        let Some(token) = config.effective_auth_token() else {
+            return Task::ready(Err("No auth token for remote connection".to_string()));
+        };
+        let (result_tx, result_rx) = async_channel::bounded(1);
+        let queue = self.action_queues.enqueue(
+            connection_id,
+            QueuedAction {
+                config,
+                token,
+                action,
+                result_tx: Some(result_tx),
+            },
+        );
+        cx.background_executor().spawn(async move {
+            let mut result = std::pin::pin!(result_rx.recv());
+            let mut closed = std::pin::pin!(queue.closed());
+            // A closed queue can retain buffered items while its sender is cached.
+            std::future::poll_fn(|cx| {
+                use std::future::Future as _;
+                use std::task::Poll;
+                match result.as_mut().poll(cx) {
+                    Poll::Ready(Ok(result)) => return Poll::Ready(result),
+                    Poll::Ready(Err(_)) => {}
+                    Poll::Pending if closed.as_mut().poll(cx).is_pending() => return Poll::Pending,
+                    Poll::Pending => {}
+                }
+                Poll::Ready(Err(
+                    "Action queue closed before returning a result".to_string()
+                ))
+            })
+            .await
+        })
     }
 
     /// Upload a pasted clipboard image to the remote server, which writes it to
@@ -1104,8 +1172,19 @@ mod tests {
     }
 
     fn respond_ok(stream: &mut TcpStream) {
+        respond_json(stream, "200 OK", json!({ "ok": true }));
+    }
+
+    fn respond_json(stream: &mut TcpStream, status: &str, body: serde_json::Value) {
+        let body = body.to_string();
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
             .unwrap();
     }
 
@@ -1166,7 +1245,7 @@ mod tests {
 
             let mut second = accept_until(&listener, deadline);
             assert!(read_request_body(&mut second).contains("second"));
-            respond_ok(&mut second);
+            respond_json(&mut second, "200 OK", json!({ "mission_id": "created" }));
         });
 
         let runtime = Arc::new(
@@ -1176,15 +1255,17 @@ mod tests {
                 .unwrap(),
         );
         let (event_tx, _event_rx) = async_channel::unbounded();
-        let queues = ActionQueues::new(runtime, event_tx);
+        let queues = ActionQueues::new(runtime.clone(), event_tx);
         let mut config = make_config("127.0.0.1", port);
         config.name = "ordered-test".to_string();
+        let (result_tx, result_rx) = async_channel::bounded(1);
         for terminal_id in ["first", "second"] {
             queues.enqueue(
                 "connection",
                 QueuedAction {
                     config: config.clone(),
                     token: "token".to_string(),
+                    result_tx: (terminal_id == "second").then(|| result_tx.clone()),
                     action: ActionRequest::SendText {
                         terminal_id: terminal_id.to_string(),
                         text: "input".to_string(),
@@ -1192,8 +1273,162 @@ mod tests {
                 },
             );
         }
+        drop(result_tx);
+
+        runtime.block_on(async {
+            let result = tokio::time::timeout(Duration::from_secs(3), result_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.unwrap(), json!({ "mission_id": "created" }));
+            assert!(result_rx.recv().await.is_err(), "result must be sent once");
+        });
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn settings_results_are_not_coalesced_and_rejections_still_warn() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            for font_size in [18, 19, 20, 21, 22] {
+                let mut request = accept_until(&listener, deadline);
+                let body: serde_json::Value =
+                    serde_json::from_str(&read_request_body(&mut request)).unwrap();
+                assert_eq!(body["patch"]["font_size"], font_size);
+                if font_size == 19 {
+                    respond_json(
+                        &mut request,
+                        "400 Bad Request",
+                        json!({ "error": "rejected" }),
+                    );
+                } else {
+                    respond_ok(&mut request);
+                }
+            }
+        });
+        let (action_tx, action_rx) = async_channel::unbounded();
+        let mut results = Vec::new();
+        for font_size in [18, 19, 20, 21, 22] {
+            let mut action = settings_action(json!({ "font_size": font_size }), port);
+            if font_size == 19 || font_size == 20 {
+                let (tx, rx) = async_channel::bounded(1);
+                action.result_tx = Some(tx);
+                results.push(rx);
+            } else if font_size == 22 {
+                let (tx, rx) = async_channel::bounded(1);
+                action.result_tx = Some(tx);
+                drop(rx);
+            }
+            action_tx.try_send(action).unwrap();
+        }
+        drop(action_tx);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (event_tx, event_rx) = async_channel::unbounded();
+        runtime.block_on(run_action_queue(
+            "connection".to_string(),
+            action_rx,
+            event_tx,
+        ));
+        assert!(
+            results[0]
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("rejected")
+        );
+        assert_eq!(
+            results[1].try_recv().unwrap().unwrap(),
+            json!({ "ok": true })
+        );
+        for result in results {
+            assert!(result.is_closed());
+            assert!(result.try_recv().is_err());
+        }
+        match event_rx.try_recv().unwrap() {
+            okena_transport::client::ConnectionEvent::ServerWarning { message, .. } => {
+                assert!(message.contains("rejected"));
+            }
+            _ => panic!("expected ServerWarning"),
+        }
+        server.join().unwrap();
+    }
+
+    #[gpui::test]
+    fn action_result_reports_missing_connection_token_and_closed_queue(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let manager = cx.new(|cx| RemoteConnectionManager::new(make_terminals(), cx));
+        let missing = manager.update(cx, |rm, cx| {
+            rm.send_action_with_result(
+                "missing",
+                ActionRequest::SetSettings { patch: json!({}) },
+                cx,
+            )
+        });
+        assert!(
+            cx.foreground_executor
+                .block_test(missing)
+                .unwrap_err()
+                .contains("not found")
+        );
+
+        let mut config = make_config("127.0.0.1", 1);
+        let id = config.id.clone();
+        manager.update(cx, |rm, _cx| {
+            let connection = crate::connection::RemoteConnection::new(
+                config.clone(),
+                rm.runtime.clone(),
+                rm.terminals.clone(),
+                rm.event_tx.clone(),
+                rm.activity_tx.clone(),
+            );
+            rm.connections.insert(id.clone(), connection);
+        });
+        let no_token = manager.update(cx, |rm, cx| {
+            rm.send_action_with_result(&id, ActionRequest::SetSettings { patch: json!({}) }, cx)
+        });
+        assert!(
+            cx.foreground_executor
+                .block_test(no_token)
+                .unwrap_err()
+                .contains("No auth token")
+        );
+
+        config.saved_token = Some("token".to_string());
+        let closed = manager.update(cx, |rm, cx| {
+            *rm.connections.get_mut(&id).unwrap().config_mut() = config;
+            let (tx, rx) = async_channel::unbounded();
+            drop(rx);
+            rm.action_queues.senders.lock().insert(id.clone(), tx);
+            rm.send_action_with_result(&id, ActionRequest::SetSettings { patch: json!({}) }, cx)
+        });
+        assert!(
+            cx.foreground_executor
+                .block_test(closed)
+                .unwrap_err()
+                .contains("queue closed")
+        );
+
+        let (tx, rx) = async_channel::unbounded();
+        let interrupted = manager.update(cx, |rm, cx| {
+            rm.action_queues.senders.lock().insert(id.clone(), tx);
+            rm.send_action_with_result(&id, ActionRequest::SetSettings { patch: json!({}) }, cx)
+        });
+        assert_eq!(rx.len(), 1);
+        drop(rx);
+        assert!(
+            cx.foreground_executor
+                .block_test(interrupted)
+                .unwrap_err()
+                .contains("queue closed")
+        );
     }
 
     fn settings_action(patch: serde_json::Value, port: u16) -> QueuedAction {
@@ -1201,6 +1436,7 @@ mod tests {
             config: make_config("127.0.0.1", port),
             token: "token".to_string(),
             action: ActionRequest::SetSettings { patch },
+            result_tx: None,
         }
     }
 
