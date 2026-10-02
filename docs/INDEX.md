@@ -26,11 +26,10 @@ Architecture and build rules live next to the code, not here:
 ## Active sprints
 
 <!-- list the sprint files currently in sprints/ ; empty between sprints -->
-- _none active_
+- [Missions and shared attention](sprints/sprint-2026-10-02-missions-and-attention.md) — desktop + daemon implementation plan; work not started.
 
 ## What's hot
 
 <!-- hand-maintained, keep short: the few things actually in motion + what's next.
      If everything is "hot", nothing is. -->
-- Nothing scheduled. Three items sit in [`backlog/`](backlog/README.md); all three
-  are deferred for a stated reason, not merely unstarted.
+- [Missions and shared attention](sprints/sprint-2026-10-02-missions-and-attention.md) is planned next. The three existing items in [`backlog/`](backlog/README.md) remain deferred for their stated reasons.
