@@ -106,6 +106,10 @@ pub struct WindowBounds {
 /// keeps the on-disk shape uniform.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WindowState {
+    #[serde(default)]
+    pub work_navigation: WorkNavigation,
+    #[serde(default)]
+    pub selected_mission: Option<MissionSelection>,
     /// Stable identity for this window. Matches `WindowId::Extra(_)` for
     /// extras; unused for the main slot (addressed by variant).
     ///
@@ -165,6 +169,8 @@ impl Default for WindowState {
         // Fresh Uuid per default-construction so two extras minted at runtime
         // never collide. Matches the serde default for missing-on-disk ids.
         Self {
+            work_navigation: WorkNavigation::default(),
+            selected_mission: None,
             id: Uuid::new_v4(),
             hidden_project_ids: HashSet::new(),
             folder_filter: None,
@@ -180,9 +186,41 @@ impl Default for WindowState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkNavigation {
+    #[default]
+    Projects,
+    Inbox,
+    Missions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionSelection {
+    pub connection_id: String,
+    pub mission_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_window_state_opens_projects_without_a_mission() {
+        let state: WindowState = serde_json::from_str("{}").unwrap();
+        assert_eq!(state.work_navigation, WorkNavigation::Projects);
+        assert_eq!(state.selected_mission, None);
+        let mut state = state;
+        state.work_navigation = WorkNavigation::Missions;
+        state.selected_mission = Some(MissionSelection {
+            connection_id: "remote-owner".into(),
+            mission_id: "same-raw-id".into(),
+        });
+        let restored: WindowState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.work_navigation, state.work_navigation);
+        assert_eq!(restored.selected_mission, state.selected_mission);
+    }
 
     #[test]
     fn window_state_default_is_empty() {
@@ -208,6 +246,8 @@ mod tests {
         collapsed.insert("f1".to_string(), true);
 
         let original = WindowState {
+            work_navigation: WorkNavigation::default(),
+            selected_mission: None,
             id: Uuid::new_v4(),
             hidden_project_ids: hidden,
             folder_filter: Some("folder-7".to_string()),

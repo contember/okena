@@ -149,6 +149,7 @@ fn prepare_loaded_session(
     let session_backend = backend.resolve();
     let clear_ids = !session_backend.supports_persistence();
     validate_workspace_data(&mut data, clear_ids, backend);
+    crate::missions::rekey_import(&mut data);
     let stale_terminal_ids = super::persistence::sync_worktrees_with_backend_and_shell(
         &mut data,
         backend,
@@ -275,6 +276,7 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
 
     // Always clear terminal IDs on import, plus full validation with folder consistency
     validate_workspace_data(&mut data, true, SessionBackend::None);
+    crate::missions::rekey_import(&mut data);
 
     Ok(data)
 }
@@ -401,13 +403,23 @@ mod tests {
         let _ = fs::remove_file(path);
 
         assert_eq!(data.version, WORKSPACE_VERSION);
-        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        assert!(
+            data.main_window
+                .hidden_project_ids
+                .contains(&data.projects[0].id)
+        );
         assert_eq!(
-            data.main_window.folder_collapsed.get("f1").copied(),
+            data.main_window
+                .folder_collapsed
+                .get(&data.folders[0].id)
+                .copied(),
             Some(true)
         );
         assert_eq!(
-            data.main_window.project_widths.get("p1").copied(),
+            data.main_window
+                .project_widths
+                .get(&data.projects[0].id)
+                .copied(),
             Some(60.0)
         );
     }
@@ -447,13 +459,23 @@ mod tests {
         let _ = fs::remove_file(path);
 
         assert_eq!(data.version, WORKSPACE_VERSION);
-        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        assert!(
+            data.main_window
+                .hidden_project_ids
+                .contains(&data.projects[0].id)
+        );
         assert_eq!(
-            data.main_window.folder_collapsed.get("f1").copied(),
+            data.main_window
+                .folder_collapsed
+                .get(&data.folders[0].id)
+                .copied(),
             Some(true)
         );
         assert_eq!(
-            data.main_window.project_widths.get("p1").copied(),
+            data.main_window
+                .project_widths
+                .get(&data.projects[0].id)
+                .copied(),
             Some(60.0)
         );
     }
@@ -504,7 +526,7 @@ mod tests {
             .data
             .projects
             .iter()
-            .find(|project| project.id == "worktree")
+            .find(|project| project.name == "feature")
             .expect("completed worktree retained");
 
         assert!(worktree.layout.is_some());

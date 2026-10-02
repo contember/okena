@@ -294,7 +294,25 @@ impl Workspace {
         }
 
         tgt_project.layout = Some(inserted_tgt_layout);
+        let conversation = tgt_project
+            .agent_sessions
+            .get(source_terminal_id)
+            .map(okena_core::attention::ConversationId::from);
 
+        move_attention_project(
+            &mut self.data.attention,
+            source_terminal_id,
+            source_project_id,
+            target_project_id,
+        );
+        if let Some(conversation) = conversation {
+            crate::missions::promote_conversation(
+                &mut self.data,
+                target_project_id,
+                source_terminal_id,
+                conversation,
+            );
+        }
         self.notify_data(cx);
 
         // Focus the moved terminal in the target project
@@ -673,11 +691,47 @@ impl Workspace {
         }
 
         tgt_project.layout = Some(inserted_tgt_layout);
+        let conversation = tgt_project
+            .agent_sessions
+            .get(terminal_id)
+            .map(okena_core::attention::ConversationId::from);
 
+        move_attention_project(
+            &mut self.data.attention,
+            terminal_id,
+            source_project_id,
+            target_project_id,
+        );
+        if let Some(conversation) = conversation {
+            crate::missions::promote_conversation(
+                &mut self.data,
+                target_project_id,
+                terminal_id,
+                conversation,
+            );
+        }
         self.notify_data(cx);
 
         if let Some(new_path) = new_focus_path {
             self.set_focused_terminal(focus_manager, target_project_id.to_string(), new_path, cx);
+        }
+    }
+}
+
+fn move_attention_project(
+    attention: &mut okena_core::attention::AttentionState,
+    terminal_id: &str,
+    source_project: &str,
+    target_project: &str,
+) {
+    for observation in &mut attention.observations {
+        for source in std::iter::once(&mut observation.source)
+            .chain(observation.input.iter_mut().map(|e| &mut e.source))
+            .chain(observation.completion.iter_mut().map(|e| &mut e.source))
+        {
+            if source.terminal_id == terminal_id && source.project_id == source_project {
+                source.project_id = target_project.into();
+            }
         }
     }
 }
@@ -711,6 +765,8 @@ mod tests {
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

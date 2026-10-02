@@ -388,6 +388,14 @@ mod tests {
         // Dropping the bridge receiver makes authorized calls fail at the
         // bridge instead of hanging on a reply that never comes.
         let (bridge_tx, _) = crate::bridge::bridge_channel();
+        router_with_bridge(auth_store, local_bootstrap, bridge_tx)
+    }
+
+    fn router_with_bridge(
+        auth_store: Arc<AuthStore>,
+        local_bootstrap: bool,
+        bridge_tx: BridgeSender,
+    ) -> Router {
         build_router(
             bridge_tx,
             auth_store,
@@ -415,6 +423,87 @@ mod tests {
         store
             .try_pair(&code, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
             .expect("pairing succeeds")
+    }
+
+    #[tokio::test]
+    async fn mission_and_attention_actions_reach_bridge_and_preserve_errors() {
+        use crate::bridge::{CommandResult, RemoteCommand};
+        use okena_core::api::ActionRequest;
+        use okena_core::mission::MissionCommand;
+
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
+        let mut router = router_with_bridge(store, true, bridge_tx);
+        let cases = [
+            (
+                serde_json::json!({
+                    "action": "mission",
+                    "command": {"operation": "create", "title": "Review"}
+                }),
+                StatusCode::OK,
+            ),
+            (
+                serde_json::json!({
+                    "action": "acknowledge_attention",
+                    "episode_id": "episode-1", "revision": 7
+                }),
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (body, expected_status) in cases {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/actions")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .expect("request");
+            request.extensions_mut().insert(LOOPBACK);
+            let reply = async {
+                let message = bridge_rx.recv().await.expect("bridge request");
+                let result = match message.command {
+                    RemoteCommand::Action(ActionRequest::Mission {
+                        command: MissionCommand::Create { title, .. },
+                    }) => {
+                        assert_eq!(title, "Review");
+                        CommandResult::Ok(Some(serde_json::json!({"mission_id": "mission-1"})))
+                    }
+                    RemoteCommand::Action(ActionRequest::AcknowledgeAttention {
+                        episode_id,
+                        revision,
+                        dismiss,
+                    }) => {
+                        assert_eq!(episode_id, "episode-1");
+                        assert_eq!(revision, 7);
+                        assert!(!dismiss);
+                        CommandResult::Err("stale episode".into())
+                    }
+                    _ => panic!("unexpected bridge command"),
+                };
+                message
+                    .reply
+                    .expect("reply channel")
+                    .send(result)
+                    .expect("reply receiver");
+            };
+            let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(router.call(request), reply)
+            })
+            .await
+            .expect("route must reach bridge");
+            let response = response.expect("response");
+            assert_eq!(response.status(), expected_status);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("body");
+            let value: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+            if expected_status == StatusCode::OK {
+                assert_eq!(value, serde_json::json!({"mission_id": "mission-1"}));
+            } else {
+                assert_eq!(value, serde_json::json!({"error": "stale episode"}));
+            }
+        }
     }
 
     struct Call {

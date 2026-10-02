@@ -169,6 +169,7 @@ mod tests {
 
     fn make_state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
+            work_overview: None,
             state_version: 1,
             projects,
             focused_project_id: None,

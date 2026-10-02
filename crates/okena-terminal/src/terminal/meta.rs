@@ -129,6 +129,18 @@ impl Terminal {
         std::mem::take(&mut *self.pending_agent_sessions.lock())
     }
 
+    pub fn attention_attachment_id(&self) -> &str {
+        &self.attention_attachment_id
+    }
+
+    pub fn set_attention_generation(&self, generation: u64) {
+        self.osc_sidecar.lock().set_generation(generation);
+    }
+
+    pub fn take_attention_events(&self) -> (Vec<super::AgentAttentionEvent>, u64) {
+        self.osc_sidecar.lock().take_attention_events()
+    }
+
     /// Whether the "agent session changed since last drain" edge is set, without
     /// consuming it.
     ///

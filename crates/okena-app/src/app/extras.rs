@@ -226,6 +226,22 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         match event {
+            WindowViewEvent::RevealWork {
+                origin,
+                connection_id,
+                project_id,
+                terminal_id,
+                completion,
+            } => {
+                self.reveal_work_terminal(
+                    *origin,
+                    connection_id,
+                    project_id,
+                    terminal_id,
+                    completion.as_deref().cloned(),
+                    cx,
+                );
+            }
             WindowViewEvent::JumpToProject { origin, project_id } => {
                 self.jump_to_project_terminal(*origin, project_id, cx);
             }
@@ -497,6 +513,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),

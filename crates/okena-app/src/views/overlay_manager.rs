@@ -116,6 +116,9 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
+    Mission {
+        project_id: String,
+    },
     /// Session manager requested a session/workspace action (load/save/import/
     /// export). The host dispatches it to the local daemon, which owns session
     /// files + the authoritative workspace.
@@ -136,6 +139,7 @@ pub enum OverlayManagerEvent {
         project_id: String,
         branch: String,
         create_branch: bool,
+        mission: Option<okena_views_git::worktree_dialog::MissionWorktreeContext>,
     },
 
     /// Shell selector selected a shell for a terminal
@@ -947,10 +951,13 @@ impl OverlayManager {
         &mut self,
         project_id: String,
         params: (okena_transport::remote_action::RemoteActionClient, String),
+        mission: Option<okena_views_git::worktree_dialog::MissionWorktreeContext>,
         cx: &mut Context<Self>,
     ) {
         let (client, daemon_project_id) = params;
-        let dialog = cx.new(|cx| WorktreeDialog::new(client, daemon_project_id, project_id, cx));
+        let dialog = cx.new(|cx| {
+            WorktreeDialog::new(client, daemon_project_id, project_id, cx).with_mission(mission)
+        });
         cx.subscribe(
             &dialog,
             |this, _, event: &WorktreeDialogEvent, cx| match event {
@@ -961,11 +968,13 @@ impl OverlayManager {
                     project_id,
                     branch,
                     create_branch,
+                    mission,
                 } => {
                     cx.emit(OverlayManagerEvent::WorktreeCreateRequested {
                         project_id: project_id.clone(),
                         branch: branch.clone(),
                         create_branch: *create_branch,
+                        mission: mission.clone(),
                     });
                     this.close_modal(cx);
                 }
@@ -1096,6 +1105,12 @@ impl OverlayManager {
 
         cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
             match event {
+                ContextMenuEvent::Mission { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::Mission {
+                        project_id: project_id.clone(),
+                    });
+                }
                 ContextMenuEvent::Close => {
                     this.hide_context_menu(cx);
                 }

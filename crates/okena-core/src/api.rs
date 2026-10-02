@@ -25,6 +25,9 @@ pub struct ApiSystemStats {
 /// GET /v1/state response
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StateResponse {
+    /// Present only on daemons supporting shared attention and missions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_overview: Option<crate::mission::WorkOverview>,
     pub state_version: u64,
     pub projects: Vec<ApiProject>,
     pub focused_project_id: Option<String>,
@@ -635,6 +638,15 @@ pub enum FileDownloadRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionRequest {
+    Mission {
+        command: crate::mission::MissionCommand,
+    },
+    AcknowledgeAttention {
+        episode_id: String,
+        revision: u64,
+        #[serde(default)]
+        dismiss: bool,
+    },
     SendText {
         terminal_id: String,
         text: String,
@@ -922,6 +934,8 @@ pub enum ActionRequest {
     CreateWorktree {
         project_id: String,
         branch: String,
+        #[serde(default)]
+        mission_id: Option<String>,
         #[serde(default)]
         create_branch: bool,
     },
@@ -1367,8 +1381,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_snapshot_and_worktree_request_default_new_contracts() {
+        let mut state: StateResponse = serde_json::from_str(r#"{"state_version":1,"projects":[],"focused_project_id":null,"fullscreen_terminal":null}"#).unwrap();
+        assert!(state.work_overview.is_none());
+        state.work_overview = Some(Default::default());
+        let round_trip: StateResponse =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(round_trip.work_overview.unwrap().attention.is_empty());
+        let request: ActionRequest = serde_json::from_str(
+            r#"{"action":"create_worktree","project_id":"p","branch":"feature"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            ActionRequest::CreateWorktree {
+                mission_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn state_response_round_trip() {
         let resp = StateResponse {
+            work_overview: None,
             state_version: 42,
             projects: vec![ApiProject {
                 id: "p1".into(),

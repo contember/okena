@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
-    PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
-    WorkspaceData, WorktreeMetadata, now_unix_seconds,
+    MissionSelection, PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId,
+    WindowState, WorkNavigation, WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -1232,6 +1232,7 @@ impl Workspace {
     /// every visible terminal grid each time. Keep such callers rare or
     /// throttled (see `bump_activity`).
     pub fn notify_data(&mut self, cx: &mut impl WorkspaceCx) {
+        crate::missions::reconcile_membership(&mut self.data);
         self.data_version += 1;
         cx.notify();
         cx.refresh_views();
@@ -1784,6 +1785,12 @@ impl Workspace {
             return;
         }
         let mut changed = self.data.agent_session_history.record(session.clone());
+        changed |= crate::missions::promote_conversation(
+            &mut self.data,
+            project_id,
+            terminal_id,
+            (&session).into(),
+        );
         if let Some(project) = self.project_mut(project_id)
             && project.agent_sessions.get(terminal_id) != Some(&session)
         {
@@ -1833,6 +1840,7 @@ impl Workspace {
     /// cross-project *move* must not use this — see the `move_ops` migration,
     /// which carries the session with the terminal.
     pub fn forget_agent_session(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
+        self.invalidate_attention_terminal(terminal_id, cx);
         let mut removed = false;
         for project in &mut self.data.projects {
             removed |= project.agent_sessions.remove(terminal_id).is_some();
@@ -2858,6 +2866,8 @@ mod workspace_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -2892,6 +2902,10 @@ mod workspace_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -2910,6 +2924,8 @@ mod workspace_tests {
                 .iter()
                 .map(|tid| LayoutNode::Terminal {
                     terminal_id: Some((*tid).to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -3246,6 +3262,8 @@ mod workspace_tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: true,
@@ -3255,6 +3273,8 @@ mod workspace_tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -3915,6 +3935,8 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -3948,6 +3970,10 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -3961,6 +3987,8 @@ mod gpui_tests {
     fn pane(terminal_id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(terminal_id.to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -4100,6 +4128,7 @@ mod gpui_tests {
                 local_endpoint: None,
             },
             state: Some(StateResponse {
+                work_overview: None,
                 state_version: 1,
                 projects: vec![ApiProject {
                     id: "p1".to_string(),

@@ -65,7 +65,7 @@ impl WindowView {
                     .and_then(|connection_id| self.remote_params(&project_id, &connection_id, cx));
                 if let Some(params) = params {
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.show_worktree_dialog(project_id, params, cx);
+                        om.show_worktree_dialog(project_id, params, None, cx);
                     });
                 }
             } else {

@@ -842,6 +842,7 @@ mod tests {
 
     fn state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
+            work_overview: None,
             state_version: 1,
             projects,
             focused_project_id: None,
@@ -851,6 +852,47 @@ mod tests {
             windows: Vec::new(),
             hooks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mobile_presentation_merge_keeps_authoritative_mission_bindings() {
+        use okena_core::mission::{TerminalMissionBinding, WorkOverview};
+
+        let mut previous = state(vec![project("p", terminal("t", true, ShellType::Default))]);
+        previous.work_overview = Some(WorkOverview {
+            terminal_bindings: vec![TerminalMissionBinding {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+                mission_id: "old-mission".into(),
+            }],
+            ..WorkOverview::default()
+        });
+        let mut next = state(vec![project("p", terminal("t", false, ShellType::Default))]);
+        let overview = WorkOverview {
+            terminal_bindings: vec![TerminalMissionBinding {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+                mission_id: "new-mission".into(),
+            }],
+            ..WorkOverview::default()
+        };
+        next.work_overview = Some(overview.clone());
+        merge_state_presentation(&mut next, &previous);
+        assert_eq!(next.work_overview, Some(overview));
+        assert!(matches!(
+            next.projects[0].layout,
+            Some(ApiLayoutNode::Terminal {
+                minimized: true,
+                ..
+            })
+        ));
+
+        next.work_overview = None;
+        merge_state_presentation(&mut next, &previous);
+        assert!(
+            next.work_overview.is_none(),
+            "old daemon must not inherit stale capability"
+        );
     }
 
     #[test]

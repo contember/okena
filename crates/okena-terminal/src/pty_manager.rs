@@ -86,6 +86,12 @@ pub enum PtyEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PtyGeneration(u64);
 
+impl PtyGeneration {
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Default)]
 struct PtyInstances {
     current: HashMap<String, PtyGeneration>,

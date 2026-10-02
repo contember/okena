@@ -113,12 +113,14 @@ enum GithubPassMessage {
     /// One project's outcome, sent the moment that project finishes. A pass
     /// used to publish nothing until its slowest repo returned, so a 0.4s PR
     /// lookup could sit behind another project's 15s request timeout.
-    Project(GithubPollResult),
+    Project(Box<GithubPollResult>),
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
 }
 
 struct GithubPollResult {
+    repositories: HashMap<String, git::repository::GithubRepo>,
+    failed_ids: HashSet<String>,
     head_generations: HashMap<String, u64>,
     branches: HashMap<String, Option<String>>,
     pr_infos: HashMap<String, Option<git::PrInfo>>,
@@ -141,6 +143,8 @@ struct ProjectPoll {
     ci_skip_sha: Option<String>,
     /// PR number from a previous pass, used when this pass isn't re-fetching it.
     cached_pr_number: Option<u32>,
+    /// The cached PR number and CI SHA are reusable only within this repository.
+    cached_repository: Option<git::repository::GithubRepo>,
 }
 
 /// Union of declared viewports (`SetVisibleProjects`). The workspace's own window
@@ -352,6 +356,7 @@ fn select_github_polls(
                     .get(id)
                     .and_then(|pr| pr.as_ref())
                     .map(|pr| pr.number),
+                cached_repository: None,
             })
         })
         .collect()
@@ -359,6 +364,7 @@ fn select_github_polls(
 
 /// What one project's GitHub slot produced.
 struct ProjectOutcome {
+    repository: Option<git::repository::GithubRepo>,
     pr: Option<PrFetch>,
     ci: Option<CiFetch>,
 }
@@ -375,6 +381,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
         // them here keeps the whole GitHub machinery off non-GitHub projects.
         if !git::repository::has_github_remote(path) {
             return ProjectOutcome {
+                repository: None,
                 pr: poll.want_pr.then_some(PrFetch::Fetched(None)),
                 ci: poll.want_ci.then_some(CiFetch::Fetched {
                     sha: None,
@@ -383,22 +390,49 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
             };
         }
 
-        let pr = poll.want_pr.then(|| git::repository::fetch_pr_info(path));
+        let repository = git::repository::resolve_base_repo(path);
+        let repository_changed = repository != poll.cached_repository;
+        let pr = if poll.want_pr {
+            Some(git::repository::fetch_pr_info(path))
+        } else {
+            repository_changed.then_some(PrFetch::Failed)
+        };
         let pr_number = match &pr {
             Some(PrFetch::Fetched(info)) => info.as_ref().map(|info| info.number),
+            Some(PrFetch::Failed) => None,
             _ => poll.cached_pr_number,
         };
+        let pr_identity_changed =
+            matches!(pr, Some(PrFetch::Fetched(_))) && pr_number != poll.cached_pr_number;
 
         // A rate-limited PR call means the CI call would only be refused too.
         let ci = if matches!(pr, Some(PrFetch::RateLimited)) {
             None
+        } else if poll.want_ci {
+            Some(git::repository::fetch_ci_checks(
+                path,
+                pr_number,
+                if repository_changed || pr_identity_changed {
+                    None
+                } else {
+                    poll.ci_skip_sha.as_deref()
+                },
+            ))
         } else {
-            poll.want_ci.then(|| {
-                git::repository::fetch_ci_checks(path, pr_number, poll.ci_skip_sha.as_deref())
+            repository_changed.then_some(CiFetch::Failed {
+                sha: None,
+                summary: None,
             })
         };
 
-        ProjectOutcome { pr, ci }
+        if repository != git::repository::resolve_base_repo(path) {
+            return ProjectOutcome {
+                repository: None,
+                pr: Some(PrFetch::Failed),
+                ci: None,
+            };
+        }
+        ProjectOutcome { repository, pr, ci }
     })
 }
 
@@ -438,7 +472,11 @@ async fn poll_github(
             Ok(outcome) => outcome,
             Err(error) => {
                 log::warn!("GitHub poll task failed for {id}: {error}");
-                continue;
+                ProjectOutcome {
+                    repository: None,
+                    pr: Some(PrFetch::Failed),
+                    ci: None,
+                }
             }
         };
 
@@ -446,6 +484,7 @@ async fn poll_github(
         let mut ci = HashMap::new();
         let mut rate_limited = false;
         let mut reached_github = false;
+        let mut failed_ids = HashSet::new();
 
         match outcome.pr {
             Some(PrFetch::Fetched(info)) => {
@@ -453,11 +492,18 @@ async fn poll_github(
                 pr_infos.insert(id.clone(), info);
             }
             Some(PrFetch::RateLimited) => rate_limited = true,
+            Some(PrFetch::Failed) => {
+                failed_ids.insert(id.clone());
+                pr_infos.insert(id.clone(), None);
+            }
             None => {}
         }
         match outcome.ci {
             Some(CiFetch::RateLimited) => rate_limited = true,
             Some(fetch) => {
+                if matches!(fetch, CiFetch::Failed { .. }) {
+                    failed_ids.insert(id.clone());
+                }
                 reached_github |= matches!(fetch, CiFetch::Fetched { .. });
                 ci.insert(id.clone(), fetch);
             }
@@ -469,6 +515,12 @@ async fn poll_github(
         // entries must exist even when empty — a missing branch reads as a
         // mismatch and the result would be dropped.
         let result = GithubPollResult {
+            repositories: outcome
+                .repository
+                .into_iter()
+                .map(|repo| (id.clone(), repo))
+                .collect(),
+            failed_ids,
             head_generations: HashMap::from([(
                 id.clone(),
                 head_generations.get(&id).copied().unwrap_or_default(),
@@ -479,7 +531,10 @@ async fn poll_github(
             rate_limited,
             reached_github,
         };
-        if result_tx.send(GithubPassMessage::Project(result)).is_err() {
+        if result_tx
+            .send(GithubPassMessage::Project(Box::new(result)))
+            .is_err()
+        {
             return;
         }
     }
@@ -499,9 +554,17 @@ fn apply_github_result(
     git_status_tx: &watch::Sender<HashMap<String, ApiGitStatus>>,
     state_version: &watch::Sender<u64>,
 ) {
+    let current_ids: HashSet<_> = result
+        .branches
+        .keys()
+        .filter(|id| github_result_is_current(&result, id, current_head_generations, last))
+        .cloned()
+        .collect();
     let GithubPollResult {
-        head_generations,
-        branches,
+        repositories: _,
+        failed_ids: _,
+        head_generations: _,
+        branches: _,
         pr_infos: fetched_pr_infos,
         ci: fetched_ci,
         rate_limited,
@@ -512,6 +575,9 @@ fn apply_github_result(
     // projects in one pass would double the backoff five times over instead of
     // once. One step per cycle keeps the doubling tied to elapsed time.
     if rate_limited {
+        for id in &current_ids {
+            schedule.require_fresh_ci(id);
+        }
         if !schedule.is_rate_limited(cycle) {
             schedule.note_rate_limited(cycle);
             log::warn!(
@@ -523,25 +589,24 @@ fn apply_github_result(
         schedule.note_request_succeeded();
     }
 
-    let is_current = |id: &str| {
-        let expected_generation = head_generations.get(id).copied().unwrap_or_default();
-        let current_generation = current_head_generations
-            .get(id)
-            .copied()
-            .unwrap_or_default();
-        let expected_branch = branches.get(id);
-        let current_branch = last.get(id).map(|status| &status.branch);
-        expected_generation == current_generation && expected_branch == current_branch
-    };
-
     for (id, pr_info) in fetched_pr_infos {
-        if is_current(&id) {
+        if current_ids.contains(&id) {
+            let identity_changed =
+                match (pr_infos.get(&id).and_then(Option::as_ref), pr_info.as_ref()) {
+                    (Some(old), Some(new)) => !same_pr_identity(old, new),
+                    (None, None) => false,
+                    _ => true,
+                };
+            if identity_changed {
+                schedule.require_fresh_ci(&id);
+                ci_checks.remove(&id);
+            }
             schedule.record_pr(&id, cycle);
             pr_infos.insert(id, pr_info);
         }
     }
     for (id, fetch) in fetched_ci {
-        if !is_current(&id) {
+        if !current_ids.contains(&id) {
             continue;
         }
         match fetch {
@@ -551,6 +616,10 @@ fn apply_github_result(
                     .as_ref()
                     .is_some_and(|summary| summary.status.is_pending());
                 schedule.record_ci(&id, cycle, pending, sha);
+                ci_checks.insert(id, summary);
+            }
+            CiFetch::Failed { summary, .. } => {
+                schedule.require_fresh_ci(&id);
                 ci_checks.insert(id, summary);
             }
             // Refusals never make it this far — they set `rate_limited` instead.
@@ -564,6 +633,146 @@ fn apply_github_result(
         status.ci_checks = ci_checks.get(id).cloned().flatten();
     }
     publish(last, &enriched, git_status_tx, state_version);
+}
+
+fn same_pr_identity(a: &git::PrInfo, b: &git::PrInfo) -> bool {
+    a.number == b.number && a.url == b.url
+}
+
+fn github_result_is_current(
+    result: &GithubPollResult,
+    id: &str,
+    generations: &HashMap<String, u64>,
+    statuses: &HashMap<String, GitStatus>,
+) -> bool {
+    result.head_generations.get(id).copied().unwrap_or_default()
+        == generations.get(id).copied().unwrap_or_default()
+        && result.branches.get(id) == statuses.get(id).map(|status| &status.branch)
+}
+
+fn invalidate_mission_prs(
+    ids: &HashSet<String>,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+) {
+    let mut ws = workspace.lock();
+    let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(workspace_tick, &None, &None);
+    for id in ids {
+        if ws.data().missions.iter().any(|mission| {
+            mission
+                .pull_requests
+                .iter()
+                .any(|pr| pr.source_project_ids.contains(id))
+        }) {
+            let _ = ws.record_mission_pr(id, None, &mut cx);
+        }
+    }
+}
+
+fn record_mission_observations(
+    result: &GithubPollResult,
+    generations: &HashMap<String, u64>,
+    statuses: &HashMap<String, GitStatus>,
+    failed_ci: &mut HashSet<String>,
+    workspace: &Arc<Mutex<Workspace>>,
+    workspace_tick: &watch::Sender<u64>,
+) {
+    use okena_core::mission::{MissionPullRequest, PullRequestIdentity};
+    use okena_workspace::missions::MissionPrObservation;
+    let mut ws = workspace.lock();
+    let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(workspace_tick, &None, &None);
+    for id in result.branches.keys() {
+        if !github_result_is_current(result, id, generations, statuses) {
+            continue;
+        }
+        match result.ci.get(id) {
+            Some(CiFetch::Failed { .. } | CiFetch::RateLimited) => {
+                failed_ci.insert(id.clone());
+            }
+            Some(CiFetch::Fetched { .. }) => {
+                failed_ci.remove(id);
+            }
+            _ if result.rate_limited => {
+                failed_ci.insert(id.clone());
+            }
+            _ => {}
+        }
+        if !ws.data().missions.iter().any(|mission| {
+            mission.repository_ids.contains(id)
+                || mission.worktree_ids.contains(id)
+                || mission
+                    .pull_requests
+                    .iter()
+                    .any(|pr| pr.source_project_ids.contains(id))
+        }) {
+            continue;
+        }
+        let available =
+            !result.rate_limited && !result.failed_ids.contains(id) && !failed_ci.contains(id);
+        let pr_fetched = result.pr_infos.get(id).is_some_and(Option::is_some);
+        let ci_fetched = matches!(result.ci.get(id), Some(CiFetch::Fetched { .. }));
+        if !pr_fetched && !ci_fetched && available && !result.pr_infos.contains_key(id) {
+            continue;
+        }
+        let observation = if pr_fetched || ci_fetched {
+            result.repositories.get(id).and_then(|repository| {
+                let cached = statuses.get(id)?;
+                let info = result
+                    .pr_infos
+                    .get(id)
+                    .unwrap_or(&cached.pr_info)
+                    .as_ref()?
+                    .clone();
+                let ci = match result.ci.get(id) {
+                    Some(CiFetch::Fetched { summary, .. }) => summary.clone(),
+                    _ if cached
+                        .pr_info
+                        .as_ref()
+                        .is_some_and(|old| same_pr_identity(old, &info)) =>
+                    {
+                        cached.ci_checks.clone()
+                    }
+                    _ => None,
+                };
+                Some(MissionPrObservation {
+                    snapshot: MissionPullRequest {
+                        identity: PullRequestIdentity {
+                            host: repository.host.clone(),
+                            repository: format!("{}/{}", repository.owner, repository.name)
+                                .to_ascii_lowercase(),
+                            number: info.number,
+                        },
+                        info,
+                        ci,
+                        observed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        available,
+                        source_project_ids: Vec::new(),
+                    },
+                    pr_fetched,
+                    ci_fetched,
+                })
+            })
+        } else {
+            None
+        };
+        if observation.is_none()
+            && !ws.data().missions.iter().any(|mission| {
+                mission
+                    .pull_requests
+                    .iter()
+                    .any(|pr| pr.source_project_ids.contains(id))
+            })
+        {
+            continue;
+        }
+        if let Err(error) = ws.record_mission_pr(id, observation, &mut cx) {
+            log::debug!("mission PR observation for {id} rejected: {error}");
+            let _ = ws.record_mission_pr(id, None, &mut cx);
+        }
+    }
 }
 
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all
@@ -580,6 +789,7 @@ fn apply_github_result(
 /// react; the *primary* output is the `git_status_tx` watch.
 pub async fn run_git_poll(
     workspace: Arc<Mutex<Workspace>>,
+    workspace_tick: watch::Sender<u64>,
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
     state_version: watch::Sender<u64>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -614,6 +824,8 @@ pub async fn run_git_poll(
     let mut known_streaming_ids: HashSet<String> = HashSet::new();
     let mut trigger_rx_closed = false;
     let mut head_generations: HashMap<String, u64> = HashMap::new();
+    let mut failed_mission_ci = HashSet::new();
+    let mut repository_cache = HashMap::new();
     let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
     // Consume `interval`'s immediate first tick. Subsequent ticks stay anchored
     // to wall time, so targeted wakes cannot postpone periodic refreshes.
@@ -632,6 +844,7 @@ pub async fn run_git_poll(
             // a refetch on every commit.
             *head_generations.entry(id.clone()).or_default() += 1;
         }
+        invalidate_mission_prs(&trigger_acc.invalidate_gh_ids, &workspace, &workspace_tick);
         clear_github_cache_for_ids(
             &trigger_acc.invalidate_gh_ids,
             &mut pr_infos,
@@ -658,6 +871,8 @@ pub async fn run_git_poll(
         pr_infos.retain(|id, _| active_ids.contains(id));
         ci_checks.retain(|id, _| active_ids.contains(id));
         head_generations.retain(|id, _| active_ids.contains(id));
+        failed_mission_ci.retain(|id| active_ids.contains(id));
+        repository_cache.retain(|id, _| active_ids.contains(id));
         known_streaming_ids.retain(|id| active_ids.contains(id));
         schedule.retain(&active_ids);
 
@@ -691,6 +906,7 @@ pub async fn run_git_poll(
 
         // ── 2. Refresh selected statuses and merge into the published cache ──
         let mut attempted: HashMap<String, Option<GitStatus>> = HashMap::new();
+        let mut failed_status_ids = HashSet::new();
         for (id, path) in projects
             .iter()
             .filter(|(id, _)| status_poll_ids.contains(id))
@@ -716,6 +932,7 @@ pub async fn run_git_poll(
                     // Preserve the last published value on a panicked blocking
                     // task; the next cadence or targeted trigger retries it.
                     log::error!("git status poll task panicked for {id}: {error}");
+                    failed_status_ids.insert(id);
                 }
             }
         }
@@ -724,10 +941,13 @@ pub async fn run_git_poll(
             .filter_map(|(id, status)| status.is_none().then_some(id.clone()))
             .collect();
         clear_github_cache_for_ids(&missing_status_ids, &mut pr_infos, &mut ci_checks);
+        invalidate_mission_prs(&missing_status_ids, &workspace, &workspace_tick);
+        invalidate_mission_prs(&failed_status_ids, &workspace, &workspace_tick);
         let mut new_statuses = merge_status_results(&last, &active_ids, attempted);
 
         let branch_changes = branch_changed_ids(&last, &new_statuses);
         if !branch_changes.is_empty() {
+            invalidate_mission_prs(&branch_changes, &workspace, &workspace_tick);
             clear_github_cache_for_ids(&branch_changes, &mut pr_infos, &mut ci_checks);
             for id in &branch_changes {
                 if let Some(status) = new_statuses.get_mut(id) {
@@ -759,7 +979,7 @@ pub async fn run_git_poll(
             // branch switch shouldn't have to wait out the pass in progress
             // and then the next cadence tick on top of it.
             let urgent_only = !github_in_flight.is_empty();
-            let polls = select_github_polls(
+            let mut polls = select_github_polls(
                 &projects,
                 &visible_ids,
                 &schedule,
@@ -769,6 +989,9 @@ pub async fn run_git_poll(
                 &github_in_flight,
                 urgent_only,
             );
+            for poll in &mut polls {
+                poll.cached_repository = repository_cache.get(&poll.id).cloned();
+            }
 
             log::trace!(
                 "GitHub poll cycle={cycle}: {} projects, {} visible, {} due",
@@ -843,8 +1066,17 @@ pub async fn run_git_poll(
                     match message {
                         // Applied and published the moment it lands, so a badge
                         // never waits on the rest of its pass.
-                        GithubPassMessage::Project(result) => apply_github_result(
-                            result,
+                        GithubPassMessage::Project(result) => {
+                            for (id, repository) in &result.repositories {
+                                if result.pr_infos.contains_key(id) && result.ci.contains_key(id)
+                                    && github_result_is_current(&result, id, &head_generations, &last) {
+                                    repository_cache.insert(id.clone(), repository.clone());
+                                }
+                            }
+                            record_mission_observations(&result, &head_generations, &last,
+                                &mut failed_mission_ci, &workspace, &workspace_tick);
+                            apply_github_result(
+                            *result,
                             cycle,
                             &head_generations,
                             &mut schedule,
@@ -853,7 +1085,8 @@ pub async fn run_git_poll(
                             &mut last,
                             &git_status_tx,
                             &state_version,
-                        ),
+                        );
+                        }
                         GithubPassMessage::Finished(ids) => {
                             for id in &ids {
                                 github_in_flight.remove(id);
@@ -965,6 +1198,7 @@ mod tests {
         let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
         run_git_poll(
             workspace,
+            watch::channel(0u64).0,
             git_status_tx.clone(),
             state_version,
             subscribed,
@@ -1173,6 +1407,8 @@ mod tests {
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: Default::default(),
@@ -1403,6 +1639,8 @@ mod tests {
     /// Build an `apply_github_result` fixture: one project, one CI outcome.
     fn github_result(generation: u64, branch: &str, ci: CiFetch) -> GithubPollResult {
         GithubPollResult {
+            repositories: HashMap::new(),
+            failed_ids: HashSet::new(),
             head_generations: HashMap::from([("p1".to_string(), generation)]),
             branches: HashMap::from([("p1".to_string(), Some(branch.to_string()))]),
             pr_infos: HashMap::from([("p1".to_string(), None)]),
@@ -1419,6 +1657,242 @@ mod tests {
         }
     }
 
+    fn mission_workspace(projects: &[(&str, &str)]) -> (Arc<Mutex<Workspace>>, watch::Sender<u64>) {
+        use okena_core::mission::{MissionCommand, MissionMember};
+        let workspace = Arc::new(Mutex::new(Workspace::new(workspace_data_with_projects(
+            projects,
+        ))));
+        let (tick, _) = watch::channel(0);
+        let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(&tick, &None, &None);
+        let mission = workspace
+            .lock()
+            .execute_mission(
+                MissionCommand::Create {
+                    title: "Outputs".into(),
+                    goal: None,
+                    home_project_id: None,
+                    member: None,
+                },
+                &mut cx,
+            )
+            .unwrap();
+        for (id, _) in projects {
+            workspace
+                .lock()
+                .execute_mission(
+                    MissionCommand::Attach {
+                        mission_id: mission.clone(),
+                        member: MissionMember::Repository {
+                            project_id: (*id).into(),
+                        },
+                    },
+                    &mut cx,
+                )
+                .unwrap();
+        }
+        (workspace, tick)
+    }
+
+    #[test]
+    fn mission_repository_change_does_not_reuse_another_repositories_pr_number() {
+        let path =
+            std::env::temp_dir().join(format!("okena-mission-repository-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/new.git",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let outcome = poll_one_project(&ProjectPoll {
+            id: "p1".into(),
+            path: path.to_string_lossy().into_owned(),
+            want_pr: false,
+            want_ci: true,
+            ci_skip_sha: Some("old-sha".into()),
+            cached_pr_number: Some(7),
+            cached_repository: Some(git::repository::GithubRepo {
+                host: "github.com".into(),
+                owner: "owner".into(),
+                name: "old".into(),
+            }),
+        });
+        assert_eq!(outcome.pr, Some(PrFetch::Failed));
+        assert_eq!(
+            outcome.ci,
+            Some(CiFetch::Fetched {
+                sha: None,
+                summary: None
+            }),
+            "an unpushed new repository has no checks; the old PR must not trigger a network lookup"
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn mission_observations_deduplicate_identity_and_retain_unavailable_sources() {
+        let projects = [("a", "ta"), ("b", "tb"), ("c", "tc"), ("d", "td")];
+        let (workspace, tick) = mission_workspace(&projects);
+        let mut cx = crate::workspace_cx::DaemonWorkspaceCx::new(&tick, &None, &None);
+        let mut result = GithubPollResult {
+            repositories: HashMap::new(),
+            failed_ids: HashSet::new(),
+            head_generations: HashMap::new(),
+            branches: HashMap::new(),
+            pr_infos: HashMap::new(),
+            ci: HashMap::new(),
+            rate_limited: false,
+            reached_github: true,
+        };
+        let mut statuses = HashMap::new();
+        for (id, host, name) in [
+            ("a", "github.com", "one"),
+            ("b", "github.com", "ONE"),
+            ("c", "github.com", "two"),
+            ("d", "git.example.com", "one"),
+        ] {
+            result.repositories.insert(
+                id.into(),
+                git::repository::GithubRepo {
+                    host: host.into(),
+                    owner: "owner".into(),
+                    name: name.into(),
+                },
+            );
+            result.branches.insert(id.into(), Some("feature".into()));
+            result.pr_infos.insert(
+                id.into(),
+                Some(git::PrInfo {
+                    number: 7,
+                    url: format!("https://{host}/owner/{name}/pull/7"),
+                    state: okena_core::api::PrState::Open,
+                    base: Some("main".into()),
+                }),
+            );
+            result.ci.insert(id.into(), fetched("sha"));
+            statuses.insert(
+                id.into(),
+                GitStatus {
+                    branch: Some("feature".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut failed_ci = HashSet::new();
+        let observe = |result: &GithubPollResult,
+                       failed_ci: &mut HashSet<String>,
+                       statuses: &HashMap<String, GitStatus>| {
+            record_mission_observations(
+                result,
+                &HashMap::new(),
+                statuses,
+                failed_ci,
+                &workspace,
+                &tick,
+            );
+        };
+        observe(&result, &mut failed_ci, &statuses);
+        {
+            let ws = workspace.lock();
+            let prs = &ws.data().missions[0].pull_requests;
+            assert_eq!(prs.len(), 3);
+            assert_eq!(
+                prs.iter()
+                    .find(|pr| pr.identity.host == "github.com"
+                        && pr.identity.repository == "owner/one")
+                    .unwrap()
+                    .source_project_ids
+                    .len(),
+                2
+            );
+            assert!(prs.iter().all(|pr| pr.available));
+        }
+        result.failed_ids.insert("a".into());
+        observe(&result, &mut failed_ci, &statuses);
+        {
+            let ws = workspace.lock();
+            let shared = ws.data().missions[0]
+                .pull_requests
+                .iter()
+                .find(|pr| {
+                    pr.identity.host == "github.com" && pr.identity.repository == "owner/one"
+                })
+                .unwrap();
+            assert!(shared.available);
+            assert_eq!(shared.source_project_ids, vec!["b"]);
+        }
+        result.failed_ids.insert("b".into());
+        result.ci.insert(
+            "c".into(),
+            CiFetch::Failed {
+                sha: Some("sha".into()),
+                summary: None,
+            },
+        );
+        observe(&result, &mut failed_ci, &statuses);
+        {
+            let ws = workspace.lock();
+            let prs = &ws.data().missions[0].pull_requests;
+            assert_eq!(prs.len(), 3);
+            assert!(
+                prs.iter()
+                    .filter(|pr| pr.identity.host == "github.com")
+                    .all(|pr| !pr.available)
+            );
+            assert!(
+                prs.iter()
+                    .all(|pr| pr.info.state == okena_core::api::PrState::Open)
+            );
+        }
+        result.ci.insert("c".into(), CiFetch::Unchanged);
+        observe(&result, &mut failed_ci, &statuses);
+        assert!(
+            !workspace.lock().data().missions[0]
+                .pull_requests
+                .iter()
+                .find(|pr| pr.identity.repository == "owner/two")
+                .unwrap()
+                .available
+        );
+        result.failed_ids.clear();
+        result.ci.insert("c".into(), fetched("sha"));
+        observe(&result, &mut failed_ci, &statuses);
+        invalidate_mission_prs(&HashSet::from(["a".into(), "b".into()]), &workspace, &tick);
+        statuses.get_mut("a").unwrap().branch = Some("new-branch".into());
+        statuses.get_mut("b").unwrap().branch = Some("new-branch".into());
+        observe(&result, &mut failed_ci, &statuses);
+        assert!(!workspace.lock().data().missions[0].pull_requests.iter().find(|pr| pr.identity.host == "github.com" && pr.identity.repository == "owner/one").unwrap().available);
+        workspace.lock().delete_project(
+            &mut okena_workspace::focus::FocusManager::new(),
+            "d",
+            &Default::default(),
+            &mut cx,
+        );
+        observe(&result, &mut failed_ci, &statuses);
+        let ws = workspace.lock();
+        let retained = ws.data().missions[0]
+            .pull_requests
+            .iter()
+            .find(|pr| pr.identity.host == "git.example.com")
+            .unwrap();
+        assert!(!retained.available);
+        assert!(retained.source_project_ids.is_empty());
+    }
+
     struct ApplyHarness {
         schedule: GithubPollSchedule,
         pr_infos: HashMap<String, Option<git::PrInfo>>,
@@ -1428,6 +1902,349 @@ mod tests {
         state_version: watch::Sender<u64>,
         _rx: watch::Receiver<HashMap<String, ApiGitStatus>>,
         _state_rx: watch::Receiver<u64>,
+    }
+
+    fn mission_pr_result(
+        id: &str,
+        state: git::PrState,
+        ci: Option<git::CiCheckSummary>,
+    ) -> GithubPollResult {
+        GithubPollResult {
+            repositories: HashMap::from([(
+                id.into(),
+                git::repository::GithubRepo {
+                    host: "github.com".into(),
+                    owner: "owner".into(),
+                    name: "repo".into(),
+                },
+            )]),
+            failed_ids: HashSet::new(),
+            head_generations: HashMap::new(),
+            branches: HashMap::from([(id.into(), Some("main".into()))]),
+            pr_infos: HashMap::from([(
+                id.into(),
+                Some(git::PrInfo {
+                    number: 7,
+                    url: "https://github.com/owner/repo/pull/7".into(),
+                    state,
+                    base: Some("main".into()),
+                }),
+            )]),
+            ci: HashMap::from([(
+                id.into(),
+                CiFetch::Fetched {
+                    sha: Some("sha".into()),
+                    summary: ci,
+                },
+            )]),
+            rate_limited: false,
+            reached_github: true,
+        }
+    }
+
+    #[test]
+    fn mission_interleaved_sources_merge_only_fetched_components() {
+        let (workspace, tick) = mission_workspace(&[("a", "ta"), ("b", "tb")]);
+        let pending = git::CiCheckSummary {
+            status: git::CiStatus::Pending,
+            passed: 0,
+            failed: 0,
+            pending: 1,
+            total: 1,
+            checks: Vec::new(),
+        };
+        let success = git::CiCheckSummary {
+            status: git::CiStatus::Success,
+            passed: 1,
+            failed: 0,
+            pending: 0,
+            total: 1,
+            checks: Vec::new(),
+        };
+        let initial = mission_pr_result("a", git::PrState::Open, Some(pending.clone()));
+        let statuses = HashMap::from([
+            (
+                "a".into(),
+                GitStatus {
+                    branch: Some("main".into()),
+                    pr_info: initial.pr_infos["a"].clone(),
+                    ci_checks: Some(pending),
+                    ..Default::default()
+                },
+            ),
+            (
+                "b".into(),
+                GitStatus {
+                    branch: Some("main".into()),
+                    pr_info: initial.pr_infos["a"].clone(),
+                    ci_checks: Some(success.clone()),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let mut failed_ci = HashSet::new();
+        let mut observe = |result: &GithubPollResult| {
+            record_mission_observations(
+                result,
+                &HashMap::new(),
+                &statuses,
+                &mut failed_ci,
+                &workspace,
+                &tick,
+            )
+        };
+        observe(&initial);
+        observe(&mission_pr_result(
+            "b",
+            git::PrState::Merged,
+            Some(success.clone()),
+        ));
+        let mut ci_only = mission_pr_result("a", git::PrState::Open, None);
+        ci_only.pr_infos.clear();
+        observe(&ci_only);
+        {
+            let ws = workspace.lock();
+            let pr = &ws.data().missions[0].pull_requests[0];
+            assert_eq!(
+                pr.info.state,
+                git::PrState::Merged,
+                "cached open must not overwrite freshly merged"
+            );
+            assert_eq!(
+                pr.ci, None,
+                "freshly verified absence of checks must clear the old summary"
+            );
+        }
+        let mut pr_only = mission_pr_result("b", git::PrState::Closed, Some(success));
+        pr_only.ci.clear();
+        observe(&pr_only);
+        let observed = workspace.lock().data().missions[0].pull_requests[0].clone();
+        assert_eq!(observed.info.state, git::PrState::Closed);
+        assert_eq!(
+            observed.ci, None,
+            "cached successful checks must not restore cleared checks"
+        );
+        ci_only.ci.insert("a".into(), CiFetch::Unchanged);
+        let previous_tick = *tick.borrow();
+        observe(&ci_only);
+        assert_eq!(
+            workspace.lock().data().missions[0].pull_requests[0],
+            observed
+        );
+        assert_eq!(
+            *tick.borrow(),
+            previous_tick,
+            "cache hits are not new observations"
+        );
+        let mut partial = mission_pr_result("a", git::PrState::Merged, None);
+        partial.ci.insert(
+            "a".into(),
+            CiFetch::Failed {
+                sha: Some("sha".into()),
+                summary: None,
+            },
+        );
+        partial.failed_ids.insert("a".into());
+        observe(&partial);
+        let ws = workspace.lock();
+        let pr = &ws.data().missions[0].pull_requests[0];
+        assert_eq!(
+            pr.info.state,
+            git::PrState::Merged,
+            "a CI failure must not discard a freshly observed merge"
+        );
+        assert!(!pr.source_project_ids.contains(&"a".into()));
+        drop(ws);
+        let mut new_identity = mission_pr_result("b", git::PrState::Open, None);
+        new_identity.ci.clear();
+        let info = new_identity
+            .pr_infos
+            .get_mut("b")
+            .unwrap()
+            .as_mut()
+            .unwrap();
+        info.number = 8;
+        info.url = "https://github.com/owner/repo/pull/8".into();
+        observe(&new_identity);
+        let ws = workspace.lock();
+        let pr = ws.data().missions[0]
+            .pull_requests
+            .iter()
+            .find(|pr| pr.identity.number == 8)
+            .unwrap();
+        assert!(pr.available);
+        assert_eq!(
+            pr.ci, None,
+            "initializing a new PR must not import the old identity's checks"
+        );
+        assert_eq!(
+            ws.data().missions[0]
+                .pull_requests
+                .iter()
+                .find(|pr| pr.identity.number == 7)
+                .unwrap()
+                .info
+                .state,
+            git::PrState::Merged
+        );
+    }
+
+    #[test]
+    fn mission_retry_fetches_after_failure_and_rate_limit() {
+        // Isolate the process-wide HTTP mock and token environment from parallel tests.
+        const CHILD: &str = "OKENA_MISSION_POLL_TEST_CHILD";
+        const VERIFIED: &str = "mission poll recovery verified";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "git_poll::tests::mission_retry_fetches_after_failure_and_rate_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("GH_TOKEN", "test-token")
+                .env("GH_HOST", "github.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains(VERIFIED));
+            return;
+        }
+        use okena_transport::http::{HttpResponse, testing};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let failure = Arc::new(AtomicUsize::new(0));
+        let ci_calls = Arc::new(AtomicUsize::new(0));
+        let pr_number = Arc::new(AtomicUsize::new(7));
+        let mock_failure = failure.clone();
+        let mock_calls = ci_calls.clone();
+        let mock_number = pr_number.clone();
+        let _mock = testing::mock(move |request| {
+            assert_eq!(request.url(), "https://api.github.com/graphql");
+            let query = request.json_body().unwrap()["query"].as_str().unwrap();
+            let (status, body) = if query.contains("PullRequestList") {
+                if mock_failure.load(Ordering::SeqCst) == 1 {
+                    (429, serde_json::json!({"message":"rate limited"}))
+                } else {
+                    let number = mock_number.load(Ordering::SeqCst);
+                    (
+                        200,
+                        serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":[{
+                            "number":number,"url":format!("https://github.com/owner/repo/pull/{number}"),"state":"OPEN","isDraft":false
+                        }]}}}}),
+                    )
+                }
+            } else {
+                assert!(query.contains("PullRequestStatusChecks"));
+                mock_calls.fetch_add(1, Ordering::SeqCst);
+                if mock_failure.load(Ordering::SeqCst) == 2 {
+                    (500, serde_json::json!({"message":"unavailable"}))
+                } else {
+                    (
+                        200,
+                        serde_json::json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}}}}),
+                    )
+                }
+            };
+            Ok(HttpResponse::new(
+                status,
+                Vec::new(),
+                serde_json::to_vec(&body).unwrap(),
+            ))
+        });
+        let path =
+            std::env::temp_dir().join(format!("okena-mission-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+            vec!["config", "branch.main.remote", "origin"],
+            vec!["config", "branch.main.merge", "refs/heads/main"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for mode in [1, 2] {
+                let (workspace, tick) = mission_workspace(&[("p1", "t1")]);
+                let mut apply = ApplyHarness::new();
+                let mut failed_ci = HashSet::new();
+                let mut cached_repository = None;
+                let projects = vec![("p1".to_string(), path.to_string_lossy().into_owned())];
+                let visible = HashSet::from(["p1".to_string()]);
+                let failure_cycle = if mode == 1 { 13 } else { 121 };
+                let retry_cycle = failure_cycle + 12;
+                for (cycle, failing, number) in [(1, false, 7), (failure_cycle, true, 7), (retry_cycle, false, 7), (retry_cycle + 12, false, 8)] {
+                    failure.store(if failing { mode } else { 0 }, Ordering::SeqCst);
+                    pr_number.store(number, Ordering::SeqCst);
+                    let mut polls = select_github_polls(&projects, &visible, &apply.schedule, &apply.pr_infos, cycle, true, &HashSet::new(), false);
+                    assert_eq!(polls.len(), 1);
+                    if cycle == retry_cycle {
+                        assert!(!apply.schedule.is_rate_limited(cycle));
+                        assert_eq!(polls[0].ci_skip_sha, None, "failure must require a real retry even though the upstream commit is unchanged");
+                    }
+                    polls[0].cached_repository = cached_repository.clone();
+                    if polls[0].want_pr { apply.schedule.pr_dispatched("p1", cycle); }
+                    if polls[0].want_ci { apply.schedule.ci_dispatched("p1", cycle); }
+                    let before_calls = ci_calls.load(Ordering::SeqCst);
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    poll_github(polls, HashMap::new(), HashMap::from([("p1".into(), Some("main".into()))]), tx).await;
+                    let GithubPassMessage::Project(result) = rx.recv().await.unwrap() else { panic!("missing project result") };
+                    cached_repository = result.repositories.get("p1").cloned();
+                    record_mission_observations(&result, &HashMap::new(), &apply.last, &mut failed_ci, &workspace, &tick);
+                    apply.apply(*result, cycle, &HashMap::new());
+                    assert_eq!(workspace.lock().data().missions[0].pull_requests.iter().find(|pr| pr.identity.number == u32::try_from(number).unwrap()).unwrap().available, !failing);
+                    if cycle == 1 { assert!(apply.schedule.ci_skip_sha("p1", 2).is_some()); }
+                    if failing && mode == 1 { assert!(apply.schedule.is_rate_limited(cycle + 1)); }
+                    if failing {
+                        assert!(!apply.schedule.has_urgent());
+                        assert!(!apply.schedule.ci_due("p1", cycle + 1, true), "failure must preserve the dispatched retry cadence");
+                    }
+                    if cycle == retry_cycle {
+                        assert!(ci_calls.load(Ordering::SeqCst) > before_calls, "recovery must actually reach the HTTP mock, not use Unchanged");
+                    }
+                    if number == 8 {
+                        assert!(ci_calls.load(Ordering::SeqCst) > before_calls, "a new PR identity must not reuse settled checks solely because its SHA matches");
+                    }
+                }
+            }
+        });
+        std::fs::remove_dir_all(path).unwrap();
+        println!("{VERIFIED}");
     }
 
     impl ApplyHarness {

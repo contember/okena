@@ -199,6 +199,7 @@ pub struct Okena {
     scrollback_visible_projects: parking_lot::Mutex<Option<std::collections::HashSet<String>>>,
     /// Track which detached windows we've already opened
     pub(crate) opened_detached_windows: HashSet<String>,
+    pub(crate) detached_window_handles: HashMap<String, AnyWindowHandle>,
     /// Remote connection manager. Held so extras spawned at runtime can
     /// be wired with the same singleton main was wired with at startup
     /// (`open_extra_window` calls `set_remote_manager` on the new view).
@@ -345,6 +346,7 @@ impl Okena {
             terminals,
             scrollback_visible_projects: parking_lot::Mutex::new(None),
             opened_detached_windows: HashSet::new(),
+            detached_window_handles: HashMap::new(),
             remote_manager: remote_manager.clone(),
             last_settings_sent: mirrored_settings(&crate::settings::settings(cx)),
             terminal_activity_repaints: ActivityRepaintBatch::default(),

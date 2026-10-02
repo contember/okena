@@ -174,14 +174,16 @@ pub async fn run_pty_loop(
         // Work done so far in this pass (across batched events).
         let mut budget = TurnBudget::default();
 
-        process_event(
+        if process_event(
             &event,
             &terminals,
             &pty_manager,
             &mut exit_events,
             &mut dirty_terminal_ids,
             &mut budget,
-        );
+        ) {
+            ingest_attention_event(&event, &terminals, &pty_manager, &reactor);
+        }
 
         // Drain additional pending events (batch processing), stopping once we
         // exceed the per-turn budget so we yield instead of monopolizing the
@@ -191,14 +193,16 @@ pub async fn run_pty_loop(
                 Ok(event) => event,
                 Err(_) => break,
             };
-            process_event(
+            if process_event(
                 &event,
                 &terminals,
                 &pty_manager,
                 &mut exit_events,
                 &mut dirty_terminal_ids,
                 &mut budget,
-            );
+            ) {
+                ingest_attention_event(&event, &terminals, &pty_manager, &reactor);
+            }
         }
 
         // Hook terminals can report their exit code via an OSC title
@@ -276,7 +280,7 @@ fn process_event(
     exit_events: &mut Vec<(String, PtyGeneration, Option<u32>)>,
     dirty_terminal_ids: &mut Vec<String>,
     budget: &mut TurnBudget,
-) {
+) -> bool {
     match event {
         PtyEvent::Data {
             terminal_id,
@@ -286,7 +290,7 @@ fn process_event(
         } => {
             budget.charge(data.len());
             if !pty_manager.is_current_generation(terminal_id, *generation) {
-                return;
+                return false;
             }
             // Hold the registry lock only for the HashMap lookup — clone the
             // `Arc<Terminal>` out and drop the guard before the (potentially
@@ -294,9 +298,11 @@ fn process_event(
             // block behind it.
             let term = terminals.lock().get(terminal_id).cloned();
             if let Some(term) = term {
+                term.set_attention_generation(generation.value());
                 term.process_output_with_sequence(data, *sequence);
             }
             dirty_terminal_ids.push(terminal_id.clone());
+            true
         }
         PtyEvent::Exit {
             terminal_id,
@@ -309,8 +315,71 @@ fn process_event(
             // see crash output.
             if pty_manager.cleanup_exited(terminal_id, *generation) {
                 exit_events.push((terminal_id.clone(), *generation, *exit_code));
+                true
+            } else {
+                false
             }
         }
+    }
+}
+
+fn ingest_attention_event(
+    event: &PtyEvent,
+    terminals: &TerminalsRegistry,
+    pty_manager: &PtyManager,
+    reactor: &PtyLoopReactor,
+) {
+    match event {
+        PtyEvent::Data {
+            terminal_id,
+            generation,
+            ..
+        } if pty_manager.is_current_generation(terminal_id, *generation) => {
+            let Some(terminal) = terminals.lock().get(terminal_id).cloned() else {
+                return;
+            };
+            let (events, lost) = terminal.take_attention_events();
+            if events.is_empty() && lost == 0 {
+                return;
+            }
+            let mut workspace = reactor.workspace.lock();
+            let mut cx = reactor.workspace_cx();
+            workspace.record_attention_loss(terminal_id, lost, &mut cx);
+            let Some(project_id) = workspace.find_project_id_owning_terminal(terminal_id) else {
+                return;
+            };
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            for event in events {
+                if event.generation != generation.value() {
+                    continue;
+                }
+                if let Some(session) = &event.session {
+                    workspace.set_agent_session(&project_id, terminal_id, session.clone(), &mut cx);
+                }
+                workspace.record_attention(
+                    okena_core::attention::AttentionSource {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                        attachment_id: terminal.attention_attachment_id().to_owned(),
+                        generation: event.generation,
+                        conversation: event.session.as_ref().map(Into::into),
+                    },
+                    event.status.as_ref(),
+                    timestamp,
+                    &mut cx,
+                );
+            }
+        }
+        PtyEvent::Exit { terminal_id, .. } => {
+            reactor
+                .workspace
+                .lock()
+                .invalidate_attention_terminal(terminal_id, &mut reactor.workspace_cx());
+        }
+        _ => {}
     }
 }
 
@@ -1235,6 +1304,10 @@ mod tests {
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![parent, child],
             project_order: vec!["parent".into()],
             folders: Vec::new(),
@@ -1262,6 +1335,8 @@ mod tests {
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.into()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -1288,12 +1363,118 @@ mod tests {
     }
 
     #[test]
+    fn attention_ingestion_rejects_stale_generation_and_invalidates_exit() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let id = manager
+            .create_terminal_with_shell(&cwd, Some(&hook_shell("exit 0")))
+            .unwrap();
+        let old = manager.current_generation(&id).unwrap();
+        manager.kill(&id);
+        manager
+            .create_or_reconnect_terminal_with_shell(Some(&id), &cwd, Some(&hook_shell("exit 0")))
+            .unwrap();
+        let current = manager.current_generation(&id).unwrap();
+        let manager = Arc::new(manager);
+        let terminal = Arc::new(Terminal::new(
+            id.clone(),
+            terminal_size(),
+            manager.clone(),
+            cwd,
+        ));
+        let terminals = Arc::new(Mutex::new(HashMap::from([(id.clone(), terminal.clone())])));
+        let mut data = WorkspaceData::empty();
+        data.projects.push(plain_project(&id));
+        let reactor = test_reactor_with_manager(
+            Workspace::new(data),
+            AppSettings::default(),
+            manager.clone(),
+        );
+        let mut exits = Vec::new();
+        let mut dirty = Vec::new();
+        let mut budget = TurnBudget::default();
+        let mut feed = |event: PtyEvent| {
+            if process_event(
+                &event,
+                &terminals,
+                &manager,
+                &mut exits,
+                &mut dirty,
+                &mut budget,
+            ) {
+                ingest_attention_event(&event, &terminals, &manager, &reactor);
+            }
+        };
+        feed(PtyEvent::Data {
+            terminal_id: id.clone(),
+            generation: old,
+            data: b"\x1b]9001;st=done\x07".to_vec(),
+            sequence: 0,
+        });
+        assert!(
+            reactor
+                .workspace
+                .lock()
+                .data()
+                .attention
+                .episodes()
+                .is_empty()
+        );
+        feed(PtyEvent::Data {
+            terminal_id: id.clone(),
+            generation: current,
+            data: b"\x1b]9001;st=working\x07\x1b]9001;st=done\x07\x1b]9001;st=blocked\x07".to_vec(),
+            sequence: 1,
+        });
+        let episodes = reactor.workspace.lock().data().attention.episodes();
+        assert_eq!(episodes.len(), 2);
+        assert!(
+            episodes
+                .iter()
+                .all(|episode| episode.available && episode.source.generation == current.value())
+        );
+        feed(PtyEvent::Exit {
+            terminal_id: id.clone(),
+            generation: old,
+            exit_code: Some(0),
+        });
+        assert!(
+            reactor
+                .workspace
+                .lock()
+                .data()
+                .attention
+                .episodes()
+                .iter()
+                .all(|episode| episode.available)
+        );
+        feed(PtyEvent::Exit {
+            terminal_id: id.clone(),
+            generation: current,
+            exit_code: Some(0),
+        });
+        let episodes = reactor.workspace.lock().data().attention.episodes();
+        assert_eq!(episodes.len(), 2);
+        assert!(
+            episodes
+                .iter()
+                .all(|episode| !episode.available && !episode.read)
+        );
+        assert!(terminal.take_attention_events().0.is_empty());
+        manager.kill_exited(&id, current);
+    }
+
+    #[test]
     fn terminal_close_uses_retained_owner_after_layout_removal_once() {
         let mut project = plain_project("terminal-1");
         project.hooks.terminal.on_close = Some("echo closed".into());
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1359,6 +1540,10 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1588,6 +1773,10 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -2126,6 +2315,10 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -2256,6 +2449,72 @@ mod tests {
             "process_output should have advanced content_generation (before={gen_before}, after={})",
             term.content_generation(),
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attention_channel_ingestion_preserves_identity_before_exit_cleanup() {
+        use okena_core::attention::AttentionKind;
+        let (manager, _output) = PtyManager::new(SessionBackend::None);
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let id = manager
+            .create_terminal_with_shell(&cwd, Some(&hook_shell("exit 0")))
+            .unwrap();
+        let generation = manager.current_generation(&id).unwrap();
+        let manager = Arc::new(manager);
+        let terminal = Arc::new(Terminal::new(
+            id.clone(),
+            terminal_size(),
+            manager.clone(),
+            cwd,
+        ));
+        let terminals = Arc::new(Mutex::new(HashMap::from([(id.clone(), terminal)])));
+        let mut data = WorkspaceData::empty();
+        data.projects.push(plain_project(&id));
+        let reactor = test_reactor_with_manager(
+            Workspace::new(data),
+            AppSettings::default(),
+            manager.clone(),
+        );
+        let workspace = reactor.workspace.clone();
+        let services = Arc::new(Mutex::new(ServiceManager::new(
+            reactor.backend.clone(),
+            terminals.clone(),
+        )));
+        let (tx, rx) = async_channel::bounded(4);
+        let session_b = "eyJhZ2VudCI6ImNsYXVkZS1jb2RlIiwic2Vzc2lvbl9pZCI6IjExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1NTU1NTU1NSJ9";
+        let session_c = "eyJhZ2VudCI6ImNsYXVkZS1jb2RlIiwic2Vzc2lvbl9pZCI6ImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSJ9";
+        tokio::task::LocalSet::new().run_until(async move {
+            let handle = tokio::task::spawn_local(run_pty_loop(rx, terminals.clone(), manager, services,
+                Handle::current(), watch::channel(0).0, reactor, watch::channel(0).0));
+            tx.send(PtyEvent::Data {
+                terminal_id: id.clone(), generation, sequence: 0,
+                data: format!("\x1b]9001;st=blocked\x07\x1b]9001;st=unknown;lbl={session_b}\x07").into_bytes(),
+            }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if workspace.lock().agent_session("project-1", &id).is_some() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            let anonymous = workspace.lock().data().attention.episodes();
+            assert_eq!(anonymous.len(), 1);
+            assert!(anonymous[0].source.conversation.is_none());
+            assert!(!anonymous[0].available, "first identity invalidates anonymous block even with unknown lifecycle");
+            tx.send(PtyEvent::Data {
+                terminal_id: id.clone(), generation, sequence: 1,
+                data: format!("\x1b]9001;st=working\x07\x1b]9001;st=done\x07\x1b]9001;st=blocked\x07\x1b]9001;st=clear;lbl={session_c}\x07\x1b]9001;st=working\x07\x1b]9001;st=done\x07\x1b]9001;st=blocked\x07").into_bytes(),
+            }).await.unwrap();
+            tx.send(PtyEvent::Exit { terminal_id: id.clone(), generation, exit_code: Some(0) }).await.unwrap();
+            drop(tx);
+            handle.await.unwrap();
+            assert!(!terminals.lock().contains_key(&id));
+            let episodes = workspace.lock().data().attention.episodes();
+            assert_eq!(episodes.len(), 5);
+            assert!(episodes.iter().all(|episode| !episode.available && !episode.read));
+            let completions: HashSet<_> = episodes.iter().filter(|episode| episode.kind == AttentionKind::Completion)
+                .map(|episode| episode.source.conversation.as_ref().unwrap().session_id.as_str()).collect();
+            assert_eq!(completions, HashSet::from(["11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]));
+        }).await;
     }
 
     #[test]

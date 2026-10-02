@@ -203,6 +203,8 @@ pub(crate) fn validate_workspace_data(
     clear_terminal_ids: bool,
     #[cfg_attr(not(windows), allow(unused))] backend_preference: SessionBackend,
 ) {
+    data.attention.validate_persisted();
+    crate::missions::validate_persisted(data);
     for project in &mut data.projects {
         for session in project.agent_sessions.values() {
             data.agent_session_history.record(session.clone());
@@ -1134,6 +1136,7 @@ pub(crate) fn sync_worktrees_with_backend_and_shell(
         p.is_creating = false;
     }
 
+    crate::missions::reconcile_membership(data);
     stale_terminal_ids
 }
 
@@ -1314,6 +1317,10 @@ pub fn default_workspace() -> WorkspaceData {
     WorkspaceData {
         version: WORKSPACE_VERSION,
         agent_session_history: Default::default(),
+        missions: Vec::new(),
+        mission_excluded_conversations: Vec::new(),
+        attention: Default::default(),
+        remote_work_overviews: HashMap::new(),
         projects: vec![ProjectData {
             id: project_id.clone(),
             name: "Default".to_string(),
@@ -1392,6 +1399,8 @@ mod tests {
         });
         let project_layout = LayoutNode::Terminal {
             terminal_id: Some("remote:local-daemon:t1".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: true,
             detached: false,
@@ -1516,6 +1525,8 @@ mod tests {
                 "p1".to_string(),
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: true,
                     detached: false,
@@ -1775,6 +1786,10 @@ mod tests {
         WorkspaceData {
             version: WORKSPACE_VERSION,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -1938,6 +1953,8 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("tid1".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: true,
             detached: true,
@@ -1989,6 +2006,8 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("tid0".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -1998,6 +2017,8 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("tid1".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2144,6 +2165,8 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("regular-term".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2153,6 +2176,8 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2257,6 +2282,10 @@ mod tests {
         let data = WorkspaceData {
             version: 0,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2628,6 +2657,10 @@ mod tests {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2709,6 +2742,8 @@ mod tests {
             let mut project = make_project("p1");
             project.layout = Some(LayoutNode::Terminal {
                 terminal_id: terminal_id.map(str::to_string),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: Some(agent_session(session_id)),
                 minimized: false,
                 detached: false,
@@ -2771,6 +2806,8 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3246,6 +3283,8 @@ mod tests {
         });
         wt.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("stale-layout".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3328,6 +3367,8 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3384,6 +3425,8 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

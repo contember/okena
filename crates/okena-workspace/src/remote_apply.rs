@@ -102,6 +102,32 @@ pub fn apply_remote_snapshot(
     let mut expected_remote_ids: HashSet<String> = HashSet::new();
     let mut synced_conn_ids: HashSet<String> = HashSet::new();
     let active_conn_ids: HashSet<String> = snapshots.iter().map(|s| s.config.id.clone()).collect();
+    data.remote_work_overviews
+        .retain(|id, _| active_conn_ids.contains(id));
+    for snapshot in snapshots {
+        match snapshot.state.as_ref() {
+            Some(state) => {
+                if let Some(overview) = &state.work_overview {
+                    data.remote_work_overviews
+                        .insert(snapshot.config.id.clone(), overview.clone());
+                } else {
+                    data.remote_work_overviews.remove(&snapshot.config.id);
+                }
+            }
+            None => {
+                if let Some(overview) = data.remote_work_overviews.get_mut(&snapshot.config.id) {
+                    for episode in &mut overview.attention {
+                        episode.available = false;
+                    }
+                    for mission in &mut overview.missions {
+                        for pr in &mut mission.pull_requests {
+                            pr.available = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     for snap in snapshots {
         let conn_id = &snap.config.id;
@@ -546,6 +572,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),
@@ -613,6 +643,7 @@ mod tests {
         folders: Vec<ApiFolder>,
     ) -> StateResponse {
         StateResponse {
+            work_overview: None,
             state_version: 1,
             projects,
             focused_project_id: None,
@@ -622,6 +653,76 @@ mod tests {
             windows: vec![],
             hooks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn work_overviews_are_connection_scoped_and_capability_is_explicit() {
+        let mut data = empty_data();
+        let mut sync = RemoteSyncState::new();
+        let mut supported = state_with(vec![], vec![], vec![]);
+        supported.work_overview = Some(Default::default());
+        let mut snapshots = vec![
+            RemoteSnapshot {
+                config: config("one"),
+                state: Some(supported.clone()),
+            },
+            RemoteSnapshot {
+                config: config("two"),
+                state: Some(supported),
+            },
+            RemoteSnapshot {
+                config: config("old"),
+                state: Some(state_with(vec![], vec![], vec![])),
+            },
+        ];
+        apply_remote_snapshot(&mut data, &mut sync, &snapshots, WindowId::Main);
+        assert_eq!(data.remote_work_overviews.len(), 2);
+        assert!(data.remote_work_overviews["one"].attention.is_empty());
+        assert!(!data.remote_work_overviews.contains_key("old"));
+        let episode = okena_core::attention::AttentionEpisode {
+            id: "same-raw-id".into(),
+            revision: 1,
+            source: okena_core::attention::AttentionSource {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+                attachment_id: "boot".into(),
+                generation: 1,
+                conversation: None,
+            },
+            kind: okena_core::attention::AttentionKind::InputNeeded,
+            summary: "Last reported question".into(),
+            created_at: 1,
+            updated_at: 1,
+            available: true,
+            read: false,
+        };
+        for snapshot in &mut snapshots[..2] {
+            snapshot
+                .state
+                .as_mut()
+                .unwrap()
+                .work_overview
+                .as_mut()
+                .unwrap()
+                .attention
+                .push(episode.clone());
+        }
+        apply_remote_snapshot(&mut data, &mut sync, &snapshots, WindowId::Main);
+        assert_eq!(
+            data.remote_work_overviews["one"].attention[0].id,
+            data.remote_work_overviews["two"].attention[0].id
+        );
+        snapshots[0].state = None;
+        apply_remote_snapshot(&mut data, &mut sync, &snapshots, WindowId::Main);
+        assert!(data.remote_work_overviews.contains_key("one"));
+        assert!(data.remote_work_overviews.contains_key("two"));
+        assert!(!data.remote_work_overviews["one"].attention[0].available);
+        assert!(data.remote_work_overviews["two"].attention[0].available);
+        let saved = serde_json::to_value(&data).unwrap();
+        assert!(saved.get("remote_work_overviews").is_none());
+        snapshots.remove(0);
+        apply_remote_snapshot(&mut data, &mut sync, &snapshots, WindowId::Main);
+        assert!(!data.remote_work_overviews.contains_key("one"));
     }
 
     #[test]

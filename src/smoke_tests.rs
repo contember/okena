@@ -124,17 +124,7 @@ mod tests {
     fn smoke_workspace_entity_creates(cx: &mut gpui::TestAppContext) {
         init_globals(cx);
         let _workspace = cx.new(|_cx| {
-            okena_workspace::state::Workspace::new(okena_workspace::state::WorkspaceData {
-                agent_session_history: Default::default(),
-                version: 1,
-                projects: vec![],
-                project_order: vec![],
-                folders: vec![],
-                service_panel_heights: Default::default(),
-                hook_panel_heights: Default::default(),
-                main_window: Default::default(),
-                extra_windows: Vec::new(),
-            })
+            okena_workspace::state::Workspace::new(okena_workspace::state::WorkspaceData::empty())
         });
     }
 

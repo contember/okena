@@ -5,6 +5,7 @@
 
 use okena_core::api::ActionRequest;
 use okena_transport::remote_action::RemoteActionClient;
+use okena_workspace::state::MissionSelection;
 
 use crate::simple_input::{InputChangedEvent, SimpleInputState};
 use list_selection::ListSelection;
@@ -36,7 +37,14 @@ pub enum WorktreeDialogEvent {
         project_id: String,
         branch: String,
         create_branch: bool,
+        mission: Option<MissionWorktreeContext>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissionWorktreeContext {
+    pub selection: MissionSelection,
+    pub title: String,
 }
 
 impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
@@ -51,6 +59,7 @@ impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
 /// mirrors back. Hence the dialog holds no `workspace`, git-root, path-template
 /// or hooks state — only branch selection.
 pub struct WorktreeDialog {
+    mission: Option<MissionWorktreeContext>,
     client: RemoteActionClient,
     daemon_project_id: String,
     pub(super) project_id: String,
@@ -92,6 +101,7 @@ impl WorktreeDialog {
         let focus_handle = cx.focus_handle();
 
         let mut dialog = Self {
+            mission: None,
             client,
             daemon_project_id,
             project_id,
@@ -108,6 +118,11 @@ impl WorktreeDialog {
         };
         dialog.load_initial_data(cx);
         dialog
+    }
+
+    pub fn with_mission(mut self, mission: Option<MissionWorktreeContext>) -> Self {
+        self.mission = mission;
+        self
     }
 
     fn load_initial_data(&mut self, cx: &mut Context<Self>) {
@@ -254,6 +269,7 @@ impl WorktreeDialog {
             project_id,
             branch,
             create_branch,
+            mission: self.mission.clone(),
         });
     }
 

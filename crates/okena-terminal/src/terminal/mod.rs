@@ -58,6 +58,7 @@ pub use osc_sidecar::TerminalNotification;
 
 use event_listener::{ClipboardQueues, CurrentState, ZedEventListener};
 use osc_sidecar::OscSidecar;
+pub use osc_sidecar::{AgentAttentionEvent, MAX_PENDING_ATTENTION_EVENTS};
 use prompt_marks::{PromptSidecar, PromptTracker};
 use types::FocusReportState;
 
@@ -251,6 +252,7 @@ pub struct Terminal {
     /// it via `take_agent_session_dirty` to persist the new session.
     pub(super) agent_session_dirty: Arc<AtomicBool>,
     pub(super) pending_agent_sessions: Arc<Mutex<Vec<AgentSession>>>,
+    pub(super) attention_attachment_id: String,
 
     /// Per-renderer focus state for DEC focus reports. A terminal can appear
     /// in multiple windows, so focus reports are derived from the aggregate
@@ -536,6 +538,7 @@ impl Terminal {
             agent_session,
             agent_session_dirty,
             pending_agent_sessions,
+            attention_attachment_id: uuid::Uuid::new_v4().to_string(),
             focus_report_state: Mutex::new(FocusReportState::default()),
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),

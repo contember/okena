@@ -1616,6 +1616,103 @@ fn mirror_does_not_queue_agent_sessions_for_persistence() {
     terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
     assert!(terminal.agent_session().is_some());
     assert!(terminal.take_pending_agent_sessions().is_empty());
+    assert_eq!(terminal.take_attention_events(), (Vec::new(), 0));
+}
+
+#[test]
+fn attention_capture_preserves_order_and_identity_within_one_batch() {
+    use okena_core::agent_status::AgentLifecycle;
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        Arc::new(super::HeadlessOwnerTransport::new()),
+        "/tmp".into(),
+    );
+    terminal.set_attention_generation(7);
+    let a = "11111111-2222-3333-4444-555555555555";
+    let b = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let label = |id| b64(&format!(r#"{{"agent":"claude-code","session_id":"{id}"}}"#));
+    terminal.process_output(format!(
+        "\x1b]9001;st=blocked;lbl={}\x07\x1b]9001;st=clear;lbl={}\x07\x1b]9001;st=working\x07\x1b]9001;st=done\x07\x1b]9001;st=clear\x07",
+        label(a), label(b),
+    ).as_bytes());
+    let (events, loss) = terminal.take_attention_events();
+    assert_eq!(loss, 0);
+    assert_eq!(events.len(), 5);
+    assert!(events.iter().all(|event| event.generation == 7));
+    assert_eq!(events[0].session.as_ref().unwrap().session_id, a);
+    assert!(
+        events[1..]
+            .iter()
+            .all(|event| event.session.as_ref().unwrap().session_id == b)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.status.as_ref().map(|s| s.lifecycle))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(AgentLifecycle::Blocked),
+            None,
+            Some(AgentLifecycle::Working),
+            Some(AgentLifecycle::Done),
+            None
+        ]
+    );
+    assert_eq!(terminal.take_attention_events(), (Vec::new(), 0));
+}
+
+#[test]
+fn attention_capture_bounds_overflow_coalesces_duplicates_and_keeps_latest() {
+    use crate::terminal::MAX_PENDING_ATTENTION_EVENTS;
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        Arc::new(super::HeadlessOwnerTransport::new()),
+        "/tmp".into(),
+    );
+    let mut output = Vec::new();
+    for _ in 0..MAX_PENDING_ATTENTION_EVENTS {
+        output.extend_from_slice(
+            b"\x1b]9001;st=working\x07\x1b]9001;st=working\x07\x1b]9001;st=done\x07",
+        );
+    }
+    terminal.process_output(&output);
+    let (events, loss) = terminal.take_attention_events();
+    assert_eq!(events.len(), MAX_PENDING_ATTENTION_EVENTS);
+    assert_eq!(loss, MAX_PENDING_ATTENTION_EVENTS as u64);
+    assert_eq!(events.last().unwrap().status, terminal.agent_status());
+}
+
+#[test]
+fn attention_generation_reset_drops_old_identity_and_partial_sequence() {
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        Arc::new(super::HeadlessOwnerTransport::new()),
+        "/tmp".into(),
+    );
+    terminal.set_attention_generation(1);
+    let lbl = b64(r#"{"agent":"claude-code","session_id":"11111111-2222-3333-4444-555555555555"}"#);
+    terminal.process_output(format!("\x1b]9001;st=blocked;lbl={lbl}\x07\x1b]9001;st=").as_bytes());
+    terminal.take_attention_events();
+    terminal.take_remote_dirty();
+    terminal.set_attention_generation(2);
+    assert!(terminal.take_remote_dirty());
+    terminal.process_output(b"done\x07\x1b]9001;st=working\x07");
+    let (events, loss) = terminal.take_attention_events();
+    assert_eq!(loss, 0);
+    assert_eq!(events.len(), 2);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.generation == 2 && event.session.is_none())
+    );
+    assert!(events[0].status.is_none());
+    assert_eq!(
+        events[1].status.as_ref().unwrap().lifecycle,
+        okena_core::agent_status::AgentLifecycle::Working
+    );
 }
 
 #[test]

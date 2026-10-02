@@ -498,16 +498,25 @@ pub fn cleanup_stale_workspace_replacement(
     backend.flush_teardown();
 }
 
-fn clear_layout_terminal_id(node: &mut LayoutNode, target: &str) -> bool {
+fn clear_layout_terminal_id(
+    node: &mut LayoutNode,
+    target: &str,
+    session: Option<&okena_core::agent_session::AgentSession>,
+) -> bool {
     match node {
-        LayoutNode::Terminal { terminal_id, .. } if terminal_id.as_deref() == Some(target) => {
+        LayoutNode::Terminal {
+            terminal_id,
+            pending_agent_resume,
+            ..
+        } if terminal_id.as_deref() == Some(target) => {
             *terminal_id = None;
+            *pending_agent_resume = session.cloned();
             true
         }
         LayoutNode::Terminal { .. } => false,
         LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children
             .iter_mut()
-            .any(|child| clear_layout_terminal_id(child, target)),
+            .any(|child| clear_layout_terminal_id(child, target, session)),
     }
 }
 
@@ -532,11 +541,14 @@ pub fn finish_workspace_replacement(
 
     for terminal_id in &completion.failed_ordinary {
         for project in &mut ws.data.projects {
-            if project
-                .layout
-                .as_mut()
-                .is_some_and(|layout| clear_layout_terminal_id(layout, terminal_id))
-            {
+            if project.layout.as_mut().is_some_and(|layout| {
+                clear_layout_terminal_id(
+                    layout,
+                    terminal_id,
+                    project.agent_sessions.get(terminal_id),
+                )
+            }) {
+                project.agent_sessions.remove(terminal_id);
                 break;
             }
         }
@@ -1025,6 +1037,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: std::collections::HashMap::new(),
             projects,
             project_order,
             service_panel_heights: HashMap::new(),
@@ -1033,6 +1049,130 @@ mod tests {
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn imported_colliding_mission_is_rekeyed_through_workspace_replacement() {
+        use okena_core::mission::{Mission, MissionLifecycle};
+        let backend = Arc::new(RecordingBackend {
+            next_id: AtomicUsize::new(1),
+            killed: Mutex::new(Vec::new()),
+            reconnected: Mutex::new(Vec::new()),
+            fail_next_cwds: Mutex::new(HashSet::new()),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let mut cx = TestCx {
+            runner: HookRunner::new(backend.clone(), terminals.clone()),
+            monitor: HookMonitor::new(),
+        };
+        let session = okena_core::agent_session::AgentSession {
+            agent: "claude-code".into(),
+            session_id: "00000000-0000-0000-0000-000000000001".into(),
+            transcript_path: None,
+        };
+        let mission_id = "00000000-0000-0000-0000-000000000002";
+        let mut incoming = data(project("collision", "old-hook", None));
+        incoming.projects[0].layout = Some(LayoutNode::new_terminal());
+        if let Some(LayoutNode::Terminal {
+            mission_id: binding,
+            pending_agent_resume,
+            ..
+        }) = &mut incoming.projects[0].layout
+        {
+            *binding = Some(mission_id.into());
+            *pending_agent_resume = Some(session.clone());
+        }
+        incoming.agent_session_history.record(session.clone());
+        let mut worktree = project("collision-worktree", "worktree-hook", None);
+        worktree.layout = None;
+        worktree.worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+            parent_project_id: "collision".into(),
+            color_override: None,
+            main_repo_path: String::new(),
+            worktree_path: String::new(),
+            branch_name: String::new(),
+        });
+        incoming.projects[0].worktree_ids.push(worktree.id.clone());
+        incoming.project_order.push(worktree.id.clone());
+        incoming.projects.push(worktree);
+        incoming.missions.push(Mission {
+            id: mission_id.into(),
+            title: "Imported".into(),
+            goal: None,
+            home_project_id: Some("collision".into()),
+            created_at: 1,
+            lifecycle: MissionLifecycle::Active,
+            repository_ids: vec!["collision".into()],
+            worktree_ids: vec!["collision-worktree".into()],
+            conversations: vec![(&session).into()],
+            pull_requests: Vec::new(),
+        });
+        let mut outgoing = incoming.clone();
+        outgoing.missions[0].title = "Outgoing".into();
+        let mut ws = Workspace::new(outgoing);
+        let path = std::env::temp_dir().join(format!(
+            "okena-mission-import-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        export_workspace(&incoming, &path).unwrap();
+        let imported = import_workspace_data(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let imported_mission = imported.missions[0].id.clone();
+        let imported_project = imported.projects[0].id.clone();
+        let imported_worktree = imported.projects[1].id.clone();
+        assert_ne!(imported_mission, mission_id);
+        assert_ne!(imported_project, "collision");
+        assert_ne!(imported_worktree, "collision-worktree");
+        let result = apply_imported_workspace(
+            &mut ws,
+            &mut FocusManager::default(),
+            imported,
+            backend.as_ref(),
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+        );
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert_eq!(ws.data.missions.len(), 1);
+        assert_eq!(ws.data.missions[0].id, imported_mission);
+        assert_eq!(ws.data.missions[0].title, "Imported");
+        assert_eq!(
+            ws.data.missions[0].home_project_id.as_deref(),
+            Some(imported_project.as_str())
+        );
+        assert_eq!(
+            ws.data.missions[0].worktree_ids,
+            vec![imported_worktree.clone()]
+        );
+        assert_eq!(ws.data.projects[0].worktree_ids, vec![imported_worktree]);
+        assert_eq!(
+            ws.data.projects[1]
+                .worktree_info
+                .as_ref()
+                .unwrap()
+                .parent_project_id,
+            imported_project
+        );
+        assert!(
+            matches!(ws.data.projects[0].layout.as_ref().unwrap(), LayoutNode::Terminal { mission_id: Some(binding), .. } if binding == &imported_mission)
+        );
+        assert_eq!(
+            ws.data.missions[0].repository_ids,
+            vec![imported_project.clone()]
+        );
+        assert_eq!(ws.data.missions[0].conversations, vec![(&session).into()]);
+        let terminal_id = ws.data.projects[0]
+            .layout
+            .as_ref()
+            .unwrap()
+            .collect_terminal_ids()[0]
+            .clone();
+        assert_eq!(
+            okena_workspace::missions::terminal_mission(&ws.data, &imported_project, &terminal_id),
+            Some(imported_mission.as_str())
+        );
+        ws.close_terminal(&imported_project, &[], &mut cx);
+        assert_eq!(ws.data.missions[0].conversations, vec![(&session).into()]);
     }
 
     #[test]
@@ -1129,6 +1269,20 @@ mod tests {
         let mut incoming = project("incoming", "stale-hook", None);
         incoming.path = failed_cwd.to_string_lossy().into_owned();
         incoming.layout = Some(LayoutNode::new_terminal());
+        let session = okena_core::agent_session::AgentSession {
+            agent: "claude-code".into(),
+            session_id: "00000000-0000-0000-0000-000000000001".into(),
+            transcript_path: None,
+        };
+        if let Some(LayoutNode::Terminal {
+            mission_id,
+            pending_agent_resume,
+            ..
+        }) = &mut incoming.layout
+        {
+            *mission_id = Some("00000000-0000-0000-0000-000000000002".into());
+            *pending_agent_resume = Some(session.clone());
+        }
         let prepared = prepare_workspace_replacement(data(incoming), &AppSettings::default());
         let reserved_id = prepared.ordinary[0].terminal_id.clone();
         let mut workspace = Workspace::new(WorkspaceData::empty());
@@ -1149,6 +1303,15 @@ mod tests {
         assert!(matches!(result, ActionResult::Err(_)));
         assert_eq!(workspace.terminal_backend_migration_epoch(), None);
         assert!(!terminals.lock().contains_key(&reserved_id));
+        let restored = workspace.project("incoming").unwrap();
+        assert_eq!(
+            restored.layout.as_ref().unwrap().pending_agent_resume(),
+            Some(&session)
+        );
+        assert!(
+            matches!(restored.layout.as_ref(), Some(LayoutNode::Terminal { mission_id: Some(id), .. }) if id == "00000000-0000-0000-0000-000000000002")
+        );
+        assert!(!restored.agent_sessions.contains_key(&reserved_id));
         assert!(workspace.project("incoming").is_some_and(|project| {
             matches!(
                 project.layout,
@@ -1217,6 +1380,8 @@ mod tests {
         let mut cx = TestCx { runner, monitor };
         let terminal_node = |id: &str| LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
@@ -1318,6 +1483,8 @@ mod tests {
         failed.path = failed_cwd.to_string_lossy().into_owned();
         failed.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
@@ -1333,6 +1500,8 @@ mod tests {
         successful.path = successful_cwd.to_string_lossy().into_owned();
         successful.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,

@@ -36,6 +36,13 @@ use std::collections::{HashMap, HashSet};
 /// Arguments: (project_id, action, cx)
 pub type DispatchActionFn = Box<dyn Fn(&str, ActionRequest, &mut App)>;
 
+pub struct MissionRequested {
+    pub project_id: String,
+    pub terminal_id: Option<String>,
+}
+
+impl EventEmitter<MissionRequested> for Sidebar {}
+
 /// Callback to get current app settings needed by the sidebar.
 pub type GetSettingsFn = Box<dyn Fn(&App) -> SidebarSettings>;
 

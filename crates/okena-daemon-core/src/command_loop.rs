@@ -3568,6 +3568,7 @@ pub async fn daemon_command_loop(
                         project_id,
                         branch,
                         create_branch,
+                        mission_id,
                     } => {
                         // Phase 0: resolve paths. Read settings first, then the
                         // workspace (settings-before-workspace lock order), and drop
@@ -3575,21 +3576,27 @@ pub async fn daemon_command_loop(
                         let template = settings.lock().worktree.path_template.clone();
                         let prepared = {
                             let ws = workspace.lock();
-                            ws.project(&project_id).map(|p| {
-                                let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
-                                    std::path::Path::new(&p.path),
-                                );
-                                let (worktree_path, wt_project_path) =
-                                    okena_git::compute_target_paths(
-                                        &git_root, &subdir, &template, &branch,
-                                    );
-                                (git_root, worktree_path, wt_project_path)
-                            })
+                            ws.validate_worktree_mission(&project_id, mission_id.as_deref())
+                                .and_then(|()| {
+                                    ws.project(&project_id)
+                                        .map(|p| {
+                                            let (git_root, subdir) =
+                                                okena_git::resolve_git_root_and_subdir(
+                                                    std::path::Path::new(&p.path),
+                                                );
+                                            let (worktree_path, wt_project_path) =
+                                                okena_git::compute_target_paths(
+                                                    &git_root, &subdir, &template, &branch,
+                                                );
+                                            (git_root, worktree_path, wt_project_path)
+                                        })
+                                        .ok_or_else(|| format!("project not found: {project_id}"))
+                                })
                         };
 
                         match prepared {
-                            None => CommandResult::Err(format!("project not found: {project_id}")),
-                            Some((git_root, worktree_path, wt_project_path)) => {
+                            Err(error) => CommandResult::Err(error),
+                            Ok((git_root, worktree_path, wt_project_path)) => {
                                 // OPTIMISTIC CREATE (symmetric with the optimistic close):
                                 // register the worktree row NOW — deferred hooks, no
                                 // terminals, layout stays None so the client renders the
@@ -3618,6 +3625,23 @@ pub async fn daemon_command_loop(
                                         WindowId::Main,
                                         &mut cx,
                                     );
+                                    let registered = registered.and_then(|id| {
+                                        if let Some(mission_id) = &mission_id
+                                            && let Err(error) = ws.execute_mission(
+                                                okena_core::mission::MissionCommand::Attach {
+                                                    mission_id: mission_id.clone(),
+                                                    member: okena_core::mission::MissionMember::Worktree {
+                                                        project_id: id.clone(),
+                                                    },
+                                                },
+                                                &mut cx,
+                                            ) {
+                                                ws.remove_stale_worktree(&id);
+                                                ws.notify_data(&mut cx);
+                                                return Err(error);
+                                        }
+                                        Ok(id)
+                                    });
                                     // Mark creating only on success; propagate the
                                     // registration error (parent-missing OR the
                                     // same-branch/path dedupe) to the caller instead of
@@ -6290,6 +6314,178 @@ mod tests {
             .await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attention_two_bridge_clients_share_ack_and_restart_snapshot() {
+        use okena_core::agent_status::{AgentLifecycle, AgentStatus};
+        use okena_core::attention::AttentionSource;
+        let h = harness();
+        let source = AttentionSource {
+            project_id: "project".into(),
+            terminal_id: "terminal".into(),
+            attachment_id: uuid::Uuid::new_v4().to_string(),
+            generation: 1,
+            conversation: None,
+        };
+        let done = AgentStatus::new_clamped(AgentLifecycle::Done, None, Default::default());
+        h.workspace.lock().data.attention.record(
+            source.clone(),
+            Some(&done),
+            1,
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let workspace = h.workspace.clone();
+        let tick = h.workspace_tick.clone();
+        let (client1, rx) = bridge_channel();
+        let client2 = client1.clone();
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let handle = h.spawn_loop(rx);
+                let snapshot = |result| match result {
+                    CommandResult::Ok(Some(value)) => {
+                        serde_json::from_value::<StateResponse>(value)
+                            .unwrap()
+                            .work_overview
+                            .unwrap()
+                    }
+                    other => panic!("snapshot failed: {other:?}"),
+                };
+                let first =
+                    snapshot(request(&client1, RemoteCommand::GetState, "client 1 snapshot").await);
+                let second =
+                    snapshot(request(&client2, RemoteCommand::GetState, "client 2 snapshot").await);
+                assert_eq!(first, second);
+                let episode = &first.attention[0];
+                let ack = ActionRequest::AcknowledgeAttention {
+                    episode_id: episode.id.clone(),
+                    revision: episode.revision,
+                    dismiss: false,
+                };
+                assert!(matches!(
+                    request(&client1, RemoteCommand::Action(ack.clone()), "ack").await,
+                    CommandResult::Ok(_)
+                ));
+                let after_ack = *tick.borrow();
+                assert!(
+                    snapshot(request(&client2, RemoteCommand::GetState, "shared ack").await)
+                        .attention
+                        .is_empty()
+                );
+                request(
+                    &client2,
+                    RemoteCommand::Action(ack.clone()),
+                    "duplicate ack",
+                )
+                .await;
+                assert_eq!(
+                    *tick.borrow(),
+                    after_ack,
+                    "duplicate ack must not notify observers"
+                );
+                {
+                    let mut ws = workspace.lock();
+                    let working =
+                        AgentStatus::new_clamped(AgentLifecycle::Working, None, Default::default());
+                    ws.data.attention.record(
+                        source.clone(),
+                        Some(&working),
+                        2,
+                        uuid::Uuid::new_v4().to_string(),
+                    );
+                    ws.data.attention.record(
+                        source.clone(),
+                        Some(&done),
+                        3,
+                        uuid::Uuid::new_v4().to_string(),
+                    );
+                }
+                request(&client1, RemoteCommand::Action(ack), "stale ack").await;
+                let latest =
+                    snapshot(request(&client2, RemoteCommand::GetState, "new completion").await);
+                assert_eq!(latest.attention.len(), 1);
+                assert_ne!(latest.attention[0].id, episode.id);
+                let saved = serde_json::to_vec(workspace.lock().data()).unwrap();
+                let mut restored: WorkspaceData = serde_json::from_slice(&saved).unwrap();
+                restored.attention.validate_persisted();
+                let restored_episodes = restored.attention.episodes();
+                assert_eq!(restored_episodes[0].id, latest.attention[0].id);
+                assert!(!restored_episodes[0].available);
+                assert!(!restored_episodes[0].read);
+                assert_eq!(
+                    snapshot(
+                        request(&client1, RemoteCommand::GetState, "reconnect snapshot").await
+                    ),
+                    latest
+                );
+                drop(client1);
+                drop(client2);
+                handle.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mission_worktree_failed_checkout_rolls_back_membership() {
+        let h = harness();
+        let directory =
+            std::env::temp_dir().join(format!("okena-mission-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        *h.workspace.lock() = Workspace::new(workspace_restored_with_on_open(
+            directory.to_str().unwrap(),
+            "",
+        ));
+        let workspace = h.workspace.clone();
+        let (client, rx) = bridge_channel();
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let handle = h.spawn_loop(rx);
+                let create = |mission_id| {
+                    RemoteCommand::Action(ActionRequest::CreateWorktree {
+                        project_id: "p1".into(),
+                        branch: "mission-failure".into(),
+                        create_branch: true,
+                        mission_id,
+                    })
+                };
+                let rejected =
+                    request(&client, create(Some("missing".into())), "invalid mission").await;
+                assert!(matches!(rejected, CommandResult::Err(_)));
+                assert_eq!(workspace.lock().data().projects.len(), 1);
+                let result = request(
+                    &client,
+                    RemoteCommand::Action(ActionRequest::Mission {
+                        command: okena_core::mission::MissionCommand::Create {
+                            title: "Mission".into(),
+                            goal: None,
+                            home_project_id: Some("p1".into()),
+                            member: None,
+                        },
+                    }),
+                    "create mission",
+                )
+                .await;
+                assert!(matches!(result, CommandResult::Ok(_)));
+                let mission_id = workspace.lock().data().missions[0].id.clone();
+                let result = request(&client, create(Some(mission_id)), "create worktree").await;
+                assert!(matches!(result, CommandResult::Ok(_)), "{result:?}");
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if workspace.lock().data().projects.len() == 1 {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("failed checkout rolls back");
+                assert!(workspace.lock().data().missions[0].worktree_ids.is_empty());
+                assert!(workspace.lock().data().projects[0].worktree_ids.is_empty());
+                drop(client);
+                handle.await.unwrap();
+                std::fs::remove_dir(directory).unwrap();
+            })
+            .await;
+    }
+
     /// App-scoped `GetSettingsSchema` returns `Ok(Some(_))` with settings keys.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_settings_schema_round_trip() {
@@ -6577,6 +6773,8 @@ mod tests {
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -6603,6 +6801,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -7299,6 +7501,8 @@ mod tests {
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -7331,6 +7535,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8051,6 +8259,8 @@ mod tests {
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -8077,6 +8287,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8297,6 +8511,8 @@ mod tests {
                 layout: Some(LayoutNode::Terminal {
                     terminal_id: None,
                     pending_agent_resume: None,
+                    mission_id: None,
+                    mission_excluded: false,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8336,6 +8552,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![parent, child],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8397,6 +8617,8 @@ mod tests {
                 LayoutNode::Terminal {
                     terminal_id: Some("active-in-checkout".to_string()),
                     pending_agent_resume: None,
+                    mission_id: None,
+                    mission_excluded: false,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8406,6 +8628,8 @@ mod tests {
                 LayoutNode::Terminal {
                     terminal_id: Some("second-in-checkout".to_string()),
                     pending_agent_resume: None,
+                    mission_id: None,
+                    mission_excluded: false,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
@@ -8932,6 +9156,8 @@ mod tests {
         nested.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("live-in-nested-directory".to_string()),
             pending_agent_resume: None,
+            mission_id: None,
+            mission_excluded: false,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -8947,6 +9173,8 @@ mod tests {
         unaffected.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("unaffected-live".to_string()),
             pending_agent_resume: None,
+            mission_id: None,
+            mission_excluded: false,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
@@ -9938,6 +10166,8 @@ mod tests {
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some("parent-term".to_string()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
@@ -9970,6 +10200,10 @@ mod tests {
         let data = WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Default::default(),
+            attention: Default::default(),
+            remote_work_overviews: Default::default(),
+            mission_excluded_conversations: Default::default(),
             projects: vec![parent],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -9999,6 +10233,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 branch: "neumie/tezky-medovnik".to_string(),
                 create_branch: true,
+                mission_id: None,
             },
             &mut workspace,
             WindowId::Main,

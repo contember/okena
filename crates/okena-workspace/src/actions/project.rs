@@ -1553,6 +1553,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1754,6 +1758,8 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("layout-terminal".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -1763,6 +1769,8 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("stale-hook".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: true,
                     detached: true,
@@ -1809,6 +1817,8 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("stale-hook".to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -1854,6 +1864,10 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),

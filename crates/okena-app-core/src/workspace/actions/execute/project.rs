@@ -481,11 +481,15 @@ pub(super) fn create_worktree(
     project_id: String,
     branch: String,
     create_branch: bool,
+    mission_id: Option<String>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    if let Err(error) = ws.validate_worktree_mission(&project_id, mission_id.as_deref()) {
+        return ActionResult::Err(error);
+    }
     let project = match ws.project(&project_id) {
         Some(p) => p,
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
@@ -509,6 +513,19 @@ pub(super) fn create_worktree(
         cx,
     ) {
         Ok(new_project_id) => {
+            if let Some(mission_id) = mission_id
+                && let Err(error) = ws.execute_mission(
+                    okena_core::mission::MissionCommand::Attach {
+                        mission_id,
+                        member: okena_core::mission::MissionMember::Worktree {
+                            project_id: new_project_id.clone(),
+                        },
+                    },
+                    cx,
+                )
+            {
+                return ActionResult::Err(error);
+            }
             let result = spawn_uninitialized_terminals(
                 ws,
                 &new_project_id,
@@ -876,6 +893,10 @@ mod hook_action_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),
@@ -1164,6 +1185,10 @@ mod clone_project_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1311,6 +1336,10 @@ mod set_show_in_overview_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),

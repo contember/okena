@@ -206,6 +206,7 @@ pub fn build_state_response(
         .and_then(|w| w.fullscreen.clone());
 
     StateResponse {
+        work_overview: Some(okena_workspace::missions::work_overview(data)),
         state_version,
         projects,
         focused_project_id,
