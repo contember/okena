@@ -1,6 +1,8 @@
 use okena_core::process::{command, safe_output};
 use std::collections::HashSet;
 use std::path::Path;
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 
 #[derive(Clone, Copy)]
 enum Gender {
@@ -225,9 +227,9 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
     if let Ok(output) = safe_output(command("gh").args(["api", "user", "--jq", ".login"]))
         && output.status.success()
     {
-        let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let login = sanitize_username(String::from_utf8_lossy(&output.stdout).trim());
         if !login.is_empty() {
-            return sanitize_username(&login);
+            return login;
         }
     }
 
@@ -235,10 +237,9 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
     if let Some(repo) = crate::gix_helpers::open(repo_path)
         && let Some(name) = repo.config_snapshot().string("user.name")
     {
-        let name = name.to_string();
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return sanitize_username(trimmed);
+        let name = sanitize_username(name.to_string().trim());
+        if !name.is_empty() {
+            return name;
         }
     }
 
@@ -246,11 +247,19 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
     "dev".to_string()
 }
 
+/// Turn a display name or login into a branch-safe prefix: lowercase, spaces to
+/// dashes, diacritics stripped (`Vojtěch Růžička` → `vojtech-ruzicka`), ASCII
+/// letters, digits and dashes only. Letters outside Latin script have no ASCII
+/// form and are dropped, so the result may be empty — callers then fall through
+/// to the next source. GitHub flags non-ASCII branch names as containing hidden
+/// characters, which is why the prefix is reduced to ASCII rather than merely
+/// to alphanumerics.
 fn sanitize_username(name: &str) -> String {
     name.to_lowercase()
         .replace(' ', "-")
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .nfkd()
+        .filter(|c| !is_combining_mark(*c))
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
 }
 
@@ -392,6 +401,17 @@ mod tests {
         assert_eq!(sanitize_username("John Doe"), "john-doe");
         assert_eq!(sanitize_username("user@name!"), "username");
         assert_eq!(sanitize_username("Already-Good"), "already-good");
+    }
+
+    #[test]
+    fn test_sanitize_username_strips_diacritics() {
+        assert_eq!(sanitize_username("Vojtěch Růžička"), "vojtech-ruzicka");
+        assert_eq!(
+            sanitize_username("Émile Zoë-Ångström"),
+            "emile-zoe-angstrom"
+        );
+        // nothing with an ASCII form left → empty, so the caller falls through
+        assert_eq!(sanitize_username("日本語"), "");
     }
 
     #[test]
