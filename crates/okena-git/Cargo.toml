@@ -14,6 +14,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.10", features = ["v4"] }
 log = "0.4"
+unicode-normalization = "0.1"
 gix = { version = "0.83", default-features = false, features = ["max-performance-safe", "sha1", "revision", "status", "blame"] }
 
 # Directory identity for the destructive-removal guard: the stable std API has
