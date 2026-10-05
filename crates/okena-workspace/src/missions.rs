@@ -917,6 +917,12 @@ pub fn work_overview(data: &WorkspaceData) -> WorkOverview {
         missions: data.missions.clone(),
         attention: data.attention.episodes(),
         lost_transitions: data.attention.lost_transitions,
+        conversation_history: data
+            .agent_session_history
+            .sessions()
+            .iter()
+            .map(ConversationId::from)
+            .collect(),
         ..Default::default()
     };
     for project in data.projects.iter().filter(|p| p.connection_id.is_none()) {
@@ -1192,6 +1198,50 @@ mod tests {
                     .into_owned(),
             ),
         }
+    }
+
+    #[test]
+    fn detached_offline_conversation_remains_an_attachment_candidate() {
+        let mut ws = Workspace::new(fixture());
+        ws.set_agent_session("p", "t", session(1), &mut Cx);
+        let conversation = ConversationId::from(&session(1));
+        let member = MissionMember::Conversation {
+            conversation: conversation.clone(),
+        };
+        let mission = create(&mut ws.data, Some(member.clone()));
+        ws.close_terminal("p", &[], &mut Cx);
+        ws.execute_mission(
+            MissionCommand::Detach {
+                mission_id: mission.clone(),
+                member: member.clone(),
+            },
+            &mut Cx,
+        )
+        .unwrap();
+        let overview = work_overview(&ws.data);
+        assert!(overview.conversations.is_empty());
+        assert!(overview.missions[0].conversations.is_empty());
+        assert_eq!(overview.conversation_history, vec![conversation.clone()]);
+        let public = serde_json::to_string(&overview).unwrap();
+        assert!(!public.contains("transcript"));
+        let restored: WorkspaceData =
+            serde_json::from_str(&serde_json::to_string(&ws.data).unwrap()).unwrap();
+        assert_eq!(
+            work_overview(&restored).conversation_history,
+            vec![conversation]
+        );
+        ws.execute_mission(
+            MissionCommand::Attach {
+                mission_id: mission,
+                member,
+            },
+            &mut Cx,
+        )
+        .unwrap();
+        assert_eq!(
+            ws.data.missions[0].conversations,
+            overview.conversation_history
+        );
     }
 
     #[test]

@@ -647,6 +647,15 @@ fn begin_project_runtimes_quiesce(
             .dedup_by(|a, b| a.terminal_id == b.terminal_id);
     }
     {
+        let mut workspace = workspace.lock();
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        for snapshot in &snapshots {
+            for teardown in &snapshot.teardown_sessions {
+                workspace.invalidate_attention_terminal(&teardown.terminal_id, &mut cx);
+            }
+        }
+    }
+    {
         let mut registry = terminals.lock();
         for snapshot in &snapshots {
             for teardown in &snapshot.teardown_sessions {
@@ -1418,6 +1427,13 @@ async fn set_settings_with_backend_migration(
     migration
         .teardown_sessions
         .dedup_by(|a, b| a.terminal_id == b.terminal_id);
+    {
+        let mut ws = workspace.lock();
+        let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+        for teardown in &migration.teardown_sessions {
+            ws.invalidate_attention_terminal(&teardown.terminal_id, &mut cx);
+        }
+    }
     {
         let mut deadlines = deadlines.lock();
         let mut registry = terminals.lock();

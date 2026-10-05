@@ -696,6 +696,11 @@ impl Workspace {
             );
             teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
             teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+            for session in &teardown_sessions {
+                self.data
+                    .attention
+                    .invalidate_terminal(&session.terminal_id);
+            }
             hook_terminal_ids.sort();
             preserved_registry_terminal_ids.sort();
             self.mark_closing_project_authoritative(project_id);
@@ -885,6 +890,11 @@ impl Workspace {
         }
         teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+        for session in &teardown_sessions {
+            self.data
+                .attention
+                .invalidate_terminal(&session.terminal_id);
+        }
         project_ids.sort();
         ordinary_slots.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         hook_terminal_ids.sort();
@@ -2745,6 +2755,25 @@ mod workspace_tests {
             *detached = true;
         }
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
+        let mut cx = RecordingCx::default();
+        for (terminal_id, lifecycle) in [
+            ("term_p1", okena_core::agent_status::AgentLifecycle::Blocked),
+            ("service-1", okena_core::agent_status::AgentLifecycle::Done),
+            ("hook-1", okena_core::agent_status::AgentLifecycle::Done),
+        ] {
+            workspace.record_attention(
+                okena_core::attention::AttentionSource {
+                    project_id: "p1".into(),
+                    terminal_id: terminal_id.into(),
+                    attachment_id: "original".into(),
+                    generation: 1,
+                    conversation: None,
+                },
+                Some(&okena_core::agent_status::AgentStatus::new(lifecycle)),
+                1,
+                &mut cx,
+            );
+        }
 
         let migration = workspace
             .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
@@ -2780,6 +2809,18 @@ mod workspace_tests {
         workspace
             .restore_terminal_backend_migration_slots(&migration)
             .expect("restore slots");
+        let episodes = workspace.data.attention.episodes();
+        assert_eq!(episodes.len(), 3);
+        assert!(
+            episodes
+                .iter()
+                .all(|e| !e.available && !e.can_open_terminal())
+        );
+        let question = episodes
+            .iter()
+            .find(|e| e.source.terminal_id == "term_p1")
+            .unwrap();
+        assert!(workspace.acknowledge_attention(&question.id, question.revision, true, &mut cx));
         assert!(matches!(
             workspace.project("p1").and_then(|project| project.layout.as_ref()),
             Some(LayoutNode::Terminal {
@@ -3119,6 +3160,20 @@ mod workspace_tests {
             .insert("running-hook".to_string(), "running".to_string());
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
         let mut cx = RecordingCx::default();
+        workspace.record_attention(
+            okena_core::attention::AttentionSource {
+                project_id: "p1".into(),
+                terminal_id: "term_p1".into(),
+                attachment_id: "original".into(),
+                generation: 1,
+                conversation: None,
+            },
+            Some(&okena_core::agent_status::AgentStatus::new(
+                okena_core::agent_status::AgentLifecycle::Done,
+            )),
+            1,
+            &mut cx,
+        );
 
         let first = workspace
             .begin_project_runtime_quiesce(
@@ -3130,6 +3185,9 @@ mod workspace_tests {
             )
             .expect("quiesce project");
         assert_eq!(first.hook_terminal_ids, vec!["running-hook"]);
+        let completion = &workspace.data.attention.episodes()[0];
+        assert!(!completion.available);
+        assert!(!completion.can_open_terminal());
         assert_eq!(
             first.preserved_registry_terminal_ids,
             vec!["completed-hook"]

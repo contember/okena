@@ -20,6 +20,7 @@ not create cross-project splits or a second copy of a live terminal.
   same daemon. Agent rows also provide a mission entry point.
 - Select a mission to see its goal, home project, members, attention and observed
   PR/CI information. **Attach existing work** lists candidates from that daemon.
+  Retained offline conversations remain candidates after they are detached.
   Membership controls offer **Attach**, **Detach**, or an explicit **Move from
   ‘<mission>’ to this mission** when another mission owns the member.
 - **Open terminal** reveals a member's real terminal through the existing
@@ -104,6 +105,8 @@ it is not recreated automatically.
 Mission history contains conversation identities, not copied transcript contents.
 The board is not a transcript viewer. The remote work overview includes only
 public conversation identity and attachment data, without local transcript paths.
+`conversation_history` lists retained identities independently of live attachments
+or mission membership.
 See [session resume](agent-status.md#session-resume) for the separate pane resume
 record.
 

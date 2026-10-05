@@ -118,6 +118,7 @@ pub fn apply_remote_snapshot(
                 if let Some(overview) = data.remote_work_overviews.get_mut(&snapshot.config.id) {
                     for episode in &mut overview.attention {
                         episode.available = false;
+                        episode.terminal_available = false;
                     }
                     for mission in &mut overview.missions {
                         for pr in &mut mission.pull_requests {
@@ -694,6 +695,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             available: true,
+            terminal_available: true,
             read: false,
         };
         for snapshot in &mut snapshots[..2] {
@@ -717,7 +719,9 @@ mod tests {
         assert!(data.remote_work_overviews.contains_key("one"));
         assert!(data.remote_work_overviews.contains_key("two"));
         assert!(!data.remote_work_overviews["one"].attention[0].available);
+        assert!(!data.remote_work_overviews["one"].attention[0].can_open_terminal());
         assert!(data.remote_work_overviews["two"].attention[0].available);
+        assert!(data.remote_work_overviews["two"].attention[0].can_open_terminal());
         let saved = serde_json::to_value(&data).unwrap();
         assert!(saved.get("remote_work_overviews").is_none());
         snapshots.remove(0);

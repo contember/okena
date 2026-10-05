@@ -471,8 +471,8 @@ impl WindowView {
                 let name = project
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "Unavailable project".into());
-                let live = connected
-                    && episode.available
+                let can_open_terminal = connected
+                    && episode.can_open_terminal()
                     && project
                         .and_then(|p| p.layout.as_ref())
                         .is_some_and(|l| l.find_terminal_path(&terminal_id).is_some());
@@ -493,7 +493,7 @@ impl WindowView {
                         owner.map(|o| o.name.as_str()).unwrap_or("Daemon"),
                         name
                     )));
-                if live {
+                if can_open_terminal {
                     card = card.child(
                         button(format!("inbox-open-{index}"), "Open terminal").on_click(
                             cx.listener(move |this, _, _, cx| {
@@ -520,7 +520,8 @@ impl WindowView {
                                 .map(okena_git::format_relative_time)
                                 .unwrap_or_else(|_| "unknown age".into())
                         )));
-                } else {
+                }
+                if !episode.available || !can_open_terminal {
                     card = card.child(
                         div()
                             .text_color(rgb(t.text_muted))
@@ -1173,6 +1174,7 @@ impl WindowView {
                 .conversations
                 .iter()
                 .map(|a| a.conversation.clone())
+                .chain(overview.conversation_history.iter().cloned())
                 .chain(
                     overview
                         .missions
@@ -1313,7 +1315,7 @@ impl WindowView {
                 .find(|e| {
                     e.kind == AttentionKind::Completion
                         && !e.read
-                        && e.available
+                        && e.can_open_terminal()
                         && e.source.project_id == project
                         && e.source.terminal_id == terminal
                 })
@@ -1570,6 +1572,7 @@ mod tests {
             created_at,
             updated_at: created_at,
             available: true,
+            terminal_available: true,
             read: false,
         }
     }

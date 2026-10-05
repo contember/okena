@@ -56,8 +56,19 @@ pub struct AttentionEpisode {
     /// Unix seconds, assigned by the daemon.
     pub created_at: u64,
     pub updated_at: u64,
+    /// The source's live status has not been cleared or invalidated.
     pub available: bool,
+    /// The original terminal attachment can still be revealed after status clears.
+    #[serde(default)]
+    pub terminal_available: bool,
     pub read: bool,
+}
+
+impl AttentionEpisode {
+    pub fn can_open_terminal(&self) -> bool {
+        // Older daemons only confirm terminal availability through live status.
+        self.terminal_available || self.available
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,7 +240,14 @@ impl AttentionState {
             }
         }
         let Some(status) = status else {
-            make_unavailable(observation);
+            observation.lifecycle = None;
+            for episode in [&mut observation.input, &mut observation.completion]
+                .into_iter()
+                .flatten()
+            {
+                episode.terminal_available = episode.can_open_terminal();
+                episode.available = false;
+            }
             self.prune_retired();
             return *self != before;
         };
@@ -265,6 +283,7 @@ impl AttentionState {
                     episode.summary = summary;
                     episode.updated_at = now;
                     episode.available = true;
+                    episode.terminal_available = true;
                     episode.read = false;
                 }
             } else {
@@ -277,6 +296,7 @@ impl AttentionState {
                     created_at: now,
                     updated_at: now,
                     available: true,
+                    terminal_available: true,
                     read: false,
                 });
             }
@@ -424,6 +444,7 @@ fn make_unavailable(observation: &mut AttentionObservation) {
         .flatten()
     {
         episode.available = false;
+        episode.terminal_available = false;
     }
 }
 
@@ -485,6 +506,62 @@ mod tests {
         assert_eq!(state.episodes().len(), 1);
         report(&mut state, AgentLifecycle::Idle, 4);
         assert!(state.episodes().is_empty());
+    }
+
+    #[test]
+    fn clear_keeps_the_original_terminal_reachable_until_owner_invalidation() {
+        for lifecycle in [AgentLifecycle::Done, AgentLifecycle::Blocked] {
+            let mut state = AttentionState::default();
+            report(&mut state, lifecycle, 1);
+            let original = state.episodes()[0].clone();
+            state.record(source(), None, 2, conversation(2).session_id);
+            let cleared = state.episodes()[0].clone();
+            assert_eq!(cleared.id, original.id);
+            assert_eq!(cleared.revision, original.revision);
+            assert!(!cleared.available);
+            assert!(cleared.can_open_terminal());
+            assert!(!cleared.read);
+
+            state.invalidate_terminal("t");
+            let retired = state.episodes()[0].clone();
+            assert!(!retired.can_open_terminal());
+            assert!(state.acknowledge(&retired.id, retired.revision, true));
+        }
+    }
+
+    #[test]
+    fn identity_replacement_and_restart_do_not_reveal_old_results() {
+        let mut state = AttentionState::default();
+        report(&mut state, AgentLifecycle::Done, 1);
+        state.record(
+            AttentionSource {
+                attachment_id: "replacement".into(),
+                ..source()
+            },
+            None,
+            2,
+            conversation(2).session_id,
+        );
+        assert!(!state.episodes()[0].can_open_terminal());
+
+        let mut state = AttentionState::default();
+        report(&mut state, AgentLifecycle::Done, 1);
+        state.record(source(), None, 2, conversation(2).session_id);
+        state.restart();
+        assert!(!state.episodes()[0].can_open_terminal());
+    }
+
+    #[test]
+    fn older_snapshots_only_allow_reveal_for_available_episodes() {
+        let mut state = AttentionState::default();
+        report(&mut state, AgentLifecycle::Done, 1);
+        let mut value = serde_json::to_value(&state.episodes()[0]).unwrap();
+        value.as_object_mut().unwrap().remove("terminal_available");
+        let live: AttentionEpisode = serde_json::from_value(value.clone()).unwrap();
+        assert!(live.can_open_terminal());
+        value["available"] = false.into();
+        let unavailable: AttentionEpisode = serde_json::from_value(value).unwrap();
+        assert!(!unavailable.can_open_terminal());
     }
 
     fn conversation(n: u64) -> ConversationId {

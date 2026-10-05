@@ -136,6 +136,7 @@ A supported daemon returns this shape (empty example):
     "attention": [],
     "lost_transitions": 0,
     "conversations": [],
+    "conversation_history": [],
     "terminal_bindings": []
   }
 }
@@ -144,9 +145,10 @@ A supported daemon returns this shape (empty example):
 | Field | Contents |
 |---|---|
 | `missions` | Ordered mission records: ID, title, goal, home project, creation time, lifecycle (`active`, `done`, `archived`), repository/worktree IDs, conversation identities and retained PR observations. |
-| `attention` | Unread episodes, input-needed before completions, then oldest first. Each includes `id`, `revision`, `source`, `kind` (`input_needed` or `completion`), `summary`, `created_at`, `updated_at`, `available`, and `read`. |
+| `attention` | Unread episodes, input-needed before completions, then oldest first. Each includes `id`, `revision`, `source`, `kind` (`input_needed` or `completion`), `summary`, `created_at`, `updated_at`, `available`, `terminal_available`, and `read`. |
 | `lost_transitions` | Cumulative capture losses and anonymous-source retention evictions. This overview is not a complete event history. |
 | `conversations` | Current `{project_id, terminal_id, conversation}` attachments, not the entire conversation-history registry. |
+| `conversation_history` | Retained `{agent, session_id}` identities, including detached offline conversations that can be attached to a mission again. Defaults to empty for older daemons. |
 | `terminal_bindings` | Effective `{project_id, terminal_id, mission_id}` membership, including worktree defaults and explicit exclusions already resolved by the daemon. |
 
 A conversation is `{agent, session_id}`. An attention source also has
@@ -155,6 +157,11 @@ A conversation is `{agent, session_id}`. An attention source also has
 transcript contents. Reserved session labels are also stripped from
 `terminal_agent_status.labels`; raw PTY output can still contain the original OSC
 bytes. This projection is not a redaction of the terminal stream.
+
+Attention `available` tracks confirmed source status. `terminal_available` tracks
+whether the original terminal attachment can still be opened after `clear`.
+Clients reading an older daemon without `terminal_available` may use `available`
+for navigation; an unavailable episode alone does not prove its terminal survives.
 
 Mission PR records use `{host, repository, number}` identity and contain `info`,
 optional `ci`, `observed_at`, `available` and `source_project_ids`. Unavailable

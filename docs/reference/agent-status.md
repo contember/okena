@@ -83,6 +83,8 @@ Agents do not need to belong to a [mission](missions.md).
   acknowledgment waits for that terminal to be visibly painted and focused in
   the active target window, including a detached window. A failed reveal does
   not mark it read. Merely opening Inbox does not acknowledge its contents.
+  Clearing agent status keeps the original terminal reachable; replacing or
+  removing its PTY disables that navigation even if a new PTY uses the same ID.
 - **Mark read** explicitly acknowledges a completion, including one without an
   available terminal. Read state is shared by all clients of the owning daemon.
 - Opening a live input-needed item does not answer it. There are no inferred
@@ -97,8 +99,9 @@ Agents do not need to belong to a [mission](missions.md).
 
 The daemon maintains attention separately from the last-status indicator. Each
 episode has an opaque ID, revision, source attachment/generation, optional
-conversation identity, kind, bounded summary, daemon timestamps, availability
-and read state.
+conversation identity, kind, bounded summary, daemon timestamps, status
+availability, terminal availability and read state. `terminal_available` tracks
+the original attachment independently of the agent's current status.
 
 | Report/event | Attention effect |
 |---|---|
@@ -106,7 +109,8 @@ and read state.
 | `working` | Ends the attachment's current input-needed episode. |
 | `done` | Ends input-needed attention and records a completion of this turn, not completion of a mission. |
 | `idle` | Ends input-needed attention without creating a completion. |
-| `clear`, pane exit, identity replacement | Makes the previous source unavailable; does not claim its question was answered or erase its unread completion. |
+| `clear` | Makes live status unconfirmed while keeping the original terminal reachable; does not claim its question was answered or erase its unread completion. |
+| Pane exit, PTY teardown/replacement, identity replacement | Makes the previous source and terminal unavailable; retains unresolved questions and unread completions. |
 | Daemon restart | Retains unread completions/read state; makes pending input observations unconfirmed until fresh reports. |
 
 A fresh lifecycle cycle creates a new episode even if its text is identical.
@@ -323,8 +327,8 @@ IDs. Invalid history records are discarded on deserialization.
 History stores identities and transcript paths, not transcript contents, and has
 no automatic expiry or general transcript browser. The mission board can show
 member conversations without live terminals. The remote `work_overview` exposes
-conversation identities and current attachments, not transcript paths or the
-entire history registry. Projects still own terminals; missions are optional.
+conversation identities from retained history and current attachments, without
+transcript paths. Projects still own terminals; missions are optional.
 
 ## Claude Code integration
 

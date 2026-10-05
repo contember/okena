@@ -194,15 +194,20 @@ fn coordinator(
 fn coordinator_reveals_hidden_minimized_inactive_terminal_then_acknowledges(
     cx: &mut TestAppContext,
 ) {
-    reveal_case(cx, false);
+    reveal_case(cx, false, true);
 }
 
 #[gpui::test]
 fn coordinator_reveals_detached_terminal_without_reattaching(cx: &mut TestAppContext) {
-    reveal_case(cx, true);
+    reveal_case(cx, true, true);
 }
 
-fn reveal_case(cx: &mut TestAppContext, detached: bool) {
+#[gpui::test]
+fn coordinator_reveals_cleared_completion_then_acknowledges(cx: &mut TestAppContext) {
+    reveal_case(cx, false, false);
+}
+
+fn reveal_case(cx: &mut TestAppContext, detached: bool, status_available: bool) {
     init(cx);
     let episode = AttentionEpisode {
         id: "00000000-0000-0000-0000-000000000001".into(),
@@ -218,7 +223,8 @@ fn reveal_case(cx: &mut TestAppContext, detached: bool) {
         summary: "Done".into(),
         created_at: 1,
         updated_at: 1,
-        available: true,
+        available: status_available,
+        terminal_available: true,
         read: false,
     };
     let server = Loopback::new(&episode);

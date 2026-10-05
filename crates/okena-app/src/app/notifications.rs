@@ -42,7 +42,7 @@ fn completion_still_current(
                         && current.revision == observed.revision
                         && current.source == observed.source
                         && current.kind == observed.kind
-                        && current.available
+                        && current.can_open_terminal()
                         && !current.read
                 })
             })
@@ -168,7 +168,9 @@ impl Okena {
         };
         let Some(handle) = handle else { return };
         if let Some(episode) = completion.filter(|e| {
-            e.kind == okena_core::attention::AttentionKind::Completion && e.available && !e.read
+            e.kind == okena_core::attention::AttentionKind::Completion
+                && e.can_open_terminal()
+                && !e.read
         }) {
             let connection = connection_id.to_string();
             let manager = self.remote_manager.clone();
@@ -647,6 +649,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             available: true,
+            terminal_available: true,
             read: false,
         };
         let mut data = crate::workspace::state::WorkspaceData::empty();
@@ -660,6 +663,11 @@ mod tests {
             );
         }
         assert!(completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].available = false;
+        assert!(completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].terminal_available = false;
+        assert!(!completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0] = observed.clone();
         data.remote_work_overviews.get_mut("b").unwrap().attention[0].read = true;
         assert!(completion_still_current(&data, "a", &observed));
         assert!(!completion_still_current(&data, "b", &observed));

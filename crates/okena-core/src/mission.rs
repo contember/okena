@@ -123,6 +123,8 @@ pub struct WorkOverview {
     pub attention: Vec<crate::attention::AttentionEpisode>,
     pub lost_transitions: u64,
     pub conversations: Vec<ConversationAttachment>,
+    #[serde(default)]
+    pub conversation_history: Vec<ConversationId>,
     pub terminal_bindings: Vec<TerminalMissionBinding>,
 }
 
