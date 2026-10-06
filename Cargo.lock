@@ -6473,6 +6473,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-normalization",
  "uuid",
  "windows-sys 0.61.2",
 ]
