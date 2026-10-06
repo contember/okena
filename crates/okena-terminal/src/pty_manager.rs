@@ -20,6 +20,9 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(unix)]
+mod cancellable_io;
+
 #[cfg(windows)]
 fn append_wsl_environment(cmd: &mut CommandBuilder, environment: &[(String, Option<String>)]) {
     if environment.is_empty() {
@@ -220,6 +223,8 @@ impl PtyInstances {
 /// Shared shutdown coordination between reader/writer threads
 struct PtyShutdownState {
     broken: AtomicBool,
+    #[cfg(unix)]
+    io_waker: Mutex<Option<std::os::unix::net::UnixStream>>,
     terminal_id: String,
     generation: PtyGeneration,
 }
@@ -228,6 +233,8 @@ impl PtyShutdownState {
     fn new(terminal_id: String, generation: PtyGeneration) -> Self {
         Self {
             broken: AtomicBool::new(false),
+            #[cfg(unix)]
+            io_waker: Mutex::new(None),
             terminal_id,
             generation,
         }
@@ -238,7 +245,24 @@ impl PtyShutdownState {
     }
 
     fn mark_broken(&self) {
-        self.broken.store(true, Ordering::Relaxed);
+        if self.broken.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(waker) = self.io_waker.lock().as_mut() {
+            // Nonblocking, one byte only. Leaving it unread wakes both the
+            // reader and writer without periodic polling or cross-thread close.
+            let _ = waker.write_all(&[1]);
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_io_waker(&self, mut waker: std::os::unix::net::UnixStream) {
+        let mut slot = self.io_waker.lock();
+        if self.is_broken() {
+            let _ = waker.write_all(&[1]);
+        }
+        *slot = Some(waker);
     }
 }
 
@@ -1004,11 +1028,12 @@ impl PtyManager {
         // Get reader and writer. The writer is shared (`Arc<Mutex>`) so query
         // replies can be written synchronously via `write_response`, ahead of the
         // batched writer thread, without racing the querying program's exit.
-        let reader = pair.master.try_clone_reader()?;
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer()?));
-
         let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string(), generation));
+        #[cfg(unix)]
+        let (reader, writer) = cancellable_io::reader_writer(pair.master.as_ref(), &shutdown)?;
+        #[cfg(not(unix))]
+        let (reader, writer) = (pair.master.try_clone_reader()?, pair.master.take_writer()?);
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let child_pid = child.process_id();
 
         // Spawn reader thread with panic guard
@@ -1404,9 +1429,10 @@ impl PtyManager {
                     }
                 }
                 Err(e) => {
-                    if !shutdown.is_broken() {
-                        log::error!("PTY read error: {}", e);
+                    if shutdown.is_broken() {
+                        break;
                     }
+                    log::error!("PTY read error: {}", e);
                     let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
@@ -1430,11 +1456,17 @@ impl PtyManager {
     ) {
         // Loop exits once the queue is closed and drained.
         while let Some(batch) = queue.next_batch() {
+            if shutdown.is_broken() {
+                break;
+            }
             okena_core::latency_probe::daemon_pty_write_started(&terminal_id);
             let mut w = writer.lock();
             let written = w.write_all(&batch).and_then(|_| w.flush());
             drop(w);
             if let Err(e) = written {
+                if shutdown.is_broken() {
+                    break;
+                }
                 log::error!("Failed to write to PTY {}: {}", terminal_id, e);
                 shutdown.mark_broken();
                 let _ = event_tx.send_blocking(PtyEvent::Exit {
