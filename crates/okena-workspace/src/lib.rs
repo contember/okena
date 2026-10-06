@@ -9,6 +9,7 @@ pub mod focus;
 pub mod hook_monitor;
 pub mod hooks;
 pub mod lifecycle;
+pub mod mission_context;
 pub mod missions;
 pub mod persistence;
 pub mod remote_apply;

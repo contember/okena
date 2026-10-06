@@ -121,6 +121,94 @@ PR closed, merged or became healthy. Retained observations are marked last-known
 until a live source supplies an observation again. There is no independent
 archived-PR polling, review/conflict inbox, CI action or automatic cleanup here.
 
+## Mission CLI
+
+```sh
+okena mission list --json
+okena mission list -q
+okena mission show <mission> --json
+okena mission create "CSV export" --goal "Export records" --current-terminal
+okena mission attach <mission> --worktree "Export checkout"
+okena mission attach <mission> --agent claude-code --session-id <UUID>
+okena mission move <target-mission> --current-terminal
+okena mission detach <mission> --terminal "Repo/shell"
+```
+
+Mission arguments accept an exact ID or a unique case-insensitive title. Duplicate
+titles are rejected rather than selecting an arbitrary mission. Project arguments
+use the usual ID/name/path addressing; terminal arguments use ID, `project/name`
+or `project:index` addressing. Commands operate on the selected profile's daemon.
+
+`list` includes all lifecycle states. Its default rows are `id`, `lifecycle` and
+`title`, separated by tabs. `--json` returns an array of mission records; `-q`
+prints only IDs. `show --json` returns `mission`, optional `home_project`,
+`projects`, resolved `terminal_bindings` and last-reported
+`conversation_attachments`. It includes the full mission member inventory without
+the briefing's limits. Explicit repository/worktree/conversation membership remains
+in the nested mission record. Terminal bindings are resolved membership, not a
+claim that every terminal in a participating repository belongs to the mission.
+Plain `show` emits tagged tab-separated rows; free-text fields are JSON-quoted.
+
+Creation optionally takes `--goal`, `--home-project` and one member selector.
+Without a selector it creates an unassigned mission. Home context alone does not
+attach a project or pane. Membership changes require exactly one selector:
+
+- `--current-terminal` reads `$OKENA_TERMINAL_ID`; it never uses desktop focus.
+- `--terminal <address>` selects a particular pane.
+- `--repository <project>` participates without assigning its terminals or children.
+- `--worktree <project>` supplies the worktree's default membership.
+- `--agent <harness> --session-id <UUID>` selects that exact conversation, independent
+  of the current pane. The identity must already be known to the daemon; it is never
+  inferred from the pane's previous agent.
+
+Selectors are mutually exclusive. Repository/worktree kind mismatches are errors.
+`attach` preserves the daemon's conflict checks; use `move` for conflicting primary
+membership. `detach` preserves persistent exclusions. Mutations print the target
+mission ID, or `{"mission_id":"…"}` with `--json`; they do not change lifecycle or
+acknowledge attention. Read commands do not mutate the workspace. Older daemons
+without `work_overview` return an unsupported-daemon error instead of an empty list.
+
+## Automatic agent briefing
+
+`okena mission context` reads a bounded, daemon-authoritative briefing for the
+calling pane (`$OKENA_TERMINAL_ID`). `--terminal <ID>` addresses an exact terminal
+on the selected profile's daemon; `--json` returns structured data. Queries do
+not change membership, mission lifecycle or attention/read state.
+New pane launches explicitly carry `OKENA_PROFILE` through the session backend,
+so an existing tmux server's environment cannot route queries to another profile.
+
+The briefing includes the mission title, goal, lifecycle, home project, current
+checkout, participating checkout paths and observed branches, and retained agent
+conversation identities. Last-reported conversation attachments are not proof
+of a running process. Transcript paths and contents are omitted. Repository
+participation alone does not assign its terminals, and home context does not
+imply membership.
+
+Pass `--agent <harness> --session-id <UUID>` when launching or resuming an agent.
+The resolver uses that identity instead of the pane's last-reported conversation:
+an existing conversation keeps its mission, a new conversation uses the explicit
+leaf/worktree default, and detach exclusions still apply. This also avoids the
+race between a launch hook and asynchronous OSC session capture.
+
+The [Claude Code plugin](../../integrations/claude-code/okena-lifecycle/README.md)
+automatically delivers this briefing through `additionalContext` on start,
+resume, compaction and subagent start. Prompt and tool hooks deliver changes,
+including assignment removal. Unchanged briefings are deduplicated; tool checks
+are limited to once per second per pane/session/subagent. Lookup failures do not
+block the agent or substitute stale cached context.
+
+The rendered briefing is at most 6000 bytes. Structured context contains up to
+12 projects and 12 conversations, with omission counts. Use `okena state` for
+the full inventory. The briefing is shared work context, not an instruction to
+implement the entire mission or permission to modify every participating
+checkout. Conversation identities do not provide handoff summaries.
+
+The authenticated, read-only `POST /v1/mission-context` endpoint accepts
+`{"terminal_id":"…","conversation":{"agent":"claude-code","session_id":"<UUID>"}}`;
+`conversation` is optional. It resolves only terminals on the owning daemon and
+returns `MissionContext`, with `mission: null` when unassigned. Missing terminals
+or invalid conversation identities return HTTP 400.
+
 ## Authority, persistence and compatibility
 
 The daemon owns missions, membership, attention and shared read state. Clients

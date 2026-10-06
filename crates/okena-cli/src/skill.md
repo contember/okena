@@ -14,6 +14,24 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena ls` — overview of windows, projects and layout (`--json` for structured).
 - `okena whoami` — which terminal/project YOU are in (reads `$OKENA_TERMINAL_ID`,
   set inside every Okena terminal). Use it to find your own terminal id.
+- `okena mission context` — your mission goal, participating checkouts and agent
+  conversation identities (`--json` for structured data). Reads current daemon
+  state without assigning work or acknowledging attention. For a new/resumed
+  agent, pass `--agent <harness> --session-id <UUID>` to use its identity rather
+  than the pane's last-reported session. Run `okena mission context --help` for
+  the hook integration contract.
+- `okena mission list [--json | -q]` — all missions on this daemon; `-q` prints IDs.
+- `okena mission show <mission> [--json]` — full membership, project paths/branches
+  and last-reported conversation attachments, without the briefing's list limits.
+- `okena mission create <title> [--goal <text>] [--home-project <project>] [--json]`
+  — prints the created ID; home context alone does not attach work.
+- `okena mission attach|detach|move <mission> <selector> [--json]` — membership
+  changes. Mission arguments accept an exact ID or a unique case-insensitive title.
+  Choose exactly one selector: `--current-terminal`, `--terminal <address>`,
+  `--repository <project>`, `--worktree <project>`, or `--agent <harness> --session-id <UUID>`.
+  `create` optionally accepts the same selectors. Conversations require their own
+  explicit identity already known to the daemon; never infer it from a prior pane
+  session. `attach` rejects conflicting primary membership; `move` transfers it.
 - `okena term ls [project]` — terminals as `id<TAB>name<TAB>project`.
 
 ## Addressing (how to name things)

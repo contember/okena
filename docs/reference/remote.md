@@ -182,6 +182,38 @@ owning connection with its raw IDs. Equal IDs on different daemons do not imply
 shared membership. A disconnected owner's retained overview is read-only and
 unavailable; another connected daemon cannot acknowledge it.
 
+### `POST /v1/mission-context`
+
+Requires `Authorization: Bearer <token>` (or the authenticated same-user local
+socket). This is a read-only query, separate from mission mutations.
+
+```json
+{
+  "terminal_id": "daemon-local-terminal-id",
+  "conversation": {
+    "agent": "claude-code",
+    "session_id": "00000000-0000-0000-0000-000000000001"
+  }
+}
+```
+
+`conversation` is optional. When supplied, it must have a valid harness ID and
+UUID-shaped session ID. It selects the launching/resumed conversation instead of
+the pane's last-reported session; it need not have reached OSC capture yet.
+Unknown terminals, foreign-daemon terminals and invalid identities return HTTP
+400 with `{"error":"…"}`. A terminal without a mission returns HTTP 200 with
+`mission: null`.
+
+The response contains `terminal_id`, `current_project`, and an optional `mission`
+briefing. Projects carry `id`, `name`, `path`, observed `branch` and `is_worktree`.
+The mission carries `id`, `title`, `goal`, `lifecycle`, optional `home_project`,
+`projects`, `conversations`, `omitted_projects` and `omitted_conversations`.
+Each conversation carries its public identity, last-reported `attachments` and
+`omitted_attachments`. Lists contain at most 12 entries each, and the current
+checkout is retained first. Attachments do not prove process liveness. Transcript
+paths and contents are never included. The query neither changes membership nor
+acknowledges attention. See [automatic agent briefing](missions.md#automatic-agent-briefing).
+
 ### `POST /v1/actions`
 
 Requires `Authorization: Bearer <token>`.

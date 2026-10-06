@@ -4266,6 +4266,20 @@ pub async fn daemon_command_loop(
             }
 
             // ── GetState: full workspace snapshot ────────────────────────────
+            RemoteCommand::GetMissionContext(request) => {
+                let ws = workspace.lock();
+                match okena_workspace::mission_context::mission_context(
+                    ws.data(),
+                    &request,
+                    &git_status_tx.borrow(),
+                ) {
+                    Ok(context) => match serde_json::to_value(context) {
+                        Ok(value) => CommandResult::Ok(Some(value)),
+                        Err(error) => CommandResult::Err(error.to_string()),
+                    },
+                    Err(error) => CommandResult::Err(error),
+                }
+            }
             RemoteCommand::GetState => {
                 // Lock order: workspace first, then service manager (kept
                 // consistent across the loop). The whole arm is synchronous, so
@@ -6326,6 +6340,99 @@ mod tests {
                 // Drop the sender so `recv` errors and the loop task joins.
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mission_context_round_trip_observes_changes_without_mutating_state() {
+        use okena_core::mission::{
+            MissionCommand, MissionContext, MissionContextRequest, MissionMember,
+        };
+        let h = harness();
+        h.workspace.lock().data = serde_json::from_value(serde_json::json!({
+            "projects": [{"id":"p", "name":"Repo", "path":"/repo", "layout":{"type":"terminal", "terminal_id":"t"}}],
+            "project_order":["p"]
+        })).unwrap();
+        let id = okena_workspace::missions::apply_command(
+            &mut h.workspace.lock().data,
+            MissionCommand::Create {
+                title: "Export".into(),
+                goal: None,
+                home_project_id: None,
+                member: Some(MissionMember::Terminal {
+                    project_id: "p".into(),
+                    terminal_id: "t".into(),
+                }),
+            },
+        )
+        .unwrap();
+        h.git_status_tx.send_replace(HashMap::from([(
+            "p".into(),
+            ApiGitStatus {
+                branch: Some("feat/export".into()),
+                ..Default::default()
+            },
+        )]));
+        let workspace = h.workspace.clone();
+        let state_version = h.state_version.clone();
+        let query = MissionContextRequest {
+            terminal_id: "t".into(),
+            conversation: None,
+        };
+        let (bridge_tx, bridge_rx) = bridge_channel();
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let before = serde_json::to_value(&workspace.lock().data).unwrap();
+                let result = request(
+                    &bridge_tx,
+                    RemoteCommand::GetMissionContext(query.clone()),
+                    "mission context",
+                )
+                .await;
+                let CommandResult::Ok(Some(value)) = result else {
+                    panic!("expected mission context: {result:?}");
+                };
+                let context: MissionContext = serde_json::from_value(value).unwrap();
+                assert_eq!(context.mission.unwrap().id, id);
+                assert_eq!(
+                    context.current_project.branch.as_deref(),
+                    Some("feat/export")
+                );
+                assert_eq!(
+                    before,
+                    serde_json::to_value(&workspace.lock().data).unwrap()
+                );
+                assert_eq!(*state_version.borrow(), 0);
+                okena_workspace::missions::apply_command(
+                    &mut workspace.lock().data,
+                    MissionCommand::Detach {
+                        mission_id: id,
+                        member: MissionMember::Terminal {
+                            project_id: "p".into(),
+                            terminal_id: "t".into(),
+                        },
+                    },
+                )
+                .unwrap();
+                let result = request(
+                    &bridge_tx,
+                    RemoteCommand::GetMissionContext(query),
+                    "detached context",
+                )
+                .await;
+                let CommandResult::Ok(Some(value)) = result else {
+                    panic!("expected detached context");
+                };
+                assert!(
+                    serde_json::from_value::<MissionContext>(value)
+                        .unwrap()
+                        .mission
+                        .is_none()
+                );
+                drop(bridge_tx);
+                handle.await.unwrap();
             })
             .await;
     }

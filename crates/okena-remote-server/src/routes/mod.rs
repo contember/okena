@@ -2,6 +2,7 @@ pub mod actions;
 pub mod auth_reload;
 pub mod download;
 pub mod health;
+pub mod mission_context;
 pub mod pair;
 pub mod paste_image;
 pub mod refresh;
@@ -167,6 +168,10 @@ pub fn build_router(
     // Routes that require auth
     let protected = Router::new()
         .route("/v1/state", axum::routing::get(state::get_state))
+        .route(
+            "/v1/mission-context",
+            axum::routing::post(mission_context::post_context),
+        )
         .route("/v1/actions", axum::routing::post(actions::post_actions))
         .route(
             "/v1/files/download",
@@ -502,6 +507,72 @@ mod tests {
                 assert_eq!(value, serde_json::json!({"mission_id": "mission-1"}));
             } else {
                 assert_eq!(value, serde_json::json!({"error": "stale episode"}));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mission_context_requires_auth_and_preserves_query_identity_and_errors() {
+        use crate::bridge::{CommandResult, RemoteCommand};
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
+        let mut router = router_with_bridge(store, true, bridge_tx);
+        let body = serde_json::json!({
+            "terminal_id": "t",
+            "conversation": {"agent":"claude-code", "session_id":"00000000-0000-0000-0000-000000000001"}
+        });
+        let make_request = |authorized: bool| {
+            let mut builder = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/mission-context")
+                .header("content-type", "application/json");
+            if authorized {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            let mut req = builder.body(Body::from(body.to_string())).unwrap();
+            req.extensions_mut().insert(LOOPBACK);
+            req
+        };
+        let response = router.call(make_request(false)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(bridge_rx.try_recv().is_err());
+        for result in [
+            CommandResult::Ok(Some(serde_json::json!({"mission":null}))),
+            CommandResult::Err("Terminal not found on this daemon".into()),
+        ] {
+            let expected_status = if matches!(result, CommandResult::Err(_)) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::OK
+            };
+            let reply = async {
+                let message = bridge_rx.recv().await.unwrap();
+                let RemoteCommand::GetMissionContext(query) = message.command else {
+                    panic!("expected read-only context query");
+                };
+                assert_eq!(query.terminal_id, "t");
+                assert_eq!(
+                    query.conversation.unwrap().session_id,
+                    "00000000-0000-0000-0000-000000000001"
+                );
+                message.reply.unwrap().send(result).unwrap();
+            };
+            let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(router.call(make_request(true)), reply)
+            })
+            .await
+            .unwrap();
+            let response = response.unwrap();
+            assert_eq!(response.status(), expected_status);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let output: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if expected_status == StatusCode::BAD_REQUEST {
+                assert_eq!(output["error"], "Terminal not found on this daemon");
+            } else {
+                assert!(output["mission"].is_null());
             }
         }
     }

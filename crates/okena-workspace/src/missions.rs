@@ -137,6 +137,23 @@ pub fn terminal_mission<'a>(
     project_id: &str,
     terminal_id: &str,
 ) -> Option<&'a str> {
+    let conversation = data
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)?
+        .agent_sessions
+        .get(terminal_id)
+        .map(ConversationId::from);
+    terminal_mission_for_conversation(data, project_id, terminal_id, conversation.as_ref())
+}
+
+/// A launch hook knows its current identity before the asynchronous OSC capture does.
+pub fn terminal_mission_for_conversation<'a>(
+    data: &'a WorkspaceData,
+    project_id: &str,
+    terminal_id: &str,
+    conversation: Option<&ConversationId>,
+) -> Option<&'a str> {
     let project = data.projects.iter().find(|p| p.id == project_id)?;
     let layout = project.layout.as_ref()?;
     let leaf = layout.get_at_path(&layout.find_terminal_path(terminal_id)?)?;
@@ -149,12 +166,11 @@ pub fn terminal_mission<'a>(
     ) {
         return None;
     }
-    if let Some(session) = project.agent_sessions.get(terminal_id) {
-        let conversation = ConversationId::from(session);
-        if data.mission_excluded_conversations.contains(&conversation) {
+    if let Some(conversation) = conversation {
+        if data.mission_excluded_conversations.contains(conversation) {
             return None;
         }
-        if let Some(id) = conversation_mission(data, &conversation) {
+        if let Some(id) = conversation_mission(data, conversation) {
             return Some(id);
         }
     }

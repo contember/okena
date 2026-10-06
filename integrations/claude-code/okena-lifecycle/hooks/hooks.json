@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh clear"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh clear",
+            "timeout": 5
           }
         ]
       }
@@ -15,7 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh working",
+            "timeout": 5
           }
         ]
       }
@@ -25,7 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh working",
+            "timeout": 5
           }
         ]
       }
@@ -35,7 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh working"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh working",
+            "timeout": 5
           }
         ]
       }
@@ -46,6 +50,17 @@
           {
             "type": "command",
             "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh blocked"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh",
+            "timeout": 5
           }
         ]
       }
@@ -65,7 +80,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh clear"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-hook.sh clear",
+            "timeout": 5
           }
         ]
       }

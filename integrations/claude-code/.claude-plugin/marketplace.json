@@ -8,8 +8,8 @@
     {
       "name": "okena-lifecycle",
       "source": "./okena-lifecycle",
-      "description": "Report Claude Code lifecycle to Okena (tab indicator, sidebar Agents section, desktop notifications) via OSC 9001.",
-      "version": "0.2.0"
+      "description": "Report Claude Code lifecycle to Okena and automatically supply mission context.",
+      "version": "0.3.0"
     }
   ]
 }

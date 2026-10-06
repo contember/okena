@@ -1165,6 +1165,11 @@ impl PtyManager {
             environment.retain(|(existing, _)| existing != key);
             environment.push((key.clone(), Some(value.clone())));
         }
+        if let Some(profile) = okena_core::profiles::try_current() {
+            // An existing tmux server may have inherited a different profile.
+            environment.retain(|(key, _)| key != "OKENA_PROFILE");
+            environment.push(("OKENA_PROFILE".into(), Some(profile.id.clone())));
+        }
         environment
     }
 

@@ -134,3 +134,48 @@ pub struct TerminalMissionBinding {
     pub terminal_id: String,
     pub mission_id: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissionContextRequest {
+    pub terminal_id: String,
+    #[serde(default)]
+    pub conversation: Option<ConversationId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionContext {
+    pub terminal_id: String,
+    pub current_project: MissionContextProject,
+    pub mission: Option<MissionBriefing>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionContextProject {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub branch: Option<String>,
+    pub is_worktree: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionBriefing {
+    pub id: String,
+    pub title: String,
+    pub goal: Option<String>,
+    pub lifecycle: MissionLifecycle,
+    pub home_project: Option<MissionContextProject>,
+    pub projects: Vec<MissionContextProject>,
+    pub conversations: Vec<MissionContextConversation>,
+    pub omitted_projects: usize,
+    pub omitted_conversations: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionContextConversation {
+    pub conversation: ConversationId,
+    /// Last-reported pane attachments, not proof that an agent process is running.
+    pub attachments: Vec<ConversationAttachment>,
+    pub omitted_attachments: usize,
+}
