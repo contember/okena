@@ -275,23 +275,20 @@ impl UrlDetector {
             let output = {
                 #[cfg(target_os = "linux")]
                 {
-                    okena_core::process::safe_output_with_timeout(
+                    okena_core::process::run_opener(
                         okena_core::process::command("xdg-open").arg(clean_path),
-                        std::time::Duration::from_secs(15),
                     )
                 }
                 #[cfg(target_os = "macos")]
                 {
-                    okena_core::process::safe_output_with_timeout(
+                    okena_core::process::run_opener(
                         okena_core::process::command("open").arg(clean_path),
-                        std::time::Duration::from_secs(15),
                     )
                 }
                 #[cfg(target_os = "windows")]
                 {
-                    okena_core::process::safe_output_with_timeout(
+                    okena_core::process::run_opener(
                         okena_core::process::command("cmd").args(["/C", "start", "", clean_path]),
-                        std::time::Duration::from_secs(15),
                     )
                 }
             };

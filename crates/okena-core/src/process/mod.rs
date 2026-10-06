@@ -55,6 +55,24 @@ pub fn spawn_and_reap(cmd: &mut std::process::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Wait for an opener without terminating the application it launches.
+/// The caller must run this off the UI thread: some openers stay alive until
+/// the application closes.
+pub fn run_opener(cmd: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    let stderr = tempfile::NamedTempFile::new()?;
+    let status = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        // File-backed stderr has no EOF dependency on the launched application.
+        .stderr(stderr.reopen()?)
+        .status()?;
+    Ok(std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr: std::fs::read(stderr.path())?,
+    })
+}
+
 /// Run a command and capture its output, routed through the global command bus
 /// (bounded concurrency + audit). Concurrency is enforced per [`Lane`]; the
 /// lane defaults to the current thread's (see [`with_lane`]).
@@ -276,6 +294,51 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn opener_leaves_the_launched_application_running() {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let started = std::time::Instant::now();
+        let output = super::run_opener(
+            super::command("/bin/sh")
+                .args(["-c", "sleep 30 & echo $! > \"$1\"", "okena-test"])
+                .arg(pid_file.path()),
+        )
+        .expect("run opener");
+        let elapsed = started.elapsed();
+        let application_pid = read_test_pid(pid_file.path());
+        let application_alive = super::is_process_alive(application_pid);
+        kill_test_process(application_pid);
+
+        assert!(output.status.success());
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "elapsed: {elapsed:?}"
+        );
+        assert!(application_alive, "the opener's application was terminated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opener_preserves_failure_status_and_stderr() {
+        let output = super::run_opener(
+            super::command("/bin/sh").args(["-c", "printf 'no application found\\n' >&2; exit 3"]),
+        )
+        .expect("run opener");
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stderr, b"no application found\n");
+    }
+
+    #[test]
+    fn opener_reports_spawn_errors() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let error = super::run_opener(&mut std::process::Command::new(
+            directory.path().join("missing-opener"),
+        ))
+        .expect_err("missing executable must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
     /// The point of the sink is arrival time, not content: lines must reach it
     /// while the command still runs. Buffering them until exit would make
     /// progress reporting useless, and that is what the plain reader does.
