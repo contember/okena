@@ -255,12 +255,14 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
 /// characters, which is why the prefix is reduced to ASCII rather than merely
 /// to alphanumerics.
 fn sanitize_username(name: &str) -> String {
-    name.to_lowercase()
+    let username: String = name
+        .to_lowercase()
         .replace(' ', "-")
         .nfkd()
         .filter(|c| !is_combining_mark(*c))
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect()
+        .collect();
+    username.trim_matches('-').to_string()
 }
 
 /// Generate a unique branch name like `username/rohlik` that doesn't collide
@@ -412,6 +414,14 @@ mod tests {
         );
         // nothing with an ASCII form left → empty, so the caller falls through
         assert_eq!(sanitize_username("日本語"), "");
+    }
+
+    #[test]
+    fn test_sanitize_username_trims_edge_dashes() {
+        assert_eq!(sanitize_username("日本 語"), "");
+        assert_eq!(sanitize_username("日本-語"), "");
+        assert_eq!(sanitize_username("---"), "");
+        assert_eq!(sanitize_username("日本 John Doe 日本"), "john-doe");
     }
 
     #[test]
