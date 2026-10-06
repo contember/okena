@@ -265,6 +265,11 @@ impl ContextMenu {
         cx.emit(ContextMenuEvent::BrowseFiles { project_id });
     }
 
+    fn open_in_file_manager(&self, path: &str, cx: &mut Context<Self>) {
+        cx.open_with_system(std::path::Path::new(path));
+        self.close(cx);
+    }
+
     fn show_diff(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::ShowDiff {
             project_id: self.request.project_id.clone(),
@@ -391,6 +396,22 @@ impl Render for ContextMenu {
                                 }
                             })),
                         )
+                        .when(shares_local_filesystem, |d| {
+                            d.child(
+                                menu_item(
+                                    "context-menu-open-directory",
+                                    "icons/folder.svg",
+                                    "Open in file manager",
+                                    &t,
+                                )
+                                .on_click(cx.listener({
+                                    let project_path = project_path.clone();
+                                    move |this, _, _window, cx| {
+                                        this.open_in_file_manager(&project_path, cx);
+                                    }
+                                })),
+                            )
+                        })
                         // Show Diff
                         .when(is_git_repo, |d| {
                             d.child(

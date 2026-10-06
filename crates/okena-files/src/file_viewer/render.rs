@@ -1373,6 +1373,20 @@ impl Render for FileViewer {
             self.project_fs.project_name()
         };
         let source_action = self.project_fs.source_action();
+        let directory_path = if has_file
+            && !has_revision
+            && source_action == crate::project_fs::FileSourceAction::OpenExternally
+        {
+            self.project_fs
+                .absolute_path(&tab.relative_path)
+                .and_then(|path| {
+                    std::path::Path::new(&path)
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                })
+        } else {
+            None
+        };
         let source_action_label = match source_action {
             crate::project_fs::FileSourceAction::OpenExternally => "Open externally",
             crate::project_fs::FileSourceAction::Download => {
@@ -1796,6 +1810,32 @@ impl Render for FileViewer {
                                             .child(source_action_label),
                                     ),
                             ))
+                            .when_some(directory_path, |d, path| {
+                                d.child(
+                                    div()
+                                        .id("file-open-directory")
+                                        .cursor_pointer()
+                                        .size(px(28.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.0))
+                                        .bg(rgb(t.bg_secondary))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("Open in file manager").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |_this, _, _window, cx| {
+                                            cx.open_with_system(&path);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/folder.svg")
+                                                .size(px(14.0))
+                                                .text_color(rgb(t.text_secondary)),
+                                        ),
+                                )
+                            })
                             .when(self.blame_provider.is_some() && !is_image && !is_font && !is_pdf && !has_revision, |d| {
                                 let on = self.blame_visible;
                                 d.child(
