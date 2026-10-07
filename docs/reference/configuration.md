@@ -168,6 +168,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 |-----|------|---------|-------------|
 | `session_backend` | string | `"Auto"` | Session persistence backend. Values: `"Auto"`, `"None"`, `"Tmux"`, `"Screen"`, `"Dtach"`. Auto prefers dtach, then tmux, then screen. Not supported on Windows. |
 | `auto_resume_agent_sessions` | bool | `false` | On restore, re-run the captured AI agent session's resume command (e.g. `claude --resume <id>`) as the pane's startup command. Applies when the pane comes back **without** its process, i.e. under `session_backend: "None"` — with a live backend the agent is still running and is left alone. See [Agent Status](agent-status.md#session-resume). |
+| `ai_proxy_enabled` | bool | `false` | Give new terminals `ANTHROPIC_BASE_URL` of the local AI proxy, which spreads `claude` requests over the accounts added in Settings → AI Proxy. See [AI proxy](ai-proxy.md). |
 
 #### Sidebar
 
