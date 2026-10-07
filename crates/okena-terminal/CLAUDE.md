@@ -41,7 +41,8 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
   can't pin unbounded memory (custom ≤ a few KB, labels bounded) — mirrors the
   OSC 99 caps.
 - `lbl=` reserves three keys — `agent`, `session_id`, `transcript_path`. With an
-  `agent` id + a UUID-shaped `session_id`, they're captured into a **sticky**
+  `agent` id + a harness-valid `session_id` (UUID, or bounded `ses_…` for
+  `opencode`), they're captured into a **sticky**
   `okena_core::agent_session::AgentSession` on `Terminal.agent_session` (read via
   `Terminal::agent_session()`). Unlike `agent_status` it survives `st=clear` —
   and is captured on it, since a harness maps session start/end onto `clear`.

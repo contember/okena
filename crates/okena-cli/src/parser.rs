@@ -256,7 +256,7 @@ pub struct MissionMemberArgs {
     /// Harness ID for the conversation; requires its own --session-id
     #[arg(long, requires = "session_id")]
     pub agent: Option<String>,
-    /// Conversation UUID, never inferred from the pane's previous agent
+    /// Harness-native conversation ID, never inferred from the pane's previous agent
     #[arg(long, requires = "agent")]
     pub session_id: Option<String>,
 }
@@ -269,7 +269,7 @@ pub struct MissionContextArgs {
     /// Current harness ID; pair with --session-id to avoid a previous pane session
     #[arg(long, requires = "session_id", conflicts_with = "claude_hook")]
     pub agent: Option<String>,
-    /// Current conversation UUID; preserves its mission when resumed elsewhere
+    /// Current harness-native conversation ID; preserves its mission when resumed elsewhere
     #[arg(long, requires = "agent", conflicts_with = "claude_hook")]
     pub session_id: Option<String>,
     /// Output structured context instead of the text briefing

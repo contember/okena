@@ -17,7 +17,7 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena mission context` — your mission goal, participating checkouts and agent
   conversation identities (`--json` for structured data). Reads current daemon
   state without assigning work or acknowledging attention. For a new/resumed
-  agent, pass `--agent <harness> --session-id <UUID>` to use its identity rather
+  agent, pass `--agent <harness> --session-id <ID>` to use its identity rather
   than the pane's last-reported session. Run `okena mission context --help` for
   the hook integration contract.
 - `okena mission list [--json | -q]` — all missions on this daemon; `-q` prints IDs.
@@ -28,7 +28,7 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena mission attach|detach|move <mission> <selector> [--json]` — membership
   changes. Mission arguments accept an exact ID or a unique case-insensitive title.
   Choose exactly one selector: `--current-terminal`, `--terminal <address>`,
-  `--repository <project>`, `--worktree <project>`, or `--agent <harness> --session-id <UUID>`.
+  `--repository <project>`, `--worktree <project>`, or `--agent <harness> --session-id <ID>`.
   `create` optionally accepts the same selectors. Conversations require their own
   explicit identity already known to the daemon; never infer it from a prior pane
   session. `attach` rejects conflicting primary membership; `move` transfers it.

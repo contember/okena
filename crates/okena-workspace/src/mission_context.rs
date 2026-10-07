@@ -246,6 +246,44 @@ mod tests {
     }
 
     #[test]
+    fn opencode_native_identity_keeps_its_assignment_when_resumed_in_another_pane() {
+        let mut data = fixture();
+        let conversation = ConversationId {
+            agent: "opencode".into(),
+            session_id: "ses_0123456789abABCDEFGHIJKLMN".into(),
+        };
+        record(&mut data, &conversation);
+        let assigned = create(
+            &mut data,
+            MissionMember::Conversation {
+                conversation: conversation.clone(),
+            },
+        );
+        create(
+            &mut data,
+            MissionMember::Worktree {
+                project_id: "w".into(),
+            },
+        );
+        assert_eq!(
+            query(&data, "tw", Some(conversation.clone()))
+                .mission
+                .unwrap()
+                .id,
+            assigned
+        );
+        let restored: WorkspaceData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        assert_eq!(
+            query(&restored, "tw", Some(conversation))
+                .mission
+                .unwrap()
+                .id,
+            assigned
+        );
+    }
+
+    #[test]
     fn resumed_assignment_wins_over_worktree_default_and_respects_detach() {
         let mut data = fixture();
         let current = conversation(1);

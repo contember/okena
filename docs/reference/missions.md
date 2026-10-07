@@ -157,7 +157,7 @@ attach a project or pane. Membership changes require exactly one selector:
 - `--terminal <address>` selects a particular pane.
 - `--repository <project>` participates without assigning its terminals or children.
 - `--worktree <project>` supplies the worktree's default membership.
-- `--agent <harness> --session-id <UUID>` selects that exact conversation, independent
+- `--agent <harness> --session-id <ID>` selects that exact conversation, independent
   of the current pane. The identity must already be known to the daemon; it is never
   inferred from the pane's previous agent.
 
@@ -184,7 +184,7 @@ of a running process. Transcript paths and contents are omitted. Repository
 participation alone does not assign its terminals, and home context does not
 imply membership.
 
-Pass `--agent <harness> --session-id <UUID>` when launching or resuming an agent.
+Pass `--agent <harness> --session-id <ID>` when launching or resuming an agent.
 The resolver uses that identity instead of the pane's last-reported conversation:
 an existing conversation keeps its mission, a new conversation uses the explicit
 leaf/worktree default, and detach exclusions still apply. This also avoids the
@@ -196,6 +196,17 @@ resume, compaction and subagent start. Prompt and tool hooks deliver changes,
 including assignment removal. Unchanged briefings are deduplicated; tool checks
 are limited to once per second per pane/session/subagent. Lookup failures do not
 block the agent or substitute stale cached context.
+
+The [OpenCode V2 plugin](../../integrations/opencode/README.md) includes both server
+and TUI adapters. The TUI binds the selected session to its explicit Okena pane and
+profile over native plugin RPC. Native context and compaction hooks query the
+daemon on each outgoing model request, including tool continuations. Unbound
+subagents use their nearest bound ancestor's assignment. Forks need their own
+binding. OpenCode's shared server never infers the pane from its environment.
+This integration requires both processes on the same host and user account.
+Bindings live in native plugin storage; mission membership remains daemon-owned.
+OpenCode IDs use `ses_` plus a nonempty ASCII alphanumeric suffix, at most 128
+bytes in total. Claude Code and Codex retain canonical UUID session IDs.
 
 The rendered briefing is at most 6000 bytes. Structured context contains up to
 12 projects and 12 conversations, with omission counts. Use `okena state` for

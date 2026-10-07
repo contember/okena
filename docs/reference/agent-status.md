@@ -171,7 +171,7 @@ ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base
   `;`/`ST`-safe.
 - `lbl=` — base64(UTF-8) of a flat JSON object, e.g. `{"stage":"verify"}`.
   Three keys are **reserved**: `agent` (harness id, e.g. `claude-code`),
-  `session_id`, and `transcript_path`. When `agent` + a UUID-shaped `session_id`
+  `session_id`, and `transcript_path`. When `agent` + a harness-valid `session_id`
   are present, Okena captures them into the pane's *agent session* — a sticky
   record (it survives, and is captured on, `st=clear`) that is the basis for
   resuming the session. All other keys are free-form.
@@ -179,7 +179,8 @@ ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base
   The reserved keys are read from the raw label map and then **removed** from
   it, so they never reach `labels` on the wire. They are persisted as session
   identity and validated rather than trusted: `session_id` must be a canonical
-  UUID, `agent` must be ≤64 chars of
+  UUID, or for `agent=opencode`, `ses_` followed by a nonempty ASCII alphanumeric
+  suffix with at most 128 bytes total. `agent` must be ≤64 chars of
   `[A-Za-z0-9._-]`, and `transcript_path` must be absolute and free of `..` and
   ≤4096 bytes. Anything else is dropped — a bad `transcript_path` alone doesn't
   discard the session, a bad `agent` or `session_id` does.
@@ -267,7 +268,7 @@ The reserved `agent` + `session_id` (+ optional `transcript_path`) labels let
 Okena remember which AI session a pane is running and bring it back after a
 restart:
 
-- **Captured** in-band from `OSC 9001` `lbl=` (see above), validated as a UUID,
+- **Captured** in-band from `OSC 9001` `lbl=` (see above), validated for its harness,
   and kept on the pane as a *sticky* record that survives `st=clear`.
 - **Persisted** in `workspace.json`: `project.agent_sessions` holds the current
   terminal attachment; `agent_session_history` retains conversation identities
@@ -485,3 +486,19 @@ Resuming a captured session needs a harness registered in
 Claude Code is implemented; Codex is registered but declines to resume until its
 CLI invocation is confirmed, so a Codex session is captured and shown but not
 auto-resumed.
+
+## OpenCode V2 integration
+
+The [OpenCode plugin](../../integrations/opencode/README.md) has native server and
+TUI entrypoints. The selected session's TUI reports `agent=opencode` and its
+`ses_…` identity through OSC 9001, using the pane's current TTY pointer.
+Execution, permission, and form events drive lifecycle status; writes are ordered
+and session selection/unload clears the previous status.
+
+The TUI also sends an explicit session-to-pane/profile binding over plugin RPC.
+The shared server uses that binding to supply daemon-owned mission briefings
+through native context and compaction hooks. Binding storage contains routing
+data, not mission membership. Both processes must run on the same host and user
+account. See the plugin README for installation and the full event mapping.
+OpenCode identities are retained and available to mission commands; automatic
+Okena resume and transcript statistics require a separate harness implementation.

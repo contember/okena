@@ -1,6 +1,6 @@
 //! Authoritative current-work attention. Only the PTY owner feeds transitions.
 
-use crate::agent_session::{AgentSession, is_uuid_like, is_valid_agent_id};
+use crate::agent_session::{AgentSession, is_uuid_like, is_valid_agent_id, is_valid_session_id};
 use crate::agent_status::{AgentLifecycle, AgentStatus};
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ pub struct ConversationId {
 
 impl ConversationId {
     pub fn is_valid(&self) -> bool {
-        is_valid_agent_id(&self.agent) && is_uuid_like(&self.session_id)
+        is_valid_agent_id(&self.agent) && is_valid_session_id(&self.agent, &self.session_id)
     }
 }
 

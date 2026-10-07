@@ -41,7 +41,7 @@ pub trait AgentHarness: Send + Sync {
 
     /// Build the argv that resumes `session_id` from working dir `cwd`, or
     /// `None` if this harness can't / shouldn't resume. `session_id` is already
-    /// [`is_uuid_like`](crate::agent_session::is_uuid_like)-validated by the
+    /// [`is_valid_session_id`](crate::agent_session::is_valid_session_id)-validated by the
     /// caller.
     ///
     /// The argv becomes the pane's startup command, which Okena composes into a
