@@ -21,6 +21,7 @@ log = "0.4"
 dirs = "5.0"
 anyhow = "1.0"
 tempfile = "3"
+getrandom = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
