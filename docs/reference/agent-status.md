@@ -364,10 +364,14 @@ The plugin maps Claude Code's lifecycle hooks to agent states:
 | `UserPromptSubmit` | `working` | You submit a prompt — the agent starts working. |
 | `PreToolUse` | `working` | The agent is about to run a tool — work resumes. |
 | `PostToolUse` | `working` | A tool finished — work continues. |
-| `Notification` | `blocked` | Claude needs permission or input. |
+| `Notification` (input requests only) | `blocked` | Permission, elicitation or agent input request. |
 | `Stop` | `done` | The agent finished its turn. |
 | `SessionStart` | `clear` | A new/resumed session — reset any stale status. |
 | `SessionEnd` | `clear` | The agent exited — drop it from the Agents list. |
+
+The Notification matcher selects `permission_prompt`, `elicitation_dialog`,
+`elicitation_url_dialog` and `agent_needs_input`. Idle, authentication and
+completion notifications do not create input-needed attention.
 
 `PreToolUse` / `PostToolUse` are the recovery edges that the obvious four-hook
 mapping is missing: when Claude is `blocked` waiting on you and you answer
@@ -431,7 +435,7 @@ you get the indicator, but no persistence and no resume, with no error.
       { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status working" } ] }
     ],
     "Notification": [
-      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status blocked" } ] }
+      { "matcher": "^(permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input)$", "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status blocked" } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status done" } ] }

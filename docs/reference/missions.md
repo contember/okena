@@ -194,8 +194,10 @@ The [Claude Code plugin](../../integrations/claude-code/okena-lifecycle/README.m
 automatically delivers this briefing through `additionalContext` on start,
 resume, compaction and subagent start. Prompt and tool hooks deliver changes,
 including assignment removal. Unchanged briefings are deduplicated; tool checks
-are limited to once per second per pane/session/subagent. Lookup failures do not
-block the agent or substitute stale cached context.
+are limited to once per second per pane/session/subagent. Lookup failures inject
+an unavailable-context reminder without blocking the agent or substituting stale
+cached context. Recovery delivers the current briefing again, including an
+explicit no-assignment message after detach.
 
 The [OpenCode V2 plugin](../../integrations/opencode/README.md) includes both server
 and TUI adapters. The TUI binds the selected session to its explicit Okena pane and

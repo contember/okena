@@ -33,10 +33,13 @@ Or enable it non-interactively in `~/.claude/settings.json`:
 | `UserPromptSubmit` | `working` |
 | `PreToolUse` | `working` (about to run a tool) |
 | `PostToolUse` | `working` (tool finished — work resumes) |
-| `Notification` | `blocked` (needs permission / input) |
+| `Notification` (permission, elicitation or agent input request) | `blocked` |
 | `Stop` | `done` |
 | `SessionStart` | `clear` (reset stale status) |
 | `SessionEnd` | `clear` (agent exited) |
+
+Idle, authentication and completion notifications do not change lifecycle or
+create input-needed attention.
 
 ## Mission context
 
@@ -69,9 +72,11 @@ projects and 12 conversations, with omission counts; `okena state` exposes the
 full inventory. The private, profile-local `mission-context/` directory stores
 the last delivered briefing for deduplication, not authoritative mission state.
 
-Context lookup, cache or CLI failures never block Claude and never reuse a
-cached briefing as fresh context. Diagnostics go to stderr. Lifecycle reporting
-still works when the context CLI is missing or the daemon is unavailable.
+Context lookup failures inject an unavailable-context reminder. Recovery delivers
+the current briefing again, including an explicit no-assignment message when
+detached. Failures never block Claude or reuse a cached briefing as fresh context.
+Diagnostics go to stderr. Lifecycle reporting still works when the context CLI
+is missing or the daemon is unavailable.
 
 To inspect context manually:
 

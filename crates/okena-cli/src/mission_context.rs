@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_BRIEFING_BYTES: usize = 6000;
 const MAX_HOOK_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 const TOOL_REFRESH_INTERVAL_MS: u64 = 1000;
+const UNAVAILABLE_BRIEFING: &str = "Okena mission context is currently unavailable. Do not treat a previous mission briefing as current.";
 
 pub fn run(args: MissionContextArgs) -> i32 {
     let result = if args.claude_hook {
@@ -160,27 +161,11 @@ fn run_claude_hook(args: &MissionContextArgs) -> Result<(), String> {
         return Ok(());
     }
     let path = cache_path(&cache_dir, &request, &event);
-    let previous = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<CachedBriefing>(&bytes).ok());
-    let now = now_millis();
-    if matches!(
-        event.hook_event_name,
-        ClaudeHookEvent::PreToolUse | ClaudeHookEvent::PostToolUse
-    ) && previous
-        .as_ref()
-        .is_some_and(|p| now >= p.checked_at_ms && now - p.checked_at_ms < TOOL_REFRESH_INTERVAL_MS)
+    if let Some(briefing) =
+        refresh_claude_briefing(&path, event.hook_event_name, now_millis(), || {
+            fetch_context(&request)
+        })
     {
-        return Ok(());
-    }
-    let context = fetch_context(&request)?;
-    let briefing = render_briefing(&context);
-    if should_deliver(
-        &context,
-        &briefing,
-        previous.as_ref(),
-        event.hook_event_name,
-    ) {
         let output = serde_json::to_string(&ClaudeHookOutput {
             output: ClaudeHookContext {
                 event: event.hook_event_name,
@@ -190,14 +175,55 @@ fn run_claude_hook(args: &MissionContextArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         write_stdout(&output)?;
     }
-    save_cache(
-        &path,
+    Ok(())
+}
+
+fn refresh_claude_briefing(
+    path: &Path,
+    event: ClaudeHookEvent,
+    now: u64,
+    fetch: impl FnOnce() -> Result<MissionContext, String>,
+) -> Option<String> {
+    let previous = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CachedBriefing>(&bytes).ok());
+    if matches!(
+        event,
+        ClaudeHookEvent::PreToolUse | ClaudeHookEvent::PostToolUse
+    ) && previous
+        .as_ref()
+        .is_some_and(|p| now >= p.checked_at_ms && now - p.checked_at_ms < TOOL_REFRESH_INTERVAL_MS)
+    {
+        return None;
+    }
+    let (briefing, mission_id, deliver) = match fetch() {
+        Ok(context) => {
+            let briefing = render_briefing(&context);
+            let deliver = should_deliver(&context, &briefing, previous.as_ref(), event);
+            (briefing, context.mission.map(|m| m.id), deliver)
+        }
+        Err(error) => {
+            eprintln!("Mission context: {error}");
+            let deliver = matches!(
+                event,
+                ClaudeHookEvent::SessionStart | ClaudeHookEvent::SubagentStart
+            ) || previous
+                .as_ref()
+                .is_none_or(|p| p.briefing != UNAVAILABLE_BRIEFING);
+            (UNAVAILABLE_BRIEFING.to_string(), None, deliver)
+        }
+    };
+    if let Err(error) = save_cache(
+        path,
         &CachedBriefing {
-            briefing,
-            mission_id: context.mission.map(|m| m.id),
+            briefing: briefing.clone(),
+            mission_id,
             checked_at_ms: now,
         },
-    )
+    ) {
+        eprintln!("Mission context cache: {error}");
+    }
+    deliver.then_some(briefing)
 }
 
 fn should_deliver(
@@ -211,7 +237,7 @@ fn should_deliver(
         ClaudeHookEvent::SessionStart | ClaudeHookEvent::SubagentStart
     );
     if context.mission.is_none() {
-        return restart || previous.is_some_and(|p| p.mission_id.is_some());
+        return restart || previous.is_some_and(|p| p.briefing != briefing);
     }
     restart || previous.is_none_or(|p| p.briefing != briefing)
 }
@@ -506,6 +532,77 @@ mod tests {
     }
 
     #[test]
+    fn failed_refresh_invalidates_context_and_recovery_redelivers_even_unchanged_briefings() {
+        let dir =
+            std::env::temp_dir().join(format!("okena-context-recovery-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("cache.json");
+        let context = fixture();
+        let expected = render_briefing(&context);
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::SessionStart, 1, || Ok(
+                context.clone()
+            )),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::UserPromptSubmit, 2, || Err(
+                "Daemon unavailable".into()
+            )),
+            Some(UNAVAILABLE_BRIEFING.into())
+        );
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::PreToolUse, 3, || panic!(
+                "tool hook must remain throttled"
+            )),
+            None
+        );
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::UserPromptSubmit, 4, || Err(
+                "Daemon unavailable".into()
+            )),
+            None
+        );
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::UserPromptSubmit, 5, || Ok(
+                context.clone()
+            )),
+            Some(expected)
+        );
+        refresh_claude_briefing(&path, ClaudeHookEvent::UserPromptSubmit, 6, || {
+            Err("Daemon unavailable".into())
+        });
+        let mut detached = context;
+        detached.mission = None;
+        let expected = render_briefing(&detached);
+        assert_eq!(
+            refresh_claude_briefing(&path, ClaudeHookEvent::UserPromptSubmit, 7, || Ok(detached)),
+            Some(expected)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_write_failure_does_not_hide_an_unavailable_context_warning() {
+        let dir = std::env::temp_dir().join(format!(
+            "okena-context-cache-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("not-a-directory");
+        std::fs::write(&parent, "occupied").unwrap();
+        assert_eq!(
+            refresh_claude_briefing(
+                &parent.join("cache.json"),
+                ClaudeHookEvent::UserPromptSubmit,
+                1,
+                || Err("Daemon unavailable".into())
+            ),
+            Some(UNAVAILABLE_BRIEFING.into())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn briefing_is_bounded_utf8_and_preserves_refresh_instructions() {
         let mut context = fixture();
         context.mission.as_mut().unwrap().goal = Some("😀".repeat(4000));
@@ -593,6 +690,78 @@ mod tests {
         clear_session_cache(&dir, &event.session_id).unwrap();
         assert!(!parent.exists() && !child.exists() && !other.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_notifications_only_report_requests_for_input() {
+        use std::process::{Command, Stdio};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../integrations/claude-code/okena-lifecycle");
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("hooks/hooks.json")).unwrap()).unwrap();
+        let notification = &config["hooks"]["Notification"][0];
+        let dir =
+            std::env::temp_dir().join(format!("okena-notification-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tty = dir.join("tty");
+        std::fs::write(&tty, "").unwrap();
+        let invoke = |command: &str, matcher: &str, kind: &str| {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg("if printf '%s\\n' \"$NOTIFICATION_TYPE\" | grep -Eq \"$HOOK_MATCHER\"; then sh -c \"$HOOK_COMMAND\"; fi")
+                .env("CLAUDE_PLUGIN_ROOT", &root)
+                .env("HOOK_COMMAND", command)
+                .env("HOOK_MATCHER", matcher)
+                .env("NOTIFICATION_TYPE", kind)
+                .env("OKENA_TERMINAL_ID", "t")
+                .env("OKENA_TTY", &tty)
+                .env_remove("OKENA_TTY_FILE")
+                .stdin(Stdio::null())
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        invoke(
+            config["hooks"]["Stop"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            ".*",
+            "",
+        );
+        let completed = std::fs::read_to_string(&tty).unwrap();
+        assert!(completed.contains("st=done;tid=t"));
+        let command = notification["hooks"][0]["command"].as_str().unwrap();
+        let matcher = notification["matcher"].as_str().unwrap();
+        for kind in [
+            "idle_prompt",
+            "auth_success",
+            "agent_completed",
+            "elicitation_complete",
+            "elicitation_response",
+        ] {
+            invoke(command, matcher, kind);
+            assert_eq!(std::fs::read_to_string(&tty).unwrap(), completed, "{kind}");
+        }
+        for kind in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+        ] {
+            std::fs::write(&tty, &completed).unwrap();
+            invoke(command, matcher, kind);
+            assert!(
+                std::fs::read_to_string(&tty)
+                    .unwrap()
+                    .contains("st=blocked;tid=t"),
+                "{kind}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
