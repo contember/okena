@@ -34,10 +34,57 @@ impl Workspace {
     ) -> Result<String, String> {
         // Validation and conflict checks are atomic, including Create with an initial member.
         let mut data = self.data.clone();
-        let id = apply_command(&mut data, command)?;
+        let id = apply_command(&mut data, command.clone())?;
+        self.update_pending_mission_membership(&command, &id);
         self.data = data;
         self.notify_data(cx);
         Ok(id)
+    }
+
+    fn update_pending_mission_membership(&mut self, command: &MissionCommand, target: &str) {
+        let member = match command {
+            MissionCommand::Create { member, .. } => member.as_ref(),
+            MissionCommand::Attach { member, .. }
+            | MissionCommand::Move { member, .. }
+            | MissionCommand::Detach { member, .. } => Some(member),
+            _ => None,
+        };
+        let Some(conversation) = member.and_then(|member| member_conversation(&self.data, member))
+        else {
+            return;
+        };
+        let detached_mission = match command {
+            MissionCommand::Detach { mission_id, .. } => Some(mission_id.as_str()),
+            MissionCommand::Move { .. } => {
+                conversation_mission(&self.data, &conversation).filter(|id| *id != target)
+            }
+            _ => None,
+        };
+        for pending in &mut self.pending_closes {
+            let Some(project) = self
+                .data
+                .projects
+                .iter()
+                .find(|p| p.id == pending.project_id)
+            else {
+                continue;
+            };
+            // Undo must preserve membership changes made during the grace period.
+            for layout in [
+                &mut pending.pre_close_layout,
+                &mut pending.post_close_layout,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(id) = detached_mission {
+                    clear_conversation_binding(layout, &project.agent_sessions, id, &conversation);
+                }
+                if !matches!(command, MissionCommand::Detach { .. }) {
+                    clear_matching_leaf_exclusions(layout, &project.agent_sessions, &conversation);
+                }
+            }
+        }
     }
 
     /// The caller supplies canonical host/repository identity from git.
@@ -524,8 +571,8 @@ fn set_leaf_binding(
     }
 }
 
-fn detach(data: &mut WorkspaceData, id: &str, member: &MissionMember) {
-    let conversation = match member {
+fn member_conversation(data: &WorkspaceData, member: &MissionMember) -> Option<ConversationId> {
+    match member {
         MissionMember::Conversation { conversation } => Some(conversation.clone()),
         MissionMember::Terminal {
             project_id,
@@ -537,7 +584,11 @@ fn detach(data: &mut WorkspaceData, id: &str, member: &MissionMember) {
             .and_then(|p| p.agent_sessions.get(terminal_id))
             .map(ConversationId::from),
         _ => None,
-    };
+    }
+}
+
+fn detach(data: &mut WorkspaceData, id: &str, member: &MissionMember) {
+    let conversation = member_conversation(data, member);
     if let Some(mission) = data.missions.iter_mut().find(|m| m.id == id) {
         match member {
             MissionMember::Repository { project_id } => {
@@ -566,17 +617,7 @@ fn detach(data: &mut WorkspaceData, id: &str, member: &MissionMember) {
         }
         for project in &mut data.projects {
             if let Some(layout) = &mut project.layout {
-                clear_pending_binding(layout, id, &conversation);
-                for (terminal_id, session) in &project.agent_sessions {
-                    if ConversationId::from(session) == conversation
-                        && let Some(path) = layout.find_terminal_path(terminal_id)
-                        && let Some(LayoutNode::Terminal { mission_id, .. }) =
-                            layout.get_at_path_mut(&path)
-                        && mission_id.as_deref() == Some(id)
-                    {
-                        *mission_id = None;
-                    }
-                }
+                clear_conversation_binding(layout, &project.agent_sessions, id, &conversation);
             }
         }
     }
@@ -620,24 +661,33 @@ fn clear_matching_leaf_exclusions(
     }
 }
 
-fn clear_pending_binding(node: &mut LayoutNode, id: &str, conversation: &ConversationId) {
+fn clear_conversation_binding(
+    node: &mut LayoutNode,
+    sessions: &std::collections::HashMap<String, okena_core::agent_session::AgentSession>,
+    id: &str,
+    conversation: &ConversationId,
+) {
     match node {
         LayoutNode::Terminal {
             mission_id,
+            terminal_id,
             pending_agent_resume,
             ..
         } => {
-            if mission_id.as_deref() == Some(id)
-                && pending_agent_resume
+            let matches_conversation = terminal_id
+                .as_ref()
+                .and_then(|terminal| sessions.get(terminal))
+                .is_some_and(|s| ConversationId::from(s) == *conversation)
+                || pending_agent_resume
                     .as_ref()
-                    .is_some_and(|s| ConversationId::from(s) == *conversation)
-            {
+                    .is_some_and(|s| ConversationId::from(s) == *conversation);
+            if mission_id.as_deref() == Some(id) && matches_conversation {
                 *mission_id = None;
             }
         }
         LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
             for child in children {
-                clear_pending_binding(child, id, conversation);
+                clear_conversation_binding(child, sessions, id, conversation);
             }
         }
     }
@@ -1214,6 +1264,160 @@ mod tests {
                     .into_owned(),
             ),
         }
+    }
+
+    #[test]
+    fn conversation_reattachment_survives_soft_close_undo() {
+        for changed_layout in [false, true] {
+            for operation in ["attach", "move", "create"] {
+                let mut ws = Workspace::new(fixture());
+                let mut focus = crate::focus::FocusManager::default();
+                ws.set_agent_session("p", "t", session(1), &mut Cx);
+                let original = create(
+                    &mut ws.data,
+                    Some(MissionMember::Terminal {
+                        project_id: "p".into(),
+                        terminal_id: "t".into(),
+                    }),
+                );
+                ws.execute_mission(
+                    MissionCommand::Detach {
+                        mission_id: original,
+                        member: MissionMember::Terminal {
+                            project_id: "p".into(),
+                            terminal_id: "t".into(),
+                        },
+                    },
+                    &mut Cx,
+                )
+                .unwrap();
+                ws.begin_soft_close(&mut focus, "p", &[], "t", "toast", &mut Cx);
+                if changed_layout {
+                    ws.project_mut("p").unwrap().layout = Some(LayoutNode::new_terminal());
+                }
+                let member = MissionMember::Conversation {
+                    conversation: (&session(1)).into(),
+                };
+                let command = match operation {
+                    "create" => MissionCommand::Create {
+                        title: "Review".into(),
+                        goal: None,
+                        home_project_id: None,
+                        member: Some(member),
+                    },
+                    "move" => MissionCommand::Move {
+                        mission_id: create(&mut ws.data, None),
+                        member,
+                    },
+                    _ => MissionCommand::Attach {
+                        mission_id: create(&mut ws.data, None),
+                        member,
+                    },
+                };
+                let target = ws.execute_mission(command, &mut Cx).unwrap();
+                assert!(ws.undo_soft_close(&mut focus, "t", true, &mut Cx));
+                assert_eq!(terminal_mission(&ws.data, "p", "t"), Some(target.as_str()));
+                ws.set_agent_session("p", "t", session(1), &mut Cx);
+                assert_eq!(terminal_mission(&ws.data, "p", "t"), Some(target.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_detach_during_soft_close_does_not_restore_a_binding() {
+        for changed_layout in [false, true] {
+            let mut ws = Workspace::new(fixture());
+            let mut focus = crate::focus::FocusManager::default();
+            ws.set_agent_session("p", "t", session(1), &mut Cx);
+            let original = create(
+                &mut ws.data,
+                Some(MissionMember::Terminal {
+                    project_id: "p".into(),
+                    terminal_id: "t".into(),
+                }),
+            );
+            ws.begin_soft_close(&mut focus, "p", &[], "t", "toast", &mut Cx);
+            if changed_layout {
+                ws.project_mut("p").unwrap().layout = Some(LayoutNode::new_terminal());
+            }
+            ws.execute_mission(
+                MissionCommand::Detach {
+                    mission_id: original,
+                    member: MissionMember::Conversation {
+                        conversation: (&session(1)).into(),
+                    },
+                },
+                &mut Cx,
+            )
+            .unwrap();
+            assert!(ws.undo_soft_close(&mut focus, "t", true, &mut Cx));
+            ws.set_agent_session("p", "t", session(2), &mut Cx);
+            assert_eq!(terminal_mission(&ws.data, "p", "t"), None);
+            assert_eq!(conversation_mission(&ws.data, &(&session(2)).into()), None);
+        }
+    }
+
+    #[test]
+    fn failed_conversation_move_preserves_soft_close_binding() {
+        let mut ws = Workspace::new(fixture());
+        let mut focus = crate::focus::FocusManager::default();
+        ws.set_agent_session("p", "t", session(1), &mut Cx);
+        let original = create(
+            &mut ws.data,
+            Some(MissionMember::Terminal {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+            }),
+        );
+        ws.begin_soft_close(&mut focus, "p", &[], "t", "toast", &mut Cx);
+        assert!(
+            ws.execute_mission(
+                MissionCommand::Move {
+                    mission_id: "missing".into(),
+                    member: MissionMember::Conversation {
+                        conversation: (&session(1)).into()
+                    },
+                },
+                &mut Cx
+            )
+            .is_err()
+        );
+        assert!(ws.undo_soft_close(&mut focus, "t", true, &mut Cx));
+        assert_eq!(
+            terminal_mission(&ws.data, "p", "t"),
+            Some(original.as_str())
+        );
+    }
+
+    #[test]
+    fn conversation_move_during_soft_close_does_not_restore_previous_default() {
+        let mut ws = Workspace::new(fixture());
+        let mut focus = crate::focus::FocusManager::default();
+        ws.set_agent_session("p", "t", session(1), &mut Cx);
+        create(
+            &mut ws.data,
+            Some(MissionMember::Terminal {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+            }),
+        );
+        let target = create(&mut ws.data, None);
+        ws.begin_soft_close(&mut focus, "p", &[], "t", "toast", &mut Cx);
+        ws.execute_mission(
+            MissionCommand::Move {
+                mission_id: target.clone(),
+                member: MissionMember::Conversation {
+                    conversation: (&session(1)).into(),
+                },
+            },
+            &mut Cx,
+        )
+        .unwrap();
+        assert!(ws.undo_soft_close(&mut focus, "t", true, &mut Cx));
+        assert_eq!(terminal_mission(&ws.data, "p", "t"), Some(target.as_str()));
+        ws.set_agent_session("p", "t", session(2), &mut Cx);
+        assert_eq!(terminal_mission(&ws.data, "p", "t"), None);
+        assert_eq!(conversation_mission(&ws.data, &(&session(2)).into()), None);
     }
 
     #[test]
