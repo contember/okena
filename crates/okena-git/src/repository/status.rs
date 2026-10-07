@@ -314,7 +314,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     // One parallel HEAD → index → worktree walk. Rename tracking is disabled to
     // match `--no-renames`: a rename surfaces as a delete of the old path plus
     // an add of the new one. Capped to one thread (see `single_threaded`).
-    let iter = crate::gix_helpers::single_threaded(repo.status(gix::progress::Discard).ok()?)
+    let mut iter = crate::gix_helpers::single_threaded(repo.status(gix::progress::Discard).ok()?)
         .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
@@ -329,7 +329,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     let mut changed: std::collections::HashSet<gix::bstr::BString> =
         std::collections::HashSet::new();
     let mut untracked: Vec<String> = Vec::new();
-    for item in iter {
+    for item in iter.by_ref() {
         let item = item.ok()?;
         if let gix::status::Item::IndexWorktree(
             gix::status::index_worktree::Item::DirectoryContents { entry, .. },
@@ -345,6 +345,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         }
         changed.insert(item.location().to_owned());
     }
+    crate::gix_helpers::refresh_racy_index(&workdir, iter.outcome_mut().as_deref());
 
     // The walk is complete, so nothing below can fail: the memo is only touched
     // by walks that finished, and a transient failure above leaves it as it was.
