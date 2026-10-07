@@ -1334,7 +1334,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
-        | ActionRequest::InvokeAction { .. }) => a,
+        | ActionRequest::InvokeAction { .. }
+        | ActionRequest::AiProxy { .. }) => a,
     }
 }
 

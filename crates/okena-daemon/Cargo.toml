@@ -29,6 +29,8 @@ okena-remote-server = { path = "../okena-remote-server", default-features = fals
 # to live in okena-ext-claude/-codex, which pull gpui, so this binary could not
 # install the registry at all and auto-resume was a silent no-op here.
 okena-agent-harnesses = { path = "../okena-agent-harnesses" }
+# `okena-daemon --ai-proxy <profile-root>` runs the per-profile AI proxy.
+okena-ai = { path = "../okena-ai" }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"

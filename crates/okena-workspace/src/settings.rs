@@ -333,6 +333,10 @@ pub struct AppSettings {
     /// session whose agent is (still) running, so nothing is resumed.
     #[serde(default)]
     pub auto_resume_agent_sessions: bool,
+    /// Route `claude` in new terminals through the per-profile AI proxy, which
+    /// spreads requests over the accounts added in Settings → AI Proxy.
+    #[serde(default)]
+    pub ai_proxy_enabled: bool,
 
     // File opener settings
     /// Editor command to open file paths (e.g. "code", "cursor", "zed", "subl", "vim")
@@ -510,6 +514,7 @@ impl Default for AppSettings {
             auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
+            ai_proxy_enabled: false,
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),

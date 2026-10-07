@@ -681,7 +681,8 @@ pub fn execute_action(
         | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
-        | ActionRequest::InvokeAction { .. } => {
+        | ActionRequest::InvokeAction { .. }
+        | ActionRequest::AiProxy { .. } => {
             ActionResult::Err("app-scoped action must be handled by the remote bridge".to_string())
         }
     }
