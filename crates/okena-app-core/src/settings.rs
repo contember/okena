@@ -175,6 +175,7 @@ impl SettingsState {
         auto_resume_agent_sessions,
         bool
     );
+    setting_setter!(set_ai_proxy_enabled, ai_proxy_enabled, bool);
     setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,
