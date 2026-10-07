@@ -67,10 +67,11 @@ impl PaneEnv {
     }
 
     /// The extra environment for PTYs spawned from now on: Claude account
-    /// isolation plus Claude remote (set when the setting is on and the
-    /// preload could be written, removed otherwise).
+    /// isolation and the AI proxy URL ([`crate::ai_proxy::pty_env`]) plus
+    /// Claude remote (set when the setting is on and the preload could be
+    /// written, removed otherwise).
     pub fn pty_env(&self, settings: &AppSettings) -> Vec<(String, Option<String>)> {
-        let mut env = okena_workspace::claude_env::claude_pty_env_for_settings(settings);
+        let mut env = crate::ai_proxy::pty_env(settings);
         let enabled = cfg!(unix) && settings.claude_remote;
         if enabled && self.okena_bin.is_none() {
             log::warn!(

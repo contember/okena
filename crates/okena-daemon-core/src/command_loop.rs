@@ -201,11 +201,13 @@ fn apply_scrollback_after_committed_settings_change(
 fn refresh_claude_pty_env_after_committed_settings_change(
     outcome: &SettingsUpdateOutcome,
     settings: &Arc<Mutex<AppSettings>>,
-    backend: &dyn TerminalBackend,
-    claude_pane_env: &ClaudePaneEnv,
+    backend: &Arc<dyn TerminalBackend>,
+    claude_pane_env: &Arc<ClaudePaneEnv>,
+    runtime: &tokio::runtime::Handle,
 ) {
     if outcome.committed {
         backend.set_extra_env(claude_pane_env.pty_env(&settings.lock()));
+        crate::ai_proxy::start_if_enabled(settings, backend, claude_pane_env, runtime);
     }
 }
 
@@ -2888,6 +2890,17 @@ pub async fn daemon_command_loop(
         };
 
         let command = match command {
+            // Talks to the AI proxy over loopback (and may start it), so it runs
+            // off the loop.
+            RemoteCommand::Action(ActionRequest::AiProxy { request }) => {
+                runtime.spawn(async move {
+                    let state = crate::ai_proxy::execute(request).await;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(CommandResult::Ok(serde_json::to_value(state).ok()));
+                    }
+                });
+                continue;
+            }
             RemoteCommand::Action(ActionRequest::SearchContent {
                 project_id,
                 query,
@@ -3066,8 +3079,9 @@ pub async fn daemon_command_loop(
                         refresh_claude_pty_env_after_committed_settings_change(
                             &outcome,
                             &settings,
-                            backend.as_ref(),
+                            &backend,
                             &claude_pane_env,
+                            &runtime,
                         );
                         apply_scrollback_after_committed_settings_change(
                             &outcome, &settings, &terminals,
@@ -5343,11 +5357,18 @@ mod tests {
     #[test]
     fn claude_pty_env_refreshes_only_after_committed_settings_changes() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let backend =
-            RecordingMigrationBackend::new(events.clone(), SessionBackend::None, false, false);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
+            events.clone(),
+            SessionBackend::None,
+            false,
+            false,
+        ));
         let settings = Arc::new(Mutex::new(default_settings()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
 
-        let claude_pane_env = ClaudePaneEnv::resolve();
+        let claude_pane_env = Arc::new(ClaudePaneEnv::resolve());
 
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome {
@@ -5357,12 +5378,14 @@ mod tests {
             &settings,
             &backend,
             &claude_pane_env,
+            runtime.handle(),
         );
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome::uncommitted(CommandResult::Err("rejected".to_string())),
             &settings,
             &backend,
             &claude_pane_env,
+            runtime.handle(),
         );
 
         assert_eq!(&*events.lock(), &["env".to_string()]);

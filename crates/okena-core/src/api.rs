@@ -1376,6 +1376,13 @@ pub enum ActionRequest {
         #[serde(default)]
         window: Option<String>,
     },
+
+    // ── AI proxy (app-scoped; handled at the remote bridge) ───────────
+    /// Manage the host's AI proxy account pool. Replies with
+    /// [`crate::ai_proxy::AiProxyState`].
+    AiProxy {
+        request: crate::ai_proxy::AiProxyCommand,
+    },
 }
 
 /// Result of processing a remote command on the GPUI thread.

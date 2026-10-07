@@ -349,6 +349,7 @@ impl DaemonCore {
         // right account — the same override the GUI's `sync_claude_pty_env`
         // applies, computed by the gpui-free `okena_workspace::claude_env` from
         // the daemon's own settings (the GUI's `ExtensionSettingsStore` is gpui).
+        // With the AI proxy enabled, new shells also get its ANTHROPIC_BASE_URL;
         // Claude remote's preload env rides along when that setting is on.
         let claude_pane_env = Arc::new(crate::claude_remote::PaneEnv::resolve());
         pty_manager.set_extra_env(claude_pane_env.pty_env(&params.settings));
@@ -407,6 +408,9 @@ impl DaemonCore {
         // `AppSettings`. Terminals created before this point would silently get
         // alacritty's 10 000-line default, so set it before any PTY spawns.
         okena_terminal::terminal::set_process_scrollback_lines(settings.lock().scrollback_lines);
+
+        // The proxy outlives daemons; this starts it only if none is running.
+        crate::ai_proxy::start_if_enabled(&settings, &backend, &claude_pane_env, &handle);
 
         // Retire hook terminals that piled up before eviction existed (or under
         // an older build). Their PTYs did not survive the restart, so this only

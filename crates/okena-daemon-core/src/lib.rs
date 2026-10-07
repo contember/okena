@@ -30,6 +30,7 @@
 //! complete, GPUI-free headless daemon that owns the runtime + remote server and
 //! runs the reactor until shutdown.
 
+mod ai_proxy;
 pub mod claude_remote;
 pub mod command_loop;
 pub mod daemon;

@@ -212,6 +212,16 @@ fn main() {
         return;
     }
 
+    // `--ai-proxy <profile-root>`: the per-profile AI proxy the daemon starts.
+    // Gated before profile resolution and logging; it has its own of both.
+    if let Some(profile_root) = okena_ai::proxy_args(&std::env::args().collect::<Vec<_>>()) {
+        if let Err(error) = okena_ai::run(profile_root) {
+            eprintln!("AI proxy failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Start heap profiling for the lifetime of the process. Held until `main`
     // returns, at which point dhat writes `dhat-heap.json` into the cwd.
     #[cfg(feature = "dhat-heap")]
