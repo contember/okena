@@ -6201,6 +6201,7 @@ dependencies = [
  "log",
  "mimalloc",
  "okena-agent-harnesses",
+ "okena-ai",
  "okena-app",
  "okena-cli",
  "okena-core",
@@ -6231,6 +6232,30 @@ version = "0.34.0"
 dependencies = [
  "log",
  "okena-core",
+]
+
+[[package]]
+name = "okena-ai"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "env_logger",
+ "fs2",
+ "futures",
+ "getrandom 0.2.17",
+ "jiff",
+ "libc",
+ "log",
+ "okena-core",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -6329,6 +6354,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "dirs 5.0.1",
+ "getrandom 0.2.17",
  "libc",
  "log",
  "serde",
@@ -8101,12 +8127,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
