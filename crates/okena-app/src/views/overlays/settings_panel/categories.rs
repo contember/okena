@@ -40,8 +40,8 @@ impl SettingsCategory {
         ]
     }
 
-    /// Categories available in project mode (only hooks for now)
+    /// Categories available in project mode
     pub(super) fn project_categories() -> &'static [SettingsCategory] {
-        &[Self::Hooks]
+        &[Self::Hooks, Self::AiProxy]
     }
 }
