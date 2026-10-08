@@ -530,7 +530,9 @@ mod gpui_tests {
 mod jump_gpui_tests {
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
-    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
+    use crate::state::{
+        LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData, WorktreeMetadata,
+    };
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;
@@ -622,6 +624,97 @@ mod jump_gpui_tests {
         });
 
         assert_eq!(fm.focused_project_id(), None, "overview must be preserved");
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("p2")
+        );
+    }
+
+    /// `p1` with worktree child `w1`, plus an unrelated `p2`.
+    fn workspace_with_worktree() -> WorkspaceData {
+        let mut parent = project("p1", "t1");
+        parent.worktree_ids = vec!["w1".to_string()];
+        let mut child = project("w1", "tw");
+        child.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            main_repo_path: "/tmp/test".to_string(),
+            worktree_path: "/tmp/w1".to_string(),
+            branch_name: String::new(),
+        });
+        WorkspaceData {
+            projects: vec![parent, child, project("p2", "t2")],
+            project_order: vec!["p1".to_string(), "w1".to_string(), "p2".to_string()],
+            ..workspace_data(&[])
+        }
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_worktree_child_keeps_the_parent_zoom(cx: &mut gpui::TestAppContext) {
+        // Zoomed into p1, which also shows its worktree child w1. Focus landing
+        // on w1 (e.g. on a sibling after closing a tab) must keep the grouped
+        // view rather than narrow the zoom to w1 alone.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("p1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "w1", "tw", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p1"));
+        assert!(!fm.is_focus_individual());
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("w1")
+        );
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_worktree_child_leaves_an_individual_zoom(cx: &mut gpui::TestAppContext) {
+        // An individual zoom on p1 hides w1, so reaching w1 has to move the zoom.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id_individual(Some("p1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "w1", "tw", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("w1"));
+        assert!(!fm.is_focus_individual());
+    }
+
+    #[gpui::test]
+    fn jumping_from_a_worktree_child_zoom_to_its_parent_follows_it(cx: &mut gpui::TestAppContext) {
+        // A zoomed worktree child shows only itself, so its parent is off screen.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("w1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p1", "t1", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p1"));
+        assert!(!fm.is_focus_individual());
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("p1")
+        );
+    }
+
+    #[gpui::test]
+    fn jumping_from_a_zoom_to_another_project_follows_it(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("p1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p2", "t2", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p2"));
         assert_eq!(
             fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
             Some("p2")

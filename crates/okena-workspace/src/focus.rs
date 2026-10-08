@@ -262,9 +262,11 @@ impl FocusManager {
     ///   project (retargeted in place, no stack growth — same as the zoom-header
     ///   next/prev arrows). A jump from a zoomed terminal lands on the new one
     ///   instead of being swallowed by the old `layout_path`-only update.
-    /// - **Project zoom** (`focused_project_id` set) → switch the zoom to the
-    ///   target's project. `compute_visible_projects`' focus override then
-    ///   surfaces that project even past a folder filter or a hidden-set entry.
+    /// - **Project zoom** (`focused_project_id` set) → if the zoom doesn't
+    ///   already show the target (a zoomed parent shows its worktree children),
+    ///   switch the zoom to the target's project. `compute_visible_projects`'
+    ///   focus override then surfaces that project even past a folder filter or
+    ///   a hidden-set entry.
     /// - **Overview** (no zoom, no fullscreen) → just move terminal focus; the
     ///   target's column is already on screen, so the multi-project overview is
     ///   left intact. Unless `project_offscreen` says it isn't: a project in the
@@ -297,35 +299,10 @@ impl FocusManager {
             return;
         }
 
-        // Not fullscreen. If a project is zoomed, follow the jump so the
-        // target's column is the one shown; leave overview untouched. Only when
-        // switching to a *different* project do we reset individual mode (a
-        // fresh zoom shows the project plus its worktree children) — revealing
-        // another terminal within the already-zoomed project must NOT clear
-        // individual mode, or it would re-expand worktree children the user has
-        // zoomed past. This primitive also backs pre-existing sidebar/cursor
-        // terminal clicks, so that regression would hit them too.
-        if self
-            .focused_project_id
-            .as_deref()
-            .is_some_and(|current| current != project_id)
-        {
-            self.focused_project_id = Some(project_id.clone());
-            self.focus_project_individual = false;
-        } else if self.focused_project_id.is_none() && project_offscreen {
-            // Overview, but this window isn't rendering the target's column.
-            // Zooming is the narrowest way to make it reachable; leaving the
-            // hidden set / folder filter alone means the user's view returns to
-            // exactly what it was when they zoom back out.
-            //
-            // This is a None→Some zoom transition, so it must save the pre-zoom
-            // focus like every other one — otherwise zooming back out leaves
-            // focus stranded on the revealed (now invisible) project: no pane
-            // renders a focus ring, `focused_terminal_state()` lies, and
-            // keystrokes go to whatever GPUI handle was focused before.
-            self.apply_zoom_focus_save_restore(&Some(project_id.clone()));
-            self.focused_project_id = Some(project_id.clone());
-            self.focus_project_individual = false;
+        // The zoomed project, and a zoomed parent's worktree children, are on
+        // screen, so revealing them keeps the zoom and its individual mode.
+        if project_offscreen {
+            self.set_focused_project_id(Some(project_id.clone()));
         }
         self.current_focus = Some(FocusTarget::new(project_id, layout_path));
         self.context = FocusContext::Terminal;
@@ -752,7 +729,7 @@ mod tests {
         fm.set_focused_project_id(Some("proj1".to_string()));
         fm.focus_terminal("proj1".to_string(), vec![0]);
 
-        fm.reveal_terminal("proj2".to_string(), vec![2], "term2".to_string(), false);
+        fm.reveal_terminal("proj2".to_string(), vec![2], "term2".to_string(), true);
 
         assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
         assert!(!fm.has_fullscreen());
@@ -833,7 +810,7 @@ mod tests {
         assert_eq!(fm.focused_terminal_state().unwrap().layout_path, vec![1]);
 
         // ...but switching to a DIFFERENT project still resets individual mode.
-        fm.reveal_terminal("proj2".to_string(), vec![0], "term-c".to_string(), false);
+        fm.reveal_terminal("proj2".to_string(), vec![0], "term-c".to_string(), true);
         assert!(!fm.is_focus_individual());
         assert_eq!(fm.focused_project_id(), Some(&"proj2".to_string()));
     }
