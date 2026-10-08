@@ -202,7 +202,7 @@ fn refresh_claude_pty_env_after_committed_settings_change(
     runtime: &tokio::runtime::Handle,
 ) {
     if outcome.committed {
-        backend.set_extra_env(crate::ai_proxy::pty_env(&settings.lock()));
+        backend.set_launch_environment(crate::ai_proxy::launch_environment(&settings.lock()));
         crate::ai_proxy::start_if_enabled(settings, backend, runtime);
     }
 }
@@ -4988,7 +4988,7 @@ mod tests {
             self.events.lock().push("flush".to_string());
         }
 
-        fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {
+        fn set_launch_environment(&self, _environment: okena_terminal::backend::LaunchEnvironment) {
             self.events.lock().push("env".to_string());
         }
 

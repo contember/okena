@@ -89,8 +89,8 @@ fn is_default_claude_dir(claude_dir: &Path) -> bool {
     canonical_dir == canonical_default
 }
 
-/// Compute the per-PTY `CLAUDE_CONFIG_DIR` override list to hand to
-/// `PtyManager::set_extra_env`. Pure, gpui-free logic.
+/// Compute the per-PTY `CLAUDE_CONFIG_DIR` override list for the daemon's PTY
+/// launch environment. Pure, gpui-free logic.
 ///
 /// * `claude_dir` — the resolved Claude config dir (see [`resolve_claude_dir`]).
 /// * `multi_profile` — whether more than one Okena profile exists.

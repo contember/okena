@@ -1628,6 +1628,7 @@ pub fn terminal_launch_plan(
             args: command_args,
         }),
         environment: safe_hook_environment(env_vars),
+        project_id: None,
     }
 }
 

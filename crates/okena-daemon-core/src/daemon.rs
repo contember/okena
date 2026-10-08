@@ -338,7 +338,7 @@ impl DaemonCore {
         // applies, computed by the gpui-free `okena_workspace::claude_env` from
         // the daemon's own settings (the GUI's `ExtensionSettingsStore` is gpui).
         // With the AI proxy enabled, new shells also get its ANTHROPIC_BASE_URL.
-        pty_manager.set_extra_env(crate::ai_proxy::pty_env(&params.settings));
+        pty_manager.set_launch_environment(crate::ai_proxy::launch_environment(&params.settings));
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
