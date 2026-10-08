@@ -2,11 +2,13 @@
 //! (OAuth, profile, telemetry) passes through with the caller's own credentials.
 
 use crate::accounts::{Accounts, Selection};
+use crate::activity::Activity;
 use crate::oauth::OAUTH_BETA;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
+use okena_core::ai_proxy::AiActivityKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,6 +21,7 @@ pub struct Relay {
     pub http: reqwest::Client,
     pub api: String,
     pub inflight: Arc<AtomicUsize>,
+    pub activity: Activity,
 }
 
 /// Counts a request as in flight until its response body is finished or dropped.
@@ -56,7 +59,13 @@ impl Relay {
         let url = format!("{}{}", self.api, path_and_query);
         let path = path_and_query.split('?').next().unwrap_or_default();
         if method != Method::POST || !path.starts_with("/v1/messages") {
-            return self.passthrough(method, &url, &headers, body, guard).await;
+            return match self.passthrough(method, &url, &headers, body).await {
+                Ok(response) => stream(response, guard),
+                Err(err) => {
+                    log::warn!("[ai-proxy] passthrough request failed: {err}");
+                    error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
+                }
+            };
         }
 
         let mut payload: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
@@ -75,9 +84,14 @@ impl Relay {
                 {
                     Selection::Selected(account) => account,
                     Selection::NoAccounts => {
-                        return self.passthrough(method, &url, &headers, body, guard).await;
+                        return match self.passthrough(method, &url, &headers, body).await {
+                            Ok(response) => self.answer(project, None, response, guard).await,
+                            Err(err) => self.unanswered(project, None, err),
+                        };
                     }
                     Selection::NoPermittedAccount => {
+                        self.activity
+                            .event(project, AiActivityKind::NoPermittedAccount);
                         // 400 rather than 403: `claude` shows the message as is,
                         // where a 401/403 can send the user to `/login`.
                         return error(
@@ -87,6 +101,7 @@ impl Relay {
                         );
                     }
                     Selection::Exhausted { retry_at_ms } => {
+                        self.activity.event(project, AiActivityKind::AllRateLimited);
                         return exhausted(rate_limited, retry_at_ms);
                     }
                 },
@@ -116,10 +131,7 @@ impl Relay {
                 .await
             {
                 Ok(response) => response,
-                Err(err) => {
-                    log::warn!("[ai-proxy] upstream request failed: {err}");
-                    return error(StatusCode::BAD_GATEWAY, "Upstream connection failed");
-                }
+                Err(err) => return self.unanswered(project, Some(&account.id), err),
             };
             let status = response.status();
             log::debug!(
@@ -133,6 +145,14 @@ impl Relay {
                 status.as_u16(),
                 response.headers(),
             );
+            if status == StatusCode::UNAUTHORIZED {
+                self.activity.event(
+                    project,
+                    AiActivityKind::Unauthorized {
+                        account_id: account.id.clone(),
+                    },
+                );
+            }
             match status {
                 StatusCode::UNAUTHORIZED if !refreshed.contains(&account.id) => {
                     refreshed.push(account.id.clone());
@@ -154,39 +174,71 @@ impl Relay {
                         "[ai-proxy] account {} rate limited, failing over",
                         account.id
                     );
+                    self.activity.rate_limited(project, &account.id);
                     let headers = response.headers().clone();
                     let body = response.bytes().await.unwrap_or_default();
                     rate_limited = Some((status, headers, body));
                     excluded.push(account.id);
                 }
-                _ => return stream(response, guard),
+                _ => {
+                    return self
+                        .answer(project, Some(&account.id), response, guard)
+                        .await;
+                }
             }
         }
+        self.activity.event(project, AiActivityKind::AllRateLimited);
         exhausted(rate_limited, None)
     }
 
+    /// Relay the response that answers a `/v1/messages` request and record it.
+    /// An error response is read whole, so its message can be recorded.
+    async fn answer(
+        &self,
+        project: Option<&str>,
+        account_id: Option<&str>,
+        response: reqwest::Response,
+        guard: InflightGuard,
+    ) -> Response {
+        let status = response.status();
+        if !status.is_client_error() && !status.is_server_error() {
+            self.activity
+                .answered(project, account_id, status.as_u16(), None);
+            return stream(response, guard);
+        }
+        let headers = response.headers().clone();
+        let body = response.bytes().await.unwrap_or_default();
+        self.activity
+            .answered(project, account_id, status.as_u16(), error_message(&body));
+        buffered(status, &headers, body)
+    }
+
+    fn unanswered(
+        &self,
+        project: Option<&str>,
+        account_id: Option<&str>,
+        err: reqwest::Error,
+    ) -> Response {
+        log::warn!("[ai-proxy] upstream request failed: {err}");
+        self.activity
+            .unanswered(project, account_id, upstream_failure(&err));
+        error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
+    }
+
+    /// Forward the request with the caller's own credentials.
     async fn passthrough(
         &self,
         method: Method,
         url: &str,
         headers: &HeaderMap,
         body: Bytes,
-        guard: InflightGuard,
-    ) -> Response {
-        match self
-            .http
+    ) -> reqwest::Result<reqwest::Response> {
+        self.http
             .request(method, url)
             .headers(forward_headers(headers))
             .body(body)
             .send()
             .await
-        {
-            Ok(response) => stream(response, guard),
-            Err(err) => {
-                log::warn!("[ai-proxy] passthrough request failed: {err}");
-                error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
-            }
-        }
     }
 }
 
@@ -205,15 +257,19 @@ fn stream(response: reqwest::Response, guard: InflightGuard) -> Response {
     relayed
 }
 
+fn buffered(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    *response.headers_mut() = strip_hop_by_hop(headers);
+    response
+}
+
 fn exhausted(
     rate_limited: Option<(StatusCode, HeaderMap, Bytes)>,
     retry_at_ms: Option<i64>,
 ) -> Response {
     if let Some((status, headers, body)) = rate_limited {
-        let mut response = Response::new(Body::from(body));
-        *response.status_mut() = status;
-        *response.headers_mut() = strip_hop_by_hop(&headers);
-        return response;
+        return buffered(status, &headers, body);
     }
     let mut response = error(
         StatusCode::TOO_MANY_REQUESTS,
@@ -226,6 +282,22 @@ fn exhausted(
         response.headers_mut().insert("retry-after", value);
     }
     response
+}
+
+/// `error.message` of an error body in the Anthropic API shape.
+fn error_message(body: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    body.pointer("/error/message")?.as_str().map(str::to_owned)
+}
+
+fn upstream_failure(err: &reqwest::Error) -> String {
+    if err.is_timeout() {
+        "No response from the provider".to_owned()
+    } else if err.is_connect() {
+        "Could not connect to the provider".to_owned()
+    } else {
+        err.to_string()
+    }
 }
 
 /// Error body in the Anthropic API shape, so the CLI shows the message.

@@ -3,8 +3,8 @@
 use crate::now_ms;
 use crate::oauth::{self, Pkce, RefreshError, Tokens, Upstream};
 use okena_core::ai_proxy::{
-    AiAccount, AiAccountRule, AiPendingLogin, AiProxyStatus, AiRouting, AiRoutingPolicy, AiUsage,
-    is_routable_project_id, write_private,
+    AiAccount, AiAccountRule, AiActivity, AiPendingLogin, AiProxyStatus, AiRouting,
+    AiRoutingPolicy, AiUsage, is_routable_project_id, write_private,
 };
 use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
@@ -184,7 +184,7 @@ impl Accounts {
         )
     }
 
-    pub fn status(&self, inflight: usize) -> AiProxyStatus {
+    pub fn status(&self, inflight: usize, activity: AiActivity) -> AiProxyStatus {
         let mut state = self.state.lock();
         let now = now_ms();
         state
@@ -224,6 +224,7 @@ impl Accounts {
                 })
                 .collect(),
             routing: state.routing.clone(),
+            activity,
         }
     }
 

@@ -250,6 +250,68 @@ pub struct AiProxyStatus {
     pub logins: Vec<AiPendingLogin>,
     #[serde(default)]
     pub routing: AiRouting,
+    #[serde(default)]
+    pub activity: AiActivity,
+}
+
+/// What the proxy did with `/v1/messages` requests in the last hour. Kept in
+/// memory only, so it starts empty when the proxy restarts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiActivity {
+    /// When the proxy started; later than an hour ago right after a restart.
+    pub since_ms: i64,
+    /// One entry per account (or the own login) that answered or was rate
+    /// limited in the last hour.
+    pub routes: Vec<AiRouteActivity>,
+    /// Failovers and failures, newest first.
+    pub events: Vec<AiActivityEvent>,
+}
+
+/// Number of entries in [`AiRouteActivity::per_minute`].
+pub const AI_ACTIVITY_MINUTES: usize = 60;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiRouteActivity {
+    /// The pool account; `None` is the terminal's own Claude login.
+    pub account_id: Option<String>,
+    /// Requests answered in each of the last 60 minutes, oldest first; the last
+    /// entry covers the last 60 seconds.
+    pub per_minute: Vec<u32>,
+    /// Answers in the last hour that were an error, or no answer at all.
+    pub errors: u32,
+    /// 429 answers in the last hour.
+    pub rate_limited: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiActivityEvent {
+    /// When it last happened.
+    pub at_ms: i64,
+    /// Local daemon project of the terminal that sent the request.
+    pub project_id: Option<String>,
+    pub kind: AiActivityKind,
+    /// How often it happened; a repeat moves the event to the top of the list.
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiActivityKind {
+    /// The account answered 429; the request moved to the next permitted account.
+    RateLimited { account_id: String },
+    /// The account's access token was rejected; the proxy refreshes it once.
+    Unauthorized { account_id: String },
+    /// Every permitted account is rate limited; the request got a 429.
+    AllRateLimited,
+    /// The policy permits no enabled, logged-in account; the request got a 400.
+    NoPermittedAccount,
+    /// An error answer, or (`status: None`) no answer from the provider.
+    /// `account_id: None` is the terminal's own Claude login.
+    Failed {
+        account_id: Option<String>,
+        status: Option<u16>,
+        message: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
