@@ -301,27 +301,11 @@ impl ResolvedBackend {
                 Some(("sh".to_string(), vec!["-c".to_string(), tmux_cmd]))
             }
             Self::Screen => {
-                // screen -D -R <name>
-                // -D -R: reattach if exists, create if not (and detach other attached sessions)
                 // Note: screen doesn't have a direct way to set cwd, we'll handle that separately
-                let mut args = vec!["-D".to_string(), "-R".to_string(), session_name.to_string()];
-                if let Some(command) = command {
-                    match command {
-                        SessionCommand::ShellScript(cmd) => {
-                            args.push(user_shell());
-                            args.push("-ic".to_string());
-                            args.push(cmd.to_string());
-                        }
-                        SessionCommand::Program {
-                            program,
-                            args: command_args,
-                        } => {
-                            args.push(program.to_string());
-                            args.extend(command_args.iter().cloned());
-                        }
-                    }
-                }
-                Some(("screen".to_string(), args))
+                let rc_dir = shell_escape(&okena_runtime_dir().to_string_lossy());
+                let script =
+                    screen_launch_script(&rc_dir, &screen_session_args(session_name, command));
+                Some(("sh".to_string(), vec!["-c".to_string(), script]))
             }
             Self::Dtach => {
                 // dtach -A <socket> -E -r winch <shell>
@@ -1581,13 +1565,10 @@ impl ResolvedBackend {
                     self.build_command_with_custom(session_name, wsl_cwd, command, environment)?;
                 inner_args.last()?.to_string()
             }
-            Self::Screen => {
-                let (_program, inner_args) =
-                    self.build_command_with_custom(session_name, wsl_cwd, command, &[])?;
-                let mut parts = vec!["screen".to_string()];
-                parts.extend(inner_args.iter().map(|a| shell_escape(a)));
-                parts.join(" ")
-            }
+            Self::Screen => screen_launch_script(
+                WSL_SCREEN_RC_DIR,
+                &screen_session_args(session_name, command),
+            ),
             Self::Dtach => {
                 // Build dtach command with WSL-native socket path and $SHELL
                 // (can't delegate to build_command — it uses Windows temp dir and host $SHELL)
@@ -1709,6 +1690,74 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// File name of the screenrc Okena generates in its runtime directory.
+const SCREEN_RC_FILE_NAME: &str = "screenrc";
+
+/// What Okena adds to screen's configuration. Without it screen switches the
+/// outer terminal to the alternate screen, which keeps no history, so Okena had
+/// no scrollback for the mouse wheel to scroll (issue #212). With `ti@:te@`
+/// screen draws on the primary screen and scrolled-off lines reach Okena's history.
+const SCREEN_RC_OKENA_SETTINGS: &str = "termcapinfo * ti@:te@";
+
+/// WSL runtime directory for the generated screenrc, as a shell word expanded
+/// inside the distro. Unlike the shared `/tmp` dtach dir, this stays per-user,
+/// because a planted screenrc could run commands.
+#[cfg(windows)]
+const WSL_SCREEN_RC_DIR: &str = "\"${XDG_RUNTIME_DIR:-$HOME/.cache}/okena\"";
+
+/// Arguments that attach to `session_name`, or create it running `command`.
+/// `-D -R` reattaches if the session exists (detaching other displays) and
+/// creates it otherwise.
+fn screen_session_args(session_name: &str, command: Option<SessionCommand<'_>>) -> Vec<String> {
+    let mut args = vec!["-D".to_string(), "-R".to_string(), session_name.to_string()];
+    match command {
+        Some(SessionCommand::ShellScript(cmd)) => {
+            args.push(user_shell());
+            args.push("-ic".to_string());
+            args.push(cmd.to_string());
+        }
+        Some(SessionCommand::Program {
+            program,
+            args: command_args,
+        }) => {
+            args.push(program.to_string());
+            args.extend(command_args.iter().cloned());
+        }
+        None => {}
+    }
+    args
+}
+
+/// `sh` script that writes Okena's screenrc into `rc_dir` (a shell word) and
+/// execs `screen -c <rc> <screen_args>`.
+///
+/// `-c` replaces screen's user-rc lookup (`$SCREENRC`, else `~/.screenrc`), so
+/// the generated file sources that same file when it is readable, and Okena's
+/// settings come last to win. The system rc (`$SYSTEMSCREENRC` or
+/// `/etc/screenrc`) is read with or without `-c`. The file is rewritten through
+/// a rename on every launch, so concurrent launches never read a partial file.
+/// If it cannot be written, screen starts without it rather than not at all.
+fn screen_launch_script(rc_dir: &str, screen_args: &[String]) -> String {
+    let screen_args = screen_args
+        .iter()
+        .map(|arg| shell_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let okena_settings = shell_escape(SCREEN_RC_OKENA_SETTINGS);
+    // The `source` lines are written single-quoted on purpose: screen expands
+    // `$SCREENRC` / `$HOME` itself, so no path needs escaping for screen's parser.
+    format!(
+        "dir={rc_dir}; rc=\"$dir/{SCREEN_RC_FILE_NAME}\"; tmp=\"$rc.$$\"; \
+         if mkdir -p \"$dir\" && {{ \
+         if [ -n \"${{SCREENRC-}}\" ]; then \
+         if [ -r \"$SCREENRC\" ]; then echo 'source \"$SCREENRC\"'; fi; \
+         elif [ -r \"$HOME/.screenrc\" ]; then echo 'source \"$HOME/.screenrc\"'; fi; \
+         echo {okena_settings}; }} > \"$tmp\" && mv -f \"$tmp\" \"$rc\"; \
+         then exec screen -c \"$rc\" {screen_args}; fi; \
+         rm -f \"$tmp\"; exec screen {screen_args}"
+    )
+}
+
 /// Get the socket directory for dtach sessions
 #[allow(dead_code)]
 fn profile_scoped_dtach_socket_dir(
@@ -1741,9 +1790,8 @@ fn active_profile_id() -> Option<String> {
 }
 
 /// Profile-scoped runtime directory for Okena's per-pane files (dtach sockets,
-/// tty pointers). One directory per profile so two profiles never see each
+/// tty pointers, the generated screenrc). One directory per profile so two profiles never see each
 /// other's panes.
-#[cfg(unix)]
 pub(crate) fn okena_runtime_dir() -> std::path::PathBuf {
     get_dtach_socket_dir()
 }
@@ -2749,14 +2797,181 @@ holders() {{
         let result = backend.build_command("test-session", "/home/user", Some("npm run dev"), &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
-        assert_eq!(program, "screen");
-        assert_eq!(args[0], "-D");
-        assert_eq!(args[1], "-R");
-        assert_eq!(args[2], "test-session");
-        // Inner command uses the user's shell with -ic
-        assert_eq!(args[3], user_shell());
-        assert_eq!(args[4], "-ic");
-        assert_eq!(args[5], "npm run dev");
+        assert_eq!(program, "sh");
+        assert_eq!(args[0], "-c");
+        let session_args = format!(
+            "'-D' '-R' 'test-session' {} '-ic' 'npm run dev'",
+            shell_escape(&user_shell())
+        );
+        assert!(
+            args[1].contains(&format!("exec screen -c \"$rc\" {session_args}")),
+            "script: {}",
+            args[1]
+        );
+        let rc_dir = shell_escape(&okena_runtime_dir().to_string_lossy());
+        assert!(
+            args[1].starts_with(&format!("dir={rc_dir}; ")),
+            "script: {}",
+            args[1]
+        );
+    }
+
+    #[test]
+    fn screen_session_args_preserve_a_custom_argv() {
+        let command_args = vec!["-lc".to_string(), "echo 'hi there'".to_string()];
+        assert_eq!(
+            screen_session_args(
+                "tm-test",
+                Some(SessionCommand::Program {
+                    program: "/bin/bash",
+                    args: &command_args,
+                }),
+            ),
+            ["-D", "-R", "tm-test", "/bin/bash", "-lc", "echo 'hi there'"]
+        );
+        assert_eq!(
+            screen_session_args("tm-test", None),
+            ["-D", "-R", "tm-test"]
+        );
+    }
+
+    /// Runs [`screen_launch_script`] against a stub `screen` that records its
+    /// argv and the rc file it was given. Returns `(argv, rc contents)`.
+    #[cfg(unix)]
+    fn run_screen_launch_script(
+        home_screenrc: Option<&str>,
+        screenrc_env: Option<&str>,
+        rc_dir_is_writable: bool,
+    ) -> (Vec<String>, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "okena-screenrc-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        if let Some(contents) = home_screenrc {
+            std::fs::write(home.join(".screenrc"), contents).unwrap();
+        }
+        let stub = bin.join("screen");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$STUB_OUT/argv\"\n\
+             if [ \"$1\" = -c ]; then cat \"$2\" > \"$STUB_OUT/rc\"; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let rc_dir = root.join("runtime dir");
+        if !rc_dir_is_writable {
+            // A regular file where the directory should be makes `mkdir -p` fail.
+            std::fs::write(&rc_dir, b"").unwrap();
+        }
+        let script = screen_launch_script(
+            &shell_escape(&rc_dir.to_string_lossy()),
+            &screen_session_args("tm-test", None),
+        );
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("STUB_OUT", &root)
+            .env_remove("SCREENRC");
+        if let Some(path) = screenrc_env {
+            command.env("SCREENRC", path);
+        }
+        let status = command.status().unwrap();
+        assert!(status.success(), "script failed: {script}");
+
+        let argv = std::fs::read_to_string(root.join("argv"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let rc = std::fs::read_to_string(root.join("rc")).unwrap_or_default();
+        if rc_dir_is_writable {
+            let leftovers: Vec<_> = std::fs::read_dir(&rc_dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert_eq!(
+                leftovers,
+                [SCREEN_RC_FILE_NAME],
+                "temp rc must be renamed away"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        (argv, rc)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screen_launches_with_okena_rc_that_keeps_the_primary_screen() {
+        let (argv, rc) = run_screen_launch_script(None, None, true);
+        assert_eq!(argv[0], "-c");
+        assert!(argv[1].ends_with(&format!("/runtime dir/{SCREEN_RC_FILE_NAME}")));
+        assert_eq!(argv[2..], ["-D", "-R", "tm-test"]);
+        assert_eq!(rc, "termcapinfo * ti@:te@\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screen_rc_sources_the_users_screenrc_before_okena_settings() {
+        let (_, rc) = run_screen_launch_script(Some("defscrollback 5000\n"), None, true);
+        assert_eq!(rc, "source \"$HOME/.screenrc\"\ntermcapinfo * ti@:te@\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screen_rc_follows_screenrc_env_like_screen_does() {
+        // `$SCREENRC` replaces `~/.screenrc` in screen's own lookup, even when
+        // it points at nothing, so the generated rc must not fall back either.
+        let (_, rc) =
+            run_screen_launch_script(Some("defscrollback 5000\n"), Some("/nonexistent/rc"), true);
+        assert_eq!(rc, "termcapinfo * ti@:te@\n");
+
+        let user_rc = std::env::temp_dir().join(format!(
+            "okena-screenrc-env-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&user_rc, "defscrollback 5000\n").unwrap();
+        let (_, rc) = run_screen_launch_script(None, Some(&user_rc.to_string_lossy()), true);
+        let _ = std::fs::remove_file(&user_rc);
+        assert_eq!(rc, "source \"$SCREENRC\"\ntermcapinfo * ti@:te@\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn screen_still_starts_when_its_rc_cannot_be_written() {
+        let (argv, rc) = run_screen_launch_script(None, None, false);
+        assert_eq!(argv, ["-D", "-R", "tm-test"]);
+        assert_eq!(rc, "");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_screen_uses_okena_rc() {
+        let (program, args) = ResolvedBackend::Screen
+            .build_wsl_session_command(Some("Ubuntu"), "tm-12345678", "/home/user", None, &[])
+            .unwrap();
+        assert_eq!(program, "wsl.exe");
+        let inner_cmd = args.last().unwrap();
+        assert!(
+            inner_cmd.starts_with(&format!("dir={WSL_SCREEN_RC_DIR}; ")),
+            "inner cmd: {inner_cmd}"
+        );
+        assert!(
+            inner_cmd.contains("exec screen -c \"$rc\" '-D' '-R' 'tm-12345678'"),
+            "inner cmd: {inner_cmd}"
+        );
     }
 
     #[test]
