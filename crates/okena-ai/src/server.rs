@@ -8,7 +8,7 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fs2::FileExt;
-use okena_core::ai_proxy::{AiProxyCommand, ProxyEndpoint, proxy_dir};
+use okena_core::ai_proxy::{AiProxyCommand, ProxyEndpoint, ensure_management_key, proxy_dir};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub struct Health {
 
 struct Service {
     token: String,
+    management_key: String,
     relay: Relay,
     shutdown: Notify,
 }
@@ -103,6 +104,7 @@ pub async fn serve(
         }
         Err(error) => return Err(error.into()),
     };
+    let management_key = ensure_management_key(&profile_root)?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .build()?;
@@ -113,6 +115,7 @@ pub async fn serve(
     )?);
     let service = Arc::new(Service {
         token: endpoint.token,
+        management_key,
         relay: Relay {
             accounts: accounts.clone(),
             http,
@@ -155,13 +158,16 @@ async fn dispatch(State(service): State<Arc<Service>>, request: Request) -> Resp
         .path_and_query()
         .map(|target| target.as_str().to_owned())
         .unwrap_or_default();
+    if let Some(management) = target.strip_prefix("/_okena/") {
+        if !has_management_key(request.headers(), &service.management_key) {
+            return error(StatusCode::UNAUTHORIZED, "Management key required");
+        }
+        return manage(&service, management, request.into_body()).await;
+    }
     let Some(rest) = strip_token(&target, &service.token) else {
         return error(StatusCode::NOT_FOUND, "Unknown endpoint");
     };
     let rest = rest.to_owned();
-    if let Some(management) = rest.strip_prefix("/_okena/") {
-        return manage(&service, management, request.into_body()).await;
-    }
     let (parts, body) = request.into_parts();
     service
         .relay
@@ -169,18 +175,30 @@ async fn dispatch(State(service): State<Arc<Service>>, request: Request) -> Resp
         .await
 }
 
-/// `/<token>/rest` → `/rest`, comparing the token in constant time.
+/// `/<token>/rest` → `/rest`.
 fn strip_token<'a>(target: &'a str, token: &str) -> Option<&'a str> {
     let after_slash = target.strip_prefix('/')?;
     let end = after_slash.find(['/', '?']).unwrap_or(after_slash.len());
     let (candidate, rest) = after_slash.split_at(end);
-    let matches = candidate.len() == token.len()
+    same_secret(candidate, token).then_some(rest)
+}
+
+fn has_management_key(headers: &axum::http::HeaderMap, key: &str) -> bool {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|candidate| same_secret(candidate, key))
+}
+
+/// Constant-time comparison, so response timing does not leak the secret.
+fn same_secret(candidate: &str, secret: &str) -> bool {
+    candidate.len() == secret.len()
         && candidate
             .bytes()
-            .zip(token.bytes())
+            .zip(secret.bytes())
             .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0;
-    matches.then_some(rest)
+            == 0
 }
 
 async fn manage(service: &Service, path: &str, body: Body) -> Response {
@@ -311,9 +329,12 @@ mod tests {
 
     struct Harness {
         _dir: tempfile::TempDir,
+        /// What a shell gets as `ANTHROPIC_BASE_URL`.
         base_url: String,
+        origin: String,
         fake: Arc<Fake>,
         http: reqwest::Client,
+        client: crate::client::ProxyClient,
     }
 
     async fn harness(accounts: Vec<serde_json::Value>) -> Harness {
@@ -331,8 +352,9 @@ mod tests {
             api,
         };
         let endpoint = okena_core::ai_proxy::ensure_endpoint(&root).unwrap();
+        let management_key = ensure_management_key(&root).unwrap();
         tokio::spawn(serve(root, upstream, std::future::pending()));
-        let client = crate::client::ProxyClient::new(endpoint.clone());
+        let client = crate::client::ProxyClient::new(endpoint.clone(), management_key);
         for _ in 0..100 {
             if client.health().await.is_ok() {
                 break;
@@ -342,8 +364,10 @@ mod tests {
         Harness {
             _dir: dir,
             base_url: endpoint.base_url(),
+            origin: format!("http://127.0.0.1:{}", endpoint.port),
             fake,
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            client,
         }
     }
 
@@ -430,6 +454,39 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 404);
         assert!(h.fake.seen.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn management_needs_the_management_key() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        let remove = AiProxyCommand::RemoveAccount {
+            account_id: "a".into(),
+        };
+        let response = h
+            .http
+            .post(format!("{}/_okena/command", h.base_url))
+            .json(&remove)
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.status().is_success());
+        let shell_token = h.base_url.rsplit_once('/').unwrap().1;
+        for path in ["health", "command", "shutdown"] {
+            let url = format!("{}/_okena/{path}", h.origin);
+            let anonymous = h.http.post(&url).json(&remove).send().await.unwrap();
+            assert_eq!(anonymous.status(), 401, "{path}");
+            let with_shell_token = h
+                .http
+                .post(&url)
+                .bearer_auth(shell_token)
+                .json(&remove)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(with_shell_token.status(), 401, "{path}");
+        }
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        assert_eq!(status.accounts.len(), 1);
     }
 
     #[test]

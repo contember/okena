@@ -51,12 +51,18 @@ headers and from polling the usage endpoint every five minutes.
   flight, then starts its own.
 - If the persisted port is taken by another program, the proxy moves to a free
   port and rewrites `endpoint.json`; only new terminals get the new URL.
+- The terminal URL only sends requests through the proxy. Management
+  (`/_okena/…`: health, commands, shutdown) needs `management.key` as a bearer
+  token, and only the daemon sends it. Any process of the same OS user can still
+  read the key file; it keeps management out of reach of anything that only
+  has the URL from a shell's environment.
 
 ## Files (`<profile>/ai-proxy/`)
 
 | File | Content |
 |---|---|
 | `endpoint.json` | port + path token (0600) |
+| `management.key` | bearer token for the management routes (0600) |
 | `accounts.json` | accounts with OAuth access/refresh tokens (0600) |
 | `proxy.lock` | instance lock |
 | `proxy.log` | proxy log (`RUST_LOG=okena_ai=debug` logs every routed request) |
