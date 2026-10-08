@@ -81,6 +81,24 @@ covers accounts added later.
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
 headers and from polling the usage endpoint every five minutes.
 
+## Activity
+
+**AI Proxy Activity** (command palette; bind `ShowAiProxyActivity` in
+`keybindings.json` for a shortcut) shows what the proxy did with `/v1/messages`
+requests in the last hour. It updates every 5 seconds while open.
+
+- **Accounts**: per pool account, its state, requests answered in the last
+  minute and the last hour, error answers, 429s, and a per-minute graph. A row
+  for the terminal's own login appears when requests went out with it.
+- **Recent Events**: the last 50 failovers (429), rejected tokens, requests no
+  account could take (all rate limited, no permitted account) and error
+  answers with the provider's message, each with the terminal's project.
+  A repeat of a listed event moves it to the top and raises its count.
+
+The proxy keeps this in memory only: it starts empty after a proxy restart.
+With *Route Claude Through the AI Proxy* off, the overlay does not start the
+proxy and shows nothing.
+
 ## Lifecycle
 
 - The daemon starts the proxy when the setting is on (at startup and when the
