@@ -686,6 +686,25 @@ mod jump_gpui_tests {
     }
 
     #[gpui::test]
+    fn jumping_from_a_worktree_child_zoom_to_its_parent_follows_it(cx: &mut gpui::TestAppContext) {
+        // A zoomed worktree child shows only itself, so its parent is off screen.
+        let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("w1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p1", "t1", cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p1"));
+        assert!(!fm.is_focus_individual());
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("p1")
+        );
+    }
+
+    #[gpui::test]
     fn jumping_from_a_zoom_to_another_project_follows_it(cx: &mut gpui::TestAppContext) {
         let workspace = cx.new(|_cx| Workspace::new(workspace_with_worktree()));
         let mut fm = FocusManager::new();
