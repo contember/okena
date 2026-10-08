@@ -5,6 +5,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okena_core::ai_proxy::AiUsage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -12,11 +13,14 @@ const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
-/// Upstream hosts. Tests point both at a loopback fake.
+/// Upstream hosts and how long they may stay silent. Tests point both hosts at
+/// a loopback fake.
 #[derive(Clone, Debug)]
 pub struct Upstream {
     pub api: String,
     pub token_url: String,
+    /// Longest wait for response headers or for the next body chunk.
+    pub silence_timeout: Duration,
 }
 
 impl Default for Upstream {
@@ -24,6 +28,9 @@ impl Default for Upstream {
         Self {
             api: "https://api.anthropic.com".into(),
             token_url: "https://platform.claude.com/v1/oauth/token".into(),
+            // Longer than the CLI's request timeout (10 min) and stream idle
+            // watchdog (3 min): only an upstream the CLI already gave up on is cut.
+            silence_timeout: Duration::from_secs(15 * 60),
         }
     }
 }
