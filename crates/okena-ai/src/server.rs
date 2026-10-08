@@ -107,6 +107,9 @@ pub async fn serve(
     let management_key = ensure_management_key(&profile_root)?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        // Bounds header and per-chunk waits, so a stalled upstream cannot hold an
+        // in-flight request (and with it a version replacement) forever.
+        .read_timeout(upstream.silence_timeout)
         .build()?;
     let accounts = Arc::new(Accounts::open(
         proxy_dir(&profile_root).join("accounts.json"),
@@ -256,6 +259,7 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+    use futures::StreamExt;
     use parking_lot::Mutex;
     use std::collections::HashMap;
 
@@ -307,6 +311,32 @@ mod tests {
         }
         let app = axum::Router::new()
             .route("/v1/messages", axum::routing::post(messages))
+            .route(
+                "/v1/stall-headers",
+                axum::routing::post(|| async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    StatusCode::OK
+                }),
+            )
+            .route(
+                "/v1/stall-body",
+                axum::routing::post(|| async {
+                    let chunks =
+                        futures::stream::once(async { Ok::<_, std::convert::Infallible>("first") })
+                            .chain(futures::stream::pending());
+                    Body::from_stream(chunks)
+                }),
+            )
+            .route(
+                "/v1/slow-body",
+                axum::routing::post(|| async {
+                    let chunks = futures::stream::iter(0..5).then(|index| async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        Ok::<_, std::convert::Infallible>(format!("chunk{index};"))
+                    });
+                    Body::from_stream(chunks)
+                }),
+            )
             .route("/v1/oauth/token", axum::routing::post(token))
             .route(
                 "/api/oauth/usage",
@@ -338,6 +368,13 @@ mod tests {
     }
 
     async fn harness(accounts: Vec<serde_json::Value>) -> Harness {
+        harness_with_silence(accounts, Upstream::default().silence_timeout).await
+    }
+
+    async fn harness_with_silence(
+        accounts: Vec<serde_json::Value>,
+        silence_timeout: Duration,
+    ) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         okena_core::ai_proxy::write_private(
@@ -350,6 +387,7 @@ mod tests {
         let upstream = Upstream {
             token_url: format!("{api}/v1/oauth/token"),
             api,
+            silence_timeout,
         };
         let endpoint = okena_core::ai_proxy::ensure_endpoint(&root).unwrap();
         let management_key = ensure_management_key(&root).unwrap();
@@ -383,6 +421,24 @@ mod tests {
                 .await
                 .unwrap();
             (response.status().as_u16(), response.text().await.unwrap())
+        }
+
+        async fn post(&self, path: &str) -> reqwest::Response {
+            self.http
+                .post(format!("{}{path}", self.base_url))
+                .send()
+                .await
+                .unwrap()
+        }
+
+        async fn settles_idle(&self) -> bool {
+            for _ in 0..100 {
+                if self.client.health().await.unwrap().inflight == 0 {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            false
         }
     }
 
@@ -487,6 +543,31 @@ mod tests {
         }
         let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
         assert_eq!(status.accounts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn silent_upstream_is_cut_and_frees_the_request() {
+        let h = harness_with_silence(vec![], Duration::from_millis(300)).await;
+        assert_eq!(h.post("/v1/stall-headers").await.status(), 502);
+
+        let response = h.post("/v1/stall-body").await;
+        assert_eq!(response.status(), 200);
+        let body = tokio::time::timeout(Duration::from_secs(10), response.bytes())
+            .await
+            .expect("the proxy must cut a silent stream");
+        assert!(body.is_err());
+        assert!(h.settles_idle().await);
+    }
+
+    #[tokio::test]
+    async fn slow_but_steady_stream_is_not_cut() {
+        let h = harness_with_silence(vec![], Duration::from_millis(500)).await;
+        let response = h.post("/v1/slow-body").await;
+        let body = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, "chunk0;chunk1;chunk2;chunk3;chunk4;");
     }
 
     #[test]
