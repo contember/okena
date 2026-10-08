@@ -1,6 +1,7 @@
 //! The `okena --ai-proxy <profile-root>` process.
 
 use crate::accounts::Accounts;
+use crate::activity::Activity;
 use crate::oauth::Upstream;
 use crate::proxy::{Relay, error};
 use axum::body::Body;
@@ -127,6 +128,7 @@ pub async fn serve(
             http,
             api: upstream.api,
             inflight: Arc::new(AtomicUsize::new(0)),
+            activity: Activity::new(),
         },
         shutdown: Notify::new(),
     });
@@ -269,7 +271,8 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
                 }
             };
             match outcome {
-                Ok(()) => axum::Json(accounts.status(inflight)).into_response(),
+                Ok(()) => axum::Json(accounts.status(inflight, service.relay.activity.snapshot()))
+                    .into_response(),
                 Err(err) => error(StatusCode::BAD_REQUEST, &err.to_string()),
             }
         }
@@ -282,6 +285,7 @@ mod tests {
     use super::*;
     use axum::http::HeaderMap;
     use futures::StreamExt;
+    use okena_core::ai_proxy::AiActivityKind;
     use parking_lot::Mutex;
     use std::collections::HashMap;
 
@@ -308,11 +312,13 @@ mod tests {
                 .get_mut(&token)
                 .and_then(|queue| (!queue.is_empty()).then(|| queue.remove(0)))
                 .unwrap_or(200);
-            let mut response = (
-                StatusCode::from_u16(status).unwrap(),
-                format!("served by {token}"),
-            )
-                .into_response();
+            let body = if status >= 500 {
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+                    .to_owned()
+            } else {
+                format!("served by {token}")
+            };
+            let mut response = (StatusCode::from_u16(status).unwrap(), body).into_response();
             response.headers_mut().insert(
                 "anthropic-ratelimit-unified-5h-utilization",
                 "0.25".parse().unwrap(),
@@ -730,6 +736,71 @@ mod tests {
         assert!(policy.accounts.is_empty(), "{policy:?}");
         // "Only `a`" with `a` gone permits nothing, rather than every other account.
         assert_eq!(h.message_in(Some("x"), "conv").await.0, 400);
+    }
+
+    #[tokio::test]
+    async fn activity_shows_failovers_errors_and_the_own_login() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        h.fake.replies.lock().insert("token-a".into(), vec![429]);
+        h.fake.replies.lock().insert("token-b".into(), vec![529]);
+        let (status, body) = h.message_in(Some("x"), "conv").await;
+        assert_eq!(status, 529);
+        assert!(body.contains("Overloaded"), "{body}");
+
+        let activity = h
+            .client
+            .command(&AiProxyCommand::Status)
+            .await
+            .unwrap()
+            .activity;
+        let route = |id: &str| {
+            activity
+                .routes
+                .iter()
+                .find(|route| route.account_id.as_deref() == Some(id))
+                .unwrap()
+        };
+        assert_eq!(route("a").rate_limited, 1);
+        assert_eq!(route("a").per_minute.iter().sum::<u32>(), 0);
+        assert_eq!(route("b").errors, 1);
+        assert_eq!(route("b").per_minute.last(), Some(&1));
+        let kinds: Vec<_> = activity.events.iter().map(|event| &event.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                &AiActivityKind::Failed {
+                    account_id: Some("b".into()),
+                    status: Some(529),
+                    message: Some("Overloaded".into()),
+                },
+                &AiActivityKind::RateLimited {
+                    account_id: "a".into()
+                },
+            ]
+        );
+        assert!(
+            activity
+                .events
+                .iter()
+                .all(|event| event.project_id.as_deref() == Some("x"))
+        );
+
+        let own = harness(vec![]).await;
+        own.message("conv").await;
+        let activity = own
+            .client
+            .command(&AiProxyCommand::Status)
+            .await
+            .unwrap()
+            .activity;
+        assert_eq!(activity.routes.len(), 1);
+        assert_eq!(activity.routes[0].account_id, None);
+        assert_eq!(activity.routes[0].per_minute.last(), Some(&1));
+        assert!(activity.events.is_empty());
     }
 
     #[test]

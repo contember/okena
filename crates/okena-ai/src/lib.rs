@@ -6,6 +6,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod accounts;
+mod activity;
 pub mod client;
 mod oauth;
 mod proxy;
