@@ -4,10 +4,12 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
 use okena_usage::{
-    SegmentUnit, UsageRow, effective_time_pct, read_working_days, render_simple_bar,
+    SegmentUnit, UsageRow, WorkingDays, effective_time_pct, read_working_days, render_simple_bar,
     render_usage_row, usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
     usage_popover_header, usage_trigger_items,
 };
+use okena_workspace::remote_sync::HostAiAccounts;
+use okena_workspace::state::{GlobalWorkspace, Workspace};
 use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
@@ -366,8 +368,8 @@ fn record_usage(usage: &mut UsageData, directory: &Path) {
 }
 
 /// Period durations for each tier
-const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
-const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
+pub(crate) const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
+pub(crate) const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
 
 fn parse_tier(resp: &serde_json::Value, key: &str, period_secs: f64) -> Option<TierUsage> {
     let tier = resp.get(key)?.as_object()?;
@@ -519,7 +521,10 @@ fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
     compute_time_elapsed_pct_from_epoch(parse_iso8601_to_epoch(resets_at)?, period_secs)
 }
 
-fn compute_time_elapsed_pct_from_epoch(reset_epoch: f64, period_secs: f64) -> Option<f64> {
+pub(crate) fn compute_time_elapsed_pct_from_epoch(
+    reset_epoch: f64,
+    period_secs: f64,
+) -> Option<f64> {
     if period_secs <= 0.0 {
         return None;
     }
@@ -755,6 +760,11 @@ impl ClaudeUsageData {
 /// poller and hold only per-window UI state.
 pub struct ClaudeUsage {
     data: Entity<ClaudeUsageData>,
+    /// AI proxy accounts of the connected hosts; when any host has some, they
+    /// are shown instead of the `claude` login's usage.
+    pool: Vec<HostAiAccounts>,
+    workspace: Option<Entity<Workspace>>,
+    _workspace_observation: Option<Subscription>,
     chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
@@ -768,12 +778,46 @@ impl ClaudeUsage {
         cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         // Re-render this window's widget whenever the shared poller updates.
         cx.observe(&data, |_, _, cx| cx.notify()).detach();
-        Self {
+        // Extensions may activate before the app installs the workspace.
+        cx.observe_global::<GlobalWorkspace>(|this, cx| this.bind_workspace(cx))
+            .detach();
+        let mut this = Self {
             data,
+            pool: Vec::new(),
+            workspace: None,
+            _workspace_observation: None,
             chart_state,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+        };
+        this.bind_workspace(cx);
+        this
+    }
+
+    fn bind_workspace(&mut self, cx: &mut Context<Self>) {
+        let workspace = cx
+            .try_global::<GlobalWorkspace>()
+            .map(|global| global.0.clone());
+        if self.workspace == workspace {
+            return;
+        }
+        self._workspace_observation = workspace.as_ref().map(|workspace| {
+            cx.observe(workspace, |this, workspace, cx| {
+                this.update_pool(&workspace, cx);
+            })
+        });
+        if let Some(workspace) = &workspace {
+            self.update_pool(workspace, cx);
+        }
+        self.workspace = workspace;
+    }
+
+    fn update_pool(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let pool = workspace.read(cx).remote_sync.ai_accounts();
+        if self.pool != pool {
+            self.pool = pool.to_vec();
+            cx.notify();
         }
     }
 
@@ -830,15 +874,39 @@ impl ClaudeUsage {
     }
 
     fn render_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let shared = self.data.read(cx);
-        let data = shared.data.lock();
-        let data = match data.as_ref() {
-            Some(d) if self.popover_visible => d.clone(),
-            _ => return div().size_0().into_any_element(),
-        };
-
+        if !self.popover_visible {
+            return div().size_0().into_any_element();
+        }
         let working = read_working_days(cx);
-        let plan = data.plan.as_deref().map(capitalize_first);
+        let (title, plan, body) = if self.pool.is_empty() {
+            let shared = self.data.read(cx);
+            let Some(data) = shared.data.lock().clone() else {
+                return div().size_0().into_any_element();
+            };
+            (
+                "CLAUDE USAGE",
+                data.plan.as_deref().map(capitalize_first),
+                self.render_usage_body(&data, working, t, cx)
+                    .into_any_element(),
+            )
+        } else {
+            (
+                "CLAUDE ACCOUNTS",
+                None,
+                div()
+                    .id("claude-pool-scroll")
+                    .max_h(px(520.0))
+                    .overflow_y_scroll()
+                    .child(crate::pool_usage::render_body(
+                        &self.pool,
+                        working,
+                        &self.chart_state,
+                        t,
+                        cx,
+                    ))
+                    .into_any_element(),
+            )
+        };
         let bounds = self.trigger_bounds;
         let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
 
@@ -862,88 +930,93 @@ impl ClaudeUsage {
                             cx.stop_propagation();
                         })
                         .child(usage_popover_header(
-                            "CLAUDE USAGE",
+                            title,
                             plan.as_deref(),
                             "https://claude.ai/settings/usage",
                             "Open usage settings on claude.ai",
                             t,
                             cx,
                         ))
-                        .child(
-                            usage_body_container()
-                                .when_some(data.five_hour.as_ref(), |el, tier| {
-                                    el.child(render_usage_row(
-                                        t,
-                                        cx,
-                                        &tier_row(
-                                            "Session",
-                                            "5h",
-                                            tier,
-                                            "claude-marker-session",
-                                            SegmentUnit::Hour,
-                                        ),
-                                        working,
-                                        &data.history,
-                                        "five_hour",
-                                        &self.chart_state,
-                                    ))
-                                })
-                                .when_some(data.seven_day.as_ref(), |el, tier| {
-                                    el.child(render_usage_row(
-                                        t,
-                                        cx,
-                                        &tier_row(
-                                            "Weekly",
-                                            "7d",
-                                            tier,
-                                            "claude-marker-weekly",
-                                            SegmentUnit::Day,
-                                        ),
-                                        working,
-                                        &data.history,
-                                        "seven_day",
-                                        &self.chart_state,
-                                    ))
-                                })
-                                .children(
-                                    data.weekly_scoped
-                                        .iter()
-                                        .filter(|scoped| should_show_scoped(scoped))
-                                        .map(|scoped| {
-                                            let row = tier_row(
-                                                scoped.label.as_str(),
-                                                "7d",
-                                                &scoped.tier,
-                                                marker_id_for_scoped(&scoped.label),
-                                                SegmentUnit::Day,
-                                            );
-                                            render_usage_row(
-                                                t,
-                                                cx,
-                                                &row,
-                                                working,
-                                                &data.history,
-                                                &format!(
-                                                    "seven_day_{}",
-                                                    scoped.label.to_lowercase()
-                                                ),
-                                                &self.chart_state,
-                                            )
-                                            .into_any_element()
-                                        }),
-                                )
-                                .when_some(data.extra_usage.as_ref(), |el, extra| {
-                                    if !extra.is_enabled {
-                                        return el;
-                                    }
-                                    el.child(usage_divider(t))
-                                        .child(render_extra_usage_row(t, cx, extra))
-                                }),
-                        ),
+                        .child(body),
                 ),
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    fn render_usage_body(
+        &self,
+        data: &UsageData,
+        working: WorkingDays,
+        t: &ThemeColors,
+        cx: &App,
+    ) -> Div {
+        usage_body_container()
+            .when_some(data.five_hour.as_ref(), |el, tier| {
+                el.child(render_usage_row(
+                    t,
+                    cx,
+                    &tier_row(
+                        "Session",
+                        "5h",
+                        tier,
+                        "claude-marker-session",
+                        SegmentUnit::Hour,
+                    ),
+                    working,
+                    &data.history,
+                    "five_hour",
+                    &self.chart_state,
+                ))
+            })
+            .when_some(data.seven_day.as_ref(), |el, tier| {
+                el.child(render_usage_row(
+                    t,
+                    cx,
+                    &tier_row(
+                        "Weekly",
+                        "7d",
+                        tier,
+                        "claude-marker-weekly",
+                        SegmentUnit::Day,
+                    ),
+                    working,
+                    &data.history,
+                    "seven_day",
+                    &self.chart_state,
+                ))
+            })
+            .children(
+                data.weekly_scoped
+                    .iter()
+                    .filter(|scoped| should_show_scoped(scoped))
+                    .map(|scoped| {
+                        let row = tier_row(
+                            scoped.label.as_str(),
+                            "7d",
+                            &scoped.tier,
+                            marker_id_for_scoped(&scoped.label),
+                            SegmentUnit::Day,
+                        );
+                        render_usage_row(
+                            t,
+                            cx,
+                            &row,
+                            working,
+                            &data.history,
+                            &format!("seven_day_{}", scoped.label.to_lowercase()),
+                            &self.chart_state,
+                        )
+                        .into_any_element()
+                    }),
+            )
+            .when_some(data.extra_usage.as_ref(), |el, extra| {
+                if !extra.is_enabled {
+                    return el;
+                }
+                el.child(usage_divider(t))
+                    .child(render_extra_usage_row(t, cx, extra))
+            })
     }
 }
 
@@ -1011,6 +1084,60 @@ impl Render for ClaudeUsage {
         let t = theme(cx);
 
         let working = read_working_days(cx);
+        let trigger = if self.pool.is_empty() {
+            let Some(items) = self.legacy_trigger_items(working, cx) else {
+                return div().size_0().into_any_element();
+            };
+            usage_trigger_items(&t, cx, &items)
+        } else {
+            crate::pool_usage::render_trigger(&self.pool, working, &t, cx)
+        };
+        let entity_handle = cx.entity().clone();
+
+        div()
+            .child(
+                h_flex()
+                    .id("claude-usage-trigger")
+                    .cursor_pointer()
+                    .gap(px(8.0))
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .children(trigger)
+                    .child(
+                        canvas(
+                            move |bounds, _window, app| {
+                                entity_handle.update(app, |this, _cx| {
+                                    this.trigger_bounds = bounds;
+                                });
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                        if *hovered {
+                            this.show_popover(cx);
+                        } else {
+                            this.hide_popover(cx);
+                        }
+                    })),
+            )
+            .child(self.render_popover(&t, cx))
+            .into_any_element()
+    }
+}
+
+impl ClaudeUsage {
+    /// The `claude` login's usage for the status bar, or `None` before the
+    /// first fetch succeeded.
+    fn legacy_trigger_items(
+        &self,
+        working: WorkingDays,
+        cx: &App,
+    ) -> Option<Vec<(SharedString, f64, Option<f64>)>> {
         let data = self.data.read(cx).data.lock();
         let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
         match data.as_ref() {
@@ -1056,46 +1183,10 @@ impl Render for ClaudeUsage {
                 // Wake the fetch loop once (e.g. after toggle on/off or if the
                 // first fetch failed). Only one signal is sent to avoid retry storms.
                 self.data.read(cx).wake_if_no_data();
-                return div().size_0().into_any_element();
+                return None;
             }
         }
-        drop(data);
-
-        let entity_handle = cx.entity().clone();
-
-        div()
-            .child(
-                h_flex()
-                    .id("claude-usage-trigger")
-                    .cursor_pointer()
-                    .gap(px(8.0))
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .children(usage_trigger_items(&t, cx, &items))
-                    .child(
-                        canvas(
-                            move |bounds, _window, app| {
-                                entity_handle.update(app, |this, _cx| {
-                                    this.trigger_bounds = bounds;
-                                });
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                        if *hovered {
-                            this.show_popover(cx);
-                        } else {
-                            this.hide_popover(cx);
-                        }
-                    })),
-            )
-            .child(self.render_popover(&t, cx))
-            .into_any_element()
+        Some(items)
     }
 }
 

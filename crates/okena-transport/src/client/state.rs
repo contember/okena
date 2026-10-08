@@ -177,6 +177,7 @@ mod tests {
             folders: vec![],
             windows: vec![],
             hooks: Vec::new(),
+            ai_accounts: Vec::new(),
         }
     }
 

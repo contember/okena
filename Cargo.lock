@@ -6386,6 +6386,7 @@ dependencies = [
  "okena-transport",
  "okena-ui",
  "okena-usage",
+ "okena-workspace",
  "parking_lot",
  "serde_json",
  "sha2",
