@@ -13,13 +13,37 @@ separate process: [ADR-0004](../decisions/0004-ai-proxy-process.md). Code:
    field, then click **Finish**. Repeat for more accounts.
 3. Open a new terminal and run `claude` as usual.
 
-Turning the proxy on affects **new** terminals only: they get
-`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/<token>`. Running terminals keep
-their environment; turning the proxy off leaves the proxy running for them.
+Turning the proxy on affects **new** terminals only. A project terminal gets
+`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/<token>/p/<project-id>` (a worktree
+terminal names its main project); other terminals get the URL without
+`/p/<project-id>`. Running terminals keep their environment; turning the proxy
+off leaves the proxy running for them.
 
 `claude` itself still needs its normal login (it refuses to start without one).
 That login is used only when the pool has no enabled, logged-in account: then
 the proxy forwards requests with the terminal's own credentials.
+
+## Project policies
+
+A policy says which pool accounts a project's terminals may use. Each account
+is **Prefer**, **Allow** or **Never**, and **New Accounts** (Allow or Never)
+covers accounts added later.
+
+| Need | Policy |
+|---|---|
+| Project X must use account A | A: Allow, others Never, New Accounts: Never |
+| Project Y may use all, B first | B: Prefer, others Allow |
+| Project Z must not use account C | C: Never, others Allow |
+
+- **Settings → AI Proxy → Default Policy** applies to terminals of projects
+  without their own policy, and to terminals without a project.
+- To give a project its own policy, pick the project in the selector at the top
+  of Settings, open **AI Proxy** and choose **Custom**. It starts as a copy of
+  the default policy. **Default** removes it again.
+- **Project Policies** on the User page lists the projects with their own
+  policy; a deleted project's policy can be removed there.
+- The proxy looks the policy up on every request: a change applies to running
+  `claude` sessions with their next request.
 
 ## How requests are routed
 
@@ -27,13 +51,24 @@ the proxy forwards requests with the terminal's own credentials.
   with that account's OAuth token and `metadata.user_id.account_uuid` is
   rewritten to the serving account. Everything else (OAuth, profile, telemetry)
   passes through untouched.
+- Only accounts the terminal's policy does not forbid are used.
 - A conversation (`x-claude-code-session-id`) stays on the account that served
-  it last while that account is usable, so prompt caches keep working.
-  Otherwise the account with the lowest 5-hour utilization is chosen.
+  it last while that account is usable and permitted, so prompt caches keep
+  working. A preferred account does not pull a conversation away from its
+  account; a forbidden one moves it.
+- Otherwise a preferred account goes before an allowed one, and among those the
+  account with the lowest 5-hour utilization is chosen.
 - **429**: the account cools down until the provider's reset time
   (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,
-  and the request moves to the next account. When all accounts are limited, the
-  provider's 429 is returned and `claude` waits and retries itself.
+  and the request moves to the next permitted account. When all permitted
+  accounts are limited, the provider's 429 is returned and `claude` waits and
+  retries itself; a project that must use A waits for A.
+- **No account at all:** with no enabled, logged-in account the proxy forwards
+  requests with the terminal's own Claude login, unless the policy forbids an
+  account (that login may be the forbidden one). Such a project, and any
+  project whose permitted accounts are all disabled or logged out, gets a 400
+  with the reason. (400, not 403: `claude` shows the message, where a 401/403
+  can send the user to `/login`.)
 - **401**: the access token is refreshed once and the request retried; if the
   refresh token is rejected the account is marked *Needs login*.
 - A request is never retried after its response started streaming.
@@ -69,10 +104,17 @@ headers and from polling the usage endpoint every five minutes.
 | `endpoint.json` | port + path token (0600) |
 | `management.key` | bearer token for the management routes (0600) |
 | `accounts.json` | accounts with OAuth access/refresh tokens (0600) |
+| `routing.json` | default and per-project policies, by account id (0600) |
 | `proxy.lock` | instance lock |
 | `proxy.log` | proxy log (`RUST_LOG=okena_ai=debug` logs every routed request) |
 
 ## Limits
+
+- Hook and service terminals carry no project and use the default policy.
+- The project in the URL routes requests; it does not isolate them. A process of
+  the same user can put another project's id into its URL.
+- A corrupt `routing.json` stops the proxy from starting rather than dropping
+  the policies.
 
 - Cooldown is per account, not per model: a weekly Opus limit also pauses Sonnet
   requests on that account until the reported reset.
