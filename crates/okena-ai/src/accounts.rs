@@ -2,12 +2,15 @@
 
 use crate::now_ms;
 use crate::oauth::{self, Pkce, RefreshError, Tokens, Upstream};
-use okena_core::ai_proxy::{AiAccount, AiPendingLogin, AiProxyStatus, AiUsage, write_private};
+use okena_core::ai_proxy::{
+    AiAccount, AiAccountRule, AiPendingLogin, AiProxyStatus, AiRouting, AiRoutingPolicy, AiUsage,
+    is_routable_project_id, write_private,
+};
 use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// How long a conversation keeps preferring the account that served it last.
@@ -74,6 +77,7 @@ struct State {
     logins: Vec<Login>,
     /// Conversation (`x-claude-code-session-id`) → account id, last used.
     affinity: HashMap<String, (String, i64)>,
+    routing: AiRouting,
 }
 
 impl State {
@@ -83,10 +87,29 @@ impl State {
             .find(|account| account.stored.id == id)
             .ok_or_else(|| anyhow::anyhow!("Unknown account"))
     }
+
+    /// Drop rules for accounts that are not in the pool (e.g. removed meanwhile).
+    fn known_accounts_only(&self, mut policy: AiRoutingPolicy) -> AiRoutingPolicy {
+        policy
+            .accounts
+            .retain(|id, _| self.accounts.iter().any(|account| &account.stored.id == id));
+        policy
+    }
+}
+
+/// Read a JSON file the proxy owns; a missing file is the default value.
+fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> anyhow::Result<T> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("{} is corrupt", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub struct Accounts {
     path: PathBuf,
+    routing_path: PathBuf,
     http: reqwest::Client,
     upstream: Upstream,
     state: Mutex<State>,
@@ -103,6 +126,9 @@ pub enum Selection {
     Selected(Selected),
     /// The pool has no enabled, logged-in account: callers use their own credentials.
     NoAccounts,
+    /// The policy forbids an account and no account it permits is enabled and
+    /// logged in. Never served with the caller's own credentials.
+    NoPermittedAccount,
     /// No usable account; the earliest cooldown end, if any account is cooling down.
     Exhausted {
         retry_at_ms: Option<i64>,
@@ -110,15 +136,14 @@ pub enum Selection {
 }
 
 impl Accounts {
-    pub fn open(path: PathBuf, http: reqwest::Client, upstream: Upstream) -> anyhow::Result<Self> {
-        // A corrupt file is an error, never an empty pool: it holds the only
-        // copy of the refresh tokens.
-        let stored: StoredAccounts = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|_| anyhow::anyhow!("{} is corrupt", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredAccounts::default(),
-            Err(error) => return Err(error.into()),
-        };
+    /// Load `accounts.json` and `routing.json` from the proxy directory.
+    pub fn open(dir: &Path, http: reqwest::Client, upstream: Upstream) -> anyhow::Result<Self> {
+        let path = dir.join("accounts.json");
+        let routing_path = dir.join("routing.json");
+        // A corrupt file is an error, never an empty pool or an open policy: one
+        // holds the only copy of the refresh tokens, the other forbids accounts.
+        let stored: StoredAccounts = read_json(&path)?;
+        let routing: AiRouting = read_json(&routing_path)?;
         let accounts = stored
             .accounts
             .into_iter()
@@ -130,10 +155,12 @@ impl Accounts {
             .collect();
         Ok(Self {
             path,
+            routing_path,
             http,
             upstream,
             state: Mutex::new(State {
                 accounts,
+                routing,
                 ..State::default()
             }),
         })
@@ -148,6 +175,13 @@ impl Accounts {
                 .collect(),
         };
         write_private(&self.path, &serde_json::to_vec_pretty(&stored)?)
+    }
+
+    fn persist_routing(&self, state: &State) -> anyhow::Result<()> {
+        write_private(
+            &self.routing_path,
+            &serde_json::to_vec_pretty(&state.routing)?,
+        )
     }
 
     pub fn status(&self, inflight: usize) -> AiProxyStatus {
@@ -189,6 +223,7 @@ impl Accounts {
                     error: login.error.clone(),
                 })
                 .collect(),
+            routing: state.routing.clone(),
         }
     }
 
@@ -289,7 +324,12 @@ impl Accounts {
             .accounts
             .retain(|account| account.stored.id != account_id);
         state.affinity.retain(|_, (id, _)| id != account_id);
-        self.persist(&state)
+        self.persist(&state)?;
+        let routing = &mut state.routing;
+        for policy in std::iter::once(&mut routing.default).chain(routing.projects.values_mut()) {
+            policy.accounts.remove(account_id);
+        }
+        self.persist_routing(&state)
     }
 
     pub fn set_enabled(&self, account_id: &str, enabled: bool) -> anyhow::Result<()> {
@@ -298,16 +338,54 @@ impl Accounts {
         self.persist(&state)
     }
 
-    /// Pick an account for a request: the conversation's previous account while
-    /// it is usable, otherwise the least-used available one.
-    pub async fn select(&self, session: Option<&str>, exclude: &[String]) -> Selection {
+    pub fn set_default_policy(&self, policy: AiRoutingPolicy) -> anyhow::Result<()> {
+        let mut state = self.state.lock();
+        state.routing.default = state.known_accounts_only(policy);
+        self.persist_routing(&state)
+    }
+
+    pub fn set_project_policy(
+        &self,
+        project_id: &str,
+        policy: Option<AiRoutingPolicy>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(is_routable_project_id(project_id), "Invalid project id");
+        let mut state = self.state.lock();
+        match policy {
+            Some(policy) => {
+                let policy = state.known_accounts_only(policy);
+                state.routing.projects.insert(project_id.to_owned(), policy);
+            }
+            None => {
+                state.routing.projects.remove(project_id);
+            }
+        }
+        self.persist_routing(&state)
+    }
+
+    /// Pick an account the project's policy permits: the conversation's previous
+    /// account while it is usable, otherwise a preferred one before an allowed
+    /// one, the least-used first.
+    pub async fn select(
+        &self,
+        project: Option<&str>,
+        session: Option<&str>,
+        exclude: &[String],
+    ) -> Selection {
         let mut excluded = exclude.to_vec();
         loop {
             let candidate = {
                 let state = self.state.lock();
                 let now = now_ms();
+                let policy = state.routing.policy(project);
+                let permitted =
+                    |account: &&Account| policy.rule(&account.stored.id) != AiAccountRule::Forbid;
+                let preferred =
+                    |account: &Account| policy.rule(&account.stored.id) == AiAccountRule::Prefer;
                 let usable = |account: &&Account| {
-                    account.available(now) && !excluded.contains(&account.stored.id)
+                    account.available(now)
+                        && !excluded.contains(&account.stored.id)
+                        && permitted(account)
                 };
                 let sticky = session
                     .and_then(|session| state.affinity.get(session))
@@ -334,26 +412,39 @@ impl Accounts {
                                     .map_or(0.0, |u| u.utilization),
                             )
                         };
-                        load(a)
-                            .partial_cmp(&load(b))
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        preferred(b)
+                            .cmp(&preferred(a))
+                            .then_with(|| {
+                                load(a)
+                                    .partial_cmp(&load(b))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
                             .then(a.runtime.requests.cmp(&b.runtime.requests))
                     })
                 });
                 match chosen {
                     Some(account) => account.stored.id.clone(),
                     None => {
+                        let in_service = |account: &&Account| {
+                            account.stored.enabled && !account.stored.needs_login
+                        };
                         if !state
                             .accounts
                             .iter()
-                            .any(|account| account.stored.enabled && !account.stored.needs_login)
+                            .filter(in_service)
+                            .any(|account| permitted(&account))
                         {
-                            return Selection::NoAccounts;
+                            return if policy.forbids_any() {
+                                Selection::NoPermittedAccount
+                            } else {
+                                Selection::NoAccounts
+                            };
                         }
                         let retry_at_ms = state
                             .accounts
                             .iter()
-                            .filter(|account| account.stored.enabled && !account.stored.needs_login)
+                            .filter(in_service)
+                            .filter(permitted)
                             .filter_map(|account| account.runtime.cooldown_until_ms)
                             .filter(|until| *until > now)
                             .min();
@@ -586,9 +677,11 @@ mod tests {
 
     #[test]
     fn corrupt_store_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accounts.json");
-        std::fs::write(&path, b"{broken").unwrap();
-        assert!(Accounts::open(path, reqwest::Client::new(), Upstream::default()).is_err());
+        for file in ["accounts.json", "routing.json"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(file), b"{broken").unwrap();
+            let opened = Accounts::open(dir.path(), reqwest::Client::new(), Upstream::default());
+            assert!(opened.is_err(), "{file}");
+        }
     }
 }
