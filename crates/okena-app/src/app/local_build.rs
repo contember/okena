@@ -16,11 +16,10 @@ impl Okena {
             return;
         };
 
-        let root = checkout.root().to_path_buf();
         cx.spawn(async move |this, cx| {
             let build_result = cx
                 .background_executor()
-                .spawn(async move { run_release_build(&root) })
+                .spawn(async move { run_release_build(&checkout) })
                 .await;
             let _ = this.update(cx, |_this, cx| match build_result {
                 Ok(()) => state.update(cx, |state, cx| {
@@ -149,10 +148,8 @@ impl Okena {
     }
 }
 
-fn run_release_build(root: &std::path::Path) -> Result<(), String> {
-    let output = Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(root)
+fn run_release_build(checkout: &okena_ext_updater::LocalCheckout) -> Result<(), String> {
+    let output = release_build_command(checkout.root(), checkout.target_dir())
         .output()
         .map_err(|error| format!("failed to start cargo: {error}"))?;
 
@@ -177,6 +174,15 @@ fn run_release_build(root: &std::path::Path) -> Result<(), String> {
     }
 }
 
+fn release_build_command(root: &std::path::Path, target_dir: &std::path::Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args(["build", "--release"])
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", target_dir);
+    command
+}
+
 fn last_output_line(output: &str) -> Option<String> {
     output
         .lines()
@@ -188,7 +194,28 @@ fn last_output_line(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::last_output_line;
+    use super::{last_output_line, release_build_command};
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    #[test]
+    fn rebuild_binds_the_matched_target_and_source_checkout() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = root.join("external-artifacts");
+        let command = release_build_command(root, &target);
+        assert_eq!(command.get_program(), OsStr::new("cargo"));
+        assert_eq!(command.get_current_dir(), Some(root));
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "CARGO_TARGET_DIR"),
+            Some((OsStr::new("CARGO_TARGET_DIR"), Some(target.as_os_str())))
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [OsStr::new("build"), OsStr::new("--release")]
+        );
+    }
 
     #[test]
     fn build_error_uses_last_non_empty_line_and_stays_short() {
