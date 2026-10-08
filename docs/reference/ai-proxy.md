@@ -81,6 +81,14 @@ covers accounts added later.
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
 headers and from polling the usage endpoint every five minutes.
 
+While new terminals are routed through the proxy, the daemon reads the accounts
+from it every 15 seconds and after each management command, and sends them to
+clients with the workspace state. The Claude usage widget in the status bar then
+shows the pool instead of the `claude` login's own usage: the 5-hour usage of
+each enabled account in the bar, and each account's 5-hour and 7-day usage, plan
+and state (disabled, needs login, rate limited) in the popover. A remote host's
+accounts are listed under the host's name.
+
 ## Activity
 
 **AI Proxy Activity** (command palette; bind `ShowAiProxyActivity` in
