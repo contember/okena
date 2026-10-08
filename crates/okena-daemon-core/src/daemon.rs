@@ -352,7 +352,7 @@ impl DaemonCore {
         // With the AI proxy enabled, new shells also get its ANTHROPIC_BASE_URL;
         // Claude remote's preload env rides along when that setting is on.
         let claude_pane_env = Arc::new(crate::claude_remote::PaneEnv::resolve());
-        pty_manager.set_extra_env(claude_pane_env.pty_env(&params.settings));
+        pty_manager.set_launch_environment(claude_pane_env.launch_environment(&params.settings));
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));

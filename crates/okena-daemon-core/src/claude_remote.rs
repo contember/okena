@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use okena_terminal::backend::LaunchEnvironment;
 use okena_workspace::persistence::AppSettings;
 use parking_lot::Mutex;
 
@@ -66,12 +67,12 @@ impl PaneEnv {
         }
     }
 
-    /// The extra environment for PTYs spawned from now on: Claude account
-    /// isolation and the AI proxy URL ([`crate::ai_proxy::pty_env`]) plus
+    /// The environment for PTYs spawned from now on: Claude account isolation,
     /// Claude remote (set when the setting is on and the preload could be
-    /// written, removed otherwise).
-    pub fn pty_env(&self, settings: &AppSettings) -> Vec<(String, Option<String>)> {
-        let mut env = crate::ai_proxy::pty_env(settings);
+    /// written, removed otherwise) and the AI proxy URL of the terminal's
+    /// project ([`crate::ai_proxy::launch_environment`]).
+    pub fn launch_environment(&self, settings: &AppSettings) -> LaunchEnvironment {
+        let mut env = okena_workspace::claude_env::claude_pty_env_for_settings(settings);
         let enabled = cfg!(unix) && settings.claude_remote;
         if enabled && self.okena_bin.is_none() {
             log::warn!(
@@ -94,7 +95,7 @@ impl PaneEnv {
         if let (Some(_), Some(profile_id)) = (&preload, &self.profile_id) {
             env.push(("OKENA_PROFILE".to_string(), Some(profile_id.clone())));
         }
-        env
+        crate::ai_proxy::launch_environment(settings, env)
     }
 
     /// Write the preload to the first location that works and return its path.
@@ -518,7 +519,7 @@ mod tests {
         };
         let settings = AppSettings::default();
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         let mut expected = okena_workspace::claude_env::claude_pty_env_for_settings(&settings);
         expected.extend(okena_workspace::claude_remote_env::claude_remote_pty_env(
@@ -546,7 +547,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         let preload = root.join(PRELOAD_DIR).join(PRELOAD_FILE);
         assert_eq!(
@@ -578,7 +579,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         assert!(env.contains(&("OKENA_BIN".to_string(), None)));
         assert!(env.contains(&("OKENA_CLAUDE_REMOTE_CHANNEL".to_string(), None)));
