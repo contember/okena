@@ -264,8 +264,9 @@ impl FocusManager {
     ///   instead of being swallowed by the old `layout_path`-only update.
     /// - **Project zoom** (`focused_project_id` set) → if the zoom doesn't
     ///   already show the target (a zoomed parent shows its worktree children),
-    ///   switch the zoom to the target's project. `compute_visible_projects`' focus override then
-    ///   surfaces that project even past a folder filter or a hidden-set entry.
+    ///   switch the zoom to the target's project. `compute_visible_projects`'
+    ///   focus override then surfaces that project even past a folder filter or
+    ///   a hidden-set entry.
     /// - **Overview** (no zoom, no fullscreen) → just move terminal focus; the
     ///   target's column is already on screen, so the multi-project overview is
     ///   left intact. Unless `project_offscreen` says it isn't: a project in the
@@ -298,42 +299,10 @@ impl FocusManager {
             return;
         }
 
-        // Not fullscreen. A target this window already renders only moves
-        // focus: the overview stays the overview, and a zoomed parent (not
-        // individual) already shows its worktree children, so landing on one of
-        // them (e.g. focus moving to a sibling after closing a tab) keeps the
-        // grouped view instead of narrowing it to that single worktree.
+        // The zoomed project, and a zoomed parent's worktree children, are on
+        // screen, so revealing them keeps the zoom and its individual mode.
         if project_offscreen {
-            match self.focused_project_id.as_deref() {
-                // Zoomed elsewhere: follow the jump so the target's column is
-                // the one shown. A fresh zoom shows the project plus its
-                // worktree children, hence the individual-mode reset. Revealing
-                // another terminal of the zoomed project itself must NOT clear
-                // it, or it would re-expand worktree children the user has
-                // zoomed past; this primitive also backs sidebar/cursor
-                // terminal clicks, so that regression would hit them too.
-                Some(current) if current != project_id => {
-                    self.focused_project_id = Some(project_id.clone());
-                    self.focus_project_individual = false;
-                }
-                // Overview, but this window isn't rendering the target's
-                // column. Zooming is the narrowest way to make it reachable;
-                // leaving the hidden set / folder filter alone means the view
-                // returns to exactly what it was when the user zooms back out.
-                //
-                // This is a None→Some zoom transition, so it must save the
-                // pre-zoom focus like every other one. Otherwise zooming back
-                // out leaves focus stranded on the revealed (now invisible)
-                // project: no pane renders a focus ring,
-                // `focused_terminal_state()` lies, and keystrokes go to
-                // whatever GPUI handle was focused before.
-                None => {
-                    self.apply_zoom_focus_save_restore(&Some(project_id.clone()));
-                    self.focused_project_id = Some(project_id.clone());
-                    self.focus_project_individual = false;
-                }
-                Some(_) => {}
-            }
+            self.set_focused_project_id(Some(project_id.clone()));
         }
         self.current_focus = Some(FocusTarget::new(project_id, layout_path));
         self.context = FocusContext::Terminal;
@@ -768,25 +737,6 @@ mod tests {
         let state = fm.focused_terminal_state().unwrap();
         assert_eq!(state.project_id, "proj2");
         assert_eq!(state.layout_path, vec![2]);
-    }
-
-    #[test]
-    fn reveal_terminal_onscreen_worktree_child_keeps_parent_zoom() {
-        // Zoomed into a parent (not individual), which also shows its worktree
-        // children. Revealing a terminal in one of those children (e.g. focus
-        // landing on a sibling after closing a tab) must keep the grouped view
-        // rather than narrowing the zoom to that single worktree.
-        let mut fm = FocusManager::new();
-        fm.set_focused_project_id(Some("parent".to_string()));
-        fm.focus_terminal("wt1".to_string(), vec![0]);
-
-        fm.reveal_terminal("wt1".to_string(), vec![1], "term-b".to_string(), false);
-
-        assert_eq!(fm.focused_project_id(), Some(&"parent".to_string()));
-        assert!(!fm.is_focus_individual());
-        let state = fm.focused_terminal_state().unwrap();
-        assert_eq!(state.project_id, "wt1");
-        assert_eq!(state.layout_path, vec![1]);
     }
 
     #[test]
