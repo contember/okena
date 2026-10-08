@@ -56,6 +56,10 @@ pub struct StateResponse {
     /// channel attached), sorted. Runtime-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_sessions: Vec<String>,
+    /// The host's AI proxy accounts while its new shells are routed through the
+    /// proxy; empty otherwise, so clients show the `claude` login's own usage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_accounts: Vec<crate::ai_proxy::AiAccount>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1591,6 +1595,7 @@ mod tests {
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
+            ai_accounts: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

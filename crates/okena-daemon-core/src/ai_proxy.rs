@@ -1,13 +1,21 @@
 //! Daemon side of the AI proxy (`okena-ai`): environment for new shells,
-//! starting the proxy process, and forwarding `ActionRequest::AiProxy`.
+//! starting the proxy process, forwarding `ActionRequest::AiProxy`, and
+//! publishing the pool's accounts to clients.
 
 use crate::claude_remote::PaneEnv;
-use okena_core::ai_proxy::{AiProxyCommand, AiProxyState, ensure_endpoint};
+use okena_core::ai_proxy::{
+    AiAccount, AiProxyCommand, AiProxyState, ensure_endpoint, ensure_management_key, load_endpoint,
+};
 use okena_terminal::backend::{LaunchEnvironment, TerminalBackend};
 use okena_workspace::persistence::AppSettings;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Notify, watch};
+
+/// How often the published accounts follow the proxy's usage and cooldowns.
+const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 fn profile_root() -> Option<PathBuf> {
     okena_core::profiles::try_current().map(|profile| profile.root.clone())
@@ -95,4 +103,73 @@ pub(crate) async fn execute(command: AiProxyCommand) -> AiProxyState {
             failure: Some(format!("{error:#}")),
         },
     }
+}
+
+/// The pool's accounts as clients see them in `StateResponse::ai_accounts`.
+#[derive(Clone)]
+pub struct AiProxyAccounts {
+    accounts: Arc<Mutex<Vec<AiAccount>>>,
+    state_version: watch::Sender<u64>,
+    refresh: Arc<Notify>,
+}
+
+impl AiProxyAccounts {
+    pub(crate) fn new(state_version: watch::Sender<u64>) -> Self {
+        Self {
+            accounts: Arc::new(Mutex::new(Vec::new())),
+            state_version,
+            refresh: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<AiAccount> {
+        self.accounts.lock().clone()
+    }
+
+    /// Re-read the accounts now instead of at the next poll.
+    pub(crate) fn refresh(&self) {
+        self.refresh.notify_one();
+    }
+
+    fn publish(&self, accounts: Vec<AiAccount>) {
+        let mut published = self.accounts.lock();
+        if *published != accounts {
+            *published = accounts;
+            self.state_version
+                .send_modify(|version| *version = version.wrapping_add(1));
+        }
+    }
+}
+
+/// Keep [`AiProxyAccounts`] in step with the proxy while new shells are routed
+/// through it. With routing off, or the proxy unreachable, nothing is
+/// published: the `claude` login's own usage is then the relevant one.
+pub(crate) async fn run_accounts_poll(
+    accounts: AiProxyAccounts,
+    settings: Arc<Mutex<AppSettings>>,
+) {
+    loop {
+        let enabled = settings.lock().ai_proxy_enabled;
+        let current = if enabled {
+            read_accounts()
+                .await
+                .inspect_err(|error| log::debug!("[ai-proxy] accounts unavailable: {error:#}"))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        accounts.publish(current);
+        tokio::select! {
+            _ = tokio::time::sleep(ACCOUNTS_POLL_INTERVAL) => {}
+            _ = accounts.refresh.notified() => {}
+        }
+    }
+}
+
+/// Ask a running proxy for its accounts without starting one.
+async fn read_accounts() -> anyhow::Result<Vec<AiAccount>> {
+    let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
+    let endpoint = load_endpoint(&root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
+    let client = okena_ai::client::ProxyClient::new(endpoint, ensure_management_key(&root)?);
+    Ok(client.command(&AiProxyCommand::Status).await?.accounts)
 }

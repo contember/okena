@@ -3,18 +3,25 @@
 //! The numbers come from the daemon (`GET /v1/usage` / `usage_changed`), via
 //! the app-installed [`GlobalDaemonUsage`] entity. This widget never fetches;
 //! opening the popover asks the daemon to refresh (throttled there to 60 s).
+//! While a host routes new shells through the AI proxy, the widget shows the
+//! proxy's account pool instead.
 
 use crate::ui_helpers::capitalize_first;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::api::{ApiExtraUsage, ApiUsageProvider, ApiUsageWindow, ApiUsageWindowKind};
+use okena_core::api::{
+    ApiExtraUsage, ApiProviderUsage, ApiUsageProvider, ApiUsageWindow, ApiUsageWindowKind,
+};
 use okena_extensions::ThemeColors;
 use okena_usage::{
-    DaemonUsage, GlobalDaemonUsage, provider_usage, read_working_days, render_simple_bar,
-    render_usage_row, usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
-    usage_popover_header, usage_trigger_items, window_points, window_row, window_trigger_item,
+    DaemonUsage, GlobalDaemonUsage, WorkingDays, provider_usage, read_working_days,
+    render_simple_bar, render_usage_row, usage_body_container, usage_divider, usage_kv_row,
+    usage_popover_container, usage_popover_header, usage_trigger_items, window_points, window_row,
+    window_trigger_item,
 };
+use okena_workspace::remote_sync::HostAiAccounts;
+use okena_workspace::state::{GlobalWorkspace, Workspace};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -32,6 +39,11 @@ fn theme(cx: &App) -> ThemeColors {
 /// [`GlobalDaemonUsage`] snapshot and hold only per-window UI state.
 pub struct ClaudeUsage {
     store: Entity<DaemonUsage>,
+    /// AI proxy accounts of the connected hosts; when any host has some, they
+    /// are shown instead of the `claude` login's usage.
+    pool: Vec<HostAiAccounts>,
+    workspace: Option<Entity<Workspace>>,
+    _workspace_observation: Option<Subscription>,
     chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
@@ -45,12 +57,46 @@ impl ClaudeUsage {
         cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         // Re-render whenever the daemon pushes a new snapshot.
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        Self {
+        // Extensions may activate before the app installs the workspace.
+        cx.observe_global::<GlobalWorkspace>(|this, cx| this.bind_workspace(cx))
+            .detach();
+        let mut this = Self {
             store,
+            pool: Vec::new(),
+            workspace: None,
+            _workspace_observation: None,
             chart_state,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+        };
+        this.bind_workspace(cx);
+        this
+    }
+
+    fn bind_workspace(&mut self, cx: &mut Context<Self>) {
+        let workspace = cx
+            .try_global::<GlobalWorkspace>()
+            .map(|global| global.0.clone());
+        if self.workspace == workspace {
+            return;
+        }
+        self._workspace_observation = workspace.as_ref().map(|workspace| {
+            cx.observe(workspace, |this, workspace, cx| {
+                this.update_pool(&workspace, cx);
+            })
+        });
+        if let Some(workspace) = &workspace {
+            self.update_pool(workspace, cx);
+        }
+        self.workspace = workspace;
+    }
+
+    fn update_pool(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let pool = workspace.read(cx).remote_sync.ai_accounts();
+        if self.pool != pool {
+            self.pool = pool.to_vec();
+            cx.notify();
         }
     }
 
@@ -72,7 +118,9 @@ impl ClaudeUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
-                    GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx);
+                    if this.pool.is_empty() {
+                        GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx);
+                    }
                     cx.notify();
                 }
             });
@@ -110,36 +158,40 @@ impl ClaudeUsage {
         if !self.popover_visible {
             return div().size_0().into_any_element();
         }
-        let Some(data) =
-            provider_usage(ApiUsageProvider::Claude, cx).filter(|data| data.fetched_at.is_some())
-        else {
-            return div().size_0().into_any_element();
-        };
-
         let working = read_working_days(cx);
-        let source = self.store.read(cx).source_label().cloned();
-        let plan = header_badge(data.plan.as_deref(), source.as_deref());
-        let bounds = self.trigger_bounds;
-        let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
-
-        let rows: Vec<AnyElement> = data
-            .windows
-            .iter()
-            .filter_map(|window| {
-                let (label, marker_id) = popover_row_identity(window)?;
-                Some(
-                    render_usage_row(
+        let (title, plan, body) = if self.pool.is_empty() {
+            let Some(data) = provider_usage(ApiUsageProvider::Claude, cx)
+                .filter(|data| data.fetched_at.is_some())
+            else {
+                return div().size_0().into_any_element();
+            };
+            let source = self.store.read(cx).source_label().cloned();
+            (
+                "CLAUDE USAGE",
+                header_badge(data.plan.as_deref(), source.as_deref()),
+                self.render_usage_body(&data, working, t, cx)
+                    .into_any_element(),
+            )
+        } else {
+            (
+                "CLAUDE ACCOUNTS",
+                None,
+                div()
+                    .id("claude-pool-scroll")
+                    .max_h(px(520.0))
+                    .overflow_y_scroll()
+                    .child(crate::pool_usage::render_body(
+                        &self.pool,
+                        working,
+                        &self.chart_state,
                         t,
                         cx,
-                        &window_row(window, label, marker_id),
-                        working,
-                        window_points(window),
-                        &self.chart_state,
-                    )
+                    ))
                     .into_any_element(),
-                )
-            })
-            .collect();
+            )
+        };
+        let bounds = self.trigger_bounds;
+        let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
 
         deferred(
             anchored()
@@ -161,27 +213,55 @@ impl ClaudeUsage {
                             cx.stop_propagation();
                         })
                         .child(usage_popover_header(
-                            "CLAUDE USAGE",
+                            title,
                             plan.as_deref(),
                             "https://claude.ai/settings/usage",
                             "Open usage settings on claude.ai",
                             t,
                             cx,
                         ))
-                        .child(usage_body_container().children(rows).when_some(
-                            data.extra_usage.as_ref(),
-                            |el, extra| {
-                                if !extra.is_enabled {
-                                    return el;
-                                }
-                                el.child(usage_divider(t))
-                                    .child(render_extra_usage_row(t, cx, extra))
-                            },
-                        )),
+                        .child(body),
                 ),
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    fn render_usage_body(
+        &self,
+        data: &ApiProviderUsage,
+        working: WorkingDays,
+        t: &ThemeColors,
+        cx: &App,
+    ) -> Div {
+        let rows: Vec<AnyElement> = data
+            .windows
+            .iter()
+            .filter_map(|window| {
+                let (label, marker_id) = popover_row_identity(window)?;
+                Some(
+                    render_usage_row(
+                        t,
+                        cx,
+                        &window_row(window, label, marker_id),
+                        working,
+                        window_points(window),
+                        &self.chart_state,
+                    )
+                    .into_any_element(),
+                )
+            })
+            .collect();
+
+        usage_body_container()
+            .children(rows)
+            .when_some(data.extra_usage.as_ref(), |el, extra| {
+                if !extra.is_enabled {
+                    return el;
+                }
+                el.child(usage_divider(t))
+                    .child(render_extra_usage_row(t, cx, extra))
+            })
     }
 }
 
@@ -264,20 +344,15 @@ impl Render for ClaudeUsage {
         let t = theme(cx);
 
         let working = read_working_days(cx);
-        let items: Vec<okena_usage::TriggerItem> = provider_usage(ApiUsageProvider::Claude, cx)
-            .map(|data| {
-                data.windows
-                    .iter()
-                    .filter_map(|window| {
-                        let label = trigger_label(window)?;
-                        Some(window_trigger_item(window, label, working))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if items.is_empty() {
-            return div().size_0().into_any_element();
-        }
+        let trigger = if self.pool.is_empty() {
+            let items = login_trigger_items(working, cx);
+            if items.is_empty() {
+                return div().size_0().into_any_element();
+            }
+            usage_trigger_items(&t, cx, &items)
+        } else {
+            crate::pool_usage::render_trigger(&self.pool, working, &t, cx)
+        };
 
         let entity_handle = cx.entity().clone();
 
@@ -291,7 +366,7 @@ impl Render for ClaudeUsage {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .children(usage_trigger_items(&t, cx, &items))
+                    .children(trigger)
                     .child(
                         canvas(
                             move |bounds, _window, app| {
@@ -315,6 +390,22 @@ impl Render for ClaudeUsage {
             .child(self.render_popover(&t, cx))
             .into_any_element()
     }
+}
+
+/// The `claude` login's usage for the status bar, empty before the daemon
+/// reported any.
+fn login_trigger_items(working: WorkingDays, cx: &mut App) -> Vec<okena_usage::TriggerItem> {
+    provider_usage(ApiUsageProvider::Claude, cx)
+        .map(|data| {
+            data.windows
+                .iter()
+                .filter_map(|window| {
+                    let label = trigger_label(window)?;
+                    Some(window_trigger_item(window, label, working))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

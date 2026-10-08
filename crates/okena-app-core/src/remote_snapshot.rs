@@ -185,6 +185,7 @@ pub fn build_state_response(
     agent_statuses: &HashMap<String, okena_core::agent_status::AgentStatus>,
     windows: Vec<ApiWindow>,
     hooks: Vec<ApiHookExecution>,
+    ai_accounts: Vec<okena_core::ai_proxy::AiAccount>,
 ) -> StateResponse {
     let projects = build_api_projects(
         data,
@@ -216,5 +217,6 @@ pub fn build_state_response(
         hooks,
         claude_dialogs: Default::default(),
         claude_sessions: Vec::new(),
+        ai_accounts,
     }
 }

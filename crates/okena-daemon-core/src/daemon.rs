@@ -605,6 +605,12 @@ impl DaemonCore {
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
             ));
+            let ai_proxy_accounts =
+                crate::ai_proxy::AiProxyAccounts::new(reactor.state_version.clone());
+            tokio::task::spawn_local(crate::ai_proxy::run_accounts_poll(
+                ai_proxy_accounts.clone(),
+                settings.clone(),
+            ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
                 remote_subscribed_terminals,
@@ -709,6 +715,7 @@ impl DaemonCore {
                 git_poll_trigger_tx,
                 claude_pane_env,
                 claude_hub,
+                ai_proxy_accounts,
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {
