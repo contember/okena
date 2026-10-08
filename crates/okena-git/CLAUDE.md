@@ -24,6 +24,16 @@ Git status, diff parsing, and worktree operations for project directories.
 
 - **Cached status**: Git status is cached in-memory and populated by background polling. `get_git_status` is non-blocking (returns cached data or None).
 - **Remote git is non-interactive**: anything touching a remote (clone, fetch, push) is built with `network_command()`, never `command("git")`. Git prompts on `/dev/tty`, so a background child would take SIGTTIN and hang forever instead of failing.
+- **The status poll may write the index**: gix status never writes the index
+  back, so an unchanged file it had to read in full (touched, or racy) goes
+  through its `clean` filter (e.g. `git-lfs clean`) on every poll.
+  `gix_helpers::refresh_filtered_index` has `git update-index -q --refresh`
+  record the new stat, in the background on `Lane::Long`, at most once a
+  minute per repo, and only when an index path is routed to a `clean` filter.
+  It runs without a timeout: the bus SIGKILLs on timeout, and a killed git
+  leaves `.git/index.lock` behind. Not gix's `Outcome::write_changes`: it
+  writes back the index read before the walk and could undo a concurrent
+  `git add`; `update-index` re-reads it under `index.lock`.
 - **Worktree workflow**: Worktrees are managed as lightweight branch checkouts alongside the main repo.
 - **Diff views**: UI for diffs lives in `crates/okena-views-git/src/diff_viewer/`.
 - **One path base for diffs and per-file mutations**: `FileDiff.old_path`/`new_path`

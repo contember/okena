@@ -1,10 +1,12 @@
 //! Helpers for opening `gix` repositories. Centralizes discovery so each
 //! call site doesn't need to think about the `ThreadSafeRepository` dance.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use gix::bstr::BString;
+use okena_core::process::{CommandSpec, Lane};
 use parking_lot::Mutex;
 
 /// Cache of opened `ThreadSafeRepository` handles, keyed by the exact query
@@ -67,27 +69,9 @@ pub(crate) fn open(path: &Path) -> Option<gix::Repository> {
     Some(local)
 }
 
-/// Make `gix` use a filter driver's one-shot `clean`/`smudge` command instead
-/// of its long-running `process` (e.g. `filter.lfs.process = git-lfs
-/// filter-process`).
-///
-/// gix-filter only waits for a long-running filter when the caller invokes
-/// `driver::State::shutdown`; its `State` has no `Drop`. A status walk builds
-/// that state internally and drops it, so the filter exits on the closed pipe
-/// and is left a zombie. Under the 5s poll in an LFS repo that is one zombie
-/// per repo per poll, until the process limit is hit. The one-shot commands
-/// are waited on after every file, so falling back to them leaks nothing.
-///
-/// Only a section that also defines `clean` loses its `process`. gix builds
-/// one driver per `[filter "x"]` section and uses the first one that matches,
-/// so the fallback has to live in the same section; and status only ever
-/// cleans, so `smudge` alone is no fallback. Without one, removing `process`
-/// would compare unfiltered content and report LFS pointers as modified.
-/// Drivers defined by `process` alone are left as they are and still leak.
-///
-/// The key is removed from the in-memory config only, never written back.
-/// Setting it to an empty value would not work: gix would try to spawn `""`
-/// rather than fall back.
+/// Drop `process` from each `[filter "x"]` section that also defines `clean`, in
+/// memory only: gix never reaps a long-running filter, but waits on `clean`.
+/// A `process`-only driver keeps it, or status would compare unfiltered content.
 fn drop_long_running_filter_processes(repo: &mut gix::Repository) {
     let ids: Vec<_> = repo
         .config_snapshot()
@@ -95,6 +79,8 @@ fn drop_long_running_filter_processes(repo: &mut gix::Repository) {
         .sections_and_ids_by_name("filter")
         .into_iter()
         .flatten()
+        // git itself prefers `process`, so a stale `clean`, or one with side
+        // effects (git-annex's ingests the file), now runs on stat-dirty files.
         .filter(|(section, _)| {
             section.header().subsection_name().is_some()
                 && section.value("process").is_some()
@@ -117,51 +103,144 @@ fn drop_long_running_filter_processes(repo: &mut gix::Repository) {
     }
 }
 
-/// How often one repo may have its racy index entries refreshed by git.
-const RACY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// How often one repo may have git refresh its index.
+const INDEX_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Last racy refresh per worktree, bounding it to one git run per interval.
-static RACY_REFRESHED: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
+struct IndexRefresh {
+    started: Instant,
+    running: bool,
+}
 
-/// Have git refresh the index when a finished status walk met racy entries.
-///
-/// An entry is racy when its file's mtime is not older than the index file
-/// itself: stat cannot prove it unchanged, so every walk hashes its content,
-/// through the clean filter (one `git-lfs clean` per LFS file). git clears
-/// this by rewriting the index, which gives it a newer timestamp. gix status
-/// never writes the index, so without this the same entries stay racy and get
-/// re-filtered on every poll: a checkout that wrote files and index within
-/// the same second cost ~150 `git-lfs clean` runs a minute.
-///
-/// git, not gix's `Outcome::write_changes`, because that writes back the copy
-/// read before the walk and would undo a `git add` that landed meanwhile;
-/// `update-index` re-reads under `index.lock`. The interval bounds entries a
-/// rewrite cannot fix (an mtime in the future) to one git run per minute.
-pub(crate) fn refresh_racy_index(workdir: &Path, outcome: Option<&gix::status::Outcome>) {
-    if outcome.is_none_or(|outcome| outcome.index_worktree.tracked_file_modification.racy_clean == 0) {
+/// Index refreshes per worktree: at most one running, one started per interval.
+static INDEX_REFRESHES: Mutex<Option<HashMap<PathBuf, IndexRefresh>>> = Mutex::new(None);
+
+/// Have git rewrite the index in the background after a status walk read
+/// unchanged entries in full: gix never writes it back, so every poll would run
+/// their `clean` filter again. Repos with no filtered path are left alone.
+pub(crate) fn refresh_filtered_index(
+    repo: &gix::Repository,
+    outcome: Option<&gix::status::Outcome>,
+) {
+    if outcome.is_none_or(|outcome| {
+        outcome
+            .index_worktree
+            .tracked_file_modification
+            .entries_to_update
+            == 0
+    }) {
         return;
     }
-    {
-        let mut guard = RACY_REFRESHED.lock();
-        let refreshed = guard.get_or_insert_with(HashMap::new);
-        if refreshed
-            .get(workdir)
-            .is_some_and(|at| at.elapsed() < RACY_REFRESH_INTERVAL)
-        {
-            return;
-        }
-        refreshed.retain(|_, at| at.elapsed() < RACY_REFRESH_INTERVAL);
-        refreshed.insert(workdir.to_path_buf(), Instant::now());
+    let drivers = clean_filter_drivers(repo);
+    if drivers.is_empty() {
+        return;
     }
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+        return;
+    };
+    if !claim_index_refresh(&workdir) {
+        return;
+    }
+    let repo = repo.clone();
+    let spawned = std::thread::Builder::new()
+        .name("okena-git-index-refresh".into())
+        .spawn({
+            let workdir = workdir.clone();
+            move || {
+                if index_uses_filter(&repo, &drivers) {
+                    run_index_refresh(&workdir);
+                }
+                release_index_refresh(&workdir);
+            }
+        });
+    if let Err(err) = spawned {
+        log::warn!(
+            "failed to spawn index refresh for {}: {err}",
+            workdir.display()
+        );
+        release_index_refresh(&workdir);
+    }
+}
+
+/// Names of the filter drivers that define `clean`.
+fn clean_filter_drivers(repo: &gix::Repository) -> HashSet<BString> {
+    repo.config_snapshot()
+        .plumbing()
+        .sections_by_name("filter")
+        .into_iter()
+        .flatten()
+        .filter(|section| section.value("clean").is_some())
+        .filter_map(|section| section.header().subsection_name().map(ToOwned::to_owned))
+        .collect()
+}
+
+/// Whether the `filter` attribute of any index entry names one of `drivers`.
+fn index_uses_filter(repo: &gix::Repository, drivers: &HashSet<BString>) -> bool {
+    let Ok(index) = repo.index_or_empty() else {
+        return false;
+    };
+    let Ok(mut attributes) = repo.attributes_only(
+        &index,
+        gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+    ) else {
+        return false;
+    };
+    let mut matches = attributes.selected_attribute_matches(["filter"]);
+    index.entries().iter().any(|entry| {
+        attributes
+            .at_entry(entry.path(&index), Some(entry.mode))
+            .is_ok_and(|platform| platform.matching_attributes(&mut matches))
+            && matches.iter_selected().any(|filter| {
+                matches!(
+                    filter.assignment.state,
+                    gix::attrs::StateRef::Value(driver) if drivers.contains(driver.as_bstr())
+                )
+            })
+    })
+}
+
+/// Claim a refresh unless one is running or started within the interval.
+fn claim_index_refresh(workdir: &Path) -> bool {
+    let mut guard = INDEX_REFRESHES.lock();
+    let refreshes = guard.get_or_insert_with(HashMap::new);
+    refreshes
+        .retain(|_, refresh| refresh.running || refresh.started.elapsed() < INDEX_REFRESH_INTERVAL);
+    if refreshes.contains_key(workdir) {
+        return false;
+    }
+    refreshes.insert(
+        workdir.to_path_buf(),
+        IndexRefresh {
+            started: Instant::now(),
+            running: true,
+        },
+    );
+    true
+}
+
+fn release_index_refresh(workdir: &Path) {
+    if let Some(refresh) = INDEX_REFRESHES
+        .lock()
+        .as_mut()
+        .and_then(|refreshes| refreshes.get_mut(workdir))
+    {
+        refresh.running = false;
+    }
+}
+
+/// No timeout: the bus SIGKILLs a command that outlives one, and git removes
+/// `index.lock` only on a signal it can catch, so a kill would leave it behind.
+fn run_index_refresh(workdir: &Path) {
+    let spec = CommandSpec::new("git")
+        .args(["update-index", "-q", "--refresh"])
+        .current_dir(workdir)
+        .lane(Lane::Long)
+        .label("index refresh");
     // Exits non-zero when entries really changed, which is not a failure here.
-    if let Err(err) = okena_core::process::safe_output_with_timeout(
-        okena_core::process::command("git")
-            .arg("-C")
-            .arg(workdir)
-            .args(["update-index", "-q", "--refresh"]),
-        Duration::from_secs(30),
-    ) {
-        log::debug!("git update-index --refresh failed in {}: {err}", workdir.display());
+    if let Err(err) = okena_core::process::run(spec) {
+        log::debug!(
+            "git update-index --refresh failed in {}: {err}",
+            workdir.display()
+        );
     }
 }
 
@@ -267,6 +346,8 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
     use crate::repository::test_support::{git_in, init_temp_repo};
 
@@ -279,8 +360,14 @@ mod tests {
     #[test]
     fn open_drops_process_for_a_driver_with_a_clean_fallback() {
         let (_tmp, repo) = init_temp_repo();
-        git_in(&repo, &["config", "filter.lfs.process", "git-lfs filter-process"]);
-        git_in(&repo, &["config", "filter.lfs.clean", "git-lfs clean -- %f"]);
+        git_in(
+            &repo,
+            &["config", "filter.lfs.process", "git-lfs filter-process"],
+        );
+        git_in(
+            &repo,
+            &["config", "filter.lfs.clean", "git-lfs clean -- %f"],
+        );
 
         let opened = open(&repo).expect("open repo");
 
@@ -384,11 +471,17 @@ mod tests {
         git_in(&repo, &["add", "."]);
         git_in(
             &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add filtered file"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add filtered file",
+            ],
         );
         // Records the name of whoever launched it. git may legitimately run it
-        // (the poll has git refresh racy index entries, and git reaps what it
-        // starts); gix must not.
+        // (the poll has git refresh the index, and git reaps what it starts);
+        // gix must not.
         let marker = repo.join(".git").join("process-launched-by");
         git_in(
             &repo,
@@ -406,6 +499,7 @@ mod tests {
         set_mtime(60);
 
         let _ = crate::repository::get_status(&repo);
+        wait_for_index_refresh(&repo);
         let _ = list_untracked_files(&repo);
         let changed = changed_paths(&repo);
 
@@ -424,50 +518,165 @@ mod tests {
         );
     }
 
-    /// A racy entry (file mtime not older than the index) is hashed through
-    /// the clean filter on every walk until the index is rewritten. The poll
-    /// has git rewrite it, so the next poll filters nothing.
-    #[cfg(unix)]
-    #[test]
-    fn a_racy_entry_is_filtered_once_not_on_every_poll() {
-        let (_tmp, repo) = init_temp_repo();
-        let counter = repo.join(".git").join("clean-runs");
+    fn set_mtime(path: &Path, at: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    /// Block until the background index refresh for `repo`, if any, has finished.
+    fn wait_for_index_refresh(repo: &Path) {
+        let workdir = open(repo)
+            .expect("open repo")
+            .workdir()
+            .expect("workdir")
+            .to_path_buf();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while INDEX_REFRESHES
+            .lock()
+            .as_ref()
+            .and_then(|refreshes| refreshes.get(&workdir))
+            .is_some_and(|refresh| refresh.running)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the index refresh did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A repo whose `*.bin` files go through a `clean` filter that logs each run
+    /// to the returned file. Every tracked file is dated two minutes back, so
+    /// none of them is racy against the index.
+    fn repo_with_logging_clean_filter() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (tmp, repo) = init_temp_repo();
+        let log = repo.join(".git").join("clean-runs");
         git_in(
             &repo,
             &[
                 "config",
                 "filter.test.clean",
-                &format!("echo x >> {}; cat", counter.display()),
+                &format!("echo x >> {}; cat", log.display()),
             ],
         );
         std::fs::write(repo.join(".gitattributes"), "*.bin filter=test\n").unwrap();
         std::fs::write(repo.join("data.bin"), "data\n").unwrap();
+        let past = SystemTime::now() - Duration::from_secs(120);
+        for name in ["file.txt", ".gitattributes", "data.bin"] {
+            set_mtime(&repo.join(name), past);
+        }
         git_in(&repo, &["add", "."]);
         git_in(
             &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add filtered file"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add filtered file",
+            ],
         );
-        // Date the index and the file to the same past instant: racy.
-        let past = std::time::SystemTime::now() - Duration::from_secs(60);
-        for path in [repo.join(".git").join("index"), repo.join("data.bin")] {
-            std::fs::File::options()
-                .write(true)
-                .open(path)
-                .unwrap()
-                .set_modified(past)
-                .unwrap();
+        (tmp, repo, log)
+    }
+
+    fn clean_runs(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// How a status walk of `repo` judged its tracked files.
+    fn tracked_file_stats(repo: &Path) -> gix::status::plumbing::index_as_worktree::Outcome {
+        let repo = open(repo).expect("open repo");
+        let mut iter = single_threaded(repo.status(gix::progress::Discard).expect("status"))
+            .untracked_files(gix::status::UntrackedFiles::None)
+            .into_iter(None)
+            .expect("status iter");
+        for item in iter.by_ref() {
+            item.expect("status item");
         }
-        let runs = || {
-            std::fs::read_to_string(&counter)
-                .map(|s| s.lines().count())
-                .unwrap_or(0)
-        };
+        iter.outcome_mut()
+            .expect("finished walk")
+            .index_worktree
+            .tracked_file_modification
+            .clone()
+    }
+
+    /// Poll, let the index refresh it triggers finish, and poll again: only the
+    /// first poll may run the clean filter.
+    fn assert_only_the_first_poll_cleans(repo: &Path, log: &Path) {
+        let _ = crate::repository::get_status(repo);
+        wait_for_index_refresh(repo);
+        let after_first = clean_runs(log);
+        let _ = crate::repository::get_status(repo);
+        wait_for_index_refresh(repo);
+
+        assert!(
+            after_first > 0,
+            "the first poll did not run the clean filter"
+        );
+        assert_eq!(
+            clean_runs(log),
+            after_first,
+            "the second poll ran the clean filter again"
+        );
+    }
+
+    /// A touched file (new mtime, same content) is read through `clean` on every
+    /// walk until the index records its new stat.
+    #[cfg(unix)]
+    #[test]
+    fn a_touched_filtered_file_is_cleaned_by_one_poll_only() {
+        let (_tmp, repo, log) = repo_with_logging_clean_filter();
+        set_mtime(
+            &repo.join("data.bin"),
+            SystemTime::now() - Duration::from_secs(60),
+        );
+        let stats = tracked_file_stats(&repo);
+        assert_eq!((stats.racy_clean, stats.entries_to_update), (0, 1));
+
+        assert_only_the_first_poll_cleans(&repo, &log);
+    }
+
+    /// A racy entry (mtime not older than the index file) is read through
+    /// `clean` on every walk until the index is rewritten.
+    #[cfg(unix)]
+    #[test]
+    fn a_racy_filtered_entry_is_cleaned_by_one_poll_only() {
+        let (_tmp, repo, log) = repo_with_logging_clean_filter();
+        let recorded = std::fs::metadata(repo.join("data.bin"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        set_mtime(&repo.join(".git").join("index"), recorded);
+        let stats = tracked_file_stats(&repo);
+        assert_eq!((stats.racy_clean, stats.entries_to_update), (3, 3));
+
+        assert_only_the_first_poll_cleans(&repo, &log);
+    }
+
+    /// Without a path routed to a `clean` filter, the poll never writes the index.
+    #[test]
+    fn a_repo_without_filtered_paths_gets_no_index_refresh() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["config", "filter.test.clean", "cat"]);
+        set_mtime(
+            &repo.join("file.txt"),
+            SystemTime::now() - Duration::from_secs(60),
+        );
+        let index = repo.join(".git").join("index");
+        let before = std::fs::metadata(&index).unwrap().modified().unwrap();
 
         let _ = crate::repository::get_status(&repo);
-        let after_first = runs();
-        let _ = crate::repository::get_status(&repo);
+        wait_for_index_refresh(&repo);
 
-        assert!(after_first > 0, "the racy entry was never filtered");
-        assert_eq!(runs(), after_first, "the second poll filtered again");
+        assert_eq!(
+            std::fs::metadata(&index).unwrap().modified().unwrap(),
+            before
+        );
     }
 }

@@ -345,7 +345,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         }
         changed.insert(item.location().to_owned());
     }
-    crate::gix_helpers::refresh_racy_index(&workdir, iter.outcome_mut().as_deref());
+    crate::gix_helpers::refresh_filtered_index(&repo, iter.outcome_mut().as_deref());
 
     // The walk is complete, so nothing below can fail: the memo is only touched
     // by walks that finished, and a transient failure above leaves it as it was.
