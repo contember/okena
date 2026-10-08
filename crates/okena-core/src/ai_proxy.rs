@@ -7,6 +7,7 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Directory holding the proxy's endpoint, accounts, lock and log.
@@ -33,6 +34,29 @@ impl ProxyEndpoint {
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}/{}", self.port, self.token)
     }
+
+    /// `ANTHROPIC_BASE_URL` for a terminal of `project_id`, so the proxy applies
+    /// that project's [routing policy](AiRouting). An id that cannot be a path
+    /// segment gets the plain URL and with it the default policy.
+    pub fn project_url(&self, project_id: &str) -> String {
+        if is_routable_project_id(project_id) {
+            format!("{}/{PROJECT_SEGMENT}/{project_id}", self.base_url())
+        } else {
+            self.base_url()
+        }
+    }
+}
+
+/// Path segment that precedes the project id in a terminal's base URL.
+pub const PROJECT_SEGMENT: &str = "p";
+
+/// Whether `project_id` can travel as a path segment of the base URL unescaped.
+pub fn is_routable_project_id(project_id: &str) -> bool {
+    !project_id.is_empty()
+        && project_id.len() <= 128
+        && project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 pub fn load_endpoint(profile_root: &Path) -> anyhow::Result<Option<ProxyEndpoint>> {
@@ -147,6 +171,74 @@ pub enum AiProxyCommand {
         account_id: String,
         enabled: bool,
     },
+    /// Replace the policy for terminals whose project has no policy of its own.
+    SetDefaultPolicy {
+        policy: AiRoutingPolicy,
+    },
+    /// Replace a project's policy; `None` makes the project use the default policy.
+    SetProjectPolicy {
+        project_id: String,
+        policy: Option<AiRoutingPolicy>,
+    },
+}
+
+/// How a routing policy treats one pool account.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAccountRule {
+    /// Used before allowed accounts while it is usable.
+    Prefer,
+    #[default]
+    Allow,
+    Forbid,
+}
+
+/// Which pool accounts may serve a terminal's requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiRoutingPolicy {
+    /// Rule for accounts not listed in `accounts`, including accounts added later.
+    pub others: AiAccountRule,
+    /// Account id → rule.
+    #[serde(default)]
+    pub accounts: BTreeMap<String, AiAccountRule>,
+}
+
+impl AiRoutingPolicy {
+    pub fn rule(&self, account_id: &str) -> AiAccountRule {
+        self.accounts
+            .get(account_id)
+            .copied()
+            .unwrap_or(self.others)
+    }
+
+    /// A policy that forbids an account never falls back to the terminal's own
+    /// Claude login: that login may be the forbidden account.
+    pub fn forbids_any(&self) -> bool {
+        self.others == AiAccountRule::Forbid
+            || self
+                .accounts
+                .values()
+                .any(|rule| *rule == AiAccountRule::Forbid)
+    }
+}
+
+/// Routing policies, owned and persisted by the proxy (`routing.json`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiRouting {
+    /// Policy for terminals without a project or whose project has no policy.
+    #[serde(default)]
+    pub default: AiRoutingPolicy,
+    /// Project id → policy. Worktree terminals carry their parent project's id.
+    #[serde(default)]
+    pub projects: BTreeMap<String, AiRoutingPolicy>,
+}
+
+impl AiRouting {
+    pub fn policy(&self, project_id: Option<&str>) -> &AiRoutingPolicy {
+        project_id
+            .and_then(|project_id| self.projects.get(project_id))
+            .unwrap_or(&self.default)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -156,6 +248,8 @@ pub struct AiProxyStatus {
     pub inflight: usize,
     pub accounts: Vec<AiAccount>,
     pub logins: Vec<AiPendingLogin>,
+    #[serde(default)]
+    pub routing: AiRouting,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,6 +339,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_private(&management_key_path(dir.path()), b"").unwrap();
         assert!(ensure_management_key(dir.path()).is_err());
+    }
+
+    #[test]
+    fn project_url_carries_only_path_safe_ids() {
+        let endpoint = ProxyEndpoint {
+            port: 4000,
+            token: "tok".into(),
+        };
+        assert_eq!(
+            endpoint.project_url("1f0c-a_B9"),
+            "http://127.0.0.1:4000/tok/p/1f0c-a_B9"
+        );
+        for unsafe_id in ["", "a/b", "a?b", "a b", "../x"] {
+            assert_eq!(endpoint.project_url(unsafe_id), endpoint.base_url());
+        }
+    }
+
+    #[test]
+    fn unlisted_accounts_follow_others() {
+        let only_a = AiRoutingPolicy {
+            others: AiAccountRule::Forbid,
+            accounts: BTreeMap::from([("a".into(), AiAccountRule::Allow)]),
+        };
+        assert_eq!(only_a.rule("a"), AiAccountRule::Allow);
+        assert_eq!(only_a.rule("added-later"), AiAccountRule::Forbid);
+        assert!(only_a.forbids_any());
+
+        let prefer_b = AiRoutingPolicy {
+            others: AiAccountRule::Allow,
+            accounts: BTreeMap::from([("b".into(), AiAccountRule::Prefer)]),
+        };
+        assert!(!prefer_b.forbids_any());
+        assert!(!AiRoutingPolicy::default().forbids_any());
+    }
+
+    #[test]
+    fn project_without_policy_uses_the_default() {
+        let routing = AiRouting {
+            default: AiRoutingPolicy {
+                others: AiAccountRule::Prefer,
+                accounts: BTreeMap::new(),
+            },
+            projects: BTreeMap::from([("x".into(), AiRoutingPolicy::default())]),
+        };
+        assert_eq!(routing.policy(Some("x")), &AiRoutingPolicy::default());
+        assert_eq!(routing.policy(Some("y")), &routing.default);
+        assert_eq!(routing.policy(None), &routing.default);
     }
 
     #[test]

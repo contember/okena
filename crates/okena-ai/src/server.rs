@@ -8,7 +8,10 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fs2::FileExt;
-use okena_core::ai_proxy::{AiProxyCommand, ProxyEndpoint, ensure_management_key, proxy_dir};
+use okena_core::ai_proxy::{
+    AiProxyCommand, PROJECT_SEGMENT, ProxyEndpoint, ensure_management_key, is_routable_project_id,
+    proxy_dir,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -112,7 +115,7 @@ pub async fn serve(
         .read_timeout(upstream.silence_timeout)
         .build()?;
     let accounts = Arc::new(Accounts::open(
-        proxy_dir(&profile_root).join("accounts.json"),
+        &proxy_dir(&profile_root),
         http.clone(),
         upstream.clone(),
     )?);
@@ -167,14 +170,14 @@ async fn dispatch(State(service): State<Arc<Service>>, request: Request) -> Resp
         }
         return manage(&service, management, request.into_body()).await;
     }
-    let Some(rest) = strip_token(&target, &service.token) else {
+    let Some((project, rest)) = strip_token(&target, &service.token).and_then(split_project) else {
         return error(StatusCode::NOT_FOUND, "Unknown endpoint");
     };
-    let rest = rest.to_owned();
+    let (project, rest) = (project.map(str::to_owned), rest.to_owned());
     let (parts, body) = request.into_parts();
     service
         .relay
-        .handle(parts.method, &rest, parts.headers, body)
+        .handle(parts.method, project.as_deref(), &rest, parts.headers, body)
         .await
 }
 
@@ -184,6 +187,21 @@ fn strip_token<'a>(target: &'a str, token: &str) -> Option<&'a str> {
     let end = after_slash.find(['/', '?']).unwrap_or(after_slash.len());
     let (candidate, rest) = after_slash.split_at(end);
     same_secret(candidate, token).then_some(rest)
+}
+
+/// `/p/<project>/rest` → `(Some(project), "/rest")`; a target without the
+/// project segment has no project. `None` for a malformed project id.
+fn split_project(rest: &str) -> Option<(Option<&str>, &str)> {
+    let Some(after) = rest
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_prefix(PROJECT_SEGMENT))
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return Some((None, rest));
+    };
+    let end = after.find(['/', '?']).unwrap_or(after.len());
+    let (project, rest) = after.split_at(end);
+    is_routable_project_id(project).then_some((Some(project), rest))
 }
 
 fn has_management_key(headers: &axum::http::HeaderMap, key: &str) -> bool {
@@ -245,6 +263,10 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
                     account_id,
                     enabled,
                 } => accounts.set_enabled(&account_id, enabled),
+                AiProxyCommand::SetDefaultPolicy { policy } => accounts.set_default_policy(policy),
+                AiProxyCommand::SetProjectPolicy { project_id, policy } => {
+                    accounts.set_project_policy(&project_id, policy)
+                }
             };
             match outcome {
                 Ok(()) => axum::Json(accounts.status(inflight)).into_response(),
@@ -359,6 +381,7 @@ mod tests {
 
     struct Harness {
         _dir: tempfile::TempDir,
+        endpoint: ProxyEndpoint,
         /// What a shell gets as `ANTHROPIC_BASE_URL`.
         base_url: String,
         origin: String,
@@ -403,6 +426,7 @@ mod tests {
             _dir: dir,
             base_url: endpoint.base_url(),
             origin: format!("http://127.0.0.1:{}", endpoint.port),
+            endpoint,
             fake,
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
             client,
@@ -411,9 +435,18 @@ mod tests {
 
     impl Harness {
         async fn message(&self, session: &str) -> (u16, String) {
+            self.message_in(None, session).await
+        }
+
+        /// A request from a terminal of `project`.
+        async fn message_in(&self, project: Option<&str>, session: &str) -> (u16, String) {
+            let base_url = project.map_or_else(
+                || self.base_url.clone(),
+                |project| self.endpoint.project_url(project),
+            );
             let response = self
                 .http
-                .post(format!("{}/v1/messages", self.base_url))
+                .post(format!("{base_url}/v1/messages"))
                 .header("authorization", "Bearer caller-own-token")
                 .header("x-claude-code-session-id", session)
                 .body(r#"{"model":"m","metadata":{"user_id":"{\"account_uuid\":\"caller\",\"session_id\":\"s\"}"}}"#)
@@ -421,6 +454,23 @@ mod tests {
                 .await
                 .unwrap();
             (response.status().as_u16(), response.text().await.unwrap())
+        }
+
+        async fn set_policy(&self, project: &str, policy: serde_json::Value) {
+            let command = AiProxyCommand::SetProjectPolicy {
+                project_id: project.into(),
+                policy: Some(serde_json::from_value(policy).unwrap()),
+            };
+            self.client.command(&command).await.unwrap();
+        }
+
+        fn served_tokens(&self) -> Vec<String> {
+            self.fake
+                .seen
+                .lock()
+                .iter()
+                .map(|(auth, _)| auth.trim_start_matches("Bearer ").to_owned())
+                .collect()
         }
 
         async fn post(&self, path: &str) -> reqwest::Response {
@@ -568,6 +618,130 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(body, "chunk0;chunk1;chunk2;chunk3;chunk4;");
+    }
+
+    #[tokio::test]
+    async fn required_account_is_waited_for_instead_of_spilling_over() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        h.set_policy(
+            "x",
+            serde_json::json!({"others": "forbid", "accounts": {"a": "allow"}}),
+        )
+        .await;
+        h.fake.replies.lock().insert("token-a".into(), vec![429]);
+
+        let (status, body) = h.message_in(Some("x"), "conv-x").await;
+        assert_eq!((status, body.as_str()), (429, "served by token-a"));
+        let (status, body) = h.message_in(Some("x"), "conv-x").await;
+        assert_eq!(status, 429);
+        assert!(body.contains("rate limited"), "{body}");
+        assert_eq!(h.served_tokens(), ["token-a"]);
+
+        // A project without a policy, and a terminal without a project, may use `b`.
+        assert_eq!(
+            h.message_in(Some("y"), "conv-y").await.1,
+            "served by token-b"
+        );
+        assert_eq!(h.message("conv-plain").await.1, "served by token-b");
+    }
+
+    #[tokio::test]
+    async fn preferred_account_comes_first_and_fails_over() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        h.set_policy(
+            "y",
+            serde_json::json!({"others": "allow", "accounts": {"b": "prefer"}}),
+        )
+        .await;
+        // Fresh accounts tie; without the preference `a` would serve.
+        assert_eq!(
+            h.message_in(Some("y"), "conv-1").await.1,
+            "served by token-b"
+        );
+
+        h.fake.replies.lock().insert("token-b".into(), vec![429]);
+        assert_eq!(
+            h.message_in(Some("y"), "conv-2").await.1,
+            "served by token-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn forbidding_an_account_moves_its_conversations() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        assert_eq!(h.message_in(Some("z"), "conv").await.1, "served by token-a");
+        h.set_policy(
+            "z",
+            serde_json::json!({"others": "allow", "accounts": {"a": "forbid"}}),
+        )
+        .await;
+        assert_eq!(h.message_in(Some("z"), "conv").await.1, "served by token-b");
+    }
+
+    #[tokio::test]
+    async fn forbidding_policy_never_falls_back_to_caller_credentials() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        h.set_policy(
+            "z",
+            serde_json::json!({"others": "allow", "accounts": {"a": "forbid"}}),
+        )
+        .await;
+        let (status, body) = h.message_in(Some("z"), "conv").await;
+        assert_eq!(status, 400);
+        assert!(
+            body.contains("No account this terminal's policy permits"),
+            "{body}"
+        );
+        assert!(h.fake.seen.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_an_account_drops_its_rules() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        h.set_policy(
+            "x",
+            serde_json::json!({"others": "forbid", "accounts": {"a": "allow", "gone": "allow"}}),
+        )
+        .await;
+        let status = h
+            .client
+            .command(&AiProxyCommand::RemoveAccount {
+                account_id: "a".into(),
+            })
+            .await
+            .unwrap();
+        let policy = &status.routing.projects["x"];
+        assert!(policy.accounts.is_empty(), "{policy:?}");
+        // "Only `a`" with `a` gone permits nothing, rather than every other account.
+        assert_eq!(h.message_in(Some("x"), "conv").await.0, 400);
+    }
+
+    #[test]
+    fn project_segment_is_split_off() {
+        assert_eq!(
+            split_project("/p/abc-1/v1/messages?beta=true"),
+            Some((Some("abc-1"), "/v1/messages?beta=true"))
+        );
+        assert_eq!(split_project("/v1/messages"), Some((None, "/v1/messages")));
+        assert_eq!(split_project("/px/v1"), Some((None, "/px/v1")));
+        assert_eq!(split_project("/p/"), None);
+        assert_eq!(split_project("/p/a%2Fb/v1/messages"), None);
     }
 
     #[test]
