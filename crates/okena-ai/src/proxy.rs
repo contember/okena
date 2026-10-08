@@ -38,10 +38,12 @@ impl Drop for InflightGuard {
 }
 
 impl Relay {
-    /// `path_and_query` is the request target with the endpoint token stripped.
+    /// `path_and_query` is the request target with the endpoint token and the
+    /// project segment stripped; `project` selects the routing policy.
     pub async fn handle(
         &self,
         method: Method,
+        project: Option<&str>,
         path_and_query: &str,
         headers: HeaderMap,
         body: Body,
@@ -66,10 +68,23 @@ impl Relay {
         for _ in 0..MAX_ATTEMPTS {
             let account = match selected.take() {
                 Some(account) => account,
-                None => match self.accounts.select(session.as_deref(), &excluded).await {
+                None => match self
+                    .accounts
+                    .select(project, session.as_deref(), &excluded)
+                    .await
+                {
                     Selection::Selected(account) => account,
                     Selection::NoAccounts => {
                         return self.passthrough(method, &url, &headers, body, guard).await;
+                    }
+                    Selection::NoPermittedAccount => {
+                        // 400 rather than 403: `claude` shows the message as is,
+                        // where a 401/403 can send the user to `/login`.
+                        return error(
+                            StatusCode::BAD_REQUEST,
+                            "No account this terminal's policy permits is enabled and \
+                             logged in. Check the policy in Settings > AI Proxy.",
+                        );
                     }
                     Selection::Exhausted { retry_at_ms } => {
                         return exhausted(rate_limited, retry_at_ms);
@@ -107,7 +122,11 @@ impl Relay {
                 }
             };
             let status = response.status();
-            log::debug!("[ai-proxy] {path} via account {}: {status}", account.id);
+            log::debug!(
+                "[ai-proxy] {path} for project {} via account {}: {status}",
+                project.unwrap_or("-"),
+                account.id
+            );
             self.accounts.observe(
                 &account.id,
                 session.as_deref(),
@@ -214,6 +233,7 @@ pub fn error(status: StatusCode, message: &str) -> Response {
     let kind = match status {
         StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
         StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
+        StatusCode::BAD_REQUEST => "invalid_request_error",
         _ => "api_error",
     };
     (
