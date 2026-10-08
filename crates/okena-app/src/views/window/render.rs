@@ -2,11 +2,11 @@ use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
     About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
     FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
-    RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
-    ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
-    ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    RestartDaemon, ReviewChanges, ShowAiProxyActivity, ShowBranchSwitcher, ShowCommandPalette,
+    ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings,
+    ShowLogConsole, ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager,
+    ShowSettings, ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
@@ -1137,6 +1137,13 @@ impl Render for WindowView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowLogConsole, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_log_console(cx));
+                }
+            }))
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |this, _: &ShowAiProxyActivity, _window, cx| {
+                    let endpoint = this.local_daemon_endpoint(cx);
+                    overlay_manager.update(cx, |om, cx| om.toggle_ai_proxy_activity(endpoint, cx));
                 }
             }))
             // Handle show profile manager action

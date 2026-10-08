@@ -1,6 +1,7 @@
 //! Settings → AI Proxy: route `claude` through the local daemon's account pool,
 //! and the routing policies that choose which accounts a project may use.
 
+use crate::remote::local::DaemonEndpoint;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::ui_text_ms;
@@ -22,7 +23,7 @@ use super::components::*;
 pub(super) enum AiProxyLoad {
     NotLoaded,
     Loading,
-    Loaded(AiProxyState),
+    Loaded(Box<AiProxyState>),
 }
 
 pub(super) struct AiProxyPanel {
@@ -49,10 +50,10 @@ impl SettingsPanel {
     /// Send one command to the daemon's AI proxy and show the resulting state.
     fn ai_proxy_command(&mut self, request: AiProxyCommand, cx: &mut Context<Self>) {
         let Some(endpoint) = self.daemon_endpoint.clone() else {
-            self.ai_proxy.load = AiProxyLoad::Loaded(AiProxyState {
+            self.ai_proxy.load = AiProxyLoad::Loaded(Box::new(AiProxyState {
                 status: None,
                 failure: Some("Local daemon is not connected".into()),
-            });
+            }));
             return;
         };
         self.ai_proxy.busy = true;
@@ -61,26 +62,13 @@ impl SettingsPanel {
         }
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let outcome = cx
+            let state = cx
                 .background_executor()
-                .spawn(async move {
-                    let value = crate::remote::local::post_action(
-                        &endpoint,
-                        &ActionRequest::AiProxy { request },
-                        // Starting the proxy and finishing a login can take a while.
-                        Duration::from_secs(75),
-                    )?;
-                    serde_json::from_value::<AiProxyState>(value)
-                        .map_err(|error| format!("Invalid AI proxy response: {error}"))
-                })
+                .spawn(async move { send_ai_proxy_command(&endpoint, request) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.ai_proxy.busy = false;
-                this.ai_proxy.load =
-                    AiProxyLoad::Loaded(outcome.unwrap_or_else(|failure| AiProxyState {
-                        status: None,
-                        failure: Some(failure),
-                    }));
+                this.ai_proxy.load = AiProxyLoad::Loaded(Box::new(state));
                 cx.notify();
             });
         })
@@ -138,7 +126,7 @@ impl SettingsPanel {
                         .child(empty_state("Starting AI proxy...", &t, cx).py(px(16.0))),
                 );
             }
-            AiProxyLoad::Loaded(state) => state.clone(),
+            AiProxyLoad::Loaded(state) => state.as_ref().clone(),
         };
 
         let busy = self.ai_proxy.busy;
@@ -265,7 +253,7 @@ impl SettingsPanel {
             self.ai_proxy_command(AiProxyCommand::Status, cx);
         }
         let state = match &self.ai_proxy.load {
-            AiProxyLoad::Loaded(state) => state.clone(),
+            AiProxyLoad::Loaded(state) => state.as_ref().clone(),
             AiProxyLoad::NotLoaded | AiProxyLoad::Loading => {
                 return content.child(
                     section_container(&t)
@@ -752,6 +740,27 @@ impl SettingsPanel {
 }
 
 /// The policy a [`SettingsPanel::render_policy_editor`] edits.
+/// Send one command to the local daemon's AI proxy. Blocking.
+pub(crate) fn send_ai_proxy_command(
+    endpoint: &DaemonEndpoint,
+    request: AiProxyCommand,
+) -> AiProxyState {
+    let outcome = crate::remote::local::post_action(
+        endpoint,
+        &ActionRequest::AiProxy { request },
+        // Starting the proxy and finishing a login can take a while.
+        Duration::from_secs(75),
+    )
+    .and_then(|value| {
+        serde_json::from_value::<AiProxyState>(value)
+            .map_err(|error| format!("Invalid AI proxy response: {error}"))
+    });
+    outcome.unwrap_or_else(|failure| AiProxyState {
+        status: None,
+        failure: Some(failure),
+    })
+}
+
 #[derive(Clone)]
 enum PolicyTarget {
     Default,
@@ -822,7 +831,7 @@ fn usage_text(window: &str, usage: Option<&AiUsage>, now: i64) -> String {
     }
 }
 
-fn format_remaining(ms: i64) -> String {
+pub(crate) fn format_remaining(ms: i64) -> String {
     let minutes = (ms / 60_000).max(1);
     if minutes < 60 {
         format!("{minutes}m")
