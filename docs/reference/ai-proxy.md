@@ -37,6 +37,11 @@ the proxy forwards requests with the terminal's own credentials.
 - **401**: the access token is refreshed once and the request retried; if the
   refresh token is rejected the account is marked *Needs login*.
 - A request is never retried after its response started streaming.
+- An upstream that sends nothing for 15 minutes (no response headers, or no
+  next chunk of a streaming body) is cut: before headers `claude` gets a 502,
+  during a stream the connection ends. This is longer than `claude`'s own
+  request timeout and stream watchdog, so it only ends requests `claude` has
+  already given up on.
 
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
 headers and from polling the usage endpoint every five minutes.
