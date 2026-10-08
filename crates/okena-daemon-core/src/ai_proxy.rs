@@ -2,7 +2,7 @@
 //! starting the proxy process, and forwarding `ActionRequest::AiProxy`.
 
 use okena_core::ai_proxy::{AiProxyCommand, AiProxyState, ensure_endpoint};
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{LaunchEnvironment, TerminalBackend};
 use okena_workspace::persistence::AppSettings;
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -12,20 +12,32 @@ fn profile_root() -> Option<PathBuf> {
     okena_core::profiles::try_current().map(|profile| profile.root.clone())
 }
 
-/// Extra environment for newly spawned PTYs: the Claude config dir and, with
-/// the proxy enabled, `ANTHROPIC_BASE_URL`. Shells that already run keep the
-/// environment they started with.
-pub(crate) fn pty_env(settings: &AppSettings) -> Vec<(String, Option<String>)> {
-    let mut env = okena_workspace::claude_env::claude_pty_env_for_settings(settings);
-    if settings.ai_proxy_enabled
+/// Environment for newly spawned PTYs: the Claude config dir and, with the
+/// proxy enabled, `ANTHROPIC_BASE_URL` naming the terminal's project, so the
+/// proxy applies that project's routing policy. Shells that already run keep
+/// the environment they started with.
+pub(crate) fn launch_environment(settings: &AppSettings) -> LaunchEnvironment {
+    let claude_env = okena_workspace::claude_env::claude_pty_env_for_settings(settings);
+    let endpoint = if settings.ai_proxy_enabled
         && let Some(root) = profile_root()
     {
-        match ensure_endpoint(&root) {
-            Ok(endpoint) => env.push(("ANTHROPIC_BASE_URL".into(), Some(endpoint.base_url()))),
-            Err(error) => log::error!("[ai-proxy] no endpoint for new shells: {error:#}"),
+        ensure_endpoint(&root)
+            .inspect_err(|error| log::error!("[ai-proxy] no endpoint for new shells: {error:#}"))
+            .ok()
+    } else {
+        None
+    };
+    Arc::new(move |project_id| {
+        let mut env = claude_env.clone();
+        if let Some(endpoint) = &endpoint {
+            let url = project_id.map_or_else(
+                || endpoint.base_url(),
+                |project_id| endpoint.project_url(project_id),
+            );
+            env.push(("ANTHROPIC_BASE_URL".into(), Some(url)));
         }
-    }
-    env
+        env
+    })
 }
 
 async fn connect() -> anyhow::Result<okena_ai::client::ProxyClient> {
@@ -48,7 +60,7 @@ pub(crate) fn start_if_enabled(
     let backend = backend.clone();
     runtime.spawn(async move {
         match connect().await {
-            Ok(_) => backend.set_extra_env(pty_env(&settings.lock())),
+            Ok(_) => backend.set_launch_environment(launch_environment(&settings.lock())),
             Err(error) => log::error!("[ai-proxy] failed to start: {error:#}"),
         }
     });
