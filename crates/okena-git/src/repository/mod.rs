@@ -9,6 +9,7 @@
 //! | [`branch`]   | list / checkout / create / delete / push branches, rebase, merge, stash, per-file stage |
 //! | [`status`]   | working-tree status, diff stats, HEAD/branch reads, ahead/behind |
 //! | `diff_memo`  | private: per-file diff counts remembered across status walks |
+//! | `range_memo` | private: ahead/behind and unpushed counts remembered per pair of commit ids |
 //! | [`ci`]       | GitHub PR info + CI check aggregation |
 //! | [`pull_requests`] | open PRs offered as worktree sources, searchable |
 //! | [`github`]   | GitHub base-repo resolution, token cache, REST/GraphQL client |
@@ -26,6 +27,7 @@ mod diff_memo;
 pub(crate) mod github;
 pub mod paths;
 pub mod pull_requests;
+mod range_memo;
 pub mod status;
 pub mod worktree;
 

@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use okena_core::process::{command, safe_output};
 
-use super::diff_memo;
+use super::{diff_memo, range_memo};
 use crate::GitStatus;
 
 /// Cheap identity of the commit currently checked out in a worktree.
@@ -44,15 +44,15 @@ pub enum StatusFetch {
 
 /// Get git status for a directory path.
 pub fn get_status(path: &Path) -> StatusFetch {
-    if crate::gix_helpers::open(path).is_none() {
+    let Some(repo) = crate::gix_helpers::open(path) else {
         return StatusFetch::NotRepo;
-    }
+    };
 
-    let branch = get_current_branch(path);
+    let branch = current_branch(&repo);
     let Some((lines_added, lines_removed)) = get_diff_stats(path) else {
         return StatusFetch::Transient;
     };
-    let unpushed = count_unpushed_commits(path);
+    let unpushed = unpushed_commits(&repo);
     let review_base = super::branch::resolve_review_base(path);
     // Only needed to decide whether the base label is redundant (base == default);
     // skip the lookup when there's no base chip to render.
@@ -64,7 +64,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
     // regardless of how `@{u}` is set and matches the "review changes" diff.
     // `None` when there's no base (HEAD is on the default branch).
     let (ahead, behind) = match review_base.as_deref() {
-        Some(base) => match count_ahead_behind_vs(path, base) {
+        Some(base) => match ahead_behind_vs(&repo, base) {
             Some((a, b)) => (Some(a), Some(b)),
             None => (None, None),
         },
@@ -165,7 +165,10 @@ pub fn has_uncommitted_changes(path: &Path) -> bool {
 
 /// Get the current branch name or short commit hash for detached HEAD.
 pub fn get_current_branch(path: &Path) -> Option<String> {
-    let repo = crate::gix_helpers::open(path)?;
+    current_branch(&crate::gix_helpers::open(path)?)
+}
+
+fn current_branch(repo: &gix::Repository) -> Option<String> {
     let head = repo.head().ok()?;
 
     if let Some(name) = head.referent_name() {
@@ -537,21 +540,8 @@ pub fn count_ahead_behind(path: &Path) -> Option<(usize, usize)> {
     let head_id = repo.head_id().ok()?.detach();
 
     // ahead = commits reachable from HEAD but not upstream; behind = the reverse.
-    let ahead = repo
-        .rev_walk([head_id])
-        .with_hidden([upstream_id])
-        .all()
-        .ok()?
-        .filter_map(Result::ok)
-        .count();
-    let behind = repo
-        .rev_walk([upstream_id])
-        .with_hidden([head_id])
-        .all()
-        .ok()?
-        .filter_map(Result::ok)
-        .count();
-
+    let ahead = range_memo::count_range(&repo, upstream_id, head_id)?;
+    let behind = range_memo::count_range(&repo, head_id, upstream_id)?;
     Some((ahead, behind))
 }
 
@@ -564,22 +554,24 @@ pub fn count_ahead_behind(path: &Path) -> Option<(usize, usize)> {
 /// `@{u}`), this measures against a fixed base, so the numbers are stable
 /// regardless of how tracking is set up and match the "review changes" diff.
 pub fn count_ahead_behind_vs(path: &Path, base_ref: &str) -> Option<(usize, usize)> {
-    let repo = crate::gix_helpers::open(path)?;
+    ahead_behind_vs(&crate::gix_helpers::open(path)?, base_ref)
+}
 
-    // Count one side of a range spec (e.g. `base..HEAD`) by walking `to` with
-    // `from` hidden — mirrors [`count_unpushed_commits`].
-    let count_range = |range: &str| -> Option<usize> {
-        let spec = repo.rev_parse(range).ok()?;
-        let gix::revision::plumbing::Spec::Range { from, to } = spec.detach() else {
-            return None;
-        };
-        let walk = repo.rev_walk([to]).with_hidden([from]).all().ok()?;
-        Some(walk.filter_map(Result::ok).count())
-    };
-
-    let ahead = count_range(&format!("{base_ref}..HEAD"))?;
-    let behind = count_range(&format!("HEAD..{base_ref}"))?;
+fn ahead_behind_vs(repo: &gix::Repository, base_ref: &str) -> Option<(usize, usize)> {
+    let (base, head) = resolve_range(repo, &format!("{base_ref}..HEAD"))?;
+    let ahead = range_memo::count_range(repo, base, head)?;
+    let behind = range_memo::count_range(repo, head, base)?;
     Some((ahead, behind))
+}
+
+/// Resolve a two-dot range spec such as `origin/main..HEAD` to its
+/// `(from, to)` commit ids.
+fn resolve_range(repo: &gix::Repository, spec: &str) -> Option<(gix::ObjectId, gix::ObjectId)> {
+    let spec = repo.rev_parse(spec).ok()?;
+    let gix::revision::plumbing::Spec::Range { from, to } = spec.detach() else {
+        return None;
+    };
+    Some((from, to))
 }
 
 /// Re-point a status's ahead/behind (and `review_base`) at the branch's open-PR
@@ -616,25 +608,19 @@ pub fn apply_pr_base(status: &mut GitStatus, path: &Path, pr_base: &str) {
 /// been pushed, or remote not configured). Returns `Some(n)` otherwise —
 /// `Some(0)` means everything is pushed.
 pub fn count_unpushed_commits(path: &Path) -> Option<usize> {
-    let repo = crate::gix_helpers::open(path)?;
-    let branch = get_current_branch(path)?;
+    unpushed_commits(&crate::gix_helpers::open(path)?)
+}
 
-    let revspec = format!("origin/{}..HEAD", branch);
-    let spec = repo.rev_parse(revspec.as_str()).ok()?;
-
-    let gix::revision::plumbing::Spec::Range { from, to } = spec.detach() else {
-        return None;
-    };
-
-    let walk = repo.rev_walk([to]).with_hidden([from]).all().ok()?;
-
-    Some(walk.filter_map(Result::ok).count())
+fn unpushed_commits(repo: &gix::Repository) -> Option<usize> {
+    let branch = current_branch(repo)?;
+    let (pushed, head) = resolve_range(repo, &format!("origin/{branch}..HEAD"))?;
+    range_memo::count_range(repo, pushed, head)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::test_support::{git_in, init_temp_repo};
+    use crate::repository::test_support::{git_in, init_temp_repo, repo_with_origin};
     use std::path::PathBuf;
 
     #[test]
@@ -1196,6 +1182,73 @@ mod tests {
         assert_eq!(get_diff_stats(&repo), Some((4, 1)));
         let computed = diff_memo::computed(&repo);
         assert_eq!((computed.tracked, computed.untracked), (2, 2));
+    }
+
+    fn commit_file(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), "x").unwrap();
+        git_in(repo, &["add", name]);
+        git_in(repo, &["-c", "commit.gpgsign=false", "commit", "-m", name]);
+    }
+
+    #[test]
+    fn range_memo_skips_the_walk_when_tips_are_unchanged() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        commit_file(&repo, "unpushed.txt");
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "f0.txt");
+        git_in(&repo, &["push", "-q", "origin", "feature"]);
+        commit_file(&repo, "f1.txt");
+
+        assert_eq!(count_ahead_behind_vs(&repo, "origin/main"), Some((3, 0)));
+        assert_eq!(count_unpushed_commits(&repo), Some(1));
+        let after_first = range_memo::walks(&repo);
+        assert_eq!(after_first, 3);
+
+        assert_eq!(count_ahead_behind_vs(&repo, "origin/main"), Some((3, 0)));
+        assert_eq!(count_unpushed_commits(&repo), Some(1));
+        assert_eq!(range_memo::walks(&repo), after_first);
+    }
+
+    #[test]
+    fn range_memo_recounts_when_a_tip_moves() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["checkout", "-b", "feature"]);
+        commit_file(&repo, "f0.txt");
+        assert_eq!(count_ahead_behind_vs(&repo, "main"), Some((1, 0)));
+        let after_first = range_memo::walks(&repo);
+
+        commit_file(&repo, "f1.txt");
+        assert_eq!(count_ahead_behind_vs(&repo, "main"), Some((2, 0)));
+        assert_eq!(range_memo::walks(&repo), after_first + 2);
+
+        git_in(&repo, &["checkout", "main"]);
+        commit_file(&repo, "m0.txt");
+        git_in(&repo, &["checkout", "feature"]);
+        assert_eq!(count_ahead_behind_vs(&repo, "main"), Some((2, 1)));
+        assert_eq!(range_memo::walks(&repo), after_first + 4);
+    }
+
+    #[test]
+    fn range_memo_walks_a_shallow_clone_every_time() {
+        let (_tmp, repo) = init_temp_repo();
+        commit_file(&repo, "second.txt");
+        let clone_tmp = tempfile::tempdir().expect("create clone tempdir");
+        let clone = clone_tmp.path().join("clone");
+        git_in(
+            &repo,
+            &[
+                "clone",
+                "-q",
+                "--depth=1",
+                &format!("file://{}", repo.display()),
+                clone.to_str().expect("clone path is utf-8"),
+            ],
+        );
+
+        assert_eq!(count_ahead_behind_vs(&clone, "origin/main"), Some((0, 0)));
+        let after_first = range_memo::walks(&clone);
+        assert_eq!(count_ahead_behind_vs(&clone, "origin/main"), Some((0, 0)));
+        assert_eq!(range_memo::walks(&clone), after_first + 2);
     }
 
     #[test]
