@@ -3,6 +3,7 @@ mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
+mod work;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
@@ -146,6 +147,13 @@ fn update_registered_panes_with_stats<T: 'static>(
 /// every window's view + OS handle and can therefore act across windows.
 #[derive(Clone)]
 pub enum WindowViewEvent {
+    RevealWork {
+        origin: WindowId,
+        connection_id: String,
+        project_id: String,
+        terminal_id: String,
+        completion: Option<Box<okena_core::attention::AttentionEpisode>>,
+    },
     /// Jump into an open project's first terminal: activate the window where it
     /// is open (`origin` preferred) and focus its first visible terminal,
     /// leaving the layout untouched.
@@ -160,6 +168,9 @@ pub enum WindowViewEvent {
 }
 
 pub struct WindowView {
+    work_draft: Option<work::MissionDraft>,
+    work_source: Option<(String, okena_core::mission::MissionMember)>,
+    mission_filter: okena_core::mission::MissionLifecycle,
     /// Identifies which window-scoped slot on the shared `Workspace` this
     /// view addresses (folder filter, hidden set, widths, collapse, focus
     /// zoom). Always `WindowId::Main` in single-window runtime; slice 05
@@ -288,6 +299,13 @@ impl WindowView {
                 cx,
             )
         });
+        cx.subscribe(
+            &sidebar,
+            |this, _, request: &okena_views_sidebar::sidebar::MissionRequested, cx| {
+                this.open_work_source(&request.project_id, request.terminal_id.as_deref(), cx);
+            },
+        )
+        .detach();
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
@@ -385,6 +403,9 @@ impl WindowView {
         }
 
         let mut view = Self {
+            work_draft: None,
+            work_source: None,
+            mission_filter: okena_core::mission::MissionLifecycle::Active,
             window_id,
             focus_manager,
             workspace,

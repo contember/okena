@@ -16,6 +16,8 @@ fn make_project(id: &str) -> ProjectData {
         path: "/tmp/test".to_string(),
         layout: Some(LayoutNode::Terminal {
             terminal_id: Some(format!("term_{}", id)),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -45,6 +47,8 @@ fn make_project(id: &str) -> ProjectData {
 fn terminal(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        mission_id: None,
+        mission_excluded: false,
         pending_agent_resume: None,
         minimized: false,
         detached: false,
@@ -58,6 +62,10 @@ fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> Workspac
     WorkspaceData {
         version: 1,
         agent_session_history: Default::default(),
+        missions: Vec::new(),
+        mission_excluded_conversations: Vec::new(),
+        attention: Default::default(),
+        remote_work_overviews: HashMap::new(),
         projects,
         project_order: order.into_iter().map(String::from).collect(),
         service_panel_heights: HashMap::new(),
@@ -136,6 +144,8 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -145,6 +155,8 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -208,6 +220,8 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -217,6 +231,8 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -226,6 +242,8 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -282,6 +300,8 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -291,6 +311,8 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -300,6 +322,8 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -381,6 +405,8 @@ fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestApp
     // active tab on t3 (now at index 1), NOT land on t2.
     let term = |id: &str| LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        mission_id: None,
+        mission_excluded: false,
         pending_agent_resume: None,
         minimized: false,
         detached: false,
@@ -441,6 +467,8 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
         children: vec![
             LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -450,6 +478,8 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -459,6 +489,8 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -507,6 +539,8 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
 fn terminal_node_t(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        mission_id: None,
+        mission_excluded: false,
         pending_agent_resume: None,
         minimized: false,
         detached: false,

@@ -8,6 +8,7 @@
 //! no behavior beyond a few pure helpers.
 
 mod hooks_config;
+pub mod mission;
 mod toast;
 mod transient;
 mod window_id;
@@ -20,7 +21,9 @@ pub use okena_layout::{LayoutNode, SplitDirection};
 pub use toast::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 pub use transient::{DropZone, FocusedTerminalState, PendingWorktreeClose};
 pub use window_id::WindowId;
-pub use window_state::{ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState};
+pub use window_state::{
+    MissionSelection, ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState, WorkNavigation,
+};
 pub use workspace_data::{
     FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,
     WorktreeMetadata, is_bash_prompt_title, now_unix_seconds,

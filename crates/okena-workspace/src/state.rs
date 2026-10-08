@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
-    PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId, WindowState,
-    WorkspaceData, WorktreeMetadata, now_unix_seconds,
+    MissionSelection, PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds, WindowId,
+    WindowState, WorkNavigation, WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -696,6 +696,11 @@ impl Workspace {
             );
             teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
             teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+            for session in &teardown_sessions {
+                self.data
+                    .attention
+                    .invalidate_terminal(&session.terminal_id);
+            }
             hook_terminal_ids.sort();
             preserved_registry_terminal_ids.sort();
             self.mark_closing_project_authoritative(project_id);
@@ -885,6 +890,11 @@ impl Workspace {
         }
         teardown_sessions.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         teardown_sessions.dedup_by(|a, b| a.terminal_id == b.terminal_id);
+        for session in &teardown_sessions {
+            self.data
+                .attention
+                .invalidate_terminal(&session.terminal_id);
+        }
         project_ids.sort();
         ordinary_slots.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         hook_terminal_ids.sort();
@@ -1232,6 +1242,7 @@ impl Workspace {
     /// every visible terminal grid each time. Keep such callers rare or
     /// throttled (see `bump_activity`).
     pub fn notify_data(&mut self, cx: &mut impl WorkspaceCx) {
+        crate::missions::reconcile_membership(&mut self.data);
         self.data_version += 1;
         cx.notify();
         cx.refresh_views();
@@ -1784,6 +1795,12 @@ impl Workspace {
             return;
         }
         let mut changed = self.data.agent_session_history.record(session.clone());
+        changed |= crate::missions::promote_conversation(
+            &mut self.data,
+            project_id,
+            terminal_id,
+            (&session).into(),
+        );
         if let Some(project) = self.project_mut(project_id)
             && project.agent_sessions.get(terminal_id) != Some(&session)
         {
@@ -1833,6 +1850,7 @@ impl Workspace {
     /// cross-project *move* must not use this — see the `move_ops` migration,
     /// which carries the session with the terminal.
     pub fn forget_agent_session(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) {
+        self.invalidate_attention_terminal(terminal_id, cx);
         let mut removed = false;
         for project in &mut self.data.projects {
             removed |= project.agent_sessions.remove(terminal_id).is_some();
@@ -2737,6 +2755,25 @@ mod workspace_tests {
             *detached = true;
         }
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
+        let mut cx = RecordingCx::default();
+        for (terminal_id, lifecycle) in [
+            ("term_p1", okena_core::agent_status::AgentLifecycle::Blocked),
+            ("service-1", okena_core::agent_status::AgentLifecycle::Done),
+            ("hook-1", okena_core::agent_status::AgentLifecycle::Done),
+        ] {
+            workspace.record_attention(
+                okena_core::attention::AttentionSource {
+                    project_id: "p1".into(),
+                    terminal_id: terminal_id.into(),
+                    attachment_id: "original".into(),
+                    generation: 1,
+                    conversation: None,
+                },
+                Some(&okena_core::agent_status::AgentStatus::new(lifecycle)),
+                1,
+                &mut cx,
+            );
+        }
 
         let migration = workspace
             .begin_terminal_backend_migration(SessionBackend::None, &ShellType::Default)
@@ -2772,6 +2809,18 @@ mod workspace_tests {
         workspace
             .restore_terminal_backend_migration_slots(&migration)
             .expect("restore slots");
+        let episodes = workspace.data.attention.episodes();
+        assert_eq!(episodes.len(), 3);
+        assert!(
+            episodes
+                .iter()
+                .all(|e| !e.available && !e.can_open_terminal())
+        );
+        let question = episodes
+            .iter()
+            .find(|e| e.source.terminal_id == "term_p1")
+            .unwrap();
+        assert!(workspace.acknowledge_attention(&question.id, question.revision, true, &mut cx));
         assert!(matches!(
             workspace.project("p1").and_then(|project| project.layout.as_ref()),
             Some(LayoutNode::Terminal {
@@ -2858,6 +2907,8 @@ mod workspace_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -2892,6 +2943,10 @@ mod workspace_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -2910,6 +2965,8 @@ mod workspace_tests {
                 .iter()
                 .map(|tid| LayoutNode::Terminal {
                     terminal_id: Some((*tid).to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -3103,6 +3160,20 @@ mod workspace_tests {
             .insert("running-hook".to_string(), "running".to_string());
         let mut workspace = Workspace::new(make_workspace_data(vec![project], vec!["p1"]));
         let mut cx = RecordingCx::default();
+        workspace.record_attention(
+            okena_core::attention::AttentionSource {
+                project_id: "p1".into(),
+                terminal_id: "term_p1".into(),
+                attachment_id: "original".into(),
+                generation: 1,
+                conversation: None,
+            },
+            Some(&okena_core::agent_status::AgentStatus::new(
+                okena_core::agent_status::AgentLifecycle::Done,
+            )),
+            1,
+            &mut cx,
+        );
 
         let first = workspace
             .begin_project_runtime_quiesce(
@@ -3114,6 +3185,9 @@ mod workspace_tests {
             )
             .expect("quiesce project");
         assert_eq!(first.hook_terminal_ids, vec!["running-hook"]);
+        let completion = &workspace.data.attention.episodes()[0];
+        assert!(!completion.available);
+        assert!(!completion.can_open_terminal());
         assert_eq!(
             first.preserved_registry_terminal_ids,
             vec!["completed-hook"]
@@ -3246,6 +3320,8 @@ mod workspace_tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: true,
@@ -3255,6 +3331,8 @@ mod workspace_tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
+                    mission_id: None,
+                    mission_excluded: false,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -3915,6 +3993,8 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -3948,6 +4028,10 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -3961,6 +4045,8 @@ mod gpui_tests {
     fn pane(terminal_id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(terminal_id.to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -4100,6 +4186,7 @@ mod gpui_tests {
                 local_endpoint: None,
             },
             state: Some(StateResponse {
+                work_overview: None,
                 state_version: 1,
                 projects: vec![ApiProject {
                     id: "p1".to_string(),

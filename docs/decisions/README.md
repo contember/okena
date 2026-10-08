@@ -16,3 +16,4 @@ a commit message suffices.
 
 - 0001 — [Split Okena into a headless daemon and thin clients](0001-headless-two-process-daemon.md) — accepted (2026-06-29)
 - 0002 — [A window is a filtered viewport, not a partition](0002-window-as-viewport.md) — accepted (2026-05-12)
+- 0003 — [Separate durable missions from runtime and shared attention](0003-missions-and-shared-attention.md) — accepted (2026-10-02)

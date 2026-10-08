@@ -272,6 +272,8 @@ impl Workspace {
                 .iter()
                 .any(|p| p.id == project_id);
 
+            self.restore_terminal(project_id, &path, cx);
+
             // Activate any tabs along the path so the terminal becomes visible
             if let Some(project_mut) = self.project_mut(project_id)
                 && let Some(ref mut layout) = project_mut.layout
@@ -294,6 +296,56 @@ impl Workspace {
     }
 }
 
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+
+    struct Cx;
+    impl WorkspaceCx for Cx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<okena_hooks::HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor> {
+            None
+        }
+    }
+
+    #[test]
+    fn reveal_restores_minimized_hidden_inactive_tab_and_preserves_detachment() {
+        for detached in [false, true] {
+            let data = serde_json::from_value(serde_json::json!({
+                "projects": [{"id": "p", "name": "Remote", "path": "/repo", "connection_id": "remote",
+                    "layout": {"type": "tabs", "active_tab": 0, "children": [
+                        {"type": "terminal", "terminal_id": "other"},
+                        {"type": "terminal", "terminal_id": "target", "minimized": true, "detached": detached}
+                    ]}}],
+                "project_order": ["p"], "main_window": {"hidden_project_ids": ["p"]}
+            })).unwrap();
+            let mut ws = Workspace::new(data);
+            let mut fm = FocusManager::new();
+            ws.focus_terminal_by_id(&mut fm, WindowId::Main, "p", "target", &mut Cx);
+            let layout = ws.project("p").unwrap().layout.as_ref().unwrap();
+            assert!(matches!(
+                layout,
+                crate::state::LayoutNode::Tabs { active_tab: 1, .. }
+            ));
+            assert!(
+                matches!(layout.get_at_path(&[1]), Some(crate::state::LayoutNode::Terminal { minimized: false, detached: actual, .. }) if *actual == detached)
+            );
+            let focused = fm.focused_terminal_state().unwrap();
+            assert_eq!(focused.project_id, "p");
+            assert_eq!(focused.layout_path, vec![1]);
+            assert!(
+                ws.visible_projects(WindowId::Main, fm.focused_project_id(), false)
+                    .iter()
+                    .any(|p| p.id == "p")
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
     use crate::focus::FocusManager;
@@ -306,6 +358,10 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -543,6 +599,8 @@ mod jump_gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -573,6 +631,10 @@ mod jump_gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![project("p1", "t1"), project("p2", "t2")],
             project_order: vec!["p1".to_string(), "p2".to_string()],
             folders: Vec::new(),

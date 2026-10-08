@@ -60,6 +60,9 @@ mod tests {
 
 /// Event emitted by ContextMenu
 pub enum ContextMenuEvent {
+    Mission {
+        project_id: String,
+    },
     Close,
     AddTerminal {
         project_id: String,
@@ -367,6 +370,19 @@ impl Render for ContextMenu {
             .child(deferred(
                 anchored().position(position).snap_to_window().child(
                     context_menu_panel("project-context-menu", &t)
+                        .child(
+                            menu_item(
+                                "context-menu-mission",
+                                "icons/bookmark.svg",
+                                "Create / attach to mission…",
+                                &t,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(ContextMenuEvent::Mission {
+                                    project_id: this.request.project_id.clone(),
+                                });
+                            })),
+                        )
                         // Add Terminal option
                         .child(
                             menu_item(

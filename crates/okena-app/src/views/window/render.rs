@@ -707,6 +707,11 @@ impl Render for WindowView {
             .track_focus(&focus_handle)
             .on_action(cx.listener(
                 |this, _: &okena_views_terminal::actions::Cancel, _window, cx| {
+                    if this.work_draft.is_some() {
+                        this.close_work_draft(cx);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
                     if this.pane_move.read(cx).source().is_some() {
                         this.pane_move.update(cx, |state, cx| state.cancel(cx));
                         cx.stop_propagation();
@@ -1500,6 +1505,7 @@ impl Render for WindowView {
                             .flex_col()
                             .min_h_0()
                             .min_w_0()
+                            .child(self.render_work_navigation(cx))
                             .child(
                                 // Projects grid (zoom is handled by LayoutContainer)
                                 div()
@@ -1507,6 +1513,8 @@ impl Render for WindowView {
                                     .flex_1()
                                     .min_h_0()
                                     .min_w_0()
+                                    .flex()
+                                    .children(self.render_work_panel(cx))
                                     .child(self.render_projects_grid(cx)),
                             ),
                     ),

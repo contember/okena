@@ -214,7 +214,7 @@ impl AgentStatus {
 /// a decoded multi-megabyte `msg=` would keep its full capacity alive for as
 /// long as the status is held on the `Terminal` — making the documented cap a
 /// length limit but not a memory limit.
-fn truncate_to_bytes(s: &mut String, max: usize) {
+pub(crate) fn truncate_to_bytes(s: &mut String, max: usize) {
     if s.len() <= max {
         return;
     }

@@ -89,6 +89,18 @@ pub fn execute_action(
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     match action {
+        ActionRequest::Mission { command } => match ws.execute_mission(command, cx) {
+            Ok(id) => ActionResult::Ok(Some(serde_json::json!({ "mission_id": id }))),
+            Err(error) => ActionResult::Err(error),
+        },
+        ActionRequest::AcknowledgeAttention {
+            episode_id,
+            revision,
+            dismiss,
+        } => {
+            let changed = ws.acknowledge_attention(&episode_id, revision, dismiss, cx);
+            ActionResult::Ok(Some(serde_json::json!({ "changed": changed })))
+        }
         // ── Terminal ops ─────────────────────────────────────────────
         ActionRequest::CreateTerminal { project_id } => terminal::create(
             ws,
@@ -617,6 +629,7 @@ pub fn execute_action(
         ActionRequest::CreateWorktree {
             project_id,
             branch,
+            mission_id,
             create_branch,
         } => project::create_worktree(
             ws,
@@ -624,6 +637,7 @@ pub fn execute_action(
             project_id,
             branch,
             create_branch,
+            mission_id,
             backend,
             terminals,
             settings,
@@ -1362,6 +1376,8 @@ mod reconnect_shell_tests {
             path: "/project".into(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: terminal_id.map(str::to_string),
+                mission_id: None,
+                mission_excluded: false,
                 pending_agent_resume,
                 shell_type,
                 minimized: false,
@@ -1389,6 +1405,10 @@ mod reconnect_shell_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![project],
             project_order: vec!["project".into()],
             folders: Vec::new(),
@@ -1730,11 +1750,13 @@ mod agent_resume_tests {
         std::fs::write(&path, serde_json::to_vec(ws.data()).unwrap()).unwrap();
         let restored = okena_workspace::sessions::import_workspace(&path).unwrap();
         std::fs::remove_file(path).unwrap();
+        let imported_project_id = restored.projects[0].id.clone();
+        assert_ne!(imported_project_id, "project");
         ws = okena_workspace::state::Workspace::new(restored);
 
         let result = spawn_uninitialized_terminals(
             &mut ws,
-            "project",
+            &imported_project_id,
             &backend,
             &terminals,
             &settings(true),
@@ -1743,7 +1765,7 @@ mod agent_resume_tests {
         );
         assert!(matches!(result, super::ActionResult::Ok(_)));
         assert!(
-            ws.project("project")
+            ws.project(&imported_project_id)
                 .unwrap()
                 .layout
                 .as_ref()
@@ -1751,10 +1773,21 @@ mod agent_resume_tests {
                 .pending_agent_resume()
                 .is_none()
         );
-        assert_eq!(ws.agent_session("project", "terminal"), Some(captured));
+        assert_eq!(
+            ws.agent_session(&imported_project_id, "terminal"),
+            Some(captured)
+        );
         let plans = backend.plans.lock().unwrap();
         assert_eq!(plans.len(), 2);
-        assert_eq!(plans[0], plans[1]);
+        let mut expected_retry = plans[0].clone();
+        let project_id_env = expected_retry
+            .environment
+            .iter_mut()
+            .find(|(key, _)| key == "OKENA_PROJECT_ID")
+            .expect("launch plan includes project identity");
+        assert_eq!(project_id_env.1, "project");
+        project_id_env.1 = imported_project_id;
+        assert_eq!(expected_retry, plans[1]);
         assert!(
             plans[1]
                 .initial_command
@@ -1777,6 +1810,8 @@ mod agent_resume_tests {
         let pending_leaf = data.projects[0].layout.take().unwrap();
         let live_leaf = LayoutNode::Terminal {
             terminal_id: Some("survivor".into()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

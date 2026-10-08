@@ -607,6 +607,8 @@ mod tests {
     fn term(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            mission_id: None,
+            mission_excluded: false,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -645,6 +647,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![project_with(layout)],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),

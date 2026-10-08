@@ -4,7 +4,7 @@
 //! [`subcommand_names`] feeds the gate in `try_handle_cli` so the GUI / profile
 //! launch path stays untouched for anything that isn't one of our commands.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 /// Okena CLI — control a running Okena instance over its remote HTTP API.
 #[derive(Parser)]
@@ -86,6 +86,14 @@ pub enum Command {
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCmd,
+    },
+    /// Inspect the mission assigned to this terminal or agent conversation
+    #[command(
+        after_help = "Mission arguments accept an exact ID or a unique case-insensitive title.\nExamples:\n  okena mission list --json\n  okena mission create \"CSV export\" --goal \"Export records\" --current-terminal\n  okena mission attach <MISSION> --agent claude-code --session-id <UUID>\n  okena mission show <MISSION> --json\n\nMembership selectors are explicit and mutually exclusive. --current-terminal reads $OKENA_TERMINAL_ID; conversations always require their own identity. Mutations print the mission ID, or {\"mission_id\":\"...\"} with --json."
+    )]
+    Mission {
+        #[command(subcommand)]
+        cmd: MissionCmd,
     },
     /// Folder operations
     Folder {
@@ -170,6 +178,106 @@ pub enum Command {
         #[command(subcommand)]
         cmd: UpdateCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub enum MissionCmd {
+    /// List all missions on the selected daemon
+    List {
+        /// Output structured missions
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Print only mission IDs
+        #[arg(short, long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Show a mission's full membership and last-reported attachments
+    Show {
+        /// Exact mission ID or unique case-insensitive title
+        mission: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a mission; prints its ID (membership is optional and explicit)
+    Create {
+        title: String,
+        #[arg(long)]
+        goal: Option<String>,
+        /// Home context, addressed by project ID, name or path
+        #[arg(long)]
+        home_project: Option<String>,
+        #[command(flatten)]
+        member: MissionMemberArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a member; conflicting primary membership requires move
+    Attach(MissionMembershipArgs),
+    /// Detach a member; respects the daemon's persistent exclusions
+    Detach(MissionMembershipArgs),
+    /// Move a member to the target mission
+    Move(MissionMembershipArgs),
+    /// Read a bounded mission briefing without changing membership or attention
+    #[command(
+        after_help = "Examples:\n  okena mission context\n  okena mission context --json\n  okena mission context --agent claude-code --session-id <UUID>\n\n--claude-hook reads Claude Code event JSON from stdin and emits hook JSON only when context changes. Hook failures never block the agent."
+    )]
+    Context(MissionContextArgs),
+}
+
+#[derive(Args)]
+pub struct MissionMembershipArgs {
+    /// Exact mission ID or unique case-insensitive title
+    #[arg(requires = "mission_member")]
+    pub mission: String,
+    #[command(flatten)]
+    pub member: MissionMemberArgs,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+#[group(skip)]
+#[command(group(ArgGroup::new("mission_member")
+    .args(["current_terminal", "terminal", "repository", "worktree", "agent"])
+    .multiple(false)))]
+pub struct MissionMemberArgs {
+    /// Select this pane using $OKENA_TERMINAL_ID
+    #[arg(long)]
+    pub current_terminal: bool,
+    /// Terminal ID, project/name or project:index
+    #[arg(long)]
+    pub terminal: Option<String>,
+    /// Repository project ID, name or path (does not assign its terminals)
+    #[arg(long)]
+    pub repository: Option<String>,
+    /// Worktree project ID, name or path
+    #[arg(long)]
+    pub worktree: Option<String>,
+    /// Harness ID for the conversation; requires its own --session-id
+    #[arg(long, requires = "session_id")]
+    pub agent: Option<String>,
+    /// Harness-native conversation ID, never inferred from the pane's previous agent
+    #[arg(long, requires = "agent")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Args)]
+pub struct MissionContextArgs {
+    /// Exact daemon-local terminal ID; defaults to $OKENA_TERMINAL_ID
+    #[arg(long)]
+    pub terminal: Option<String>,
+    /// Current harness ID; pair with --session-id to avoid a previous pane session
+    #[arg(long, requires = "session_id", conflicts_with = "claude_hook")]
+    pub agent: Option<String>,
+    /// Current harness-native conversation ID; preserves its mission when resumed elsewhere
+    #[arg(long, requires = "agent", conflicts_with = "claude_hook")]
+    pub session_id: Option<String>,
+    /// Output structured context instead of the text briefing
+    #[arg(long, conflicts_with = "claude_hook")]
+    pub json: bool,
+    /// Read Claude hook JSON from stdin; output additionalContext on changes
+    #[arg(long)]
+    pub claude_hook: bool,
 }
 
 #[derive(Subcommand)]
@@ -505,7 +613,7 @@ pub fn subcommand_names() -> &'static [&'static str] {
     &[
         "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
         "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
-        "command", "update",
+        "command", "update", "mission",
     ]
 }
 
@@ -539,6 +647,92 @@ mod tests {
         // clap runs its internal consistency debug-asserts here; a malformed
         // command tree would panic.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn mission_context_requires_a_complete_identity_and_separates_hook_output() {
+        assert!(Cli::try_parse_from(["okena", "mission", "context"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "mission", "context", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "mission", "context", "--claude-hook"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "okena",
+                "mission",
+                "context",
+                "--agent",
+                "claude-code",
+                "--session-id",
+                "00000000-0000-0000-0000-000000000001"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["okena", "mission", "context", "--agent", "claude-code"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["okena", "mission", "context", "--session-id", "x"]).is_err());
+        assert!(
+            Cli::try_parse_from(["okena", "mission", "context", "--claude-hook", "--json"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mission_membership_selectors_are_explicit_and_mutually_exclusive() {
+        for verb in ["attach", "detach", "move"] {
+            for selector in [
+                vec!["--current-terminal"],
+                vec!["--terminal", "Repo:0"],
+                vec!["--repository", "Repo"],
+                vec!["--worktree", "Worktree"],
+                vec![
+                    "--agent",
+                    "claude-code",
+                    "--session-id",
+                    "00000000-0000-0000-0000-000000000001",
+                ],
+            ] {
+                let mut args = vec!["okena", "mission", verb, "Export"];
+                args.extend(selector);
+                args.push("--json");
+                assert!(Cli::try_parse_from(args).is_ok(), "{verb}");
+            }
+            for selector in [
+                vec![],
+                vec!["--agent", "claude-code"],
+                vec!["--session-id", "x"],
+                vec!["--current-terminal", "--repository", "Repo"],
+                vec![
+                    "--terminal",
+                    "t",
+                    "--agent",
+                    "claude-code",
+                    "--session-id",
+                    "x",
+                ],
+            ] {
+                let mut args = vec!["okena", "mission", verb, "Export"];
+                args.extend(selector);
+                assert!(Cli::try_parse_from(args).is_err(), "{verb}");
+            }
+        }
+        assert!(Cli::try_parse_from(["okena", "mission", "create", "Export"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "okena",
+                "mission",
+                "create",
+                "Export",
+                "--goal",
+                "Add export",
+                "--home-project",
+                "Repo",
+                "--current-terminal",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["okena", "mission", "list", "--quiet", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "mission", "show", "Export", "--json"]).is_ok());
     }
 
     #[test]

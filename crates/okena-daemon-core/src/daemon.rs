@@ -565,6 +565,7 @@ impl DaemonCore {
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_poll(
                 reactor.workspace.clone(),
+                reactor.workspace_tick.clone(),
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
                 remote_subscribed_terminals.clone(),
@@ -847,6 +848,8 @@ mod shutdown_tests {
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some("layout".to_string()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: Default::default(),
@@ -1036,6 +1039,8 @@ mod shutdown_tests {
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some("ordinary".to_string()),
                 pending_agent_resume: None,
+                mission_id: None,
+                mission_excluded: false,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,

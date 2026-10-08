@@ -94,6 +94,7 @@ impl Sidebar {
                         project_id: parent_id.clone(),
                         branch,
                         create_branch: true,
+                        mission_id: None,
                     },
                     cx,
                 );

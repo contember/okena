@@ -32,12 +32,20 @@ pub enum RemoteCommand {
     },
     /// Get the full workspace state snapshot.
     GetState,
+    GetMissionContext(okena_core::mission::MissionContextRequest),
     /// Render a terminal's visible content as ANSI bytes (for snapshots).
-    RenderSnapshot { terminal_id: String },
+    RenderSnapshot {
+        terminal_id: String,
+    },
     /// Get current grid sizes (cols, rows) for multiple terminals.
-    GetTerminalSizes { terminal_ids: Vec<String> },
+    GetTerminalSizes {
+        terminal_ids: Vec<String>,
+    },
     /// Bracketed-paste server-local text into the target terminal.
-    PastePath { terminal_id: String, text: String },
+    PastePath {
+        terminal_id: String,
+        text: String,
+    },
 }
 
 /// Channel types for the bridge.

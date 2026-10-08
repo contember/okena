@@ -80,6 +80,14 @@ impl GithubPollSchedule {
         entry.ci_revalidate_cycle = 0;
     }
 
+    /// Require a wire fetch at the next scheduled CI poll without changing its cadence.
+    pub fn require_fresh_ci(&mut self, id: &str) {
+        if let Some(entry) = self.projects.get_mut(id) {
+            entry.settled_ci_sha = None;
+            entry.ci_revalidate_cycle = 0;
+        }
+    }
+
     /// A project became relevant. Only worth an off-cadence fetch when the
     /// caller holds no PR/CI result for it — otherwise the cached badge is
     /// still good and the cadence will refresh it.
@@ -279,6 +287,37 @@ pub fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrig
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requiring_fresh_ci_preserves_cadence_urgency_and_rate_limit_gate() {
+        let mut schedule = GithubPollSchedule::default();
+        schedule.record_pr("p", 10);
+        schedule.record_ci("p", 10, false, Some("sha".into()));
+        schedule.note_rate_limited(10);
+        assert_eq!(schedule.ci_skip_sha("p", 11).as_deref(), Some("sha"));
+        schedule.require_fresh_ci("p");
+        assert_eq!(schedule.ci_skip_sha("p", 11), None);
+        assert!(!schedule.has_urgent());
+        assert!(!schedule.pr_due("p", 21, true));
+        assert!(!schedule.ci_due("p", 21, true));
+        assert!(schedule.pr_due("p", 22, true));
+        assert!(schedule.ci_due("p", 22, true));
+        assert!(schedule.is_rate_limited(21));
+        assert!(!schedule.is_rate_limited(22));
+        schedule.note_rate_limited(22);
+        assert_eq!(schedule.rate_limit_backoff_cycles(), 24);
+        schedule.force("p");
+        schedule.require_fresh_ci("p");
+        assert!(schedule.is_urgent("p"));
+        assert!(schedule.pr_due("p", 22, false));
+        assert!(schedule.ci_due("p", 22, false));
+        assert!(schedule.is_rate_limited(45));
+        assert!(!schedule.is_rate_limited(46));
+        schedule.require_fresh_ci("unknown");
+        assert!(!schedule.is_urgent("unknown"));
+        assert!(!schedule.ci_due("unknown", 0, true));
+        assert!(schedule.ci_due("unknown", 1, true));
+    }
 
     #[test]
     fn head_change_only_wakes_local_git_poll() {

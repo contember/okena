@@ -41,7 +41,7 @@ pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
 };
-pub use github::has_github_remote;
+pub use github::{GithubRepo, has_github_remote, resolve_base_repo};
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
     project_path_in_worktree, resolve_git_root_and_subdir,

@@ -86,6 +86,12 @@ pub enum PtyEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PtyGeneration(u64);
 
+impl PtyGeneration {
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Default)]
 struct PtyInstances {
     current: HashMap<String, PtyGeneration>,
@@ -1158,6 +1164,11 @@ impl PtyManager {
         for (key, value) in &plan.environment {
             environment.retain(|(existing, _)| existing != key);
             environment.push((key.clone(), Some(value.clone())));
+        }
+        if let Some(profile) = okena_core::profiles::try_current() {
+            // An existing tmux server may have inherited a different profile.
+            environment.retain(|(key, _)| key != "OKENA_PROFILE");
+            environment.push(("OKENA_PROFILE".into(), Some(profile.id.clone())));
         }
         environment
     }

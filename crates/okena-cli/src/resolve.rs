@@ -355,6 +355,7 @@ mod tests {
 
     fn state_with(projects: Vec<ApiProject>, windows: Vec<ApiWindow>) -> StateResponse {
         StateResponse {
+            work_overview: None,
             state_version: 1,
             projects,
             focused_project_id: None,

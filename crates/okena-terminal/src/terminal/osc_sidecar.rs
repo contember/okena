@@ -3,7 +3,7 @@ use base64::Engine as _;
 use okena_core::agent_session::{AgentSession, RESERVED_LABEL_KEYS};
 use okena_core::agent_status::{AgentLifecycle, AgentStatus};
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -39,6 +39,15 @@ const OSC99_MAX_PENDING: usize = 32;
 
 /// Keep the newest notifications if the host stops draining them.
 const MAX_PENDING_NOTIFICATIONS: usize = 32;
+
+pub const MAX_PENDING_ATTENTION_EVENTS: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentAttentionEvent {
+    pub generation: u64,
+    pub session: Option<AgentSession>,
+    pub status: Option<AgentStatus>,
+}
 
 /// Reassembly buffer for a chunked `OSC 99` notification keyed by its `i=` id.
 #[derive(Default)]
@@ -85,12 +94,37 @@ impl OscSidecar {
                 transport,
                 terminal_id,
                 osc99_pending: HashMap::new(),
+                attention_events: VecDeque::new(),
+                attention_loss: 0,
+                generation: 0,
             },
         }
     }
 
     pub(super) fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.perform, bytes);
+    }
+
+    pub(super) fn set_generation(&mut self, generation: u64) {
+        if self.perform.generation == generation {
+            return;
+        }
+        if self.perform.generation != 0 {
+            self.perform.generation = generation;
+            self.parser = alacritty_terminal::vte::Parser::new();
+            *self.perform.agent_status.lock() = None;
+            *self.perform.agent_session.lock() = None;
+            self.perform.remote_dirty.store(true, Ordering::Relaxed);
+            self.perform.capture_attention(None);
+        }
+        self.perform.generation = generation;
+    }
+
+    pub(super) fn take_attention_events(&mut self) -> (Vec<AgentAttentionEvent>, u64) {
+        (
+            self.perform.attention_events.drain(..).collect(),
+            std::mem::take(&mut self.perform.attention_loss),
+        )
     }
 }
 
@@ -127,9 +161,30 @@ struct SidecarPerform {
     /// In-progress `OSC 99` notifications keyed by `i=` id, awaiting their
     /// final (`d=1`) chunk. GPUI-thread only (process_output is serialized).
     osc99_pending: HashMap<String, Osc99Accumulator>,
+    attention_events: VecDeque<AgentAttentionEvent>,
+    attention_loss: u64,
+    generation: u64,
 }
 
 impl SidecarPerform {
+    fn capture_attention(&mut self, status: Option<AgentStatus>) {
+        if !self.transport.answers_terminal_queries() {
+            return;
+        }
+        let event = AgentAttentionEvent {
+            generation: self.generation,
+            session: self.agent_session.lock().clone(),
+            status,
+        };
+        if self.attention_events.back() == Some(&event) {
+            return;
+        }
+        if self.attention_events.len() == MAX_PENDING_ATTENTION_EVENTS {
+            self.attention_events.pop_front();
+            self.attention_loss = self.attention_loss.saturating_add(1);
+        }
+        self.attention_events.push_back(event);
+    }
     /// Queue a desktop notification, bounding the backlog.
     ///
     /// Every `OSC 9` / `OSC 777` / `OSC 99` / agent-status notification goes
@@ -399,7 +454,13 @@ impl SidecarPerform {
         // is interpreted: identity is orthogonal to lifecycle, and the two hook
         // events that carry it (session start/end) are exactly the ones a
         // harness maps to `clear`.
+        let mut replaced_identity = false;
         if let Some(session) = AgentSession::from_labels(&labels) {
+            replaced_identity = self
+                .agent_session
+                .lock()
+                .as_ref()
+                .is_none_or(|existing| !existing.is_same_session(&session));
             self.record_agent_session(session);
         }
         // The reserved keys are session identity, not display labels. Drop them
@@ -410,6 +471,7 @@ impl SidecarPerform {
         }
 
         if st == "clear" {
+            self.capture_attention(None);
             let mut slot = self.agent_status.lock();
             let changed = slot.is_some();
             *slot = None;
@@ -424,6 +486,9 @@ impl SidecarPerform {
             return;
         }
         let Some(lifecycle) = AgentLifecycle::from_token(st) else {
+            if replaced_identity {
+                self.capture_attention(None);
+            }
             log::debug!(
                 "agent-status[{}]: unknown st={st:?} — ignored, status left as-is",
                 self.terminal_id
@@ -437,6 +502,7 @@ impl SidecarPerform {
         // body instead of an empty string.
         let custom = msg_b64.and_then(decode_osc_base64);
         let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
+        self.capture_attention(Some(new_status.clone()));
 
         // Notify only on a *transition* into a notifying state, so repeated
         // identical reports don't ping. Decide while holding the slot (we need
@@ -524,7 +590,11 @@ impl SidecarPerform {
             if self.transport.answers_terminal_queries()
                 && let Some(session) = slot.as_ref()
             {
-                self.pending_agent_sessions.lock().push(session.clone());
+                let mut pending = self.pending_agent_sessions.lock();
+                if pending.len() == MAX_PENDING_ATTENTION_EVENTS {
+                    pending.remove(0);
+                }
+                pending.push(session.clone());
             }
             self.agent_session_dirty.store(true, Ordering::Relaxed);
         }

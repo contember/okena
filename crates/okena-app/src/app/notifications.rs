@@ -24,6 +24,30 @@ use notify_rust::Notification;
 
 use super::Okena;
 
+#[cfg(test)]
+mod reveal_test;
+
+fn completion_still_current(
+    data: &crate::workspace::state::WorkspaceData,
+    connection_id: &str,
+    observed: &okena_core::attention::AttentionEpisode,
+) -> bool {
+    observed.kind == okena_core::attention::AttentionKind::Completion
+        && data
+            .remote_work_overviews
+            .get(connection_id)
+            .is_some_and(|overview| {
+                overview.attention.iter().any(|current| {
+                    current.id == observed.id
+                        && current.revision == observed.revision
+                        && current.source == observed.source
+                        && current.kind == observed.kind
+                        && current.can_open_terminal()
+                        && !current.read
+                })
+            })
+}
+
 /// Where a clicked desktop notification should send the user: the exact
 /// terminal that raised the alert.
 #[derive(Clone, Debug)]
@@ -102,6 +126,96 @@ pub(crate) fn show_notification(
 }
 
 impl Okena {
+    pub(super) fn reveal_work_terminal(
+        &mut self,
+        origin: WindowId,
+        connection_id: &str,
+        project_id: &str,
+        terminal_id: &str,
+        completion: Option<okena_core::attention::AttentionEpisode>,
+        cx: &mut Context<Self>,
+    ) {
+        use okena_transport::client::{ConnectionStatus, make_prefixed_id};
+        let pid = make_prefixed_id(connection_id, project_id);
+        let tid = make_prefixed_id(connection_id, terminal_id);
+        if !self
+            .remote_manager
+            .read(cx)
+            .connections()
+            .iter()
+            .any(|(config, status, state)| {
+                config.id == connection_id
+                    && matches!(status, ConnectionStatus::Connected)
+                    && state.as_ref().is_some_and(|s| s.work_overview.is_some())
+            })
+        {
+            return;
+        }
+        if self
+            .workspace
+            .read(cx)
+            .project(&pid)
+            .and_then(|p| p.layout.as_ref())
+            .is_none_or(|l| l.find_terminal_path(&tid).is_none())
+        {
+            return;
+        }
+        let handle = if self.workspace.read(cx).is_terminal_detached(&tid) {
+            self.ensure_detached_window(&tid, &pid, cx)
+        } else {
+            self.window_view_and_handle(origin)
+                .map(|(_, handle)| handle)
+        };
+        let Some(handle) = handle else { return };
+        if let Some(episode) = completion.filter(|e| {
+            e.kind == okena_core::attention::AttentionKind::Completion
+                && e.can_open_terminal()
+                && !e.read
+        }) {
+            let connection = connection_id.to_string();
+            let manager = self.remote_manager.clone();
+            let workspace = self.workspace.clone();
+            okena_views_terminal::presentation::request_reveal(
+                tid.clone(),
+                handle,
+                move |cx| {
+                    if !completion_still_current(workspace.read(cx).data(), &connection, &episode) {
+                        return;
+                    }
+                    let connected =
+                        manager
+                            .read(cx)
+                            .connections()
+                            .iter()
+                            .any(|(config, status, state)| {
+                                config.id == connection
+                                    && matches!(status, ConnectionStatus::Connected)
+                                    && state.as_ref().is_some_and(|s| s.work_overview.is_some())
+                            });
+                    if connected {
+                        manager.update(cx, |manager, cx| {
+                            manager.send_action(
+                                &connection,
+                                okena_core::api::ActionRequest::AcknowledgeAttention {
+                                    episode_id: episode.id,
+                                    revision: episode.revision,
+                                    dismiss: false,
+                                },
+                                cx,
+                            )
+                        });
+                    }
+                },
+                cx,
+            );
+        }
+        let requested = match origin {
+            WindowId::Main => "main".to_string(),
+            WindowId::Extra(id) => id.to_string(),
+        };
+        self.jump_to_terminal(&pid, &tid, Some(&requested), cx);
+    }
+
     /// Spawn the loop that turns clicked XDG notifications into pane jumps.
     /// The notification threads (see [`show_notification`]) send a
     /// [`NotificationJump`] here; on other platforms nothing is ever sent.
@@ -361,6 +475,15 @@ impl Okena {
         requested_window: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace.read(cx).is_terminal_detached(terminal_id) {
+            if let Some(handle) = self.ensure_detached_window(terminal_id, project_id, cx) {
+                let _ = handle.update(cx, |_, window, _| {
+                    window.activate_window();
+                    window.refresh();
+                });
+            }
+            return;
+        }
         let requested_window = match requested_window {
             None => None,
             Some("main") => Some(WindowId::Main),
@@ -499,9 +622,73 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationWindowCandidate, choose_notification_window};
+    use super::{
+        NotificationWindowCandidate, choose_notification_window, completion_still_current,
+    };
     use crate::workspace::state::WindowId;
     use uuid::Uuid;
+
+    #[test]
+    fn observed_completion_cannot_consume_another_connection_revision_or_attachment() {
+        use okena_core::{
+            attention::{AttentionEpisode, AttentionKind, AttentionSource},
+            mission::WorkOverview,
+        };
+        let observed = AttentionEpisode {
+            id: "same".into(),
+            revision: 1,
+            source: AttentionSource {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+                attachment_id: "attachment".into(),
+                generation: 1,
+                conversation: None,
+            },
+            kind: AttentionKind::Completion,
+            summary: "Finished".into(),
+            created_at: 1,
+            updated_at: 1,
+            available: true,
+            terminal_available: true,
+            read: false,
+        };
+        let mut data = crate::workspace::state::WorkspaceData::empty();
+        for owner in ["a", "b"] {
+            data.remote_work_overviews.insert(
+                owner.into(),
+                WorkOverview {
+                    attention: vec![observed.clone()],
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].available = false;
+        assert!(completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].terminal_available = false;
+        assert!(!completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0] = observed.clone();
+        data.remote_work_overviews.get_mut("b").unwrap().attention[0].read = true;
+        assert!(completion_still_current(&data, "a", &observed));
+        assert!(!completion_still_current(&data, "b", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].revision = 2;
+        assert!(!completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0].revision = 1;
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0]
+            .source
+            .attachment_id = "replacement".into();
+        assert!(!completion_still_current(&data, "a", &observed));
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0] = observed.clone();
+        let mut question = observed.clone();
+        question.kind = AttentionKind::InputNeeded;
+        data.remote_work_overviews.get_mut("a").unwrap().attention[0] = question.clone();
+        assert!(!completion_still_current(&data, "a", &question));
+        data.remote_work_overviews.remove("a");
+        assert!(
+            !completion_still_current(&data, "a", &observed),
+            "old daemon has no authoritative overview"
+        );
+    }
 
     fn candidate(
         id: WindowId,

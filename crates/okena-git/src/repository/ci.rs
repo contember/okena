@@ -18,6 +18,7 @@ use super::status::get_upstream_ref;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrFetch {
     Fetched(Option<crate::PrInfo>),
+    Failed,
     RateLimited,
 }
 
@@ -30,6 +31,11 @@ pub enum CiFetch {
     /// A request ran. `sha` is the upstream commit the summary describes, used
     /// to skip the next fetch while it holds.
     Fetched {
+        sha: Option<String>,
+        summary: Option<crate::CiCheckSummary>,
+    },
+    /// A failed lookup may still contain the successful half of the REST pair.
+    Failed {
         sha: Option<String>,
         summary: Option<crate::CiCheckSummary>,
     },
@@ -62,7 +68,7 @@ query PullRequestList($owner: String!, $repo: String!, $headBranch: String!) {
 
 /// The `pullRequests.nodes[]` entry of [`PR_LOOKUP_QUERY`].
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 struct PrNode {
     url: String,
     state: String,
@@ -112,22 +118,36 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     let current_sha = super::status::get_head_sha(path);
     let pushed_sha = branch_pushed_sha(path);
     let Some((mut client, repo)) = github_client(path) else {
-        return PrFetch::Fetched(None);
+        return PrFetch::Failed;
     };
 
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
     match client.graphql(PR_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
-        Err(ApiError::Failed) => PrFetch::Fetched(None),
-        Ok(data) => {
-            let node = data
-                .pointer("/repository/pullRequests/nodes/0")
-                .cloned()
-                .and_then(|node| serde_json::from_value::<PrNode>(node).ok());
-            PrFetch::Fetched(node.and_then(|node| {
-                pr_info_from_node(node, current_sha.as_deref(), pushed_sha.as_deref())
-            }))
+        Err(ApiError::Failed) => PrFetch::Failed,
+        Ok(data) => parse_pr_lookup(data, current_sha.as_deref(), pushed_sha.as_deref()),
+    }
+}
+
+fn parse_pr_lookup(data: Value, current_sha: Option<&str>, pushed_sha: Option<&str>) -> PrFetch {
+    let Some(nodes) = data
+        .pointer("/repository/pullRequests/nodes")
+        .and_then(Value::as_array)
+    else {
+        return PrFetch::Failed;
+    };
+    let Some(node) = nodes.first() else {
+        return PrFetch::Fetched(None);
+    };
+    match serde_json::from_value::<PrNode>(node.clone()) {
+        Ok(node)
+            if node.url.starts_with("http")
+                && node.number > 0
+                && matches!(node.state.as_str(), "OPEN" | "CLOSED" | "MERGED") =>
+        {
+            PrFetch::Fetched(pr_info_from_node(node, current_sha, pushed_sha))
         }
+        _ => PrFetch::Failed,
     }
 }
 
@@ -314,8 +334,8 @@ fn rollup_status(failed: usize, pending: usize) -> crate::CiStatus {
 /// This is what keeps a machine with many projects inside GitHub's hourly
 /// budget: a repo parked on `main` costs one cheap local ref read per poll.
 ///
-/// Returns `Fetched(None)` when there are no checks, when no GitHub token is
-/// available, or when the repo has no GitHub remote.
+/// Successful absence of checks is distinct from an unavailable repository,
+/// authentication failure, or failed request.
 pub fn fetch_ci_checks(
     path: &Path,
     pr_number: Option<u32>,
@@ -412,7 +432,7 @@ struct Workflow {
 /// view`) misfires on fork/upstream-split repos.
 fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch {
     let Some((mut client, repo)) = github_client(path) else {
-        return CiFetch::Fetched { sha, summary: None };
+        return CiFetch::Failed { sha, summary: None };
     };
 
     let mut contexts: Vec<RollupContext> = Vec::new();
@@ -427,13 +447,19 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
         let data = match client.graphql(PR_CHECKS_QUERY, variables) {
             Ok(data) => data,
             Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-            Err(ApiError::Failed) => return CiFetch::Fetched { sha, summary: None },
+            Err(ApiError::Failed) => return CiFetch::Failed { sha, summary: None },
         };
         // A commit with no checks has a null rollup — nothing to read.
-        let Some(page) = data
-            .pointer("/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup/contexts")
+        let Some(rollup) =
+            data.pointer("/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup")
         else {
+            return CiFetch::Failed { sha, summary: None };
+        };
+        if rollup.is_null() {
             break;
+        }
+        let Some(page) = rollup.get("contexts") else {
+            return CiFetch::Failed { sha, summary: None };
         };
         match page
             .get("nodes")
@@ -441,8 +467,8 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
             .map(serde_json::from_value::<Vec<RollupContext>>)
         {
             Some(Ok(nodes)) => contexts.extend(nodes),
-            Some(Err(_)) => return CiFetch::Fetched { sha, summary: None },
-            None => {}
+            Some(Err(_)) => return CiFetch::Failed { sha, summary: None },
+            None => return CiFetch::Failed { sha, summary: None },
         }
         let has_next = page
             .pointer("/pageInfo/hasNextPage")
@@ -572,12 +598,11 @@ fn fetch_branch_checks(path: &Path, sha: Option<String>) -> CiFetch {
             summary: None,
         };
     };
-    let fetched = |summary| CiFetch::Fetched {
-        sha: Some(sha.clone()),
-        summary,
-    };
     let Some((mut client, repo)) = github_client(path) else {
-        return fetched(None);
+        return CiFetch::Failed {
+            sha: Some(sha),
+            summary: None,
+        };
     };
     let commit = format!("repos/{}/{}/commits/{sha}", repo.owner, repo.name);
 
@@ -588,24 +613,35 @@ fn fetch_branch_checks(path: &Path, sha: Option<String>) -> CiFetch {
             Err(ApiError::Failed) => None,
         };
     let statuses = match client.rest_get_json(&format!("{commit}/status")) {
-        Ok(combined) => Some(
-            combined
-                .get("statuses")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-        ),
+        Ok(combined) => combined.get("statuses").and_then(Value::as_array).cloned(),
         Err(ApiError::RateLimited) => return CiFetch::RateLimited,
         Err(ApiError::Failed) => None,
     };
 
-    if check_runs.is_none() && statuses.is_none() {
-        return fetched(None);
+    branch_checks_outcome(sha, check_runs, statuses)
+}
+
+fn branch_checks_outcome(
+    sha: String,
+    check_runs: Option<Vec<Value>>,
+    statuses: Option<Vec<Value>>,
+) -> CiFetch {
+    if check_runs.is_none() || statuses.is_none() {
+        return CiFetch::Failed {
+            sha: Some(sha),
+            summary: branch_ci_summary(
+                &check_runs.unwrap_or_default(),
+                &statuses.unwrap_or_default(),
+            ),
+        };
     }
-    fetched(branch_ci_summary(
-        &check_runs.unwrap_or_default(),
-        &statuses.unwrap_or_default(),
-    ))
+    CiFetch::Fetched {
+        sha: Some(sha),
+        summary: branch_ci_summary(
+            &check_runs.unwrap_or_default(),
+            &statuses.unwrap_or_default(),
+        ),
+    }
 }
 
 /// Combine REST `check-runs` entries and `status.statuses` entries into a
@@ -758,6 +794,66 @@ fn branch_ci_summary(check_runs: &[Value], statuses: &[Value]) -> Option<crate::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_pr_lookup_is_distinct_from_successful_empty_results() {
+        assert_eq!(
+            parse_pr_lookup(
+                json!({"repository":{"pullRequests":{"nodes":[]}}}),
+                None,
+                None
+            ),
+            PrFetch::Fetched(None)
+        );
+        assert_eq!(
+            parse_pr_lookup(json!({"repository":null}), None, None),
+            PrFetch::Failed
+        );
+        assert_eq!(
+            parse_pr_lookup(
+                json!({"repository":{"pullRequests":{"nodes":[{}]}}}),
+                None,
+                None
+            ),
+            PrFetch::Failed
+        );
+        let found = parse_pr_lookup(
+            json!({"repository":{"pullRequests":{"nodes":[{
+                "url":"https://github.com/owner/repo/pull/7", "number":7, "state":"OPEN", "isDraft":false
+            }]}}}),
+            None,
+            None,
+        );
+        assert!(matches!(found, PrFetch::Fetched(Some(info)) if info.number == 7));
+    }
+
+    #[test]
+    fn failed_ci_retains_partial_summary_but_is_not_successful_empty() {
+        assert_eq!(
+            branch_checks_outcome("sha".into(), Some(vec![]), Some(vec![])),
+            CiFetch::Fetched {
+                sha: Some("sha".into()),
+                summary: None
+            }
+        );
+        assert_eq!(
+            branch_checks_outcome("sha".into(), None, None),
+            CiFetch::Failed {
+                sha: Some("sha".into()),
+                summary: None
+            }
+        );
+        let statuses = vec![json!({"context":"build", "state":"success"})];
+        let expected = branch_ci_summary(&[], &statuses);
+        assert!(expected.is_some());
+        assert_eq!(
+            branch_checks_outcome("sha".into(), None, Some(statuses)),
+            CiFetch::Failed {
+                sha: Some("sha".into()),
+                summary: expected
+            }
+        );
+    }
 
     // ─── PR node mapping tests ─────────────────────────────────────────
 

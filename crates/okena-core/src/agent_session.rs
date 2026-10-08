@@ -10,7 +10,7 @@
 //! can stay runtime-only.
 //!
 //! The values arrive in-band from an **untrusted** byte stream (any process in
-//! the pane can emit the OSC), so [`is_uuid_like`] gates the `session_id` before
+//! the pane can emit the OSC), so [`is_valid_session_id`] gates the `session_id` before
 //! it is ever stored or handed to a resume command.
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ pub struct AgentSession {
     /// core change.
     pub agent: String,
     /// The agent's own session id (e.g. Claude Code / Codex `session_id`).
-    /// Always [`is_uuid_like`]-validated before construction here, since it is
+    /// Always [`is_valid_session_id`]-validated before construction here, since it is
     /// untrusted in-band data that may later be passed to a resume command.
     pub session_id: String,
     /// Absolute path to the session transcript, when the agent reported one.
@@ -95,8 +95,8 @@ impl<'de> Deserialize<'de> for AgentSessionHistory {
 /// session identity out of the map (see [`AgentSession::from_labels`]).
 pub const RESERVED_LABEL_KEYS: [&str; 3] = ["agent", "session_id", "transcript_path"];
 
-/// Bounds on the two free-form session fields. `session_id` needs none — it is
-/// UUID-shaped by [`is_uuid_like`] — but `agent` and `transcript_path` are
+/// Bounds on persisted identity fields. UUID sessions are fixed-length; OpenCode
+/// sessions use a bounded prefix plus an alphanumeric suffix. Other fields are
 /// arbitrary in-band strings that get **persisted to `workspace.json`**, so
 /// without a bound one pane can rewrite the user's state file with megabytes of
 /// chosen bytes on every autosave. These reject rather than truncate: a cut
@@ -104,6 +104,7 @@ pub const RESERVED_LABEL_KEYS: [&str; 3] = ["agent", "session_id", "transcript_p
 /// prune drop an already-poisoned file.
 pub const MAX_AGENT_ID_LEN: usize = 64;
 pub const MAX_TRANSCRIPT_PATH_LEN: usize = 4096;
+pub const MAX_SESSION_ID_LEN: usize = 128;
 
 /// Whether `s` is a usable harness id — bounded and restricted to the shape an
 /// extension id has (`"claude-code"`, `"codex"`, …).
@@ -112,6 +113,17 @@ pub fn is_valid_agent_id(s: &str) -> bool {
         && s.len() <= MAX_AGENT_ID_LEN
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+pub fn is_valid_session_id(agent: &str, session_id: &str) -> bool {
+    if is_uuid_like(session_id) {
+        return true;
+    }
+    agent == "opencode"
+        && session_id.len() <= MAX_SESSION_ID_LEN
+        && session_id.strip_prefix("ses_").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
 }
 
 /// Whether a reported transcript path is safe to store and later hand to a
@@ -132,7 +144,7 @@ impl AgentSession {
     /// the pane didn't report one.
     ///
     /// Requires both `agent` (without it we don't know which harness could
-    /// resume) and a [`is_uuid_like`] `session_id`. Takes the map **before**
+    /// resume) and a harness-valid `session_id`. Takes the map **before**
     /// [`crate::agent_status::AgentStatus::new_clamped`] bounds it: that clamp
     /// keeps only the lowest [`MAX_LABELS`](crate::agent_status::MAX_LABELS)
     /// keys and truncates values, either of which would silently drop or
@@ -142,7 +154,7 @@ impl AgentSession {
     pub fn from_labels(labels: &std::collections::BTreeMap<String, String>) -> Option<Self> {
         let agent = labels.get("agent")?;
         let session_id = labels.get("session_id")?;
-        if !is_valid_agent_id(agent) || !is_uuid_like(session_id) {
+        if !is_valid_agent_id(agent) || !is_valid_session_id(agent, session_id) {
             return None;
         }
         Some(Self {
@@ -171,7 +183,7 @@ impl AgentSession {
     /// so that a file already poisoned by an older build gets pruned on load.
     pub fn is_valid(&self) -> bool {
         is_valid_agent_id(&self.agent)
-            && is_uuid_like(&self.session_id)
+            && is_valid_session_id(&self.agent, &self.session_id)
             && self
                 .transcript_path
                 .as_deref()
@@ -204,6 +216,44 @@ mod tests {
     fn accepts_canonical_uuid() {
         assert!(is_uuid_like("3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b"));
         assert!(is_uuid_like("3B9C1F2A-4D5E-6F70-8A9B-0C1D2E3F4A5B"));
+    }
+
+    #[test]
+    fn opencode_identity_is_captured_and_survives_history_round_trip() {
+        let id = "ses_0123456789abABCDEFGHIJKLMN";
+        let session =
+            AgentSession::from_labels(&labels(&[("agent", "opencode"), ("session_id", id)]))
+                .unwrap();
+        assert!(session.is_valid());
+        assert!(crate::attention::ConversationId::from(&session).is_valid());
+        let mut history = AgentSessionHistory::default();
+        assert!(history.record(session.clone()));
+        let restored: AgentSessionHistory =
+            serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
+        assert_eq!(restored.sessions(), &[session]);
+    }
+
+    #[test]
+    fn opencode_session_ids_are_bounded_and_harness_specific() {
+        let valid = "ses_0123456789abABCDEFGHIJKLMN";
+        assert!(is_valid_session_id("opencode", valid));
+        for agent in ["claude-code", "codex", "unknown"] {
+            assert!(!is_valid_session_id(agent, valid));
+            assert!(is_valid_session_id(agent, UUID));
+        }
+        for invalid in [
+            "ses_",
+            "ses",
+            "ses_a b",
+            "ses_a;command",
+            "ses_$(command)",
+            "ses_../file",
+            "ses_á",
+            "ses_a\n",
+            &format!("ses_{}", "a".repeat(MAX_SESSION_ID_LEN)),
+        ] {
+            assert!(!is_valid_session_id("opencode", invalid), "{invalid:?}");
+        }
     }
 
     #[test]

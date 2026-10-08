@@ -1,4 +1,6 @@
 pub mod commands;
+mod mission_context;
+mod missions;
 pub mod parser;
 pub mod register;
 pub mod resolve;
@@ -111,6 +113,7 @@ fn dispatch(cli: Cli) -> i32 {
         },
         Command::Whoami { json } => commands::cli_whoami(json),
         Command::Ls { json } => commands::cli_ls(json),
+        Command::Mission { cmd } => missions::run(cmd),
 
         Command::Project { cmd } => match cmd {
             ProjectCmd::Add {

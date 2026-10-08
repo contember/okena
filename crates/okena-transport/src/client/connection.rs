@@ -1993,6 +1993,7 @@ mod tests {
             event_tx,
         );
         client.set_remote_state(Some(StateResponse {
+            work_overview: None,
             state_version: 1,
             projects: Vec::new(),
             focused_project_id: None,

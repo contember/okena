@@ -985,6 +985,10 @@ mod entry_mutation_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),

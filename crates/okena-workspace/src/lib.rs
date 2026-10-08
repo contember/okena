@@ -2,12 +2,15 @@
 
 pub mod access_history;
 pub mod actions;
+pub mod attention;
 pub mod claude_env;
 pub mod context;
 pub mod focus;
 pub mod hook_monitor;
 pub mod hooks;
 pub mod lifecycle;
+pub mod mission_context;
+pub mod missions;
 pub mod persistence;
 pub mod remote_apply;
 pub mod remote_sync;

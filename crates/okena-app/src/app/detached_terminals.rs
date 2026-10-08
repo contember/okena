@@ -12,6 +12,22 @@ use std::sync::Arc;
 use super::Okena;
 
 impl Okena {
+    pub(super) fn ensure_detached_window(
+        &mut self,
+        terminal_id: &str,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyWindowHandle> {
+        if let Some(handle) = self.detached_window_handles.get(terminal_id).copied()
+            && handle.update(cx, |_, _, _| ()).is_ok()
+        {
+            return Some(handle);
+        }
+        self.detached_window_handles.remove(terminal_id);
+        self.open_detached_window(terminal_id, project_id, cx);
+        self.detached_window_handles.get(terminal_id).copied()
+    }
+
     pub(super) fn handle_detached_terminals_changed(
         &mut self,
         workspace: Entity<Workspace>,
@@ -38,6 +54,8 @@ impl Okena {
             .collect();
 
         self.opened_detached_windows = current_ids;
+        self.detached_window_handles
+            .retain(|id, _| self.opened_detached_windows.contains(id));
 
         for (terminal_id, project_id) in new {
             self.open_detached_window(&terminal_id, &project_id, cx);
@@ -63,7 +81,12 @@ impl Okena {
         Some(backend.transport())
     }
 
-    fn open_detached_window(&self, terminal_id: &str, project_id: &str, cx: &mut Context<Self>) {
+    fn open_detached_window(
+        &mut self,
+        terminal_id: &str,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
         // A detached terminal reuses the live `Arc<Terminal>` already in the
         // registry; the transport only matters on the re-create fallback. Route
@@ -78,6 +101,7 @@ impl Okena {
         };
         let terminals = self.terminals.clone();
         let terminal_id_owned = terminal_id.to_string();
+        let coordinator = cx.entity().downgrade();
 
         let terminal_name = {
             let ws = workspace.read(cx);
@@ -91,7 +115,7 @@ impl Okena {
             name
         };
 
-        cx.open_window(
+        let result = cx.open_window(
             WindowOptions {
                 // On Windows the chrome is fully client-drawn (matches main window);
                 // other platforms keep the transparent titlebar.
@@ -121,6 +145,13 @@ impl Okena {
                 ..Default::default()
             },
             move |window, cx| {
+                let closed_terminal = terminal_id_owned.clone();
+                window.on_window_should_close(cx, move |_, cx| {
+                    let _ = coordinator.update(cx, |this, _| {
+                        this.detached_window_handles.remove(&closed_terminal);
+                    });
+                    true
+                });
                 let detached_view = cx.new(|cx| {
                     DetachedTerminalView::new(
                         workspace.clone(),
@@ -132,7 +163,13 @@ impl Okena {
                 });
                 cx.new(|cx| Root::new(detached_view, window, cx))
             },
-        )
-        .ok();
+        );
+        if let Ok(handle) = result {
+            self.opened_detached_windows.insert(terminal_id.to_string());
+            self.detached_window_handles
+                .insert(terminal_id.to_string(), handle.into());
+        } else {
+            self.opened_detached_windows.remove(terminal_id);
+        }
     }
 }

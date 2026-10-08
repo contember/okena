@@ -1787,6 +1787,17 @@ impl Element for TerminalElement {
             background_rects,
         });
 
+        if bounds.size.width >= cell_width && bounds.size.height >= line_height {
+            crate::presentation::painted(
+                &self.terminal.terminal_id,
+                &self.focus_handle,
+                bounds,
+                size(cell_width, line_height),
+                window,
+                cx,
+            );
+        }
+
         let painted_samples = okena_core::latency_probe::client_painted(
             &self.terminal.terminal_id,
             self.resize_viewer_id,

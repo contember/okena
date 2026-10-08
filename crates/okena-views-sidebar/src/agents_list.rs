@@ -130,6 +130,8 @@ impl Sidebar {
         let dot_color = rgb(agent.status.lifecycle.theme_color(&t));
         let project_id = agent.project_id.clone();
         let terminal_id = agent.terminal_id.clone();
+        let mission_project = project_id.clone();
+        let mission_terminal = terminal_id.clone();
         // Agent-supplied text: flattened and clipped before it reaches either
         // line, since the tooltip has no ellipsis to save it.
         let custom = agent
@@ -219,6 +221,20 @@ impl Sidebar {
                     ),
             )
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(
+                div()
+                    .id(format!("agent-mission-{}", agent.terminal_id))
+                    .px_1()
+                    .text_size(ui_text_sm(cx))
+                    .child("Mission…")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(crate::sidebar::MissionRequested {
+                            project_id: mission_project.clone(),
+                            terminal_id: Some(mission_terminal.clone()),
+                        });
+                    })),
+            )
     }
 }
 

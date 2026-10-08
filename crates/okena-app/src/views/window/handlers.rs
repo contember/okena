@@ -479,6 +479,9 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         match event {
+            OverlayManagerEvent::Mission { project_id } => {
+                self.open_work_source(project_id, None, cx)
+            }
             OverlayManagerEvent::SessionAction(action) => {
                 // Sessions are workspace-global and the daemon owns the session
                 // files + authoritative state, so route to the local daemon
@@ -503,18 +506,25 @@ impl WindowView {
                 project_id,
                 branch,
                 create_branch,
+                mission,
             } => {
+                let Some(action) = self.worktree_create_request(
+                    mission.as_ref().map(|context| &context.selection),
+                    project_id,
+                    branch,
+                    *create_branch,
+                    cx,
+                ) else {
+                    okena_workspace::toast::ToastManager::error(
+                        "The mission, repository, or owning daemon is no longer available",
+                        cx,
+                    );
+                    return;
+                };
                 // The daemon creates the worktree, its project and its terminals;
                 // they mirror back. No local mirror mutation or PTY spawn here.
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-                    dispatcher.dispatch(
-                        ActionRequest::CreateWorktree {
-                            project_id: project_id.clone(),
-                            branch: branch.clone(),
-                            create_branch: *create_branch,
-                        },
-                        cx,
-                    );
+                    dispatcher.dispatch(action, cx);
                 }
             }
             OverlayManagerEvent::ShellSelected {
@@ -543,7 +553,7 @@ impl WindowView {
                     .and_then(|connection_id| self.remote_params(project_id, &connection_id, cx));
                 if let Some(params) = params {
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.show_worktree_dialog(project_id.clone(), params, cx);
+                        om.show_worktree_dialog(project_id.clone(), params, None, cx);
                     });
                 }
             }

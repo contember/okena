@@ -590,6 +590,8 @@ fn export_file_stem(connection_id: &str, terminal_id: &str) -> String {
 fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest {
     let s = |id: &str| strip_prefix(id, connection_id);
     match action {
+        // WorkOverview retains owner-local IDs rather than mirror-prefixed IDs.
+        a @ (ActionRequest::Mission { .. } | ActionRequest::AcknowledgeAttention { .. }) => a,
         ActionRequest::SendText { terminal_id, text } => ActionRequest::SendText {
             terminal_id: s(&terminal_id),
             text,
@@ -896,10 +898,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id,
             branch,
             create_branch,
+            mission_id,
         } => ActionRequest::CreateWorktree {
             project_id: s(&project_id),
             branch,
             create_branch,
+            mission_id,
         },
         ActionRequest::AddDiscoveredWorktree {
             parent_project_id,

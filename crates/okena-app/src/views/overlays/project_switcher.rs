@@ -697,6 +697,10 @@ mod tests {
         let data = WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects: vec![make_project("p1", "/p1")],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),

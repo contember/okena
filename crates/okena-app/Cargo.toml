@@ -72,4 +72,5 @@ anyhow = "1.0"
 time = { version = "0.3", features = ["local-offset"] }
 
 [dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }

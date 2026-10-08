@@ -20,6 +20,77 @@ mod tests {
     use okena_workspace::state::LayoutNode;
 
     #[test]
+    fn work_overview_preserves_old_snapshot_compatibility() {
+        use okena_core::api::StateResponse;
+        use okena_core::mission::WorkOverview;
+
+        let old_json = serde_json::json!({
+            "state_version": 1, "projects": [],
+            "focused_project_id": null, "fullscreen_terminal": null
+        });
+        let mut current: StateResponse = serde_json::from_value(old_json).expect("old snapshot");
+        assert!(current.work_overview.is_none());
+        current.work_overview = Some(WorkOverview::default());
+
+        // The pre-overview schema accepts additional top-level fields.
+        #[derive(serde::Deserialize)]
+        struct LegacyState {
+            state_version: u64,
+            projects: Vec<okena_core::api::ApiProject>,
+            focused_project_id: Option<String>,
+            fullscreen_terminal: Option<okena_core::api::ApiFullscreen>,
+            project_order: Vec<String>,
+            folders: Vec<okena_core::api::ApiFolder>,
+            windows: Vec<okena_core::api::ApiWindow>,
+            hooks: Vec<okena_core::api::ApiHookExecution>,
+        }
+        let json = serde_json::to_value(&current).expect("snapshot");
+        let legacy: LegacyState = serde_json::from_value(json.clone()).expect("old client");
+        assert_eq!(legacy.state_version, 1);
+        assert!(legacy.projects.is_empty());
+        assert!(legacy.focused_project_id.is_none());
+        assert!(legacy.fullscreen_terminal.is_none());
+        assert!(legacy.project_order.is_empty());
+        assert!(legacy.folders.is_empty());
+        assert!(legacy.windows.is_empty());
+        assert!(legacy.hooks.is_empty());
+        let decoded: StateResponse = serde_json::from_value(json).expect("new client");
+        assert_eq!(decoded.work_overview, Some(WorkOverview::default()));
+    }
+
+    #[test]
+    fn conversation_overview_omits_private_transcript_path() {
+        use okena_core::agent_session::AgentSession;
+        use okena_core::attention::ConversationId;
+        use okena_core::mission::{ConversationAttachment, WorkOverview};
+
+        let session = AgentSession {
+            agent: "codex".into(),
+            session_id: "11111111-2222-3333-4444-555555555555".into(),
+            transcript_path: Some("/private/transcripts/session.jsonl".into()),
+        };
+        let overview = WorkOverview {
+            conversations: vec![ConversationAttachment {
+                project_id: "p".into(),
+                terminal_id: "t".into(),
+                conversation: ConversationId::from(&session),
+            }],
+            ..WorkOverview::default()
+        };
+        let json = serde_json::to_value(overview).expect("public overview");
+        assert_eq!(
+            json["conversations"][0]["conversation"],
+            serde_json::json!({
+                "agent": "codex",
+                "session_id": "11111111-2222-3333-4444-555555555555"
+            })
+        );
+        let serialized = json.to_string();
+        assert!(!serialized.contains("transcript_path"));
+        assert!(!serialized.contains("/private/transcripts"));
+    }
+
+    #[test]
     fn prefixed_terminal_id() {
         let api = ApiLayoutNode::Terminal {
             terminal_id: Some("abc-123".into()),

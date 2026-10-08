@@ -244,6 +244,10 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -369,6 +373,10 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),

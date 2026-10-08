@@ -23,7 +23,7 @@ const DEFAULT_HOST: &str = "github.com";
 
 /// A GitHub repository: `owner/name` on a normalised `host`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubRepo {
+pub struct GithubRepo {
     pub host: String,
     pub owner: String,
     pub name: String,
@@ -181,7 +181,7 @@ fn host_filter() -> String {
 }
 
 /// The GitHub repository `gh` would run against for this checkout.
-pub(crate) fn resolve_base_repo(path: &Path) -> Option<GithubRepo> {
+pub fn resolve_base_repo(path: &Path) -> Option<GithubRepo> {
     let repo = crate::gix_helpers::open(path)?;
     select_base_repo(remote_candidates(&repo), &host_filter())
 }

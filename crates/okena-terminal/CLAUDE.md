@@ -41,7 +41,8 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
   can't pin unbounded memory (custom ≤ a few KB, labels bounded) — mirrors the
   OSC 99 caps.
 - `lbl=` reserves three keys — `agent`, `session_id`, `transcript_path`. With an
-  `agent` id + a UUID-shaped `session_id`, they're captured into a **sticky**
+  `agent` id + a harness-valid `session_id` (UUID, or bounded `ses_…` for
+  `opencode`), they're captured into a **sticky**
   `okena_core::agent_session::AgentSession` on `Terminal.agent_session` (read via
   `Terminal::agent_session()`). Unlike `agent_status` it survives `st=clear` —
   and is captured on it, since a harness maps session start/end onto `clear`.
@@ -65,6 +66,15 @@ ESC ] 9001 ; st=<working|blocked|done|idle|clear> [ ; tid=<terminal-id> ] [ ; ms
   per-feature drain. A transition into `blocked`/`done` also queues a
   `TerminalNotification` (reusing the OSC 9 notification path + focus
   suppression).
+- The owner also captures ordered `AgentAttentionEvent`s with the session valid
+  at each report. The queue coalesces adjacent identical reports, retains at most
+  128 events, and counts dropped oldest transitions. The daemon drains it after
+  each validated PTY data event, before exit or hook cleanup, into shared attention.
+  A terminal attachment UUID plus the PTY generation identifies runtime validity;
+  generation replacement resets the sidecar parser and sticky identity. Mirrors
+  never enqueue these events. Capture does not produce additional notifications.
+  `clear` and exit make attention unavailable, not answered. A silent agent crash
+  with a surviving shell remains undetected until another report or invalidation.
 - `pty_manager.rs` exports three env vars into the pane at spawn. All go through
   `launch_environment`, **not** `cmd.env()` after the fact: under a session
   backend the spawned command is `sh -c "tmux new-session …"`, so a late

@@ -184,7 +184,18 @@ impl Render for WorktreeDialog {
                                             .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
-                                            .child("Create Worktree"),
+                                            .child("Create Worktree")
+                                            .when_some(self.mission.as_ref(), |d, mission| {
+                                                d.child(
+                                                    div()
+                                                        .text_size(ui_text_md(cx))
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child(format!(
+                                                            "Mission: {}",
+                                                            mission.title
+                                                        )),
+                                                )
+                                            }),
                                     ),
                             )
                             .child(

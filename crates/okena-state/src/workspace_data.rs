@@ -22,6 +22,16 @@ pub struct FolderData {
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
+    #[serde(default)]
+    pub missions: Vec<crate::mission::Mission>,
+    /// Explicit detach survives resume; only explicit attach/move clears it.
+    #[serde(default)]
+    pub mission_excluded_conversations: Vec<okena_core::attention::ConversationId>,
+    #[serde(default)]
+    pub attention: okena_core::attention::AttentionState,
+    /// Connection-scoped client mirrors never enter authoritative persistence.
+    #[serde(skip)]
+    pub remote_work_overviews: HashMap<String, okena_core::mission::WorkOverview>,
     /// Local conversation history survives terminal and project removal.
     #[serde(
         default,
@@ -60,6 +70,10 @@ impl WorkspaceData {
     /// (`apply_remote_snapshot`), so the client must not seed a default project.
     pub fn empty() -> Self {
         WorkspaceData {
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             agent_session_history: Default::default(),
             version: default_workspace_version(),
             projects: Vec::new(),
@@ -578,6 +592,10 @@ mod tests {
 
     fn make_workspace() -> WorkspaceData {
         WorkspaceData {
+            missions: Vec::new(),
+            mission_excluded_conversations: Vec::new(),
+            attention: Default::default(),
+            remote_work_overviews: HashMap::new(),
             version: 1,
             agent_session_history: Default::default(),
             projects: Vec::new(),
