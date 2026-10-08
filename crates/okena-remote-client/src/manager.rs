@@ -3,12 +3,14 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
 use okena_workspace::settings::{AppSettings, load_settings, update_remote_connections};
+use okena_workspace::state::WindowId;
 use okena_workspace::toast::{Toast, ToastManager};
 
 use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
 use okena_core::soft_close::{
     SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX, decode_action, encode_action,
 };
+use okena_core::ws::ClientPresentationRequest;
 use okena_transport::client::connection::try_refresh_token;
 use okena_transport::client::{
     ConnectionEvent, ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig,
@@ -215,11 +217,30 @@ pub enum RemoteManagerEvent {
     TerminalActivity(Vec<String>),
 
     /// An external API client asked the desktop to focus and raise an exact
-    /// remote terminal. IDs are already prefixed for this manager connection.
+    /// remote terminal. IDs are already prefixed for this manager connection;
+    /// `window: None` leaves the choice to the desktop.
     TerminalFocusRequested {
         project_id: String,
         terminal_id: String,
-        window: Option<String>,
+        window: Option<WindowId>,
+    },
+
+    /// An external API client showed or hid a project. The desktop applies the
+    /// requested state to its own window (`None` = its active window). The
+    /// project id is already prefixed for this manager connection.
+    ProjectVisibilityRequested {
+        project_id: String,
+        show: bool,
+        window: Option<WindowId>,
+    },
+
+    /// An external API client entered (`terminal_id: Some`) or exited
+    /// fullscreen. The desktop applies it to its own window (`None` = its
+    /// active window). IDs are already prefixed for this manager connection.
+    FullscreenRequested {
+        project_id: String,
+        terminal_id: Option<String>,
+        window: Option<WindowId>,
     },
 
     /// The implicit local-daemon loopback connection reached a terminal failed
@@ -826,7 +847,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
             ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
             ConnectionEvent::Toast { .. } => "Toast",
-            ConnectionEvent::TerminalFocusRequested { .. } => "TerminalFocusRequested",
+            ConnectionEvent::PresentationRequested { .. } => "PresentationRequested",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
         };
@@ -975,16 +996,15 @@ impl RemoteConnectionManager {
                     conn.set_system_stats(Some(stats));
                 }
             }
-            ConnectionEvent::TerminalFocusRequested {
+            ConnectionEvent::PresentationRequested {
                 connection_id,
                 request,
-            } => {
-                cx.emit(RemoteManagerEvent::TerminalFocusRequested {
-                    project_id: make_prefixed_id(&connection_id, &request.project_id),
-                    terminal_id: make_prefixed_id(&connection_id, &request.terminal_id),
-                    window: request.window,
-                });
-            }
+            } => match presentation_event(&connection_id, request) {
+                Ok(event) => cx.emit(event),
+                Err(window) => {
+                    log::warn!("Ignoring presentation request for invalid window id: {window}");
+                }
+            },
             ConnectionEvent::Toast {
                 connection_id,
                 mut toast,
@@ -1125,15 +1145,52 @@ fn now_unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+/// Map a daemon's presentation request onto this client: prefix its ids for
+/// `connection_id` and parse its window. `Err` carries a malformed window id.
+fn presentation_event(
+    connection_id: &str,
+    request: ClientPresentationRequest,
+) -> Result<RemoteManagerEvent, String> {
+    let parse_window = |window: Option<String>| match window {
+        None => Ok(None),
+        Some(raw) => WindowId::from_wire(&raw).map(Some).ok_or(raw),
+    };
+    Ok(match request {
+        ClientPresentationRequest::FocusTerminal(request) => {
+            RemoteManagerEvent::TerminalFocusRequested {
+                project_id: make_prefixed_id(connection_id, &request.project_id),
+                terminal_id: make_prefixed_id(connection_id, &request.terminal_id),
+                window: parse_window(request.window)?,
+            }
+        }
+        ClientPresentationRequest::ProjectVisibility(request) => {
+            RemoteManagerEvent::ProjectVisibilityRequested {
+                project_id: make_prefixed_id(connection_id, &request.project_id),
+                show: request.show,
+                window: parse_window(request.window)?,
+            }
+        }
+        ClientPresentationRequest::Fullscreen(request) => RemoteManagerEvent::FullscreenRequested {
+            project_id: make_prefixed_id(connection_id, &request.project_id),
+            terminal_id: request
+                .terminal_id
+                .map(|terminal_id| make_prefixed_id(connection_id, &terminal_id)),
+            window: parse_window(request.window)?,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionQueues, QueuedAction, RemoteConnectionManager, activity_changed,
+        ActionQueues, QueuedAction, RemoteConnectionManager, RemoteManagerEvent, activity_changed,
         coalesce_settings_actions, is_local_connection_terminal_failure, merge_settings_patches,
-        run_action_queue,
+        presentation_event, run_action_queue,
     };
-    use okena_core::api::ActionRequest;
+    use okena_core::api::{ActionRequest, ApiFullscreenRequest, ApiProjectVisibilityRequest};
+    use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+    use okena_workspace::state::WindowId;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1608,5 +1665,50 @@ mod tests {
             assert!(rm.add_connection(config2, cx).is_ok());
             assert!(rm.add_connection(config3, cx).is_ok());
         });
+    }
+
+    #[test]
+    fn presentation_event_prefixes_ids_and_parses_window() {
+        let extra = uuid::Uuid::new_v4();
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectVisibility(ApiProjectVisibilityRequest {
+                project_id: "p1".into(),
+                show: false,
+                window: Some(extra.to_string()),
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::ProjectVisibilityRequested { project_id, show: false, window: Some(WindowId::Extra(id)) })
+                if project_id == "remote:conn:p1" && id == extra
+        ));
+
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::Fullscreen(ApiFullscreenRequest {
+                project_id: "p1".into(),
+                terminal_id: Some("t1".into()),
+                window: None,
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::FullscreenRequested { project_id, terminal_id: Some(terminal_id), window: None })
+                if project_id == "remote:conn:p1" && terminal_id == "remote:conn:t1"
+        ));
+    }
+
+    #[test]
+    fn presentation_event_rejects_a_malformed_window() {
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectVisibility(ApiProjectVisibilityRequest {
+                project_id: "p1".into(),
+                show: true,
+                window: Some("second".into()),
+            }),
+        );
+        assert!(matches!(event, Err(window) if window == "second"));
     }
 }

@@ -271,12 +271,9 @@ pub(super) fn set_show_in_overview(
 
 /// Apply the SetProjectShowInOverview action against the targeted window.
 ///
-/// Reads the project's current per-window visibility from the targeted
-/// window's `hidden_project_ids`, then toggles only when the desired and
-/// current states differ. `window_id` carries through from `execute_action`
-/// so remote-bridge invocations land on whichever window currently has OS
-/// focus. For unknown extras (close-race), the read returns `None`; we treat
-/// the project as visible and the toggle delegates to the silent-no-op path.
+/// `window_id` carries through from `execute_action` so remote-bridge
+/// invocations land on whichever window currently has OS focus. Setting the
+/// state the window already has is a no-op.
 fn apply_set_project_show_in_overview(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
@@ -288,15 +285,7 @@ fn apply_set_project_show_in_overview(
     if ws.project(project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let current_hidden = ws
-        .data()
-        .window(window_id)
-        .map(|w| w.hidden_project_ids.contains(project_id))
-        .unwrap_or(false);
-    let current_visible = !current_hidden;
-    if current_visible != show {
-        ws.toggle_project_overview_visibility(focus_manager, window_id, project_id, cx);
-    }
+    ws.set_project_overview_visibility(focus_manager, window_id, project_id, show, cx);
     ActionResult::Ok(None)
 }
 

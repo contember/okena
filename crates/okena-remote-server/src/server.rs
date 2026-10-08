@@ -2,8 +2,9 @@ use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
-use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
+use okena_core::ws::ClientPresentationRequest;
 use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -40,7 +41,7 @@ impl RemoteServer {
         bind_addrs: Vec<IpAddr>,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
-        terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
+        presentation_tx: Arc<tokio::sync::broadcast::Sender<ClientPresentationRequest>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
@@ -209,7 +210,7 @@ impl RemoteServer {
                 start_time,
                 git_status,
                 toast_tx,
-                terminal_focus_tx,
+                presentation_tx,
                 remote_subscribed_terminals,
                 remote_visible_projects,
                 git_poll_trigger_tx,

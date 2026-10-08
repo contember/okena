@@ -3,6 +3,7 @@ mod detached_terminals;
 mod extras;
 mod local_build;
 mod notifications;
+mod presentation_requests;
 
 pub use detached_overlays::open_detached_overlay;
 
@@ -435,7 +436,21 @@ impl Okena {
                 terminal_id,
                 window,
             } => {
-                this.jump_to_terminal(project_id, terminal_id, window.as_deref(), cx);
+                this.jump_to_terminal(project_id, terminal_id, *window, cx);
+            }
+            RemoteManagerEvent::ProjectVisibilityRequested {
+                project_id,
+                show,
+                window,
+            } => {
+                this.apply_project_visibility_request(project_id, *show, *window, cx);
+            }
+            RemoteManagerEvent::FullscreenRequested {
+                project_id,
+                terminal_id,
+                window,
+            } => {
+                this.apply_fullscreen_request(project_id, terminal_id.as_deref(), *window, cx);
             }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.

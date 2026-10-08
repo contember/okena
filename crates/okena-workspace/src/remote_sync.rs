@@ -46,6 +46,12 @@ pub struct RemoteSyncState {
     /// state sync. The server assigns the project ID, so the client matches
     /// the first newly materialized project by connection/name/path.
     pending_project_visibility: Vec<PendingRemoteProjectVisibility>,
+    /// External show/hide requests (e.g. `okena project add --hidden`) for
+    /// projects whose daemon snapshot has not reached this client yet: the push
+    /// can outrun the state sync. Keyed by prefixed project id, then window;
+    /// the latest request per window wins. Applied once when the project
+    /// materializes, never persisted.
+    requested_project_visibility: HashMap<String, HashMap<WindowId, bool>>,
     /// Client-owned layouts waiting for their daemon projects to materialize,
     /// or retained across a temporary disconnect.
     preserved_project_layouts: HashMap<String, LayoutNode>,
@@ -220,6 +226,29 @@ impl RemoteSyncState {
         } else {
             None
         }
+    }
+
+    /// Remember an external show/hide request until `project_id` materializes.
+    pub fn queue_requested_project_visibility(
+        &mut self,
+        project_id: &str,
+        window_id: WindowId,
+        show: bool,
+    ) {
+        self.requested_project_visibility
+            .entry(project_id.to_string())
+            .or_default()
+            .insert(window_id, show);
+    }
+
+    /// Take the show/hide requests waiting for `project_id`, per window.
+    pub fn take_requested_project_visibility(
+        &mut self,
+        project_id: &str,
+    ) -> HashMap<WindowId, bool> {
+        self.requested_project_visibility
+            .remove(project_id)
+            .unwrap_or_default()
     }
 
     // === snapshots ===

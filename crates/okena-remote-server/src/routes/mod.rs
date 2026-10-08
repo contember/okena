@@ -21,8 +21,9 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
+use okena_core::ws::ClientPresentationRequest;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -49,9 +50,10 @@ pub struct AppState {
     /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
     /// receivers are simply dropped (fire-and-forget, like git status).
     pub toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
-    /// One-shot exact-terminal focus requests produced by successful external
-    /// actions and consumed by connected desktop clients.
-    pub terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
+    /// One-shot presentation requests (terminal focus, project visibility,
+    /// fullscreen) produced by successful external actions and consumed by
+    /// connected desktop clients. Never stored in state snapshots.
+    pub presentation_tx: Arc<tokio::sync::broadcast::Sender<ClientPresentationRequest>>,
     /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
     /// Puts the owning projects on the git poller's responsive tier, but only for
     /// connections with no entry in `remote_visible_projects`.
@@ -130,7 +132,7 @@ pub fn build_router(
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
-    terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
+    presentation_tx: Arc<tokio::sync::broadcast::Sender<ClientPresentationRequest>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
@@ -150,7 +152,7 @@ pub fn build_router(
         start_time,
         git_status,
         toast_tx,
-        terminal_focus_tx,
+        presentation_tx,
         remote_subscribed_terminals,
         remote_visible_projects,
         git_poll_trigger_tx,

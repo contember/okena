@@ -321,6 +321,45 @@ impl Workspace {
         }
     }
 
+    /// Show or hide a project in one window. A no-op when the project is
+    /// already in the requested state, so repeating a request never flips it
+    /// back. An unknown extra window reads as "visible".
+    pub fn set_project_overview_visibility(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        project_id: &str,
+        show: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let hidden = self
+            .data
+            .window(window_id)
+            .is_some_and(|w| w.hidden_project_ids.contains(project_id));
+        if hidden == show {
+            self.toggle_project_overview_visibility(focus_manager, window_id, project_id, cx);
+        }
+    }
+
+    /// Apply an external show/hide request (`okena project show|hide`) to one
+    /// window. A project whose daemon snapshot has not reached this client yet
+    /// is remembered and applied once it materializes.
+    pub fn request_project_overview_visibility(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        project_id: &str,
+        show: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.project(project_id).is_some() {
+            self.set_project_overview_visibility(focus_manager, window_id, project_id, show, cx);
+        } else {
+            self.remote_sync
+                .queue_requested_project_visibility(project_id, window_id, show);
+        }
+    }
+
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
     ///
@@ -2079,6 +2118,93 @@ mod gpui_tests {
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_overview_visibility_is_idempotent_per_window(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let extra = okena_state::WindowState::default();
+        let extra_id = WindowId::Extra(extra.id);
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Hiding twice keeps it hidden (a toggle would flip it back).
+        for _ in 0..2 {
+            workspace.update(cx, |ws: &mut Workspace, cx| {
+                ws.set_project_overview_visibility(
+                    &mut FocusManager::new(),
+                    extra_id,
+                    "p1",
+                    false,
+                    cx,
+                );
+            });
+            workspace.read_with(cx, |ws: &Workspace, _cx| {
+                assert!(ws.is_project_hidden(extra_id, "p1"));
+                assert!(!ws.is_project_hidden(WindowId::Main, "p1"));
+            });
+        }
+
+        // Showing twice keeps it visible.
+        for _ in 0..2 {
+            workspace.update(cx, |ws: &mut Workspace, cx| {
+                ws.set_project_overview_visibility(
+                    &mut FocusManager::new(),
+                    extra_id,
+                    "p1",
+                    true,
+                    cx,
+                );
+            });
+            workspace.read_with(cx, |ws: &Workspace, _cx| {
+                assert!(!ws.is_project_hidden(extra_id, "p1"));
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn request_project_overview_visibility_waits_for_an_unsynced_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut focus_manager = FocusManager::new();
+            ws.request_project_overview_visibility(
+                &mut focus_manager,
+                WindowId::Main,
+                "p1",
+                false,
+                cx,
+            );
+            ws.request_project_overview_visibility(
+                &mut focus_manager,
+                WindowId::Main,
+                "not-synced-yet",
+                false,
+                cx,
+            );
+        });
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            assert!(ws.is_project_hidden(WindowId::Main, "p1"));
+            // The unknown project is not written into the hidden set; it waits.
+            assert!(!ws.is_project_hidden(WindowId::Main, "not-synced-yet"));
+            assert_eq!(
+                ws.remote_sync
+                    .take_requested_project_visibility("not-synced-yet"),
+                std::collections::HashMap::from([(WindowId::Main, false)])
+            );
+            assert!(
+                ws.remote_sync
+                    .take_requested_project_visibility("p1")
+                    .is_empty()
+            );
         });
     }
 

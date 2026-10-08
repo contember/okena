@@ -77,5 +77,7 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
   project's terminal appears; if creation fails the row disappears from state.
 - **`--window` is honored only by** `project add/clone/show/hide/focus` and
   `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
+- **`project show/hide`, `--hidden` and `term fullscreen` also reach attached
+  desktops**: each applies them to the `--window` target, else its active window.
 - Default output is tab-separated (grep/awk friendly); add `--json` for structured.
   `okena ls --json` is a structured overview; `okena state` is the raw dump.

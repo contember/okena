@@ -7,6 +7,7 @@ use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, TOKEN_REFRESH_AGE_SECS, WsClientMessage,
 };
 use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
+use okena_core::ws::ClientPresentationRequest;
 
 use futures::{Sink, Stream};
 use std::collections::HashMap;
@@ -170,6 +171,21 @@ impl SessionConfig {
 
     fn into_inner(self) -> RemoteConnectionConfig {
         self.0
+    }
+}
+
+/// Parse the payload of a one-shot presentation push. The `WsOutbound`
+/// variants are internally tagged, so the payload fields sit next to `type`.
+fn parse_presentation_request<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    wrap: fn(T) -> ClientPresentationRequest,
+) -> Option<ClientPresentationRequest> {
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(payload) => Some(wrap(payload)),
+        Err(e) => {
+            log::warn!("Failed to parse presentation request: {}", e);
+            None
+        }
     }
 }
 
@@ -1540,24 +1556,42 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     }
                                 }
                                 "terminal_focus_requested" => {
-                                    match serde_json::from_value::<
-                                        okena_core::api::ApiTerminalFocusRequest,
-                                    >(value.clone())
-                                    {
-                                        Ok(request) => {
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::TerminalFocusRequested {
-                                                    connection_id: config_id.clone(),
-                                                    request,
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Failed to parse terminal focus request: {}",
-                                                e
-                                            );
-                                        }
+                                    if let Some(request) = parse_presentation_request(
+                                        &value,
+                                        ClientPresentationRequest::FocusTerminal,
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::PresentationRequested {
+                                                connection_id: config_id.clone(),
+                                                request,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "project_visibility_requested" => {
+                                    if let Some(request) = parse_presentation_request(
+                                        &value,
+                                        ClientPresentationRequest::ProjectVisibility,
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::PresentationRequested {
+                                                connection_id: config_id.clone(),
+                                                request,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "fullscreen_requested" => {
+                                    if let Some(request) = parse_presentation_request(
+                                        &value,
+                                        ClientPresentationRequest::Fullscreen,
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::PresentationRequested {
+                                                connection_id: config_id.clone(),
+                                                request,
+                                            })
+                                            .await;
                                     }
                                 }
                                 "toast" => {

@@ -89,21 +89,6 @@ use crate::service_cx::ServiceReactorRef;
 use crate::soft_close::SoftCloseDeadlines;
 use crate::workspace_cx::DaemonWorkspaceCx;
 
-/// Parse a wire-format window id into a [`WindowId`].
-///
-/// GPUI-free copy of the GUI's `remote_commands::parse_window_id`. `"main"`
-/// maps to [`WindowId::Main`]; any other string is parsed as a UUID and, on
-/// success, wrapped in [`WindowId::Extra`]. A malformed UUID returns `None` so
-/// the caller can reject the action with an "invalid window id" error rather
-/// than silently routing it to the wrong window.
-fn parse_window_id(s: &str) -> Option<WindowId> {
-    if s == "main" {
-        Some(WindowId::Main)
-    } else {
-        uuid::Uuid::parse_str(s).ok().map(WindowId::Extra)
-    }
-}
-
 fn claim_input_resize_owner(action: &ActionRequest, owner_id: &str) {
     let terminal_id = match action {
         ActionRequest::SendText { terminal_id, .. }
@@ -4132,7 +4117,7 @@ pub async fn daemon_command_loop(
                         // carry an extra UI window through daemon-side validation.
                         let parsed_target = match action.target_window() {
                             None => Ok(None),
-                            Some(s) => match parse_window_id(s) {
+                            Some(s) => match WindowId::from_wire(s) {
                                 Some(wid) => Ok(Some(wid)),
                                 None => Err(s.to_string()),
                             },
@@ -4283,8 +4268,9 @@ pub async fn daemon_command_loop(
 
                 // The daemon serves a SINGLE synthetic main window (ported from
                 // the former GUI-headless windows resolver). No GUI, so it's always
-                // "active", has no per-window focus/fullscreen/bounds, and no
-                // hidden set — every project in `project_order` is visible.
+                // "active" and has no per-window focus/fullscreen/bounds. Its
+                // hidden set is the daemon's own (`SetProjectShowInOverview`);
+                // desktops keep separate per-window hidden sets.
                 let visible_project_ids: Vec<String> = ws
                     .visible_projects(WindowId::Main, None, false)
                     .iter()
@@ -5354,25 +5340,6 @@ mod tests {
     }
 
     // ── Pure unit tests ──────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_window_id_main_maps_to_main() {
-        assert_eq!(parse_window_id("main"), Some(WindowId::Main));
-    }
-
-    #[test]
-    fn parse_window_id_valid_uuid_maps_to_extra() {
-        let id = uuid::Uuid::new_v4();
-        assert_eq!(parse_window_id(&id.to_string()), Some(WindowId::Extra(id)));
-    }
-
-    #[test]
-    fn parse_window_id_garbage_returns_none() {
-        assert_eq!(parse_window_id("garbage"), None);
-        assert_eq!(parse_window_id(""), None);
-        // A near-miss UUID (one char short) is still rejected.
-        assert_eq!(parse_window_id("550e8400-e29b-41d4-a716-44665544000"), None);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_close_service_recovery_rearms_current_writeback_owner() {

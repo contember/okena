@@ -18,7 +18,8 @@ use clap::{Parser, Subcommand};
 )]
 pub struct Cli {
     /// Target window for per-window commands ("main", a full window id, or a
-    /// unique id prefix). When omitted, the server uses the focused window.
+    /// unique id prefix). When omitted, the daemon uses its main window and
+    /// attached desktops use their active window.
     #[arg(long, global = true)]
     pub window: Option<String>,
 
@@ -365,11 +366,17 @@ pub enum ProjectCmd {
         project: String,
     },
     /// Show a project in the overview
+    ///
+    /// Applies to the daemon's own view (web, TUI, `okena ls`) and to every
+    /// attached desktop, in the --window target or else its active window.
     Show {
         /// Project (id / name / path)
         project: String,
     },
     /// Hide a project from the overview
+    ///
+    /// Applies to the daemon's own view (web, TUI, `okena ls`) and to every
+    /// attached desktop, in the --window target or else its active window.
     Hide {
         /// Project (id / name / path)
         project: String,
@@ -489,6 +496,9 @@ pub enum TermCmd {
         terminal: String,
     },
     /// Fullscreen a terminal (or exit fullscreen with --off)
+    ///
+    /// Attached desktops apply it in the --window target or else their active
+    /// window.
     Fullscreen {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,

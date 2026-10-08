@@ -358,19 +358,9 @@ impl Okena {
         &mut self,
         project_id: &str,
         terminal_id: &str,
-        requested_window: Option<&str>,
+        requested_window: Option<WindowId>,
         cx: &mut Context<Self>,
     ) {
-        let requested_window = match requested_window {
-            None => None,
-            Some("main") => Some(WindowId::Main),
-            Some(id) => {
-                let Ok(id) = uuid::Uuid::parse_str(id) else {
-                    return;
-                };
-                Some(WindowId::Extra(id))
-            }
-        };
         let target = requested_window.unwrap_or_else(|| {
             choose_notification_window(&self.notification_window_candidates(
                 project_id,
@@ -408,7 +398,7 @@ impl Okena {
 
     /// Resolve a window's view entity + OS handle, or `None` if the id names an
     /// extra that has been dropped (close race).
-    fn window_view_and_handle(
+    pub(super) fn window_view_and_handle(
         &self,
         window_id: WindowId,
     ) -> Option<(Entity<WindowView>, AnyWindowHandle)> {

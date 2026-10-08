@@ -118,6 +118,18 @@ impl WorkspaceData {
         }
     }
 
+    /// Set a project's hidden state in the targeted window. A no-op when the
+    /// project is already in that state; otherwise behaves like
+    /// [`Self::toggle_hidden`] (including dropping `project_width_scale`).
+    pub fn set_hidden(&mut self, id: WindowId, project_id: &str, hidden: bool) {
+        let is_hidden = self
+            .window(id)
+            .is_some_and(|w| w.hidden_project_ids.contains(project_id));
+        if is_hidden != hidden {
+            self.toggle_hidden(id, project_id);
+        }
+    }
+
     /// Set a folder's collapsed state in the targeted window's sidebar.
     ///
     /// `collapsed = true` inserts `(folder_id, true)` into the targeted window's

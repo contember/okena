@@ -511,7 +511,8 @@ pub fn apply_remote_snapshot(
 /// Apply one-shot per-window visibility for a freshly materialized remote
 /// project. When a local window issued the create, the spawn intent ("visible
 /// in this window, hidden everywhere else") is applied. Otherwise the project is
-/// left visible in every window.
+/// left visible in every window. External show/hide requests that arrived
+/// before the project did (`okena project add --hidden`) are applied last.
 ///
 /// Per-window project visibility is CLIENT-owned: each window's
 /// `hidden_project_ids` is toggled locally (`toggle_project_overview_visibility`)
@@ -530,6 +531,9 @@ fn apply_initial_remote_project_visibility(
 ) {
     if let Some(spawning_window) = remote_sync.take_project_visibility(connection_id, name, path) {
         data.add_project_hide_in_other_windows(prefixed_id, spawning_window);
+    }
+    for (window_id, show) in remote_sync.take_requested_project_visibility(prefixed_id) {
+        data.set_hidden(window_id, prefixed_id, !show);
     }
 }
 
@@ -1562,6 +1566,48 @@ mod tests {
                 .unwrap()
                 .hidden_project_ids
                 .contains("remote:conn:p1")
+        );
+    }
+
+    #[test]
+    fn visibility_request_waiting_for_its_project_applies_once_on_materialization() {
+        // `okena project add --hidden`: the hide push can reach the client
+        // before the snapshot carrying the new project.
+        let mut data = empty_data();
+        let extra = okena_state::WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let mut rs = RemoteSyncState::new();
+        rs.queue_requested_project_visibility("remote:c1:a", WindowId::Main, true);
+        rs.queue_requested_project_visibility("remote:c1:a", WindowId::Main, false);
+        let snapshot = || RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(
+                vec![api_project("a", None)],
+                vec!["a".into()],
+                vec![],
+            )),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snapshot()], WindowId::Main);
+
+        // The latest request for the window wins; other windows are untouched.
+        assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            !data
+                .window(WindowId::Extra(extra_id))
+                .unwrap()
+                .hidden_project_ids
+                .contains("remote:c1:a")
+        );
+
+        // Consumed: a later sync never replays it over the user's own toggle.
+        data.toggle_hidden(WindowId::Main, "remote:c1:a");
+        apply_remote_snapshot(&mut data, &mut rs, &[snapshot()], WindowId::Main);
+        assert!(!data.main_window.hidden_project_ids.contains("remote:c1:a"));
+        assert!(
+            rs.take_requested_project_visibility("remote:c1:a")
+                .is_empty()
         );
     }
 

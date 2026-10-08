@@ -70,8 +70,8 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
   per-window presentation (`focused_project_id`, `bounds`, `sidebar_open`,
   `folder_filter`) and are stubbed `None` on purpose. Everything else must be
   populated — a stub there is a real gap. See `docs/backlog/03-daemon-parity-follow-ups.md`.
-- **`parse_window_id`** is a deliberate gpui-free copy of the GUI's version.
-  Keep the two in sync.
+- **Window ids on the wire** parse with `WindowId::from_wire` (`okena-state`),
+  shared with the desktop client.
 
 Related: `crates/okena-workspace/CLAUDE.md` (the logic being driven),
 `crates/okena-remote-server/src/CLAUDE.md` (the protocol surface).

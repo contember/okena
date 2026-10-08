@@ -19,10 +19,45 @@ pub enum WindowId {
     Extra(Uuid),
 }
 
+impl WindowId {
+    /// Parse the wire form used by the remote API's `window` fields: `"main"`
+    /// or an extra window's UUID. Anything else is `None`, so callers reject
+    /// the request instead of routing it to the wrong window.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        if s == "main" {
+            Some(WindowId::Main)
+        } else {
+            Uuid::parse_str(s).ok().map(WindowId::Extra)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn from_wire_maps_main_and_uuids() {
+        assert_eq!(WindowId::from_wire("main"), Some(WindowId::Main));
+        let id = Uuid::new_v4();
+        assert_eq!(
+            WindowId::from_wire(&id.to_string()),
+            Some(WindowId::Extra(id))
+        );
+    }
+
+    #[test]
+    fn from_wire_rejects_garbage() {
+        assert_eq!(WindowId::from_wire("garbage"), None);
+        assert_eq!(WindowId::from_wire(""), None);
+        assert_eq!(WindowId::from_wire("Main"), None);
+        // A near-miss UUID (one char short) is still rejected.
+        assert_eq!(
+            WindowId::from_wire("550e8400-e29b-41d4-a716-44665544000"),
+            None
+        );
+    }
 
     #[test]
     fn main_equals_main() {

@@ -312,6 +312,29 @@ pub struct ApiTerminalFocusRequest {
     pub window: Option<String>,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `SetProjectShowInOverview` action succeeds on the daemon. Each desktop owns
+/// its per-window hidden sets, so it applies the requested state to its own
+/// window; the daemon's `show_in_overview` never drives desktop visibility.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiProjectVisibilityRequest {
+    pub project_id: String,
+    pub show: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
+/// One-shot desktop presentation request emitted after an external
+/// `SetFullscreen` action succeeds on the daemon. `terminal_id: None` exits
+/// fullscreen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiFullscreenRequest {
+    pub project_id: String,
+    pub terminal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,

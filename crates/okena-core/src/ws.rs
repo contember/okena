@@ -1,4 +1,7 @@
-use crate::api::{ApiGitStatus, ApiSystemStats, ApiTerminalFocusRequest, ApiToast};
+use crate::api::{
+    ApiFullscreenRequest, ApiGitStatus, ApiProjectVisibilityRequest, ApiSystemStats,
+    ApiTerminalFocusRequest, ApiToast,
+};
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -85,6 +88,12 @@ pub enum WsOutbound {
     /// One-shot request for a connected desktop client to focus and raise an
     /// exact terminal after an external API action succeeds.
     TerminalFocusRequested(ApiTerminalFocusRequest),
+    /// One-shot request for a connected desktop client to show or hide a
+    /// project in one of its windows after an external API action succeeds.
+    ProjectVisibilityRequested(ApiProjectVisibilityRequest),
+    /// One-shot request for a connected desktop client to enter or exit
+    /// fullscreen in one of its windows after an external API action succeeds.
+    FullscreenRequested(ApiFullscreenRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -96,6 +105,32 @@ pub enum WsOutbound {
         #[serde(default)]
         server_owns: bool,
     },
+}
+
+/// A one-shot presentation request the server pushes to every connected
+/// client after an external action succeeds. Desktop windows own this state, so
+/// it is never part of a state snapshot and never replays on reconnect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientPresentationRequest {
+    FocusTerminal(ApiTerminalFocusRequest),
+    ProjectVisibility(ApiProjectVisibilityRequest),
+    Fullscreen(ApiFullscreenRequest),
+}
+
+impl From<ClientPresentationRequest> for WsOutbound {
+    fn from(request: ClientPresentationRequest) -> Self {
+        match request {
+            ClientPresentationRequest::FocusTerminal(request) => {
+                WsOutbound::TerminalFocusRequested(request)
+            }
+            ClientPresentationRequest::ProjectVisibility(request) => {
+                WsOutbound::ProjectVisibilityRequested(request)
+            }
+            ClientPresentationRequest::Fullscreen(request) => {
+                WsOutbound::FullscreenRequested(request)
+            }
+        }
+    }
 }
 
 // ── Binary frame protocol ──────────────────────────────────────────────────
@@ -236,6 +271,16 @@ mod tests {
                 terminal_id: "t1".into(),
                 window: Some("main".into()),
             }),
+            WsOutbound::ProjectVisibilityRequested(ApiProjectVisibilityRequest {
+                project_id: "p1".into(),
+                show: false,
+                window: None,
+            }),
+            WsOutbound::FullscreenRequested(ApiFullscreenRequest {
+                project_id: "p1".into(),
+                terminal_id: None,
+                window: Some("main".into()),
+            }),
             WsOutbound::TerminalResized {
                 terminal_id: "t1".into(),
                 cols: 120,
@@ -247,6 +292,42 @@ mod tests {
             let json = serde_json::to_string(&msg).unwrap();
             let _parsed: WsOutbound = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    /// Clients read presentation requests by their `type` tag and deserialize
+    /// the payload struct from the same flat object.
+    #[test]
+    fn presentation_requests_are_tagged_flat_payloads() {
+        let visibility = ApiProjectVisibilityRequest {
+            project_id: "p1".into(),
+            show: false,
+            window: Some("main".into()),
+        };
+        let fullscreen = ApiFullscreenRequest {
+            project_id: "p1".into(),
+            terminal_id: Some("t1".into()),
+            window: None,
+        };
+
+        let value = serde_json::to_value(WsOutbound::from(
+            ClientPresentationRequest::ProjectVisibility(visibility.clone()),
+        ))
+        .unwrap();
+        assert_eq!(value["type"], "project_visibility_requested");
+        assert_eq!(
+            serde_json::from_value::<ApiProjectVisibilityRequest>(value).unwrap(),
+            visibility
+        );
+
+        let value = serde_json::to_value(WsOutbound::from(ClientPresentationRequest::Fullscreen(
+            fullscreen.clone(),
+        )))
+        .unwrap();
+        assert_eq!(value["type"], "fullscreen_requested");
+        assert_eq!(
+            serde_json::from_value::<ApiFullscreenRequest>(value).unwrap(),
+            fullscreen
+        );
     }
 
     #[test]
