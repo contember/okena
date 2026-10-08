@@ -691,15 +691,13 @@ async fn flush_project_runtime_teardown(
             for teardown in &teardown_sessions {
                 backend.kill_session(teardown);
             }
-            if backend.flush_teardown_with_timeout(Duration::from_secs(5), &teardown_terminal_ids) {
-                Ok(())
-            } else {
-                Err("terminal teardown did not release project paths in time; checkout preserved")
-            }
+            backend.flush_teardown_with_timeout(Duration::from_secs(5), &teardown_terminal_ids)
         })
         .await
         .map_err(|error| format!("terminal teardown task failed: {error}"))?
-        .map_err(str::to_string)
+        .map_err(|error| {
+            format!("terminal teardown did not release project paths: {error}; checkout preserved")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2272,12 +2270,14 @@ pub(crate) fn spawn_background_worktree_removal(
             // `kill` is asynchronous for local PTYs. Do not race destructive
             // removal with a process that may still own the checkout CWD: a
             // bounded failure restores the project instead of deleting it.
-            if !teardown_backend
+            if let Err(error) = teardown_backend
                 .flush_teardown_with_timeout(Duration::from_secs(5), &teardown_terminal_ids)
             {
                 return (
                     plan,
-                    Err("terminal teardown did not release the worktree in time; checkout preserved".to_string()),
+                    Err(format!(
+                        "terminal teardown did not release the worktree: {error}; checkout preserved"
+                    )),
                     None,
                     None,
                 );
@@ -7239,6 +7239,53 @@ mod tests {
         );
     }
 
+    /// A finished hook keeps its entry after its PTY is gone. Tearing down its
+    /// project must not wait for that terminal to release anything (#214).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_teardown_releases_finished_hook_without_pty() {
+        use okena_state::{HookTerminalEntry, HookTerminalStatus};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+
+        let tmp = std::env::temp_dir();
+        let tmp_path = tmp.to_str().expect("temp dir is utf-8");
+        let mut data = workspace_with_uninitialized_terminal(tmp_path);
+        data.projects[0].hook_terminals.insert(
+            "finished-hook".to_string(),
+            HookTerminalEntry {
+                label: "on_worktree_create".to_string(),
+                status: HookTerminalStatus::Succeeded,
+                hook_type: "on_worktree_create".to_string(),
+                command: "true".to_string(),
+                cwd: tmp_path.to_string(),
+                finished_at: Some(1),
+            },
+        );
+        let mut workspace = Workspace::new(data);
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+        let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+        let snapshot = workspace
+            .begin_project_runtime_quiesce(
+                "p1",
+                &ShellType::Default,
+                SessionBackend::None,
+                false,
+                &mut cx,
+            )
+            .expect("quiesce project");
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+
+        let result = flush_project_runtime_teardown(
+            &[snapshot],
+            &backend,
+            &tokio::runtime::Handle::current(),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
     /// On an empty workspace `materialize_uninitialized_terminals` is a no-op:
     /// no terminals spawned and the data_version is untouched.
     #[test]
@@ -7832,7 +7879,7 @@ mod tests {
         killed: std::sync::atomic::AtomicBool,
         flush_started: std::sync::atomic::AtomicBool,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
-        timeout_result: Option<bool>,
+        timeout_result: Option<Result<(), okena_terminal::backend::TeardownIncomplete>>,
     }
 
     struct RenameRecordingBackend {
@@ -8005,8 +8052,8 @@ mod tests {
             &self,
             _timeout: Duration,
             _terminal_ids: &[String],
-        ) -> bool {
-            if let Some(result) = self.timeout_result {
+        ) -> Result<(), okena_terminal::backend::TeardownIncomplete> {
+            if let Some(result) = self.timeout_result.clone() {
                 assert!(
                     self.killed.load(std::sync::atomic::Ordering::SeqCst),
                     "project PTYs must be killed before bounded teardown verification"
@@ -8016,7 +8063,7 @@ mod tests {
                 result
             } else {
                 self.flush_teardown();
-                true
+                Ok(())
             }
         }
 

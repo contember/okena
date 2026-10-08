@@ -712,8 +712,9 @@ impl DaemonCore {
             || {
                 // Shutdown only needs the queue to drain; per-terminal session
                 // verification is the destructive paths' concern.
-                if !shutdown_pty_manager
+                if shutdown_pty_manager
                     .flush_teardown_with_timeout(std::time::Duration::from_secs(5), &[])
+                    .is_err()
                 {
                     log::warn!("terminal teardown still owns a process at daemon shutdown");
                 }

@@ -1,4 +1,6 @@
-use crate::backend::{TerminalLaunchPlan, TerminalSessionTeardown, TerminalTeardownRoute};
+use crate::backend::{
+    TeardownIncomplete, TerminalLaunchPlan, TerminalSessionTeardown, TerminalTeardownRoute,
+};
 use crate::pty_write_queue::{PtyWriteQueue, Queued};
 use crate::session_backend::SessionCommand;
 #[cfg(not(windows))]
@@ -366,7 +368,7 @@ enum TeardownKind {
         session_backend: ResolvedBackend,
         session_name: String,
         #[cfg(unix)]
-        process_session: Option<crate::session_backend::OwnedPtyProcessSession>,
+        direct_processes: DirectPtyProcesses,
         /// WSL distro for the session (Windows only).
         #[cfg(windows)]
         wsl_distro: Option<String>,
@@ -374,6 +376,18 @@ enum TeardownKind {
         #[cfg(windows)]
         wsl_backend: Option<ResolvedBackend>,
     },
+}
+
+/// What a direct PTY (no session backend) leaves for its teardown to stop.
+#[cfg(unix)]
+enum DirectPtyProcesses {
+    /// This manager owns no PTY for the terminal: it was torn down already, or
+    /// this daemon never spawned it. There is nothing left to stop or verify.
+    NotOwned,
+    /// The PTY exists, but its private process session was not recorded at
+    /// spawn, so surviving descendants cannot be ruled out.
+    Untracked,
+    Session(crate::session_backend::OwnedPtyProcessSession),
 }
 
 /// A unit of teardown work handed to the shared worker pool. Everything is owned so
@@ -452,22 +466,35 @@ impl TeardownTracker {
         self.unverified.lock().remove(terminal_id);
     }
 
-    /// Wait for queued teardown to drain, then report whether every terminal in
-    /// `terminal_ids` released its session. An empty slice asks only about the
-    /// drain. Reading is non-destructive, so concurrent waiters agree.
-    fn flush_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+    /// Wait for queued teardown to drain, then report which terminals in
+    /// `terminal_ids` did not release their session. An empty slice asks only
+    /// about the drain. Reading is non-destructive, so concurrent waiters agree.
+    fn flush_timeout(
+        &self,
+        timeout: Duration,
+        terminal_ids: &[String],
+    ) -> Result<(), TeardownIncomplete> {
         let deadline = std::time::Instant::now() + timeout;
         let mut pending = self.pending.lock();
         while *pending != 0 {
             let now = std::time::Instant::now();
             if now >= deadline {
-                return false;
+                return Err(TeardownIncomplete::TimedOut);
             }
             self.drained.wait_for(&mut pending, deadline - now);
         }
         drop(pending);
         let unverified = self.unverified.lock();
-        terminal_ids.iter().all(|id| !unverified.contains(id))
+        let unreleased: Vec<String> = terminal_ids
+            .iter()
+            .filter(|id| unverified.contains(*id))
+            .cloned()
+            .collect();
+        if unreleased.is_empty() {
+            Ok(())
+        } else {
+            Err(TeardownIncomplete::Unreleased(unreleased))
+        }
     }
 }
 
@@ -694,7 +721,7 @@ impl PtyManager {
                 session_backend,
                 session_name,
                 #[cfg(unix)]
-                process_session,
+                direct_processes,
                 #[cfg(windows)]
                 wsl_distro,
                 #[cfg(windows)]
@@ -718,21 +745,26 @@ impl PtyManager {
                 }
                 #[cfg(unix)]
                 {
-                    let session_stopped = session_backend.kill_session(&session_name);
-                    let descendants_stopped = if session_backend == ResolvedBackend::None {
-                        process_session.is_some_and(|session| {
-                            crate::session_backend::terminate_pty_process_session(
-                                session,
-                                &terminal_id,
-                            )
-                        })
+                    let released = if session_backend == ResolvedBackend::None {
+                        match direct_processes {
+                            // Recording nothing keeps an earlier failed teardown
+                            // of this terminal blocking destructive flushes.
+                            DirectPtyProcesses::NotOwned => None,
+                            DirectPtyProcesses::Untracked => Some(false),
+                            DirectPtyProcesses::Session(session) => {
+                                Some(crate::session_backend::terminate_pty_process_session(
+                                    session,
+                                    &terminal_id,
+                                ))
+                            }
+                        }
                     } else {
-                        true
+                        Some(session_backend.kill_session(&session_name))
                     };
-                    if session_stopped && descendants_stopped {
-                        tracker.mark_verified(&terminal_id);
-                    } else {
-                        tracker.mark_unverified(&terminal_id);
+                    match released {
+                        Some(true) => tracker.mark_verified(&terminal_id),
+                        Some(false) => tracker.mark_unverified(&terminal_id),
+                        None => {}
                     }
                 }
             }
@@ -1632,10 +1664,15 @@ impl PtyManager {
         let session_name = session_backend.session_name(terminal_id);
 
         #[cfg(unix)]
-        let process_session = handle
-            .as_ref()
-            .and_then(|handle| handle.process_session)
-            .or_else(|| exited.as_ref().and_then(|exited| exited.process_session));
+        let direct_processes = if handle.is_none() && exited.is_none() {
+            DirectPtyProcesses::NotOwned
+        } else {
+            handle
+                .as_ref()
+                .and_then(|handle| handle.process_session)
+                .or_else(|| exited.as_ref().and_then(|exited| exited.process_session))
+                .map_or(DirectPtyProcesses::Untracked, DirectPtyProcesses::Session)
+        };
         // The pane is going away for good — its pointer must not outlive it and
         // name a pty number the next pane inherits.
         #[cfg(unix)]
@@ -1652,7 +1689,7 @@ impl PtyManager {
                 session_backend,
                 session_name,
                 #[cfg(unix)]
-                process_session,
+                direct_processes,
                 #[cfg(windows)]
                 wsl_distro,
                 #[cfg(windows)]
@@ -1747,11 +1784,15 @@ impl PtyManager {
 
     /// Wait only a bounded interval for queued teardown and detached reapers.
     ///
-    /// `false` means the wait timed out, or one of `terminal_ids` could not be
-    /// verified as having released its persistent session — i.e. a process may
-    /// still own its former working directory. Pass the terminals the caller is
-    /// about to delete; an empty slice asks only about the drain.
-    pub fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+    /// An error means the wait timed out, or some of `terminal_ids` could not be
+    /// verified as having released their persistent session — i.e. a process
+    /// may still own its former working directory. Pass the terminals the caller
+    /// is about to delete; an empty slice asks only about the drain.
+    pub fn flush_teardown_with_timeout(
+        &self,
+        timeout: Duration,
+        terminal_ids: &[String],
+    ) -> Result<(), TeardownIncomplete> {
         self.teardown_tracker.flush_timeout(timeout, terminal_ids)
     }
 
@@ -2716,10 +2757,13 @@ mod tests {
             .expect("child pid is numeric");
 
         manager.kill(&terminal_id);
-        assert!(manager.flush_teardown_with_timeout(
-            Duration::from_secs(2),
-            std::slice::from_ref(&terminal_id)
-        ));
+        assert_eq!(
+            manager.flush_teardown_with_timeout(
+                Duration::from_secs(2),
+                std::slice::from_ref(&terminal_id)
+            ),
+            Ok(())
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while unsafe { libc::kill(child_pid, 0) == 0 } && std::time::Instant::now() < deadline {
@@ -2834,7 +2878,10 @@ mod tests {
         reader_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("manager reaper joins released reader");
-        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]));
+        assert_eq!(
+            manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]),
+            Ok(())
+        );
     }
 
     /// A child that stopped draining its PTY blocks the writer thread inside
@@ -3056,8 +3103,9 @@ mod tests {
             "N stuck children must not create N reaper threads"
         );
         assert_eq!(*manager.teardown_tracker.pending.lock(), STUCK_CHILDREN);
-        assert!(
-            !manager.flush_teardown_with_timeout(Duration::from_millis(50), &[]),
+        assert_eq!(
+            manager.flush_teardown_with_timeout(Duration::from_millis(50), &[]),
+            Err(TeardownIncomplete::TimedOut),
             "destructive flush must remain blocked while children may own a CWD"
         );
 
@@ -3070,7 +3118,10 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("all reaper-owned readers finish");
         }
-        assert!(manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]));
+        assert_eq!(
+            manager.flush_teardown_with_timeout(Duration::from_secs(1), &[]),
+            Ok(())
+        );
     }
 
     #[cfg(unix)]
@@ -3150,8 +3201,9 @@ mod tests {
         );
 
         manager.kill(&terminal_id);
-        assert!(
+        assert_eq!(
             manager.flush_teardown_with_timeout(Duration::from_secs(5), &[]),
+            Ok(()),
             "teardown must complete"
         );
         assert!(!pointer.exists(), "pointer must not outlive the pane");
@@ -3197,28 +3249,75 @@ mod tests {
     fn unverified_teardown_is_scoped_to_its_own_terminal() {
         let tracker = TeardownTracker::default();
         tracker.mark_unverified("term-a");
+        let term_a_unreleased = Err(TeardownIncomplete::Unreleased(vec!["term-a".to_string()]));
 
-        assert!(
-            !tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
-            "the terminal that failed must block its own destructive flush"
+        assert_eq!(
+            tracker.flush_timeout(
+                Duration::ZERO,
+                &["term-a".to_string(), "term-b".to_string()]
+            ),
+            term_a_unreleased,
+            "the terminal that failed must block its own destructive flush, and only it is named"
         );
-        assert!(
+        assert_eq!(
             tracker.flush_timeout(Duration::ZERO, &["term-b".to_string()]),
+            Ok(()),
             "an unrelated terminal must not inherit that failure"
         );
-        assert!(
-            !tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+        assert_eq!(
+            tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            term_a_unreleased,
             "reading the failure must not consume it"
         );
 
         // A plain drain must not erase the signal either.
         tracker.flush();
-        assert!(!tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]));
+        assert_eq!(
+            tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            term_a_unreleased
+        );
 
         tracker.mark_verified("term-a");
-        assert!(
+        assert_eq!(
             tracker.flush_timeout(Duration::ZERO, &["term-a".to_string()]),
+            Ok(()),
             "a later successful teardown clears the terminal"
+        );
+    }
+
+    /// A finished hook's terminal stays in the project after its PTY is gone, so
+    /// worktree removal kills an id this manager no longer owns.
+    #[test]
+    fn killing_a_terminal_without_a_pty_does_not_block_teardown() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let terminal_id = "finished-hook".to_string();
+
+        manager.kill(&terminal_id);
+
+        assert_eq!(
+            manager.flush_teardown_with_timeout(
+                Duration::from_secs(2),
+                std::slice::from_ref(&terminal_id)
+            ),
+            Ok(())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_terminal_without_a_pty_keeps_an_earlier_failure() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let terminal_id = "leaked-descendants".to_string();
+        manager.teardown_tracker.mark_unverified(&terminal_id);
+
+        manager.kill(&terminal_id);
+
+        assert_eq!(
+            manager.flush_teardown_with_timeout(
+                Duration::from_secs(2),
+                std::slice::from_ref(&terminal_id)
+            ),
+            Err(TeardownIncomplete::Unreleased(vec![terminal_id.clone()]))
         );
     }
 

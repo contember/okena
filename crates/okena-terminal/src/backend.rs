@@ -10,6 +10,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Why a bounded teardown flush could not confirm that terminals let go of
+/// their working directories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeardownIncomplete {
+    TimedOut,
+    /// Terminals whose processes could not be verified as stopped.
+    Unreleased(Vec<String>),
+}
+
+impl std::fmt::Display for TeardownIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => write!(f, "queued terminal teardown did not finish in time"),
+            Self::Unreleased(terminal_ids) => write!(
+                f,
+                "processes of terminal(s) {} could not be verified as stopped",
+                terminal_ids.join(", ")
+            ),
+        }
+    }
+}
+
 /// Exact startup command carried separately from the shell used to route it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalLaunchCommand {
@@ -114,12 +136,16 @@ pub trait TerminalBackend: Send + Sync {
     }
     /// Wait for teardown work queued before this call to finish.
     fn flush_teardown(&self) {}
-    /// Bounded teardown wait for destructive operations. `false` means the wait
-    /// timed out, or one of `terminal_ids` may still own its former working
-    /// directory. An empty slice asks only about the drain.
-    fn flush_teardown_with_timeout(&self, _timeout: Duration, _terminal_ids: &[String]) -> bool {
+    /// Bounded teardown wait for destructive operations. An error means the
+    /// wait timed out, or some of `terminal_ids` may still own their former
+    /// working directory. An empty slice asks only about the drain.
+    fn flush_teardown_with_timeout(
+        &self,
+        _timeout: Duration,
+        _terminal_ids: &[String],
+    ) -> Result<(), TeardownIncomplete> {
         self.flush_teardown();
-        true
+        Ok(())
     }
     /// Replace environment overrides applied to terminals created from now on.
     fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {}
@@ -221,7 +247,11 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.flush_teardown()
     }
 
-    fn flush_teardown_with_timeout(&self, timeout: Duration, terminal_ids: &[String]) -> bool {
+    fn flush_teardown_with_timeout(
+        &self,
+        timeout: Duration,
+        terminal_ids: &[String],
+    ) -> Result<(), TeardownIncomplete> {
         self.pty_manager
             .flush_teardown_with_timeout(timeout, terminal_ids)
     }
