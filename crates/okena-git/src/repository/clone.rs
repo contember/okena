@@ -165,6 +165,7 @@ pub fn finish_clone_repository(handle: CommandHandle) -> GitResult<()> {
 /// Resolving HEAD is the line between the two: git writes it only once the
 /// fetch has landed the branch it is about to check out.
 pub fn is_complete_checkout(path: &Path) -> bool {
+    // No status walk on this handle: one needs `gix_helpers::open`'s filter config.
     gix::open(path).is_ok_and(|repo| repo.head_id().is_ok())
 }
 

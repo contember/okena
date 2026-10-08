@@ -100,6 +100,7 @@ fn unsafe_worktree(path: &Path, reason: impl Into<String>) -> GitError {
 }
 
 fn fresh_repo(path: &Path) -> GitResult<gix::Repository> {
+    // No status walk on this handle: one needs `gix_helpers::open`'s filter config.
     gix::ThreadSafeRepository::discover(path)
         .map(|repository| repository.to_thread_local())
         .map_err(|error| unsafe_worktree(path, format!("repository discovery failed: {error}")))
@@ -825,7 +826,8 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
     // Main worktree: open via common_dir, which always resolves to the main
-    // repository even when `repo_path` lives in a linked worktree.
+    // repository even when `repo_path` lives in a linked worktree. No status
+    // walk on this handle: one needs `gix_helpers::open`'s filter config.
     if let Ok(main_repo) = gix::open(repo.common_dir())
         && let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo))
     {
