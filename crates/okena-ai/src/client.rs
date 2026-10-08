@@ -2,7 +2,8 @@
 
 use crate::server::Health;
 use okena_core::ai_proxy::{
-    AiProxyCommand, AiProxyStatus, ProxyEndpoint, ensure_endpoint, load_endpoint,
+    AiProxyCommand, AiProxyStatus, ProxyEndpoint, ensure_endpoint, ensure_management_key,
+    load_endpoint,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -11,13 +12,15 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ProxyClient {
     endpoint: ProxyEndpoint,
+    management_key: String,
     http: reqwest::Client,
 }
 
 impl ProxyClient {
-    pub fn new(endpoint: ProxyEndpoint) -> Self {
+    pub fn new(endpoint: ProxyEndpoint, management_key: String) -> Self {
         Self {
             endpoint,
+            management_key,
             http: reqwest::Client::builder()
                 // Loopback must never go through a configured HTTP proxy.
                 .no_proxy()
@@ -30,14 +33,18 @@ impl ProxyClient {
         &self.endpoint
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/_okena/{path}", self.endpoint.base_url())
+    fn management(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(
+                method,
+                format!("http://127.0.0.1:{}/_okena/{path}", self.endpoint.port),
+            )
+            .bearer_auth(&self.management_key)
     }
 
     pub async fn health(&self) -> anyhow::Result<Health> {
         Ok(self
-            .http
-            .get(self.url("health"))
+            .management(reqwest::Method::GET, "health")
             .timeout(Duration::from_secs(2))
             .send()
             .await?
@@ -48,8 +55,7 @@ impl ProxyClient {
 
     pub async fn command(&self, command: &AiProxyCommand) -> anyhow::Result<AiProxyStatus> {
         let response = self
-            .http
-            .post(self.url("command"))
+            .management(reqwest::Method::POST, "command")
             .json(command)
             // Finishing a login waits for the provider's token endpoint.
             .timeout(Duration::from_secs(60))
@@ -68,8 +74,7 @@ impl ProxyClient {
     /// Ask an idle proxy to exit. `false` when requests are in flight.
     pub async fn shutdown(&self) -> anyhow::Result<bool> {
         let response = self
-            .http
-            .post(self.url("shutdown"))
+            .management(reqwest::Method::POST, "shutdown")
             .timeout(Duration::from_secs(2))
             .send()
             .await?;
@@ -81,7 +86,8 @@ impl ProxyClient {
 /// when none answers. A proxy of another version is replaced only while idle, so
 /// an update never cuts a running response; otherwise the old one keeps serving.
 pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<ProxyClient> {
-    let client = ProxyClient::new(ensure_endpoint(profile_root)?);
+    let management_key = ensure_management_key(profile_root)?;
+    let client = ProxyClient::new(ensure_endpoint(profile_root)?, management_key.clone());
     match client.health().await {
         Ok(health) if health.version == crate::VERSION => return Ok(client),
         Ok(health) => {
@@ -106,7 +112,7 @@ pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<P
     while tokio::time::Instant::now() < deadline {
         // The proxy may have moved to another port if the old one was taken.
         if let Ok(Some(endpoint)) = load_endpoint(profile_root) {
-            let started = ProxyClient::new(endpoint);
+            let started = ProxyClient::new(endpoint, management_key.clone());
             if started.health().await.is_ok() {
                 return Ok(started);
             }

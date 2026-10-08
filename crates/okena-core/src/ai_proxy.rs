@@ -19,8 +19,9 @@ fn endpoint_path(profile_root: &Path) -> PathBuf {
 }
 
 /// Loopback address of the proxy. The token is the first path segment of every
-/// request, so only processes that were handed the URL (Okena shells, the
-/// daemon) can use the proxy.
+/// inference request, so only processes that were handed the URL (Okena shells)
+/// can send requests through the proxy. Managing it needs the separate
+/// [management key](ensure_management_key).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyEndpoint {
     pub port: u16,
@@ -61,6 +62,29 @@ pub fn ensure_endpoint(profile_root: &Path) -> anyhow::Result<ProxyEndpoint> {
     Ok(endpoint)
 }
 
+fn management_key_path(profile_root: &Path) -> PathBuf {
+    proxy_dir(profile_root).join("management.key")
+}
+
+/// Load the secret that authorizes the proxy's management routes, creating it on
+/// first use. Unlike the endpoint token it never enters a shell's environment.
+pub fn ensure_management_key(profile_root: &Path) -> anyhow::Result<String> {
+    let path = management_key_path(profile_root);
+    if !path.exists() {
+        // The daemon and a starting proxy may race to create it; the first one wins.
+        let created =
+            private_temp_file(&path, random_token()?.as_bytes())?.persist_noclobber(&path);
+        if let Err(error) = created
+            && error.error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(error.error.into());
+        }
+    }
+    let key = std::fs::read_to_string(&path)?;
+    anyhow::ensure!(!key.is_empty(), "{} is empty", path.display());
+    Ok(key)
+}
+
 pub fn free_loopback_port() -> anyhow::Result<u16> {
     Ok(std::net::TcpListener::bind(("127.0.0.1", 0))?
         .local_addr()?
@@ -75,6 +99,14 @@ pub fn random_token() -> anyhow::Result<String> {
 
 /// Atomically replace `path` with `bytes`, readable only by the owner.
 pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    private_temp_file(path, bytes)?
+        .persist(path)
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// Owner-only temporary file next to `path`, holding `bytes` and ready to persist.
+fn private_temp_file(path: &Path, bytes: &[u8]) -> anyhow::Result<tempfile::NamedTempFile> {
     use std::io::Write;
     let dir = path.parent().context("path has no parent directory")?;
     std::fs::create_dir_all(dir)?;
@@ -87,8 +119,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    Ok(file)
 }
 
 /// Management commands, sent by clients through the daemon (`ActionRequest::AiProxy`)
@@ -189,15 +220,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn endpoint_file_is_private() {
+    fn endpoint_and_management_key_files_are_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         ensure_endpoint(dir.path()).unwrap();
-        let mode = std::fs::metadata(endpoint_path(dir.path()))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        ensure_management_key(dir.path()).unwrap();
+        for path in [endpoint_path(dir.path()), management_key_path(dir.path())] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn management_key_is_created_once_and_differs_from_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = ensure_management_key(dir.path()).unwrap();
+        assert_eq!(key.len(), 48);
+        assert_eq!(ensure_management_key(dir.path()).unwrap(), key);
+        assert_ne!(ensure_endpoint(dir.path()).unwrap().token, key);
+    }
+
+    #[test]
+    fn empty_management_key_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&management_key_path(dir.path()), b"").unwrap();
+        assert!(ensure_management_key(dir.path()).is_err());
     }
 
     #[test]
