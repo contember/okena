@@ -45,6 +45,7 @@ pub mod toast_poll;
 pub mod usage_poll;
 pub mod workspace_cx;
 pub mod worktree_close_watchdog;
+pub mod worktree_discovery;
 pub mod worktree_stale_sweep;
 
 #[cfg(test)]

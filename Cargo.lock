@@ -6405,6 +6405,7 @@ version = "0.34.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "globset",
  "libc",
  "log",
  "okena-agent-usage",
@@ -6421,6 +6422,7 @@ dependencies = [
  "okena-workspace",
  "parking_lot",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
 ]

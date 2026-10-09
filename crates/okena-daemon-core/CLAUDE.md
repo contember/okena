@@ -63,6 +63,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `ai_proxy.rs` | AI proxy glue: shell environment, proxy start, management commands, and the accounts poll (15 s, paused while no client is connected; it still checks that the proxy runs every 5 min and on every routed PTY spawn) that loads each account's history (≤ once a minute) and publishes the pool summary into `UsageHub::set_pool` and each account's windows with history into `UsageHub::set_pool_histories`, computed on the blocking pool. |
 | `worktree_close_watchdog.rs` | Watches pending worktree closes. |
 | `worktree_stale_sweep.rs` | Drops worktree projects whose checkout was deleted outside Okena. |
+| `worktree_discovery.rs` | Adds worktrees created outside Okena, minus `worktree.auto_track_ignore` and ones the user untracked (`dismissed_worktree_paths`). |
 
 ## Patterns
 
