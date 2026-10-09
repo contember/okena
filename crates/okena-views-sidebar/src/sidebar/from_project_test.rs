@@ -41,6 +41,7 @@ fn make_project(id: &str) -> ProjectData {
 fn make_workspace(hidden: &[&str]) -> Workspace {
     let mut data = WorkspaceData {
         agent_session_history: Default::default(),
+        dismissed_worktree_paths: Vec::new(),
         version: 1,
         projects: vec![],
         project_order: vec![],
@@ -105,6 +106,7 @@ fn from_project_resolves_worktree_colour_through_override_then_parent() {
 
     let workspace = Workspace::new(WorkspaceData {
         agent_session_history: Default::default(),
+        dismissed_worktree_paths: Vec::new(),
         version: 1,
         projects: vec![parent, plain, red],
         project_order: vec!["main".to_string()],
