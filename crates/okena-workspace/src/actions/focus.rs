@@ -182,6 +182,60 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Apply an external fullscreen request once its terminal is in the mirror.
+    /// A newer request, including exiting fullscreen, replaces the pending one.
+    pub fn request_fullscreen(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        project_id: &str,
+        terminal_id: Option<&str>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.remote_sync.take_requested_fullscreen(window_id);
+        if let Some(terminal_id) = terminal_id {
+            self.remote_sync.queue_requested_fullscreen(
+                window_id,
+                okena_core::api::ApiFullscreen {
+                    project_id: project_id.to_owned(),
+                    terminal_id: terminal_id.to_owned(),
+                },
+            );
+            self.apply_requested_fullscreen(focus_manager, window_id, cx);
+        } else {
+            self.exit_fullscreen(focus_manager, cx);
+        }
+    }
+
+    pub(crate) fn apply_requested_fullscreen(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(request) = self.remote_sync.take_requested_fullscreen(window_id) else {
+            return;
+        };
+        if self.data().window(window_id).is_none() {
+            return;
+        }
+        let terminal_known = self
+            .project(&request.project_id)
+            .and_then(|project| project.layout.as_ref())
+            .is_some_and(|layout| layout.find_terminal_path(&request.terminal_id).is_some());
+        if terminal_known {
+            self.set_fullscreen_terminal(
+                focus_manager,
+                request.project_id,
+                request.terminal_id,
+                cx,
+            );
+        } else {
+            self.remote_sync
+                .queue_requested_fullscreen(window_id, request);
+        }
+    }
+
     /// Set focused terminal (for visual indicator)
     ///
     /// Focus events propagate: terminal focus -> pane focus -> project awareness

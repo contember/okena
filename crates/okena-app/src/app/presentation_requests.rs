@@ -68,29 +68,11 @@ impl Okena {
             log::warn!("Ignoring fullscreen request for unknown window {target:?}");
             return;
         };
-        if let Some(terminal_id) = terminal_id {
-            let terminal_known = self
-                .workspace
-                .read(cx)
-                .project(project_id)
-                .and_then(|project| project.layout.as_ref())
-                .is_some_and(|layout| layout.find_terminal_path(terminal_id).is_some());
-            if !terminal_known {
-                log::warn!("Ignoring fullscreen request for unknown terminal {terminal_id}");
-                return;
-            }
-        }
         let workspace = self.workspace.clone();
         let focus_manager = view.read(cx).focus_manager();
         focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| match terminal_id {
-                Some(terminal_id) => ws.set_fullscreen_terminal(
-                    fm,
-                    project_id.to_string(),
-                    terminal_id.to_string(),
-                    cx,
-                ),
-                None => ws.exit_fullscreen(fm, cx),
+            workspace.update(cx, |ws, cx| {
+                ws.request_fullscreen(fm, target, project_id, terminal_id, cx);
             });
             cx.notify();
         });

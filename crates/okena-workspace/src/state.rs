@@ -1549,6 +1549,9 @@ impl Workspace {
     /// reappear.
     pub fn close_extra_window(&mut self, id: WindowId, cx: &mut impl WorkspaceCx) {
         self.data.close_extra_window(id);
+        if self.data.window(id).is_none() {
+            self.remote_sync.take_requested_fullscreen(id);
+        }
         self.notify_data(cx);
     }
 
@@ -2423,6 +2426,7 @@ impl Workspace {
         }
 
         self.reanchor_focus(focus_manager, anchor.as_ref());
+        self.apply_requested_fullscreen(focus_manager, window_id, cx);
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         self.notify_ui_only(cx);
@@ -4181,6 +4185,145 @@ mod gpui_tests {
         sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
         fm.focus_terminal("remote:c1:p1".to_string(), vec![1]);
         (workspace, fm)
+    }
+
+    #[gpui::test]
+    fn requested_fullscreen_waits_for_its_terminal_and_applies_once(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_| Workspace::new(make_workspace_data(vec![], vec![])));
+        let mut fm = crate::focus::FocusManager::new();
+        workspace.update(cx, |ws, cx| {
+            ws.request_fullscreen(
+                &mut fm,
+                WindowId::Main,
+                "remote:c1:p1",
+                Some("remote:c1:t2"),
+                cx,
+            );
+        });
+        assert_eq!(fm.fullscreen_state(), None);
+
+        sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("t1"));
+        assert_eq!(fm.fullscreen_state(), None);
+        sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some(("remote:c1:p1", "remote:c1:t2"))
+        );
+        assert_eq!(fm.focused_terminal_state().unwrap().layout_path, vec![1]);
+
+        workspace.update(cx, |ws, cx| ws.exit_fullscreen(&mut fm, cx));
+        sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
+        assert_eq!(fm.fullscreen_state(), None);
+    }
+
+    #[gpui::test]
+    fn requested_fullscreen_on_a_known_terminal_supersedes_a_pending_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let workspace = cx.new(|_| Workspace::new(make_workspace_data(vec![], vec![])));
+        let mut fm = crate::focus::FocusManager::new();
+        sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("t1"));
+        workspace.update(cx, |ws, cx| {
+            for terminal in ["remote:c1:t2", "remote:c1:t1"] {
+                ws.request_fullscreen(&mut fm, WindowId::Main, "remote:c1:p1", Some(terminal), cx);
+            }
+        });
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some(("remote:c1:p1", "remote:c1:t1"))
+        );
+
+        sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some(("remote:c1:p1", "remote:c1:t1"))
+        );
+    }
+
+    #[gpui::test]
+    fn requested_fullscreen_off_cancels_a_pending_request(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_| Workspace::new(make_workspace_data(vec![], vec![])));
+        let mut fm = crate::focus::FocusManager::new();
+        sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("t1"));
+        workspace.update(cx, |ws, cx| {
+            for terminal in [Some("remote:c1:t1"), Some("remote:c1:t2"), None] {
+                ws.request_fullscreen(&mut fm, WindowId::Main, "remote:c1:p1", terminal, cx);
+            }
+        });
+        assert_eq!(fm.fullscreen_state(), None);
+
+        sync_and_read_focus(&workspace, &mut fm, cx, api_split(["t1", "t2"]));
+        assert_eq!(fm.fullscreen_state(), None);
+    }
+
+    #[gpui::test]
+    fn requested_fullscreen_keeps_the_latest_request_in_its_window(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(vec![], vec![]);
+        let extra = data.spawn_extra_window(None);
+        let workspace = cx.new(|_| Workspace::new(data));
+        let mut main_fm = crate::focus::FocusManager::new();
+        let mut extra_fm = crate::focus::FocusManager::new();
+        sync_and_read_focus(&workspace, &mut main_fm, cx, api_terminal("t1"));
+        workspace.update(cx, |ws, cx| {
+            ws.request_fullscreen(
+                &mut main_fm,
+                WindowId::Main,
+                "remote:c1:p1",
+                Some("remote:c1:t1"),
+                cx,
+            );
+            for terminal in ["remote:c1:t2", "remote:c1:t3"] {
+                ws.request_fullscreen(&mut extra_fm, extra, "remote:c1:p1", Some(terminal), cx);
+            }
+        });
+
+        let snapshot = snapshot_of(api_split_of(&["t1", "t2", "t3"]));
+        workspace.update(cx, |ws, cx| {
+            ws.apply_remote_snapshot(
+                std::slice::from_ref(&snapshot),
+                WindowId::Main,
+                &mut main_fm,
+                cx,
+            );
+        });
+        assert_eq!(
+            main_fm.fullscreen_state(),
+            Some(("remote:c1:p1", "remote:c1:t1"))
+        );
+        assert_eq!(extra_fm.fullscreen_state(), None);
+
+        workspace.update(cx, |ws, cx| {
+            ws.apply_remote_snapshot(&[snapshot], extra, &mut extra_fm, cx);
+        });
+        assert_eq!(
+            extra_fm.fullscreen_state(),
+            Some(("remote:c1:p1", "remote:c1:t3"))
+        );
+        assert_eq!(
+            extra_fm.focused_terminal_state().unwrap().layout_path,
+            vec![2]
+        );
+    }
+
+    #[gpui::test]
+    fn requested_fullscreen_is_discarded_when_its_connection_is_removed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let workspace = cx.new(|_| Workspace::new(make_workspace_data(vec![], vec![])));
+        let mut fm = crate::focus::FocusManager::new();
+        workspace.update(cx, |ws, cx| {
+            ws.request_fullscreen(
+                &mut fm,
+                WindowId::Main,
+                "remote:c1:p1",
+                Some("remote:c1:t1"),
+                cx,
+            );
+            ws.apply_remote_snapshot(&[], WindowId::Main, &mut fm, cx);
+        });
+
+        sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("t1"));
+        assert_eq!(fm.fullscreen_state(), None);
     }
 
     #[gpui::test]

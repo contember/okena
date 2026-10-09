@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use okena_core::api::{ApiGitStatus, ApiServiceInfo};
+use okena_core::api::{ApiFullscreen, ApiGitStatus, ApiServiceInfo};
 use okena_layout::LayoutNode;
 use okena_state::WindowId;
 
@@ -52,6 +52,9 @@ pub struct RemoteSyncState {
     /// the latest request per window wins. Applied once when the project
     /// materializes, never persisted.
     requested_project_visibility: HashMap<String, HashMap<WindowId, bool>>,
+    /// Fullscreen pushes can arrive before their terminal's snapshot. The latest
+    /// request per window waits here until that terminal materializes.
+    requested_fullscreen: HashMap<WindowId, ApiFullscreen>,
     /// Client-owned layouts waiting for their daemon projects to materialize,
     /// or retained across a temporary disconnect.
     preserved_project_layouts: HashMap<String, LayoutNode>,
@@ -251,6 +254,21 @@ impl RemoteSyncState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn queue_requested_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        request: ApiFullscreen,
+    ) {
+        self.requested_fullscreen.insert(window_id, request);
+    }
+
+    pub(crate) fn take_requested_fullscreen(
+        &mut self,
+        window_id: WindowId,
+    ) -> Option<ApiFullscreen> {
+        self.requested_fullscreen.remove(&window_id)
+    }
+
     // === snapshots ===
 
     pub fn snapshot(&self, project_id: &str) -> Option<&RemoteProjectSnapshot> {
@@ -297,6 +315,8 @@ impl RemoteSyncState {
             .retain(|_, projects| !projects.is_empty());
         self.pending_close_focus
             .retain(|_, pending| pending.project_id != project_id);
+        self.requested_fullscreen
+            .retain(|_, request| request.project_id != project_id);
     }
 
     /// Drop cached project presentation after a connection disappears or a
@@ -329,12 +349,18 @@ impl RemoteSyncState {
         }
         self.pending_project_visibility
             .retain(|pending| active_connection_ids.contains(&pending.connection_id));
+        self.requested_fullscreen.retain(|_, request| {
+            remote_connection_id(&request.project_id)
+                .is_none_or(|id| active_connection_ids.contains(id))
+        });
         removed.sort();
         removed
     }
 
     /// Remove all cached remote state whose project ID starts with the prefix.
     pub fn retain_not_starting_with(&mut self, prefix: &str) -> Vec<String> {
+        self.requested_fullscreen
+            .retain(|_, request| !request.project_id.starts_with(prefix));
         let mut removed: HashSet<String> = self
             .snapshots
             .keys()
