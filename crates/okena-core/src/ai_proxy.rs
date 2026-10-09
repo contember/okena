@@ -82,8 +82,11 @@ pub fn ensure_endpoint(profile_root: &Path) -> anyhow::Result<ProxyEndpoint> {
         port: free_loopback_port()?,
         token: random_token()?,
     };
-    save_endpoint(profile_root, &endpoint)?;
-    Ok(endpoint)
+    create_private(
+        &endpoint_path(profile_root),
+        &serde_json::to_vec(&endpoint)?,
+    )?;
+    load_endpoint(profile_root)?.context("ai-proxy endpoint.json vanished after creation")
 }
 
 fn management_key_path(profile_root: &Path) -> PathBuf {
@@ -95,14 +98,7 @@ fn management_key_path(profile_root: &Path) -> PathBuf {
 pub fn ensure_management_key(profile_root: &Path) -> anyhow::Result<String> {
     let path = management_key_path(profile_root);
     if !path.exists() {
-        // The daemon and a starting proxy may race to create it; the first one wins.
-        let created =
-            private_temp_file(&path, random_token()?.as_bytes())?.persist_noclobber(&path);
-        if let Err(error) = created
-            && error.error.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(error.error.into());
-        }
+        create_private(&path, random_token()?.as_bytes())?;
     }
     let key = std::fs::read_to_string(&path)?;
     anyhow::ensure!(!key.is_empty(), "{} is empty", path.display());
@@ -127,6 +123,16 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .persist(path)
         .map_err(|error| error.error)?;
     Ok(())
+}
+
+/// Create `path` with `bytes`, readable only by the owner, unless it exists.
+/// The daemon and a starting proxy may race to create it; the first one wins.
+fn create_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    match private_temp_file(path, bytes)?.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.error.into()),
+    }
 }
 
 /// Owner-only temporary file next to `path`, holding `bytes` and ready to persist.
@@ -372,6 +378,28 @@ mod tests {
             created.base_url(),
             format!("http://127.0.0.1:{}/{}", created.port, created.token)
         );
+    }
+
+    #[test]
+    fn concurrent_first_use_agrees_on_one_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let endpoints: Vec<ProxyEndpoint> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        ensure_endpoint(dir.path()).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let stored = load_endpoint(dir.path()).unwrap().unwrap();
+        assert!(endpoints.iter().all(|endpoint| *endpoint == stored));
     }
 
     #[cfg(unix)]
