@@ -339,6 +339,7 @@ mod tests {
         }
         let app = axum::Router::new()
             .route("/v1/messages", axum::routing::post(messages))
+            .route("/api/oauth/profile", axum::routing::post(messages))
             .route(
                 "/v1/stall-headers",
                 axum::routing::post(|| async {
@@ -552,6 +553,32 @@ mod tests {
         let (status, body) = h.message("conv").await;
         assert_eq!(status, 200);
         assert_eq!(body, "served by caller-own-token");
+    }
+
+    #[tokio::test]
+    async fn dot_segments_cannot_carry_an_account_out_of_inference() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        // reqwest would resolve the dot segments itself, so the request is raw.
+        for escape in ["../..", "%2e%2e/%2E%2E"] {
+            let mut socket = tokio::net::TcpStream::connect(h.origin.trim_start_matches("http://"))
+                .await
+                .unwrap();
+            let request = format!(
+                "POST /{}/v1/messages/{escape}/api/oauth/profile HTTP/1.1\r\n\
+                 Host: 127.0.0.1\r\nAuthorization: Bearer caller-own-token\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n",
+                h.endpoint.token
+            );
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).await.unwrap();
+            assert!(
+                response.contains("served by caller-own-token"),
+                "{response}"
+            );
+        }
+        assert_eq!(h.served_tokens(), ["caller-own-token", "caller-own-token"]);
     }
 
     #[tokio::test]
