@@ -8,6 +8,7 @@ use okena_core::theme::ThemeColors;
 use okena_core::types::DiffMode;
 use okena_git::CommitLogEntry;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm};
+use okena_ui::truncated_text::truncated_text;
 use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
 use gpui::prelude::*;
@@ -392,7 +393,8 @@ impl GitHeader {
                                                         .child(svg().path("icons/git-branch.svg").size(px(10.0)).text_color(rgb(t.term_green)))
                                                         .child(
                                                             div().text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
-                                                                .max_w(px(140.0)).text_ellipsis().overflow_hidden().child(name),
+                                                                .max_w(px(140.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                                .child(truncated_text("branch-name", name, None)),
                                                         ),
                                                 )
                                             })
@@ -437,8 +439,8 @@ impl GitHeader {
                                                     .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_green)))
                                                     .child(
                                                         div().text_color(rgb(t.text_secondary))
-                                                            .max_w(px(120.0)).text_ellipsis().overflow_hidden()
-                                                            .child(base.clone().unwrap_or_else(|| "base...".to_string())),
+                                                            .max_w(px(120.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                            .child(truncated_text("branch-name", base.clone().unwrap_or_else(|| "base...".to_string()), None)),
                                                     ),
                                             ),
                                     )
@@ -467,8 +469,8 @@ impl GitHeader {
                                                     .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_cyan)))
                                                     .child(
                                                         div().text_color(rgb(t.text_secondary))
-                                                            .max_w(px(120.0)).text_ellipsis().overflow_hidden()
-                                                            .child(head.clone().unwrap_or_else(|| "head...".to_string())),
+                                                            .max_w(px(120.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                            .child(truncated_text("branch-name", head.clone().unwrap_or_else(|| "head...".to_string()), None)),
                                                     ),
                                             ),
                                     )

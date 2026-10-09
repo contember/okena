@@ -11,6 +11,7 @@ use okena_ui::icon_button::icon_button;
 use okena_ui::rename_state::{RenameState, rename_input};
 use okena_ui::simple_input::SimpleInput;
 use okena_ui::tokens::{ui_text_md, ui_text_sm, ui_text_xs};
+use okena_ui::truncated_text::truncated_text;
 
 /// Expand/collapse arrow (chevron-down/right, 16x16).
 ///
@@ -104,7 +105,7 @@ pub fn sidebar_name_label(
         .text_size(ui_text_md(cx))
         .text_color(rgb(t.text_primary))
         .text_ellipsis()
-        .child(name.into())
+        .child(truncated_text("name", name, None))
 }
 
 /// Collapsible group header (e.g. "Terminals (3)" or "Services (2)").
@@ -262,7 +263,7 @@ pub fn sidebar_name_or_badge(
                     .text_ellipsis()
                     .text_size(ui_text_md(cx))
                     .text_color(rgb(t.text_primary))
-                    .child(name.to_string()),
+                    .child(truncated_text("name", name.to_string(), None)),
             )
             .child(sidebar_terminal_count_badge(terminal_count, t, cx))
             .into_any_element()

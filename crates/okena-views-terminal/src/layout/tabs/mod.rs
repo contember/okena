@@ -17,6 +17,7 @@ use okena_terminal::terminal::TerminalProgressState;
 use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
+use okena_ui::truncated_text::truncated_text;
 use okena_workspace::state::{LayoutNode, SplitDirection};
 use std::collections::HashSet;
 
@@ -444,7 +445,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             div()
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
                 .cursor_pointer()
-                .when_some(agent_tooltip, |d, text| {
+                .when_some(agent_tooltip.clone(), |d, text| {
                     d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
                 })
                 .relative()
@@ -532,9 +533,23 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         h_flex()
                             .gap(px(6.0))
                             .overflow_hidden()
-                            .text_ellipsis()
                             .child(svg().path(icon_path).size(px(12.0)).flex_shrink_0().text_color(icon_color))
-                            .child(tab_label.clone())
+                            // `min_w_0` lets the title shrink below its text width, so
+                            // a long title ends in "…" instead of being cut by the tab.
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    // The hovered title's tooltip wins over the tab's,
+                                    // so it carries the agent status along with it.
+                                    .child(truncated_text(
+                                        "tab-title",
+                                        tab_label.clone(),
+                                        agent_tooltip.map(SharedString::from),
+                                    )),
+                            )
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
                             }))
