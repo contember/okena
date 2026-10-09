@@ -11,6 +11,8 @@ A git worktree is a linked checkout of a branch in a separate directory, sharing
 3. Inherits the parent project's folder color and settings
 4. Automatically cleans up when the worktree directory is removed
 
+Worktrees created outside Okena can show up on their own too, once you opt in; see [below](#worktrees-created-outside-okena).
+
 ## Creating Worktrees
 
 Right-click a project in the sidebar and select **Create Worktree**, or use the command palette. The worktree dialog has two modes:
@@ -31,14 +33,40 @@ Right-click a project in the sidebar and select **Create Worktree**, or use the 
 
 Check **Use custom path** to override where the worktree is created on disk. The field is pre-filled with the auto-generated path based on your path template.
 
-## Worktree Sync Watcher
+## Worktrees Created Outside Okena
 
-Okena runs a background watcher that polls every **30 seconds** to:
+The daemon keeps the sidebar in step with what Git knows about. Two background
+scans do this:
 
-- **Discover new worktrees** -- If you create a worktree from the command line (outside Okena), the watcher detects it via `git worktree list` and adds it to the sidebar automatically.
-- **Remove stale worktrees** -- If a worktree directory no longer exists on disk (deleted externally), the watcher removes the corresponding project from the sidebar.
+- **Discovery** (every **10 seconds**, opt-in) adds linked worktrees that were created
+  outside Okena (from a terminal, by a script, by Claude Code's `claude -w`)
+  under their parent project. It opens every parent repository with gix and
+  reads its worktree list, so a pass spawns no processes.
+- **Stale sweep** (every **30 seconds**) removes worktree projects whose
+  checkout directory no longer exists (`git worktree remove` from a terminal,
+  `rm -rf`, a cleanup script).
 
-The watcher only scans non-remote, non-worktree projects (i.e., your "parent" repositories). Discovery uses canonical path comparison to avoid duplicates.
+Discovery skips:
+
+- worktrees matching `worktree.auto_track_ignore`. The default ignores
+  `.claude/worktrees/agent-*`, the short-lived worktrees Claude Code gives each
+  isolated subagent: a single session can create dozens, and Claude removes
+  them itself when the subagent leaves no changes. Session worktrees
+  (`.claude/worktrees/<name>`) are tracked.
+- worktrees you untracked. Removing a worktree row from the sidebar (or
+  unticking it in **Manage Worktrees**) while its checkout stays on disk is
+  remembered in `workspace.json` (`dismissed_worktree_paths`), so the next
+  scan doesn't add it back. Ticking it again forgets the dismissal, and so does
+  deleting the checkout.
+- worktrees in a detached HEAD state, and repositories reached only through a
+  project that is itself a linked worktree (it would file the main checkout
+  and its siblings under the wrong parent).
+
+In a monorepo with several projects in one repository, a discovered worktree
+goes under the first of them in sidebar order.
+
+Discovery is **off by default**. Turn it on with **Settings > Worktree >
+Discovery** (`auto_track`). The stale sweep always runs.
 
 ## Path Templates
 
@@ -135,7 +163,9 @@ Worktree settings live in `settings.json` in your platform's config dir (macOS: 
     "default_stash": false,
     "default_fetch": true,
     "default_push": false,
-    "default_delete_branch": false
+    "default_delete_branch": false,
+    "auto_track": false,
+    "auto_track_ignore": [".claude/worktrees/agent-*"]
   }
 }
 ```
@@ -148,5 +178,7 @@ Worktree settings live in `settings.json` in your platform's config dir (macOS: 
 | `default_fetch` | bool | `true` | Fetch remotes before rebase by default |
 | `default_push` | bool | `false` | Push after merge by default |
 | `default_delete_branch` | bool | `false` | Delete branch after merge by default |
+| `auto_track` | bool | `false` | Opt-in. Add worktrees created outside Okena to the sidebar |
+| `auto_track_ignore` | string[] | `[".claude/worktrees/agent-*"]` | Globs discovery leaves alone, over the checkout path relative to the repository root (or the absolute path for a checkout outside it). `*` stays within one path segment, `**` spans several. |
 
 You can also configure these defaults from **Settings > Worktree > Close Defaults** in the UI.

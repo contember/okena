@@ -22,6 +22,15 @@ impl SettingsPanel {
                 false,
                 cx,
             )))
+            .child(section_header("Discovery", &t, cx))
+            .child(section_container(&t).child(self.render_toggle(
+                "wt-auto-track",
+                "Track worktrees created outside Okena",
+                wt.auto_track,
+                false,
+                |state, val, cx| state.set_worktree_auto_track(val, cx),
+                cx,
+            )))
             .child(section_header("Close Defaults", &t, cx))
             .child(
                 section_container(&t)
