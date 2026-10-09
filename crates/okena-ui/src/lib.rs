@@ -42,3 +42,4 @@ pub mod theme;
 pub mod title_subtitle;
 pub mod toggle;
 pub mod tokens;
+pub mod truncated_text;
