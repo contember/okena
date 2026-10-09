@@ -63,6 +63,7 @@ pub(crate) fn empty_workspace_data() -> WorkspaceData {
     WorkspaceData {
         version: 1,
         agent_session_history: Default::default(),
+        dismissed_worktree_paths: Vec::new(),
         projects: Vec::new(),
         project_order: Vec::new(),
         folders: Vec::new(),

@@ -1488,6 +1488,44 @@ impl Workspace {
     }
 }
 
+/// Worktrees the user untracked while their checkout stayed on disk.
+///
+/// Discovery adds every linked worktree it finds, so removing one from the
+/// sidebar has to be remembered or the next scan would put it straight back.
+impl Workspace {
+    /// Record that the worktree checked out at `checkout_path` was untracked.
+    pub fn dismiss_worktree(&mut self, checkout_path: &str) {
+        if !self.is_worktree_dismissed(std::path::Path::new(checkout_path)) {
+            self.data
+                .dismissed_worktree_paths
+                .push(checkout_path.to_string());
+        }
+    }
+
+    /// Forget a dismissal, because the user asked to track the worktree again.
+    pub fn undismiss_worktree(&mut self, checkout_path: &std::path::Path) {
+        let identity = Self::physical_path_identity(checkout_path);
+        self.data.dismissed_worktree_paths.retain(|dismissed| {
+            Self::physical_path_identity(std::path::Path::new(dismissed)) != identity
+        });
+    }
+
+    pub fn is_worktree_dismissed(&self, checkout_path: &std::path::Path) -> bool {
+        let identity = Self::physical_path_identity(checkout_path);
+        self.data.dismissed_worktree_paths.iter().any(|dismissed| {
+            Self::physical_path_identity(std::path::Path::new(dismissed)) == identity
+        })
+    }
+
+    /// Drop the given dismissals. Discovery passes the ones whose checkout is
+    /// gone, so a later worktree at the same path is tracked like a new one.
+    pub fn forget_dismissed_worktrees(&mut self, paths: &[String]) {
+        self.data
+            .dismissed_worktree_paths
+            .retain(|dismissed| !paths.contains(dismissed));
+    }
+}
+
 #[cfg(test)]
 mod merge_pipeline_tests {
     use super::{

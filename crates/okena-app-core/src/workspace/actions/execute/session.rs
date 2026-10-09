@@ -1025,6 +1025,7 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects,
             project_order,
             service_panel_heights: HashMap::new(),

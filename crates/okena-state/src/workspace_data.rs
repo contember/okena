@@ -51,6 +51,12 @@ pub struct WorkspaceData {
     /// single-window case.
     #[serde(default)]
     pub extra_windows: Vec<WindowState>,
+    /// Checkout roots of linked worktrees the user removed from the sidebar
+    /// while the checkout stayed on disk. Worktree discovery skips these, so
+    /// untracking one sticks instead of being undone by the next scan. An
+    /// entry is pruned once its directory is gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_worktree_paths: Vec<String>,
 }
 
 impl WorkspaceData {
@@ -61,6 +67,7 @@ impl WorkspaceData {
     pub fn empty() -> Self {
         WorkspaceData {
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             version: default_workspace_version(),
             projects: Vec::new(),
             project_order: Vec::new(),
@@ -580,6 +587,7 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: Vec::new(),
             project_order: Vec::new(),
             folders: Vec::new(),

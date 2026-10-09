@@ -360,6 +360,7 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -629,6 +630,7 @@ mod jump_gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project("p1", "t1"), project("p2", "t2")],
             project_order: vec!["p1".to_string(), "p2".to_string()],
             folders: Vec::new(),

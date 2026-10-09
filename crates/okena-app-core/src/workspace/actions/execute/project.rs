@@ -253,8 +253,21 @@ pub(super) fn delete_project(
     if ws.is_project_closing(&project_id) {
         return ActionResult::Err("project is already being closed".to_string());
     }
+    // Deleting a worktree row leaves its checkout alone. Remember that, or
+    // worktree discovery would add the row straight back on its next scan.
+    let dismissed_checkout = ws
+        .project(&project_id)
+        .filter(|project| project.worktree_info.is_some())
+        .map(|project| {
+            okena_workspace::persistence::worktree_checkout_path(project)
+                .to_string_lossy()
+                .into_owned()
+        });
     let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
+    if let Some(checkout) = dismissed_checkout {
+        ws.dismiss_worktree(&checkout);
+    }
     ActionResult::Ok(None)
 }
 
@@ -549,6 +562,7 @@ pub(super) fn add_discovered_worktree(
             Ok(id) => id,
             Err(error) => return ActionResult::Err(error),
         };
+    ws.undismiss_worktree(std::path::Path::new(&worktree_path));
     ws.add_to_worktree_ids(&parent_project_id, &new_id);
     // `add_discovered_worktree` deliberately doesn't notify (caller's job).
     ws.notify_data(cx);
@@ -865,6 +879,7 @@ mod hook_action_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),
@@ -1076,6 +1091,45 @@ mod hook_action_tests {
     }
 
     #[test]
+    fn deleting_a_worktree_row_dismisses_its_checkout_from_discovery() {
+        let mut workspace = workspace_with_worktree_hook("hook-1");
+        let mut focus_manager = FocusManager::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = delete_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert!(workspace.is_worktree_dismissed(std::path::Path::new("/tmp/test")));
+    }
+
+    #[test]
+    fn deleting_a_plain_project_dismisses_nothing() {
+        let mut workspace = workspace_with_hook("hook-1");
+        let mut focus_manager = FocusManager::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        delete_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(workspace.data().dismissed_worktree_paths.is_empty());
+    }
+
+    #[test]
     fn remove_worktree_project_rejects_an_authoritative_close_in_progress() {
         let mut workspace = workspace_with_worktree_hook("hook-1");
         workspace.mark_closing_project_authoritative("p1");
@@ -1153,6 +1207,7 @@ mod clone_project_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1300,6 +1355,7 @@ mod set_show_in_overview_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
