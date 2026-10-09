@@ -47,7 +47,9 @@ covers accounts added later.
 
 ## How requests are routed
 
-- `/v1/messages*` gets a pool account: the `authorization` header is replaced
+- A `POST` to `/v1/messages` or a path under it gets a pool account. The path
+  is judged after `..` segments are resolved, so it cannot reach another
+  endpoint with the account's token. The `authorization` header is replaced
   with that account's OAuth token and `metadata.user_id.account_uuid` is
   rewritten to the serving account. Everything else (OAuth, profile, telemetry)
   passes through untouched.

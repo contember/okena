@@ -56,10 +56,15 @@ impl Relay {
             Ok(body) => body,
             Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body is too large"),
         };
-        let url = format!("{}{}", self.api, path_and_query);
-        let path = path_and_query.split('?').next().unwrap_or_default();
-        if method != Method::POST || !path.starts_with("/v1/messages") {
-            return match self.passthrough(method, &url, &headers, body).await {
+        let Ok(target) = reqwest::Url::parse(&format!("{}{}", self.api, path_and_query)) else {
+            return error(StatusCode::BAD_REQUEST, "Invalid request path");
+        };
+        // Judge the path the request will reach: parsing resolves `..` segments,
+        // percent-encoded ones too, and a pool account must not leave inference.
+        let path = target.path();
+        let url = target.as_str();
+        if method != Method::POST || !is_inference_path(path) {
+            return match self.passthrough(method, url, &headers, body).await {
                 Ok(response) => stream(response, guard),
                 Err(err) => {
                     log::warn!("[ai-proxy] passthrough request failed: {err}");
@@ -84,7 +89,7 @@ impl Relay {
                 {
                     Selection::Selected(account) => account,
                     Selection::NoAccounts => {
-                        return match self.passthrough(method, &url, &headers, body).await {
+                        return match self.passthrough(method, url, &headers, body).await {
                             Ok(response) => self.answer(project, None, response, guard).await,
                             Err(err) => self.unanswered(project, None, err),
                         };
@@ -124,7 +129,7 @@ impl Relay {
             ensure_oauth_beta(&mut request_headers);
             let response = match self
                 .http
-                .post(&url)
+                .post(url)
                 .headers(request_headers)
                 .body(outgoing)
                 .send()
@@ -316,6 +321,11 @@ pub fn error(status: StatusCode, message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+/// `/v1/messages` and its sub-resources (e.g. `count_tokens`).
+fn is_inference_path(path: &str) -> bool {
+    path == "/v1/messages" || path.starts_with("/v1/messages/")
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
