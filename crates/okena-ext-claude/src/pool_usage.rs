@@ -17,29 +17,54 @@ use okena_usage::{
 };
 use okena_workspace::remote_sync::HostAiAccounts;
 
-/// The 5-hour usage of every account the proxy may route to, or the account
-/// count while none has reported usage yet.
+/// Both quota windows and availability for every enabled pool account.
 pub(crate) fn render_trigger(
     hosts: &[HostAiAccounts],
     working: WorkingDays,
     t: &ThemeColors,
     cx: &App,
 ) -> Vec<AnyElement> {
-    let items: Vec<TriggerItem> = hosts
+    let now_ms = jiff::Timestamp::now().as_millisecond();
+    let accounts: Vec<AnyElement> = hosts
         .iter()
         .flat_map(|host| &host.accounts)
         .filter(|account| account.enabled && !account.needs_login)
-        .filter_map(|account| {
-            let usage = account.five_hour.as_ref()?;
-            Some((
-                account.label.clone().into(),
-                usage.utilization,
-                time_pct(usage, FIVE_HOUR_SECS, SegmentUnit::Hour, working),
-            ))
+        .map(|account| {
+            let status = account
+                .cooldown_until_ms
+                .filter(|until| *until > now_ms && account.exhausted_period(now_ms).is_none())
+                .map(|_| "429 cooldown");
+            let items = trigger_items(account, working);
+            h_flex()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(account.label.clone()),
+                )
+                .when_some(status, |el, status| {
+                    el.child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.warning))
+                            .child(status),
+                    )
+                })
+                .children(usage_trigger_items(t, cx, &items))
+                .when(items.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Usage unknown"),
+                    )
+                })
+                .into_any_element()
         })
         .collect();
-    if !items.is_empty() {
-        return usage_trigger_items(t, cx, &items);
+    if !accounts.is_empty() {
+        return accounts;
     }
     let count: usize = hosts.iter().map(|host| host.accounts.len()).sum();
     vec![
@@ -52,6 +77,33 @@ pub(crate) fn render_trigger(
             ))
             .into_any_element(),
     ]
+}
+
+fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> {
+    [
+        (
+            "5h",
+            account.five_hour.as_ref(),
+            FIVE_HOUR_SECS,
+            SegmentUnit::Hour,
+        ),
+        (
+            "7d",
+            account.seven_day.as_ref(),
+            SEVEN_DAY_SECS,
+            SegmentUnit::Day,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(period, usage, seconds, unit)| {
+        let usage = usage?;
+        Some((
+            period.into(),
+            usage.utilization,
+            time_pct(usage, seconds, unit, working),
+        ))
+    })
+    .collect()
 }
 
 pub(crate) fn render_body(
@@ -189,10 +241,13 @@ fn account_status(account: &AiAccount, now_ms: i64) -> Option<String> {
     if !account.enabled {
         return Some("Disabled".into());
     }
+    if let Some(period) = account.exhausted_period(now_ms) {
+        return Some(format!("{period} limit reached"));
+    }
     let until_ms = account.cooldown_until_ms.filter(|until| *until > now_ms)?;
     Some(format!(
-        "Rate limited until {}",
-        format_reset_time_epoch(until_ms as f64 / 1000.0, false)
+        "429 cooldown until {}",
+        format_reset_time_epoch(until_ms as f64 / 1000.0, true)
     ))
 }
 
@@ -221,8 +276,9 @@ fn time_pct(
 
 #[cfg(test)]
 mod tests {
-    use super::account_status;
-    use okena_core::ai_proxy::AiAccount;
+    use super::{account_status, trigger_items};
+    use okena_core::ai_proxy::{AiAccount, AiUsage};
+    use okena_usage::WorkingDays;
 
     fn account() -> AiAccount {
         AiAccount {
@@ -271,7 +327,37 @@ mod tests {
         };
         assert!(
             account_status(&limited, 1_000)
-                .is_some_and(|status| status.starts_with("Rate limited until"))
+                .is_some_and(|status| status.starts_with("429 cooldown until"))
         );
+    }
+
+    #[test]
+    fn zero_session_usage_does_not_hide_an_exhausted_weekly_quota() {
+        let mut account = AiAccount {
+            five_hour: Some(AiUsage {
+                utilization: 0.0,
+                resets_at_ms: None,
+            }),
+            seven_day: Some(AiUsage {
+                utilization: 100.0,
+                resets_at_ms: Some(2_000),
+            }),
+            ..account()
+        };
+        let items = trigger_items(&account, WorkingDays::all());
+        assert_eq!(
+            items
+                .iter()
+                .map(|(label, percent, _)| (label.as_ref(), *percent))
+                .collect::<Vec<_>>(),
+            [("5h", 0.0), ("7d", 100.0)]
+        );
+        assert_eq!(
+            account_status(&account, 1_000).as_deref(),
+            Some("7d limit reached")
+        );
+        assert_eq!(account_status(&account, 2_000), None);
+        account.five_hour = None;
+        assert_eq!(trigger_items(&account, WorkingDays::all()).len(), 1);
     }
 }
