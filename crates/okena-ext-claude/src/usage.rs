@@ -839,7 +839,9 @@ impl ClaudeUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
-                    this.data.read(cx).request_fresh_fetch();
+                    if this.pool.is_empty() {
+                        this.data.read(cx).request_fresh_fetch();
+                    }
                     cx.notify();
                 }
             });

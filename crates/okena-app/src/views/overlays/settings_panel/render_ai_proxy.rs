@@ -553,10 +553,12 @@ impl SettingsPanel {
             details.insert(0, "Needs login".into());
         } else if !account.enabled {
             details.insert(0, "Disabled".into());
-        } else if let Some(until) = account.cooldown_until_ms {
+        } else if let Some(period) = account.exhausted_period(now) {
+            details.insert(0, format!("{period} limit reached"));
+        } else if let Some(until) = account.cooldown_until_ms.filter(|until| *until > now) {
             details.insert(
                 0,
-                format!("Rate limited for {}", format_remaining(until - now)),
+                format!("429 cooldown for {}", format_remaining(until - now)),
             );
         }
         details.push(format!("{} requests", account.requests));

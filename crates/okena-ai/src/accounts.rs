@@ -44,6 +44,21 @@ struct Runtime {
     last_used_ms: Option<i64>,
 }
 
+impl Runtime {
+    fn blocked_until(&self, now: i64) -> Option<i64> {
+        let quota_resets = [self.five_hour.as_ref(), self.seven_day.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|usage| usage.is_exhausted(now))
+            .map(|usage| usage.resets_at_ms.unwrap_or(now + DEFAULT_COOLDOWN_MS));
+        self.cooldown_until_ms
+            .filter(|until| *until > now)
+            .into_iter()
+            .chain(quota_resets)
+            .max()
+    }
+}
+
 struct Account {
     stored: StoredAccount,
     runtime: Runtime,
@@ -53,12 +68,7 @@ struct Account {
 
 impl Account {
     fn available(&self, now: i64) -> bool {
-        self.stored.enabled
-            && !self.stored.needs_login
-            && self
-                .runtime
-                .cooldown_until_ms
-                .is_none_or(|until| until <= now)
+        self.stored.enabled && !self.stored.needs_login && self.runtime.blocked_until(now).is_none()
     }
 }
 
@@ -446,8 +456,7 @@ impl Accounts {
                             .iter()
                             .filter(in_service)
                             .filter(permitted)
-                            .filter_map(|account| account.runtime.cooldown_until_ms)
-                            .filter(|until| *until > now)
+                            .filter_map(|account| account.runtime.blocked_until(now))
                             .min();
                         return Selection::Exhausted { retry_at_ms };
                     }
@@ -674,6 +683,109 @@ mod tests {
             cooldown_until(&HeaderMap::new(), now),
             now + DEFAULT_COOLDOWN_MS
         );
+    }
+
+    #[test]
+    fn quota_and_429_cooldowns_expire_independently() {
+        let mut runtime = Runtime {
+            cooldown_until_ms: Some(2_000),
+            five_hour: Some(AiUsage {
+                utilization: 0.0,
+                resets_at_ms: None,
+            }),
+            seven_day: Some(AiUsage {
+                utilization: 100.0,
+                resets_at_ms: Some(3_000),
+            }),
+            ..Runtime::default()
+        };
+        assert_eq!(runtime.blocked_until(1_000), Some(3_000));
+        assert_eq!(runtime.blocked_until(2_000), Some(3_000));
+        assert_eq!(runtime.blocked_until(3_000), None);
+        runtime.seven_day = Some(AiUsage {
+            utilization: 7.0,
+            resets_at_ms: Some(3_000),
+        });
+        assert_eq!(runtime.blocked_until(1_000), Some(2_000));
+        assert_eq!(runtime.blocked_until(2_000), None);
+        runtime.seven_day = Some(AiUsage {
+            utilization: 100.0,
+            resets_at_ms: None,
+        });
+        assert_eq!(
+            runtime.blocked_until(3_000),
+            Some(3_000 + DEFAULT_COOLDOWN_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_quota_is_skipped_without_waiting_for_a_429() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = StoredAccounts {
+            accounts: ["a", "b"]
+                .into_iter()
+                .map(|id| StoredAccount {
+                    id: id.into(),
+                    label: id.into(),
+                    email: None,
+                    account_uuid: None,
+                    plan: None,
+                    enabled: true,
+                    needs_login: false,
+                    tokens: Tokens {
+                        access_token: format!("token-{id}"),
+                        refresh_token: format!("refresh-{id}"),
+                        expires_at_ms: i64::MAX / 2,
+                    },
+                })
+                .collect(),
+        };
+        write_private(
+            &dir.path().join("accounts.json"),
+            &serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        let accounts =
+            Accounts::open(dir.path(), reqwest::Client::new(), Upstream::default()).unwrap();
+        let reset = (now_ms() / 1000 + 3_600).to_string();
+        accounts.observe(
+            "a",
+            Some("conversation"),
+            200,
+            &headers(&[
+                ("anthropic-ratelimit-unified-5h-utilization", "0"),
+                ("anthropic-ratelimit-unified-7d-utilization", "1"),
+                ("anthropic-ratelimit-unified-7d-reset", &reset),
+            ]),
+        );
+        accounts.observe(
+            "b",
+            None,
+            200,
+            &headers(&[("anthropic-ratelimit-unified-5h-utilization", "0.23")]),
+        );
+        let Selection::Selected(selected) = accounts.select(None, Some("conversation"), &[]).await
+        else {
+            panic!("the account with remaining quota should be selected");
+        };
+        assert_eq!(selected.id, "b");
+        let status = accounts.status(0, AiActivity::default());
+        assert_eq!(status.accounts[0].cooldown_until_ms, None);
+        assert_eq!(status.accounts[0].exhausted_period(now_ms()).unwrap(), "7d");
+
+        accounts.observe(
+            "b",
+            None,
+            200,
+            &headers(&[
+                ("anthropic-ratelimit-unified-5h-utilization", "1"),
+                ("anthropic-ratelimit-unified-5h-reset", &reset),
+            ]),
+        );
+        let Selection::Exhausted { retry_at_ms } = accounts.select(None, None, &[]).await else {
+            panic!("both accounts have exhausted their quota");
+        };
+        assert_eq!(retry_at_ms, Some(reset.parse::<i64>().unwrap() * 1000));
     }
 
     #[test]

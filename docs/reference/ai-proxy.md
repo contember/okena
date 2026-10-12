@@ -54,6 +54,9 @@ covers accounts added later.
   rewritten to the serving account. Everything else (OAuth, profile, telemetry)
   passes through untouched.
 - Only accounts the terminal's policy does not forbid are used.
+- An account with a known 5-hour or weekly utilization of 100% is skipped
+  until that window resets or a usage update reports remaining quota. This
+  does not require a preceding 429 response.
 - A conversation (`x-claude-code-session-id`) stays on the account that served
   it last while that account is usable and permitted, so prompt caches keep
   working. A preferred account does not pull a conversation away from its
@@ -83,12 +86,26 @@ covers accounts added later.
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
 headers and from polling the usage endpoint every five minutes.
 
+The status bar shows both **5h** and **7d** for each enabled, logged-in pool
+account. A red **100%** conveys quota exhaustion without an extra status label;
+the popover and activity view name the exhausted window as **5h/7d limit reached**.
+**429 cooldown** means the provider returned 429 and the proxy is waiting before trying that
+account again. A 429 alone does not establish that either quota is at 100%.
+The activity view records these responses as HTTP 429 events separately from
+the account's current quota state.
+
+Pool usage refreshes in the proxy, first five seconds after startup and then
+every five minutes, and also follows response headers. The daemon publishes
+the account state every 15 seconds. Opening the pool popover does not fetch
+usage with the local Claude login; both the status bar and popover use the
+accounts published by the daemon.
+
 While new terminals are routed through the proxy, the daemon reads the accounts
 from it every 15 seconds and after each management command, and sends them to
 clients with the workspace state. The Claude usage widget in the status bar then
-shows the pool instead of the `claude` login's own usage: the 5-hour usage of
-each enabled account in the bar, and each account's 5-hour and 7-day usage, plan
-and state (disabled, needs login, rate limited) in the popover. A remote host's
+shows the pool instead of the `claude` login's own usage: the 5-hour and 7-day
+usage of each enabled account in the bar, and each account's usage, plan
+and state (disabled, needs login, quota exhausted or cooling down) in the popover. A remote host's
 accounts are listed under the host's name.
 
 ## Activity
