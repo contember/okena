@@ -330,7 +330,7 @@ pub struct AiAccount {
     pub enabled: bool,
     /// The refresh token was rejected; the account needs a new login.
     pub needs_login: bool,
-    /// The account was rate limited and is skipped until this time.
+    /// An HTTP 429 cooldown; quota exhaustion is derived from the usage windows.
     pub cooldown_until_ms: Option<i64>,
     pub five_hour: Option<AiUsage>,
     pub seven_day: Option<AiUsage>,
@@ -343,6 +343,29 @@ pub struct AiUsage {
     /// Percent of the window used, 0–100.
     pub utilization: f64,
     pub resets_at_ms: Option<i64>,
+}
+
+impl AiUsage {
+    /// A reset in the past no longer blocks requests, even before the next poll.
+    pub fn is_exhausted(&self, now_ms: i64) -> bool {
+        self.utilization >= 100.0 && self.resets_at_ms.is_none_or(|reset| reset > now_ms)
+    }
+}
+
+impl AiAccount {
+    /// Prefer the weekly reason when both windows are exhausted.
+    pub fn exhausted_period(&self, now_ms: i64) -> Option<&'static str> {
+        [
+            ("7d", self.seven_day.as_ref()),
+            ("5h", self.five_hour.as_ref()),
+        ]
+        .into_iter()
+        .find_map(|(period, usage)| {
+            usage
+                .filter(|usage| usage.is_exhausted(now_ms))
+                .map(|_| period)
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

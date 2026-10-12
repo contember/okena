@@ -412,19 +412,16 @@ fn account_state(account: &AiAccount, now: i64, t: &ThemeColors) -> (String, u32
     if !account.enabled {
         return ("Disabled".to_owned(), t.text_muted);
     }
+    if let Some(period) = account.exhausted_period(now) {
+        return (format!("{period} limit reached"), t.warning);
+    }
     if let Some(until) = account.cooldown_until_ms.filter(|until| *until > now) {
         return (
-            format!("Rate limited {}", format_remaining(until - now)),
+            format!("429 cooldown {}", format_remaining(until - now)),
             t.warning,
         );
     }
-    match &account.five_hour {
-        Some(usage) => (
-            format!("Ready \u{b7} 5h {:.0}%", usage.utilization),
-            t.success,
-        ),
-        None => ("Ready".to_owned(), t.success),
-    }
+    ("Ready".to_owned(), t.success)
 }
 
 fn last_minute(route: &AiRouteActivity) -> u32 {
@@ -469,14 +466,14 @@ fn account_label(account_id: Option<&str>, accounts: &[AiAccount]) -> String {
 fn event_text(kind: &AiActivityKind, accounts: &[AiAccount]) -> String {
     match kind {
         AiActivityKind::RateLimited { account_id } => format!(
-            "{} rate limited, moved to the next account",
+            "{} returned HTTP 429, trying the next account",
             account_label(Some(account_id), accounts)
         ),
         AiActivityKind::Unauthorized { account_id } => format!(
             "{} token rejected",
             account_label(Some(account_id), accounts)
         ),
-        AiActivityKind::AllRateLimited => "Every permitted account is rate limited".to_owned(),
+        AiActivityKind::AllRateLimited => "No permitted account is currently available".to_owned(),
         AiActivityKind::NoPermittedAccount => {
             "The policy permits no enabled, logged-in account".to_owned()
         }
@@ -638,7 +635,7 @@ mod tests {
         };
         assert_eq!(
             event_text(&failover, &accounts),
-            "Removed account rate limited, moved to the next account"
+            "Removed account returned HTTP 429, trying the next account"
         );
     }
 }
