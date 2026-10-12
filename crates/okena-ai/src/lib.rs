@@ -8,6 +8,7 @@
 mod accounts;
 mod activity;
 pub mod client;
+mod diagnostics;
 mod oauth;
 mod proxy;
 mod server;
