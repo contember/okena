@@ -134,6 +134,10 @@ proxy and shows nothing.
 - It is never stopped by the daemon, the GUI or an update. A daemon that finds a
   proxy of another version asks it to exit only while it has no request in
   flight, then starts its own.
+- There is no restart button. **Refresh** in AI Proxy settings sends a status
+  command through this version check; it replaces an idle proxy only when its
+  version differs. A rebuild with the same version does not replace the proxy.
+  A busy older proxy is checked again on a later management command.
 - If the persisted port is taken by another program, the proxy moves to a free
   port and rewrites `endpoint.json`; only new terminals get the new URL.
 - The terminal URL only sends requests through the proxy. Management
@@ -152,6 +156,22 @@ proxy and shows nothing.
 | `routing.json` | default and per-project policies, by account id (0600) |
 | `proxy.lock` | instance lock |
 | `proxy.log` | proxy log (`RUST_LOG=okena_ai=debug` logs every routed request) |
+
+Provider HTTP errors, including 401 and 429 attempts that are retried, are
+logged at warning level with method, endpoint path, project/account IDs, status,
+error type/message, request ID, and selected response headers (`retry-after`,
+`anthropic-ratelimit-*`, request IDs, `cf-ray`, and content type). Messages are
+limited to 2,048 characters and header values to 256 characters; control
+characters are escaped. Non-JSON error bodies are represented by their size
+and content type, not dumped into the log.
+
+`upstream_error` identifies provider responses. `proxy_rejection` identifies
+local rejections and includes the reason and earliest retry time when known.
+Connection failures, unreadable error bodies, and interrupted response streams
+have separate log entries with request context. Request bodies, query strings,
+authorization headers, and cookies are not included. These diagnostics apply
+to the relay; SSE error events inside an otherwise successful HTTP stream are
+forwarded without parsing.
 
 ## Limits
 

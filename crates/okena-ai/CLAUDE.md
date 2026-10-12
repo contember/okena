@@ -8,6 +8,7 @@ GPUI-free. Runs as `okena --ai-proxy <profile-root>` / `okena-daemon --ai-proxy 
 |---|---|
 | `server.rs` | Process entry (`run`): instance lock, logging, bind, `/<token>[/p/<project>]/…` dispatch, management routes (`/_okena/health`, `/_okena/command`, `/_okena/shutdown`, bearer `management.key`), upstream silence timeout, usage poller. E2E tests against a fake provider live here. |
 | `proxy.rs` | Relay: account selection per attempt, auth/`metadata.user_id` rewrite, 401 refresh-once, 429 failover, streaming with an in-flight guard, activity recording (error answers are read whole for their message). |
+| `diagnostics.rs` | Bounded provider error details and request context for relay logs; only structured error fields and selected response headers are logged. |
 | `activity.rs` | In-memory last hour of `/v1/messages` outcomes per account and the recent failover/error events, sent with every status. |
 | `accounts.rs` | Pool state: `accounts.json` (credentials), `routing.json` (per-project policies), policy-aware selection, runtime quota/cooldown, conversation affinity, serialized token refresh, OAuth login bookkeeping. |
 | `oauth.rs` | Claude OAuth (PKCE manual-code flow, refresh, profile plan, usage endpoint) — constants mirror the `claude` CLI. |
