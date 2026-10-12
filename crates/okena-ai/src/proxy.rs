@@ -3,6 +3,7 @@
 
 use crate::accounts::{Accounts, Selection};
 use crate::activity::Activity;
+use crate::diagnostics::{RequestContext, diagnostic_headers};
 use crate::oauth::OAUTH_BETA;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -63,11 +64,23 @@ impl Relay {
         // percent-encoded ones too, and a pool account must not leave inference.
         let path = target.path();
         let url = target.as_str();
+        let context = RequestContext::new(&method, path, project);
         if method != Method::POST || !is_inference_path(path) {
             return match self.passthrough(method, url, &headers, body).await {
-                Ok(response) => stream(response, guard),
+                Ok(response)
+                    if response.status().is_client_error()
+                        || response.status().is_server_error() =>
+                {
+                    read_error_response(response, &context)
+                        .await
+                        .into_response()
+                }
+                Ok(response) => stream(response, guard, context),
                 Err(err) => {
-                    log::warn!("[ai-proxy] passthrough request failed: {err}");
+                    log::warn!(
+                        "[ai-proxy] connection_error {context} error={}",
+                        err.without_url()
+                    );
                     error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
                 }
             };
@@ -77,7 +90,7 @@ impl Relay {
         let session = session_id(&headers, payload.as_ref());
         let mut excluded: Vec<String> = Vec::new();
         let mut refreshed: Vec<String> = Vec::new();
-        let mut rate_limited: Option<(StatusCode, HeaderMap, Bytes)> = None;
+        let mut rate_limited: Option<ErrorResponse> = None;
         let mut selected = None;
         for _ in 0..MAX_ATTEMPTS {
             let account = match selected.take() {
@@ -90,11 +103,14 @@ impl Relay {
                     Selection::Selected(account) => account,
                     Selection::NoAccounts => {
                         return match self.passthrough(method, url, &headers, body).await {
-                            Ok(response) => self.answer(project, None, response, guard).await,
-                            Err(err) => self.unanswered(project, None, err),
+                            Ok(response) => self.answer(context, response, guard).await,
+                            Err(err) => self.unanswered(&context, err),
                         };
                     }
                     Selection::NoPermittedAccount => {
+                        log::warn!(
+                            "[ai-proxy] proxy_rejection {context} status=400 reason=no_permitted_account"
+                        );
                         self.activity
                             .event(project, AiActivityKind::NoPermittedAccount);
                         // 400 rather than 403: `claude` shows the message as is,
@@ -106,11 +122,15 @@ impl Relay {
                         );
                     }
                     Selection::Exhausted { retry_at_ms } => {
+                        log::warn!(
+                            "[ai-proxy] proxy_rejection {context} status=429 reason=accounts_unavailable retry_at_ms={retry_at_ms:?}"
+                        );
                         self.activity.event(project, AiActivityKind::AllRateLimited);
                         return exhausted(rate_limited, retry_at_ms);
                     }
                 },
             };
+            let account_context = context.for_account(&account.id);
             let outgoing = match (payload.as_mut(), account.account_uuid.as_deref()) {
                 (Some(payload), Some(uuid)) => {
                     if rewrite_account_uuid(payload, uuid) {
@@ -136,7 +156,7 @@ impl Relay {
                 .await
             {
                 Ok(response) => response,
-                Err(err) => return self.unanswered(project, Some(&account.id), err),
+                Err(err) => return self.unanswered(&account_context, err),
             };
             let status = response.status();
             log::debug!(
@@ -150,48 +170,48 @@ impl Relay {
                 status.as_u16(),
                 response.headers(),
             );
-            if status == StatusCode::UNAUTHORIZED {
-                self.activity.event(
-                    project,
-                    AiActivityKind::Unauthorized {
-                        account_id: account.id.clone(),
-                    },
-                );
-            }
             match status {
-                StatusCode::UNAUTHORIZED if !refreshed.contains(&account.id) => {
-                    refreshed.push(account.id.clone());
-                    match self
-                        .accounts
-                        .fresh_token(&account.id, Some(&account.access_token))
-                        .await
-                    {
-                        Ok(retry) => selected = Some(retry),
-                        Err(_) => excluded.push(account.id),
+                StatusCode::UNAUTHORIZED => {
+                    read_error_response(response, &account_context).await;
+                    self.activity.event(
+                        project,
+                        AiActivityKind::Unauthorized {
+                            account_id: account.id.clone(),
+                        },
+                    );
+                    if !refreshed.contains(&account.id) {
+                        refreshed.push(account.id.clone());
+                        match self
+                            .accounts
+                            .fresh_token(&account.id, Some(&account.access_token))
+                            .await
+                        {
+                            Ok(retry) => selected = Some(retry),
+                            Err(error) => {
+                                log::warn!(
+                                    "[ai-proxy] refresh_error {account_context} error={error:#}"
+                                );
+                                excluded.push(account.id);
+                            }
+                        }
+                    } else {
+                        self.accounts.mark_needs_login(&account.id);
+                        excluded.push(account.id);
                     }
                 }
-                StatusCode::UNAUTHORIZED => {
-                    self.accounts.mark_needs_login(&account.id);
-                    excluded.push(account.id);
-                }
                 StatusCode::TOO_MANY_REQUESTS => {
-                    log::info!(
-                        "[ai-proxy] account {} rate limited, failing over",
-                        account.id
-                    );
                     self.activity.rate_limited(project, &account.id);
-                    let headers = response.headers().clone();
-                    let body = response.bytes().await.unwrap_or_default();
-                    rate_limited = Some((status, headers, body));
+                    rate_limited = Some(read_error_response(response, &account_context).await);
                     excluded.push(account.id);
                 }
                 _ => {
-                    return self
-                        .answer(project, Some(&account.id), response, guard)
-                        .await;
+                    return self.answer(account_context, response, guard).await;
                 }
             }
         }
+        log::warn!(
+            "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={MAX_ATTEMPTS}"
+        );
         self.activity.event(project, AiActivityKind::AllRateLimited);
         exhausted(rate_limited, None)
     }
@@ -200,33 +220,31 @@ impl Relay {
     /// An error response is read whole, so its message can be recorded.
     async fn answer(
         &self,
-        project: Option<&str>,
-        account_id: Option<&str>,
+        context: RequestContext,
         response: reqwest::Response,
         guard: InflightGuard,
     ) -> Response {
         let status = response.status();
         if !status.is_client_error() && !status.is_server_error() {
             self.activity
-                .answered(project, account_id, status.as_u16(), None);
-            return stream(response, guard);
+                .answered(context.project(), context.account(), status.as_u16(), None);
+            return stream(response, guard, context);
         }
-        let headers = response.headers().clone();
-        let body = response.bytes().await.unwrap_or_default();
-        self.activity
-            .answered(project, account_id, status.as_u16(), error_message(&body));
-        buffered(status, &headers, body)
+        let failure = read_error_response(response, &context).await;
+        self.activity.answered(
+            context.project(),
+            context.account(),
+            status.as_u16(),
+            failure.message.clone(),
+        );
+        failure.into_response()
     }
 
-    fn unanswered(
-        &self,
-        project: Option<&str>,
-        account_id: Option<&str>,
-        err: reqwest::Error,
-    ) -> Response {
-        log::warn!("[ai-proxy] upstream request failed: {err}");
+    fn unanswered(&self, context: &RequestContext, err: reqwest::Error) -> Response {
+        let err = err.without_url();
+        log::warn!("[ai-proxy] connection_error {context} error={err}");
         self.activity
-            .unanswered(project, account_id, upstream_failure(&err));
+            .unanswered(context.project(), context.account(), upstream_failure(&err));
         error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
     }
 
@@ -249,17 +267,65 @@ impl Relay {
 
 /// Relay status, headers and the body as it arrives; dropping the downstream
 /// connection drops the upstream one.
-fn stream(response: reqwest::Response, guard: InflightGuard) -> Response {
+fn stream(response: reqwest::Response, guard: InflightGuard, context: RequestContext) -> Response {
     let status = response.status();
     let headers = strip_hop_by_hop(response.headers());
+    let diagnostics = diagnostic_headers(response.headers());
     let body = response.bytes_stream().map(move |chunk| {
         let _ = &guard;
-        chunk
+        chunk.map_err(|error| {
+            let error = error.without_url();
+            log::warn!(
+                "[ai-proxy] stream_error {context} status={} headers={diagnostics:?} error={error}",
+                status.as_u16()
+            );
+            error
+        })
     });
     let mut relayed = Response::new(Body::from_stream(body));
     *relayed.status_mut() = status;
     *relayed.headers_mut() = headers;
     relayed
+}
+
+struct ErrorResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+    message: Option<String>,
+}
+
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        buffered(self.status, &self.headers, self.body)
+    }
+}
+
+async fn read_error_response(
+    response: reqwest::Response,
+    context: &RequestContext,
+) -> ErrorResponse {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(error) => {
+            log::warn!(
+                "[ai-proxy] error_body_read_failed {context} status={} headers={:?} error={}",
+                status.as_u16(),
+                diagnostic_headers(&headers),
+                error.without_url()
+            );
+            Bytes::new()
+        }
+    };
+    let message = context.response_error(status, &headers, &body);
+    ErrorResponse {
+        status,
+        headers,
+        body,
+        message,
+    }
 }
 
 fn buffered(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
@@ -269,12 +335,9 @@ fn buffered(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
     response
 }
 
-fn exhausted(
-    rate_limited: Option<(StatusCode, HeaderMap, Bytes)>,
-    retry_at_ms: Option<i64>,
-) -> Response {
-    if let Some((status, headers, body)) = rate_limited {
-        return buffered(status, &headers, body);
+fn exhausted(rate_limited: Option<ErrorResponse>, retry_at_ms: Option<i64>) -> Response {
+    if let Some(response) = rate_limited {
+        return response.into_response();
     }
     let mut response = error(
         StatusCode::TOO_MANY_REQUESTS,
@@ -287,12 +350,6 @@ fn exhausted(
         response.headers_mut().insert("retry-after", value);
     }
     response
-}
-
-/// `error.message` of an error body in the Anthropic API shape.
-fn error_message(body: &[u8]) -> Option<String> {
-    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
-    body.pointer("/error/message")?.as_str().map(str::to_owned)
 }
 
 fn upstream_failure(err: &reqwest::Error) -> String {

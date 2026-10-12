@@ -289,12 +289,33 @@ mod tests {
     use parking_lot::Mutex;
     use std::collections::HashMap;
 
+    static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static TEST_LOGGER: TestLogger = TestLogger;
+
+    struct TestLogger;
+
+    impl log::Log for TestLogger {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if record.target().starts_with("okena_ai") {
+                LOG_MESSAGES.lock().push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
     /// Fake provider: per access token, a queue of statuses for `/v1/messages`.
     #[derive(Default)]
     struct Fake {
         replies: Mutex<HashMap<String, Vec<u16>>>,
         seen: Mutex<Vec<(String, String)>>,
         refreshes: AtomicUsize,
+        error_bodies: Mutex<HashMap<String, String>>,
+        error_headers: Mutex<HeaderMap>,
     }
 
     async fn fake_upstream(fake: Arc<Fake>) -> String {
@@ -319,6 +340,14 @@ mod tests {
                 format!("served by {token}")
             };
             let mut response = (StatusCode::from_u16(status).unwrap(), body).into_response();
+            if status >= 400 {
+                if let Some(body) = fake.error_bodies.lock().get(&token) {
+                    *response.body_mut() = Body::from(body.clone());
+                }
+                response
+                    .headers_mut()
+                    .extend(fake.error_headers.lock().clone());
+            }
             response.headers_mut().insert(
                 "anthropic-ratelimit-unified-5h-utilization",
                 "0.25".parse().unwrap(),
@@ -545,6 +574,98 @@ mod tests {
         let (status, body) = h.message("conv").await;
         assert_eq!(status, 429);
         assert!(body.contains("rate limited"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn logs_provider_failures_and_local_rejections_without_changing_the_response() {
+        log::set_logger(&TEST_LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        let rate_limited = r#"{"error":{"type":"rate_limit_error","message":"Too many concurrent requests"},"private":"private-response-data"}"#;
+        let overloaded = r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        h.fake
+            .error_bodies
+            .lock()
+            .insert("token-a".into(), rate_limited.into());
+        h.fake
+            .error_bodies
+            .lock()
+            .insert("token-b".into(), overloaded.into());
+        for (name, value) in [
+            ("request-id", "diagnostics-request"),
+            ("retry-after", "60"),
+            ("set-cookie", "private-cookie"),
+        ] {
+            h.fake
+                .error_headers
+                .lock()
+                .insert(name, value.parse().unwrap());
+        }
+        h.fake.replies.lock().insert("token-a".into(), vec![429]);
+        h.fake
+            .replies
+            .lock()
+            .insert("token-b".into(), vec![529, 429]);
+        assert_eq!(
+            h.message_in(Some("diagnostics-test"), "conv").await,
+            (529, overloaded.into())
+        );
+        h.fake
+            .error_bodies
+            .lock()
+            .insert("token-b".into(), rate_limited.into());
+        let response = h
+            .http
+            .post(format!(
+                "{}/v1/messages",
+                h.endpoint.project_url("diagnostics-test")
+            ))
+            .body(r#"{"model":"m"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["request-id"], "diagnostics-request");
+        assert_eq!(response.headers()["retry-after"], "60");
+        assert_eq!(response.text().await.unwrap(), rate_limited);
+        assert_eq!(h.message_in(Some("diagnostics-test"), "conv").await.0, 429);
+
+        let logs = LOG_MESSAGES
+            .lock()
+            .iter()
+            .filter(|line| line.contains("diagnostics-test"))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "upstream_error",
+            "status=429",
+            "status=529",
+            "Too many concurrent requests",
+            "Overloaded",
+            "diagnostics-request",
+            "retry-after",
+            "proxy_rejection",
+            "reason=accounts_unavailable",
+            "retry_at_ms=Some",
+            "account=Some(\"a\")",
+            "account=Some(\"b\")",
+        ] {
+            assert!(logs.contains(expected), "{logs}");
+        }
+        for secret in [
+            "token-a",
+            "token-b",
+            "private-cookie",
+            "private-response-data",
+            "caller-own-token",
+        ] {
+            assert!(!logs.contains(secret), "{logs}");
+        }
     }
 
     #[tokio::test]
