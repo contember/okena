@@ -66,6 +66,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-extensions` | Extension system |
 | `okena-ext-claude` | Claude AI extension |
 | `okena-ext-codex` | Codex extension |
+| `okena-ext-grok` | Grok usage extension |
 | `okena-ext-github` | GitHub status extension |
 | `okena-ext-updater` | Self-update system |
 | `okena-core` | Shared data types only (no networking): wire schema (`api`), WS message types (`ws`), profiles, theme colors, process bus, key handling. Depended on by every crate. |

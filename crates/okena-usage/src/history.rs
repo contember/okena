@@ -12,6 +12,7 @@ const RESET_TIME_TOLERANCE_SECS: f64 = 1.0;
 pub enum Provider {
     Claude,
     Codex,
+    Grok,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +122,7 @@ fn filename(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude.jsonl",
         Provider::Codex => "codex.jsonl",
+        Provider::Grok => "grok.jsonl",
     }
 }
 

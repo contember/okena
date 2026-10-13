@@ -20,14 +20,16 @@ The directory contains:
   usage-history/       # Append-only usage limit samples (shared across profiles)
     claude.jsonl
     codex.jsonl
+    grok.jsonl
 ```
 
 ---
 
 ## Usage limit history
 
-The Claude and Codex desktop widgets append each successful usage fetch to
-`usage-history/claude.jsonl` and `usage-history/codex.jsonl` under the config
+The Claude, Codex, and Grok desktop widgets append each successful usage fetch to
+`usage-history/claude.jsonl`, `usage-history/codex.jsonl`, and
+`usage-history/grok.jsonl` under the config
 directory above. These files are shared across Okena profiles. Collection runs
 while the widgets are active, normally every five minutes; opening a popover can
 trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
@@ -36,14 +38,15 @@ responses without recognized limits do not add samples.
 Each line is a versioned JSON object with `version: 1`, `recorded_at`, `provider`,
 `source`, `plan`, and `limits`. Each limit has `name`, `used_percent`,
 `window_seconds`, and nullable `reset_at`. Timestamps are Unix epoch seconds in
-UTC. `source` identifies the Codex account or the Claude credential directory;
-tokens are not stored. Claude account changes within the same credential
+UTC. `source` identifies the Codex account, the Claude credential directory, or the
+Grok user id; tokens are not stored. Claude account changes within the same credential
 directory cannot be distinguished by this source identifier.
 
 For charting, group by provider, source, and limit name; use `recorded_at` for the
 time axis and `reset_at` to distinguish quota windows. Claude includes session,
 weekly, and model-specific weekly limits; Codex includes primary, secondary,
-and code-review limits. Paid credits are not included. History persists across
+and code-review limits; Grok includes included credits and, when enabled,
+on-demand credits. Paid credits are not included. History persists across
 restarts and has no automatic retention cutoff. A write error is logged without
 interrupting the usage display.
 
@@ -222,6 +225,10 @@ Precedence (highest to lowest):
 3. `$HOME/.claude` — the default
 
 If the configured directory does not exist, Okena logs a warning and falls back to the next tier.
+
+#### Grok Extension
+
+The Grok extension reads the Grok CLI session from `~/.grok/auth.json`. `GROK_HOME` overrides that directory, matching the CLI. Enable the `grok` extension to show the usage meter. When the access token is expired, Okena refreshes it through the session's OIDC issuer and writes the rotated tokens back to `auth.json`.
 
 #### Hooks
 

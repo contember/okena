@@ -6178,6 +6178,7 @@ dependencies = [
  "okena-ext-claude",
  "okena-ext-codex",
  "okena-ext-github",
+ "okena-ext-grok",
  "okena-ext-updater",
  "okena-extensions",
  "okena-files",
@@ -6397,6 +6398,26 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "smol",
+]
+
+[[package]]
+name = "okena-ext-grok"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "jiff",
+ "log",
+ "okena-core",
+ "okena-extensions",
+ "okena-transport",
+ "okena-ui",
+ "okena-usage",
+ "parking_lot",
+ "serde_json",
+ "smol",
+ "tempfile",
 ]
 
 [[package]]
