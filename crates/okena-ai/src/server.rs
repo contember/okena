@@ -250,8 +250,14 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
                 None => return error(StatusCode::BAD_REQUEST, "Invalid command"),
             };
             let accounts = &service.relay.accounts;
+            let mut usage_history = None;
             let outcome = match command {
                 AiProxyCommand::Status => Ok(()),
+                AiProxyCommand::UsageHistory { account_id } => accounts
+                    .usage_history(&account_id)
+                    .await
+                    .map(|history| usage_history = Some(history)),
+
                 AiProxyCommand::StartLogin { label } => accounts.start_login(label),
                 AiProxyCommand::FinishLogin { login_id, code } => {
                     accounts.finish_login(&login_id, &code).await
@@ -271,8 +277,11 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
                 }
             };
             match outcome {
-                Ok(()) => axum::Json(accounts.status(inflight, service.relay.activity.snapshot()))
-                    .into_response(),
+                Ok(()) => {
+                    let mut status = accounts.status(inflight, service.relay.activity.snapshot());
+                    status.usage_history = usage_history;
+                    axum::Json(status).into_response()
+                }
                 Err(err) => error(StatusCode::BAD_REQUEST, &err.to_string()),
             }
         }
@@ -322,6 +331,7 @@ mod tests {
         replies: Mutex<HashMap<String, Vec<u16>>>,
         seen: Mutex<Vec<(String, String)>>,
         refreshes: AtomicUsize,
+        usage: Mutex<HashMap<String, serde_json::Value>>,
         error_bodies: Mutex<HashMap<String, axum::body::Bytes>>,
         error_headers: Mutex<HeaderMap>,
     }
@@ -406,7 +416,18 @@ mod tests {
             .route("/v1/oauth/token", axum::routing::post(token))
             .route(
                 "/api/oauth/usage",
-                axum::routing::get(|| async { StatusCode::NOT_FOUND }),
+                axum::routing::get(
+                    |State(fake): State<Arc<Fake>>, headers: HeaderMap| async move {
+                        let token = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default();
+                        match fake.usage.lock().get(token).cloned() {
+                            Some(usage) => axum::Json(usage).into_response(),
+                            None => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    },
+                ),
             )
             .with_state(fake);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -786,6 +807,87 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 404);
         assert!(h.fake.seen.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_history_is_persisted_per_account_and_loaded_on_demand() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        let query = |id: &str| AiProxyCommand::UsageHistory {
+            account_id: id.into(),
+        };
+        assert!(h.client.command(&query("missing")).await.is_err());
+        assert!(
+            h.client
+                .command(&query("a"))
+                .await
+                .unwrap()
+                .usage_history
+                .unwrap()
+                .samples
+                .is_empty()
+        );
+        let reset = "2099-01-01T00:00:00Z";
+        for (token, utilization) in [("token-a", 23.0), ("token-b", 71.0)] {
+            h.fake.usage.lock().insert(
+                format!("Bearer {token}"),
+                serde_json::json!({
+                    "five_hour": { "utilization": utilization, "resets_at": reset },
+                    "seven_day": { "utilization": utilization / 2.0, "resets_at": reset },
+                }),
+            );
+        }
+        let history = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let status = h.client.command(&query("b")).await.unwrap();
+                let history = status.usage_history.unwrap();
+                if !history.samples.is_empty() {
+                    break history;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(history.account_id, "b");
+        assert_eq!(history.samples.len(), 1);
+        assert_eq!(history.samples[0].source, "b");
+        assert_eq!(history.samples[0].limits[0].name, "5h");
+        assert_eq!(history.samples[0].limits[0].used_percent, 71.0);
+        assert_eq!(history.samples[0].limits[1].name, "7d");
+        assert_eq!(history.samples[0].limits[1].used_percent, 35.5);
+        assert_eq!(history.samples[0].limits[0].window_seconds, 18000.0);
+        assert!(history.samples[0].limits[0].reset_at.is_some());
+        let ordinary = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        assert!(ordinary.usage_history.is_none());
+        assert!(
+            serde_json::to_value(ordinary)
+                .unwrap()
+                .get("usage_history")
+                .is_none()
+        );
+        let first = h
+            .client
+            .command(&query("a"))
+            .await
+            .unwrap()
+            .usage_history
+            .unwrap();
+        assert_eq!(first.samples.len(), 1);
+        assert_eq!(first.samples[0].source, "a");
+        assert_eq!(first.samples[0].limits[0].used_percent, 23.0);
+        assert!(h.client.shutdown().await.unwrap());
+        let reopened = Accounts::open(
+            &proxy_dir(h._dir.path()),
+            h.http.clone(),
+            Upstream::default(),
+        )
+        .unwrap();
+        assert_eq!(reopened.usage_history("a").await.unwrap(), first);
+        assert_eq!(reopened.usage_history("b").await.unwrap(), history);
     }
 
     #[tokio::test]
