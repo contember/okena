@@ -59,26 +59,49 @@ struct GrokUsageData {
     _poll_task: Task<()>,
 }
 
+/// Only `Remote` failures back off. A session problem is fixed by running
+/// `grok`, so it keeps the normal cadence and recovers on the next poll.
+#[derive(Debug, PartialEq)]
+enum FetchError {
+    Session(String),
+    Remote(String),
+}
+
+impl FetchError {
+    fn message(&self) -> &str {
+        match self {
+            FetchError::Session(message) | FetchError::Remote(message) => message,
+        }
+    }
+}
+
 #[derive(Default)]
 struct FetchStatus {
     last_success: Option<Instant>,
+    last_attempt: Option<Instant>,
     error: Option<String>,
+    /// Consecutive remote failures; drives the backoff.
     failures: u32,
     next_attempt: Option<Instant>,
     fetching: bool,
 }
 
 impl FetchStatus {
-    fn complete(&mut self, result: &Result<UsageData, String>, now: Instant) -> Duration {
+    fn complete(&mut self, result: &Result<UsageData, FetchError>, now: Instant) -> Duration {
         self.fetching = false;
+        self.last_attempt = Some(now);
         match result {
             Ok(_) => {
                 self.last_success = Some(now);
                 self.error = None;
                 self.failures = 0;
             }
-            Err(error) => {
-                self.error = Some(error.clone());
+            Err(FetchError::Session(message)) => {
+                self.error = Some(message.clone());
+                self.failures = 0;
+            }
+            Err(FetchError::Remote(message)) => {
+                self.error = Some(message.clone());
                 self.failures = self.failures.saturating_add(1);
             }
         }
@@ -91,6 +114,15 @@ impl FetchStatus {
         };
         self.next_attempt = Some(now + delay);
         delay
+    }
+
+    /// Hover may fetch early unless a fetch is running or remote failures are backing off.
+    fn allows_early_fetch(&self) -> bool {
+        if self.fetching || self.failures > 0 {
+            return false;
+        }
+        self.last_attempt
+            .is_none_or(|last| last.elapsed() >= HOVER_REFETCH_THROTTLE)
     }
 }
 
@@ -180,26 +212,39 @@ fn billing_request(access_token: &str, version: &str) -> okena_transport::http::
         .label("grok.usage")
 }
 
-fn fetch_usage() -> Result<UsageData, String> {
-    let dir = resolve_grok_dir();
-    let auth = read_grok_auth(&dir)
-        .ok_or("Grok credentials missing; sign in with `grok login`".to_string())?;
+fn fetch_usage() -> Result<UsageData, FetchError> {
+    fetch_usage_in(&resolve_grok_dir(), okena_transport::http::send)
+}
+
+fn fetch_usage_in(
+    dir: &Path,
+    send: impl FnOnce(
+        okena_transport::http::HttpRequest,
+    )
+        -> Result<okena_transport::http::HttpResponse, okena_transport::http::HttpError>,
+) -> Result<UsageData, FetchError> {
+    let auth = read_grok_auth(dir).ok_or_else(|| {
+        FetchError::Session("Grok credentials missing; sign in with `grok login`".to_string())
+    })?;
     if access_token_expired(auth.expires_at.as_deref(), jiff::Timestamp::now()) {
-        return Err(SESSION_EXPIRED.to_string());
+        return Err(FetchError::Session(SESSION_EXPIRED.to_string()));
     }
-    let version = client_version(&dir);
-    let response = okena_transport::http::send(billing_request(&auth.access_token, &version))
-        .map_err(|_| "Could not connect to Grok usage API".to_string())?;
+    let version = client_version(dir);
+    let response = send(billing_request(&auth.access_token, &version))
+        .map_err(|_| FetchError::Remote("Could not connect to Grok usage API".to_string()))?;
     if response.status() == 401 {
-        return Err(SESSION_EXPIRED.to_string());
+        return Err(FetchError::Session(SESSION_EXPIRED.to_string()));
     }
     if !response.is_success() {
-        return Err(format!("Usage request failed: HTTP {}", response.status()));
+        return Err(FetchError::Remote(format!(
+            "Usage request failed: HTTP {}",
+            response.status()
+        )));
     }
     let body: serde_json::Value = response
         .json()
-        .map_err(|_| "Invalid JSON in usage response".to_string())?;
-    let mut data = parse_usage(&body, now_epoch())?;
+        .map_err(|_| FetchError::Remote("Invalid JSON in usage response".to_string()))?;
+    let mut data = parse_usage(&body, now_epoch()).map_err(FetchError::Remote)?;
     data.source = auth.user_id.clone();
     let mut limits = Vec::new();
     if let Some(window) = &data.included {
@@ -447,15 +492,7 @@ impl GrokUsageData {
     }
 
     fn request_fresh_fetch(&self) {
-        let status = self.status.lock();
-        if status.fetching || status.error.is_some() {
-            return;
-        }
-        let stale = match status.last_success {
-            None => true,
-            Some(last) => last.elapsed() >= HOVER_REFETCH_THROTTLE,
-        };
-        if stale && !self.wake_sent.swap(true, Ordering::SeqCst) {
+        if self.status.lock().allows_early_fetch() && !self.wake_sent.swap(true, Ordering::SeqCst) {
             let _ = self.wake_tx.try_send(());
         }
     }
@@ -484,7 +521,7 @@ impl GrokUsageData {
                 let delay = status_for_task.lock().complete(&result, Instant::now());
                 match result {
                     Ok(fetched) => *data_for_task.lock() = Some(fetched),
-                    Err(error) => log::warn!("[grok-usage] {error}"),
+                    Err(error) => log::warn!("[grok-usage] {}", error.message()),
                 }
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
@@ -692,9 +729,10 @@ impl GrokUsage {
             .text_color(rgb(t.text_secondary))
             .child(age)
             .when_some(status.error.as_ref(), |element, error| {
-                element
-                    .child(format!("Update failed: {error}"))
-                    .child(format!("Failed attempts: {}", status.failures))
+                element.child(format!("Update failed: {error}"))
+            })
+            .when(status.failures > 0, |element| {
+                element.child(format!("Failed attempts: {}", status.failures))
             })
             .when(status.fetching, |element| element.child("Updating…"))
             .when_some(status.next_attempt, |element, next| {
@@ -940,10 +978,54 @@ mod tests {
             USAGE_INTERVAL
         );
         assert_eq!(
-            status.complete(&Err("HTTP 401".into()), now),
+            status.complete(&Err(FetchError::Remote("HTTP 500".into())), now),
             MIN_RETRY_DELAY
         );
         assert_eq!(status.last_success, Some(now));
         assert_eq!(status.failures, 1);
+        assert!(!status.allows_early_fetch());
+    }
+
+    #[test]
+    fn an_expired_session_keeps_the_normal_cadence() {
+        let mut status = FetchStatus::default();
+        let now = Instant::now() - HOVER_REFETCH_THROTTLE;
+        status.complete(&Err(FetchError::Remote("HTTP 500".into())), now);
+        assert_eq!(
+            status.complete(&Err(FetchError::Session(SESSION_EXPIRED.into())), now),
+            USAGE_INTERVAL
+        );
+        assert_eq!(status.failures, 0);
+        assert_eq!(status.error.as_deref(), Some(SESSION_EXPIRED));
+        assert!(status.allows_early_fetch());
+    }
+
+    #[test]
+    fn an_expired_token_is_reported_without_a_network_call() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::json!({
+                "https://auth.x.ai::client": {
+                    "key": "access-token",
+                    "expires_at": "2000-01-01T00:00:00Z",
+                    "user_id": "user-1"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let result = fetch_usage_in(dir.path(), |_| panic!("an expired token must not be sent"));
+        assert_eq!(
+            result.err(),
+            Some(FetchError::Session(SESSION_EXPIRED.to_string()))
+        );
+    }
+
+    #[test]
+    fn a_missing_session_is_reported_without_a_network_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = fetch_usage_in(dir.path(), |_| panic!("no session, no request"));
+        assert!(matches!(result, Err(FetchError::Session(_))));
     }
 }
