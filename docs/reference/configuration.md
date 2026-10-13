@@ -228,7 +228,7 @@ If the configured directory does not exist, Okena logs a warning and falls back 
 
 #### Grok Extension
 
-The Grok extension reads the Grok CLI session from `~/.grok/auth.json`. `GROK_HOME` overrides that directory, matching the CLI. Enable the `grok` extension to show the usage meter. When the access token is expired, Okena refreshes it through the session's OIDC issuer and writes the rotated tokens back to `auth.json`.
+The Grok extension reads the Grok CLI session from `~/.grok/auth.json`. `GROK_HOME` overrides that directory, matching the CLI. Enable the `grok` extension to show the usage meter. Okena only reads `auth.json` and never refreshes or writes the session. When the access token is expired or the usage API rejects it, the widget shows that the session expired. Okena never sends a request with a token that `auth.json` marks as expired; run `grok` to renew the session.
 
 #### Hooks
 

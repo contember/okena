@@ -23,7 +23,7 @@ const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 /// The Grok CLI requests this with its grok.com session. `grok.com` itself
 /// returns 404 for the same path.
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
-const DEFAULT_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+const SESSION_EXPIRED: &str = "Grok session expired — run `grok` to refresh";
 const USER_AGENT: &str = concat!("okena/", env!("CARGO_PKG_VERSION"));
 
 fn theme(cx: &App) -> ThemeColors {
@@ -94,15 +94,12 @@ impl FetchStatus {
     }
 }
 
+/// Okena only reads the Grok CLI session. Refreshing would rotate the refresh
+/// token the CLI also holds, so an expired session is left for the CLI to renew.
 struct GrokAuth {
-    entry_key: String,
     access_token: String,
-    refresh_token: Option<String>,
-    client_id: Option<String>,
-    issuer: Option<String>,
     user_id: String,
     expires_at: Option<String>,
-    auth_path: PathBuf,
 }
 
 /// `GROK_HOME` when it exists, otherwise `~/.grok`.
@@ -125,14 +122,14 @@ fn read_grok_auth(dir: &Path) -> Option<GrokAuth> {
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let entries = value.as_object()?;
     let now = jiff::Timestamp::now();
-    let (entry_key, entry) = entries
-        .iter()
-        .filter(|(_, entry)| {
+    let entry = entries
+        .values()
+        .filter(|entry| {
             entry["key"]
                 .as_str()
                 .is_some_and(|token| !token.trim().is_empty())
         })
-        .min_by_key(|(_, entry)| access_token_expired(entry["expires_at"].as_str(), now) as u8)?;
+        .min_by_key(|entry| access_token_expired(entry["expires_at"].as_str(), now) as u8)?;
     let access_token = entry["key"].as_str()?.trim().to_string();
     let user_id = entry["user_id"]
         .as_str()
@@ -140,14 +137,9 @@ fn read_grok_auth(dir: &Path) -> Option<GrokAuth> {
         .unwrap_or("default")
         .to_string();
     Some(GrokAuth {
-        entry_key: entry_key.clone(),
         access_token,
-        refresh_token: non_empty(entry["refresh_token"].as_str()),
-        client_id: non_empty(entry["oidc_client_id"].as_str()),
-        issuer: non_empty(entry["oidc_issuer"].as_str()),
         user_id,
         expires_at: non_empty(entry["expires_at"].as_str()),
-        auth_path: path,
     })
 }
 
@@ -168,131 +160,12 @@ fn access_token_expired(expires_at: Option<&str>, now: jiff::Timestamp) -> bool 
     expires <= now
 }
 
-fn token_endpoint(issuer: Option<&str>) -> String {
-    match issuer.map(|issuer| issuer.trim_end_matches('/')) {
-        Some("https://auth.x.ai") | None => DEFAULT_TOKEN_URL.to_string(),
-        Some(issuer) => format!("{issuer}/oauth2/token"),
-    }
-}
-
-fn form_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-fn refresh_form(client_id: &str, refresh_token: &str) -> String {
-    format!(
-        "grant_type=refresh_token&client_id={}&refresh_token={}",
-        form_encode(client_id),
-        form_encode(refresh_token)
-    )
-}
-
 fn client_version(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("version.json"))
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
         .and_then(|value| non_empty(value["version"].as_str()))
         .unwrap_or_else(|| "okena".to_string())
-}
-
-fn refresh_access_token(auth: &GrokAuth) -> Result<String, String> {
-    let client_id = auth
-        .client_id
-        .as_deref()
-        .ok_or("Grok session has no OIDC client id; sign in again with `grok login`")?;
-    let refresh_token = auth
-        .refresh_token
-        .as_deref()
-        .ok_or("Grok session has no refresh token; sign in again with `grok login`")?;
-    let response = okena_transport::http::send(
-        okena_transport::http::HttpRequest::post(token_endpoint(auth.issuer.as_deref()))
-            .body(
-                "application/x-www-form-urlencoded",
-                refresh_form(client_id, refresh_token),
-            )
-            .timeout(Duration::from_secs(10))
-            .user_agent(USER_AGENT)
-            .header("Accept", "application/json")
-            .label("grok.token-refresh"),
-    )
-    .map_err(|_| "Token refresh failed; sign in again with `grok login`".to_string())?;
-    if !response.is_success() {
-        return Err(format!(
-            "Token refresh failed: HTTP {}; sign in again with `grok login`",
-            response.status()
-        ));
-    }
-    let body: serde_json::Value = response
-        .json()
-        .map_err(|_| "Token refresh returned invalid JSON".to_string())?;
-    let access =
-        non_empty(body["access_token"].as_str()).ok_or("Token refresh returned no access token")?;
-    let refreshed = non_empty(body["refresh_token"].as_str());
-    let expires_at = body["expires_in"].as_i64().map(|seconds| {
-        let expires = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(seconds.max(0));
-        expires.to_string()
-    });
-    persist_tokens(
-        &auth.auth_path,
-        &auth.entry_key,
-        &access,
-        refreshed.as_deref(),
-        expires_at.as_deref(),
-    );
-    Ok(access)
-}
-
-fn persist_tokens(
-    path: &Path,
-    entry_key: &str,
-    access_token: &str,
-    refresh_token: Option<&str>,
-    expires_at: Option<&str>,
-) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut file) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    let Some(entry) = file
-        .get_mut(entry_key)
-        .and_then(|entry| entry.as_object_mut())
-    else {
-        return;
-    };
-    entry.insert(
-        "key".to_string(),
-        serde_json::Value::String(access_token.to_string()),
-    );
-    if let Some(refresh_token) = refresh_token {
-        entry.insert(
-            "refresh_token".to_string(),
-            serde_json::Value::String(refresh_token.to_string()),
-        );
-    }
-    if let Some(expires_at) = expires_at {
-        entry.insert(
-            "expires_at".to_string(),
-            serde_json::Value::String(expires_at.to_string()),
-        );
-    }
-    let Ok(updated) = serde_json::to_string_pretty(&file) else {
-        return;
-    };
-    let temporary = path.with_extension("json.okena-tmp");
-    if std::fs::write(&temporary, updated).is_ok() && std::fs::rename(&temporary, path).is_err() {
-        let _ = std::fs::remove_file(temporary);
-    }
 }
 
 fn billing_request(access_token: &str, version: &str) -> okena_transport::http::HttpRequest {
@@ -311,21 +184,15 @@ fn fetch_usage() -> Result<UsageData, String> {
     let dir = resolve_grok_dir();
     let auth = read_grok_auth(&dir)
         .ok_or("Grok credentials missing; sign in with `grok login`".to_string())?;
-    let version = client_version(&dir);
-    let mut access_token = auth.access_token.clone();
     if access_token_expired(auth.expires_at.as_deref(), jiff::Timestamp::now()) {
-        access_token = refresh_access_token(&auth)?;
+        return Err(SESSION_EXPIRED.to_string());
     }
-
-    let response = match okena_transport::http::send(billing_request(&access_token, &version)) {
-        Ok(response) if response.status() == 401 => {
-            access_token = refresh_access_token(&auth)?;
-            okena_transport::http::send(billing_request(&access_token, &version))
-                .map_err(|_| "Could not connect to Grok usage API".to_string())?
-        }
-        Ok(response) => response,
-        Err(_) => return Err("Could not connect to Grok usage API".to_string()),
-    };
+    let version = client_version(&dir);
+    let response = okena_transport::http::send(billing_request(&auth.access_token, &version))
+        .map_err(|_| "Could not connect to Grok usage API".to_string())?;
+    if response.status() == 401 {
+        return Err(SESSION_EXPIRED.to_string());
+    }
     if !response.is_success() {
         return Err(format!("Usage request failed: HTTP {}", response.status()));
     }
@@ -1053,7 +920,7 @@ mod tests {
         std::fs::write(dir.path().join("auth.json"), auth.to_string()).unwrap();
         let session = read_grok_auth(dir.path()).unwrap();
         assert_eq!(session.user_id, "user-1");
-        assert_eq!(session.issuer.as_deref(), Some("https://auth.x.ai"));
+        assert_eq!(session.access_token, "access-token");
         assert!(access_token_expired(
             session.expires_at.as_deref(),
             "2026-10-13T00:00:00Z".parse().unwrap()
@@ -1062,47 +929,6 @@ mod tests {
             Some("2026-10-14T00:00:00Z"),
             "2026-10-13T00:00:00Z".parse().unwrap()
         ));
-    }
-
-    #[test]
-    fn refresh_form_encodes_reserved_characters() {
-        assert_eq!(
-            refresh_form("client id", "a/b+c"),
-            "grant_type=refresh_token&client_id=client%20id&refresh_token=a%2Fb%2Bc"
-        );
-        assert_eq!(token_endpoint(Some("https://auth.x.ai")), DEFAULT_TOKEN_URL);
-    }
-
-    #[test]
-    fn rotated_tokens_are_written_back_without_dropping_the_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.json");
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "https://auth.x.ai::client": {
-                    "key": "old",
-                    "refresh_token": "old-refresh",
-                    "user_id": "user-1"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        persist_tokens(
-            &path,
-            "https://auth.x.ai::client",
-            "new-access",
-            Some("new-refresh"),
-            Some("2026-10-13T12:00:00Z"),
-        );
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let entry = &saved["https://auth.x.ai::client"];
-        assert_eq!(entry["key"], "new-access");
-        assert_eq!(entry["refresh_token"], "new-refresh");
-        assert_eq!(entry["expires_at"], "2026-10-13T12:00:00Z");
-        assert_eq!(entry["user_id"], "user-1");
     }
 
     #[test]
