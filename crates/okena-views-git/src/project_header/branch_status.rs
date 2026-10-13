@@ -15,6 +15,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::tooltip::Tooltip;
+use okena_ui::truncated_text::truncated_text;
 use std::sync::Arc;
 
 /// The shared `Arc<dyn Fn>` click handler, before being wrapped in `Option`.
@@ -90,9 +91,14 @@ pub fn render_branch_status(
             div()
                 .text_color(rgb(t.text_secondary))
                 .max_w(px(100.0))
-                .text_ellipsis()
                 .overflow_hidden()
-                .child(status.branch.clone().unwrap_or_default()),
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(truncated_text(
+                    "branch-name",
+                    status.branch.clone().unwrap_or_default(),
+                    None,
+                )),
         )
         .when(branch_clickable, |d| {
             d.child(

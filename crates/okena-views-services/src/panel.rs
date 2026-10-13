@@ -8,6 +8,7 @@ use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button;
 use okena_ui::theme::ThemeColors;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xs};
+use okena_ui::truncated_text::truncated_text;
 use std::sync::Arc;
 
 /// Callback taking a service name (e.g. start/stop/restart a named service).
@@ -485,10 +486,11 @@ fn render_overview_row(
                 .min_w(px(80.0))
                 .text_size(ui_text_md(cx))
                 .text_color(rgb(name_color))
-                .text_ellipsis()
                 .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .hover(|s| s.text_color(rgb(t.border_active)))
-                .child(name.clone())
+                .child(truncated_text("name", name.clone(), None))
                 .on_click(move |_, window, cx| {
                     on_service_click(name.clone(), window, cx);
                 })

@@ -8,6 +8,7 @@ use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button_sized;
 use okena_ui::theme::ThemeColors;
 use okena_ui::tokens::{ui_text_md, ui_text_sm, ui_text_xs};
+use okena_ui::truncated_text::truncated_text;
 
 /// Render the action buttons for the services group header.
 ///
@@ -171,10 +172,11 @@ pub fn render_service_item(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_primary))
                 .text_ellipsis()
-                .child(service_name.clone()),
+                .child(truncated_text("name", service_name.clone(), None)),
         )
         .children(
             // Port badges
