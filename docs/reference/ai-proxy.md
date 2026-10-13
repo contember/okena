@@ -160,10 +160,17 @@ proxy and shows nothing.
 Provider HTTP errors, including 401 and 429 attempts that are retried, are
 logged at warning level with method, endpoint path, project/account IDs, status,
 error type/message, request ID, and selected response headers (`retry-after`,
-`anthropic-ratelimit-*`, request IDs, `cf-ray`, and content type). Messages are
-limited to 2,048 characters and header values to 256 characters; control
-characters are escaped. Non-JSON error bodies are represented by their size
-and content type, not dumped into the log.
+`anthropic-ratelimit-*`, request IDs, `cf-ray`, content type/encoding/length,
+and server). Gzip, Brotli and deflate responses are decoded before logging or
+relaying; the relay removes obsolete encoding and length headers.
+Diagnostics accept nested error objects, string errors and top-level
+`message`, `error_description` or `detail` fields. An unexpected JSON shape
+lists up to 16 field names at the root and inside `error`, each limited to 64
+characters, without dumping unknown values. Invalid JSON records the parse
+error category and position. Request IDs fall back to response headers.
+Messages are limited to 2,048 characters and header values to 256 characters;
+control characters are escaped. Non-JSON error bodies are represented by
+their size, headers and parse failure, not dumped into the log.
 
 `upstream_error` identifies provider responses. `proxy_rejection` identifies
 local rejections and includes the reason and earliest retry time when known.

@@ -1,7 +1,7 @@
 //! Bounded provider error details; request bodies and authentication headers stay out of logs.
 
 use axum::http::{HeaderMap, Method, StatusCode};
-use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -63,57 +63,90 @@ impl std::fmt::Display for RequestContext {
     }
 }
 
-#[derive(Default, Deserialize)]
-struct ErrorEnvelope {
-    error: Option<ProviderError>,
-    request_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ProviderError {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    message: Option<String>,
-}
-
 struct ErrorDetails {
     kind: Option<String>,
     message: Option<String>,
     request_id: Option<String>,
     headers: BTreeMap<String, String>,
     body_bytes: usize,
+    json_fields: Vec<String>,
+    parse_error: Option<String>,
 }
 
 impl std::fmt::Display for ErrorDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "type={:?} message={:?} request_id={:?} headers={:?} body_bytes={}",
-            self.kind, self.message, self.request_id, self.headers, self.body_bytes
+            "type={:?} message={:?} request_id={:?} headers={:?} body_bytes={} json_fields={:?} parse_error={:?}",
+            self.kind,
+            self.message,
+            self.request_id,
+            self.headers,
+            self.body_bytes,
+            self.json_fields,
+            self.parse_error
         )
     }
 }
 
 fn response_details(headers: &HeaderMap, body: &[u8]) -> ErrorDetails {
-    let error: ErrorEnvelope = serde_json::from_slice(body).unwrap_or_default();
-    let kind = error
-        .error
-        .as_ref()
-        .and_then(|error| error.kind.as_deref())
+    let (value, parse_error) = match serde_json::from_slice::<Value>(body) {
+        Ok(value) => (value, None),
+        Err(error) => (
+            Value::Null,
+            Some(format!(
+                "{:?} at line {} column {}",
+                error.classify(),
+                error.line(),
+                error.column()
+            )),
+        ),
+    };
+    let error = &value["error"];
+    let kind = string_field(error, &["type", "code"])
+        .or_else(|| string_field(&value, &["type", "code"]))
         .map(|value| bounded(value, 128));
-    let message = error
-        .error
-        .as_ref()
-        .and_then(|error| error.message.as_deref())
+    let message = string_field(error, &["message", "error_description", "detail"])
+        .or_else(|| string_field(&value, &["message", "error_description", "detail"]))
+        .or_else(|| error.as_str())
         .map(|value| bounded(value, 2048));
-    let request_id = error.request_id.as_deref().map(|value| bounded(value, 256));
+    let request_id = string_field(&value, &["request_id"])
+        .or_else(|| {
+            headers
+                .get("request-id")
+                .and_then(|value| value.to_str().ok())
+        })
+        .or_else(|| {
+            headers
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+        })
+        .map(|value| bounded(value, 256));
+    let mut json_fields = field_names(&value, "");
+    json_fields.extend(field_names(error, "error."));
     ErrorDetails {
         kind,
         message,
         request_id,
         headers: diagnostic_headers(headers),
         body_bytes: body.len(),
+        json_fields,
+        parse_error,
     }
+}
+
+fn string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names.iter().find_map(|name| value[*name].as_str())
+}
+
+fn field_names(value: &Value, prefix: &str) -> Vec<String> {
+    value
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .take(16)
+        .map(|name| format!("{prefix}{}", bounded(name, 64)))
+        .collect()
 }
 
 pub(crate) fn diagnostic_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
@@ -122,7 +155,14 @@ pub(crate) fn diagnostic_headers(headers: &HeaderMap) -> BTreeMap<String, String
         .filter(|(name, _)| {
             matches!(
                 name.as_str(),
-                "request-id" | "x-request-id" | "retry-after" | "content-type" | "cf-ray"
+                "request-id"
+                    | "x-request-id"
+                    | "retry-after"
+                    | "content-type"
+                    | "content-encoding"
+                    | "content-length"
+                    | "server"
+                    | "cf-ray"
             ) || name.as_str().starts_with("anthropic-ratelimit-")
         })
         .filter_map(|(name, value)| {
@@ -197,5 +237,57 @@ mod tests {
             response_details(&HeaderMap::new(), &serde_json::to_vec(&body).unwrap()).to_string();
         assert!(details.contains(&format!("{}…", "ž".repeat(2048))));
         assert!(!details.contains(&"ž".repeat(2049)));
+    }
+
+    #[test]
+    fn alternate_error_formats_keep_messages_and_header_request_ids() {
+        let mut headers = HeaderMap::new();
+        headers.insert("request-id", "header-request".parse().unwrap());
+        for body in [
+            r#"{"error":"Too many requests"}"#,
+            r#"{"message":"Too many requests","error":42}"#,
+            r#"{"error":"rate_limit","error_description":"Too many requests"}"#,
+            r#"{"detail":"Too many requests"}"#,
+            r#"{"error":{"code":"rate_limit","message":"Too many requests"},"request_id":42}"#,
+        ] {
+            let details = response_details(&headers, body.as_bytes());
+            assert_eq!(details.message.as_deref(), Some("Too many requests"));
+            assert_eq!(details.request_id.as_deref(), Some("header-request"));
+            assert_eq!(details.parse_error, None);
+        }
+    }
+
+    #[test]
+    fn unknown_json_reports_bounded_field_names_without_values() {
+        let body = serde_json::json!({
+            "error": {"reason": "private-reason", "token": "private-token"},
+            "messages": ["private-prompt"],
+        });
+        let details = response_details(&HeaderMap::new(), &serde_json::to_vec(&body).unwrap());
+        assert_eq!(details.message, None);
+        assert_eq!(
+            details.json_fields,
+            ["error", "messages", "error.reason", "error.token"]
+        );
+        assert!(!details.to_string().contains("private-"));
+
+        let fields = (0..40)
+            .map(|index| (format!("{index:02}{}", "x".repeat(100)), Value::Null))
+            .collect();
+        let names = field_names(&Value::Object(fields), "");
+        assert_eq!(names.len(), 16);
+        assert!(names.iter().all(|name| name.chars().count() == 65));
+    }
+
+    #[test]
+    fn malformed_json_and_encoded_bodies_report_parse_failures() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        for body in [b"\x1f\x8b\x08".as_slice(), br#"{"message":"private-text"#] {
+            let details = response_details(&headers, body);
+            assert!(details.parse_error.is_some());
+            assert_eq!(details.headers["content-encoding"], "gzip");
+            assert!(!details.to_string().contains("private-text"));
+        }
     }
 }
