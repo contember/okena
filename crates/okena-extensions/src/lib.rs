@@ -18,6 +18,42 @@ pub fn theme(cx: &App) -> ThemeColors {
     (cx.global::<GlobalThemeProvider>().0)(cx)
 }
 
+type ActionSender = Arc<
+    dyn Fn(
+        &str,
+        okena_core::api::ActionRequest,
+        &mut App,
+    ) -> Task<Result<serde_json::Value, String>>,
+>;
+
+/// Host bridge to authenticated daemon actions, selected by connection ID.
+pub struct ExtensionActions(ActionSender);
+impl Global for ExtensionActions {}
+
+impl ExtensionActions {
+    pub fn new(
+        sender: impl Fn(
+            &str,
+            okena_core::api::ActionRequest,
+            &mut App,
+        ) -> Task<Result<serde_json::Value, String>>
+        + 'static,
+    ) -> Self {
+        Self(Arc::new(sender))
+    }
+
+    pub fn send(
+        connection_id: &str,
+        action: okena_core::api::ActionRequest,
+        cx: &mut App,
+    ) -> Task<Result<serde_json::Value, String>> {
+        let Some(sender) = cx.try_global::<Self>().map(|bridge| bridge.0.clone()) else {
+            return Task::ready(Err("Daemon connection is unavailable".into()));
+        };
+        sender(connection_id, action, cx)
+    }
+}
+
 /// Extension metadata.
 pub struct ExtensionManifest {
     pub id: &'static str,

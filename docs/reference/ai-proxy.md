@@ -86,9 +86,11 @@ covers accounts added later.
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
 headers and from polling the usage endpoint every five minutes.
 
-The status bar shows both **5h** and **7d** for each enabled, logged-in pool
-account. A red **100%** conveys quota exhaustion without an extra status label;
-the popover and activity view name the exhausted window as **5h/7d limit reached**.
+The status bar shows a separate entry for each pool account, with both
+**5h** and **7d** when available. Disabled accounts and accounts needing login
+show their state alongside the name. A red **100%** conveys quota exhaustion
+without an extra status label; the popover and activity view name the exhausted
+window as **5h/7d limit reached**.
 **429 cooldown** means the provider returned 429 and the proxy is waiting before trying that
 account again. A 429 alone does not establish that either quota is at 100%.
 The activity view records these responses as HTTP 429 events separately from
@@ -104,9 +106,19 @@ While new terminals are routed through the proxy, the daemon reads the accounts
 from it every 15 seconds and after each management command, and sends them to
 clients with the workspace state. The Claude usage widget in the status bar then
 shows the pool instead of the `claude` login's own usage: the 5-hour and 7-day
-usage of each enabled account in the bar, and each account's usage, plan
-and state (disabled, needs login, quota exhausted or cooling down) in the popover. A remote host's
-accounts are listed under the host's name.
+usage of each account in the bar. Hovering an account opens its own popover
+with its usage, plan and state (disabled, needs login, quota exhausted or
+cooling down). Remote accounts include the host name in their popover.
+
+Successful five-minute usage polls append quota samples to
+`<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection
+continues while the proxy runs, even with the desktop closed. Samples survive
+proxy restarts; history begins with the first successful poll after upgrading.
+The popup loads the selected account's last seven days through the authenticated
+`usage_history` management command, at most once a minute across desktop windows.
+History is omitted from ordinary status and workspace snapshots. The shared
+storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
+them without owning proxy persistence.
 
 ## Activity
 
