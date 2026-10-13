@@ -296,6 +296,17 @@ impl Okena {
 
         // Create remote connection manager and wire to main window
         let remote_manager = cx.new(|cx| RemoteConnectionManager::new(terminals.clone(), cx));
+        let extension_manager = remote_manager.downgrade();
+        cx.set_global(okena_extensions::ExtensionActions::new(
+            move |connection_id, action, cx| {
+                let Some(manager) = extension_manager.upgrade() else {
+                    return gpui::Task::ready(Err("Daemon connection is unavailable".into()));
+                };
+                manager.update(cx, |manager, cx| {
+                    manager.send_action_with_result(connection_id, action, cx)
+                })
+            },
+        ));
         main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
