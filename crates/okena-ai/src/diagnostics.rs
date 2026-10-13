@@ -2,10 +2,32 @@
 
 use axum::http::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+struct InferenceDetails {
+    model: Option<String>,
+    max_tokens: Option<u64>,
+    stream: Option<bool>,
+    body_bytes: usize,
+    session_hash: Option<String>,
+    client_retry: Option<u32>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct RequestContext {
+    id: u64,
+    started: Instant,
+    attempt: usize,
+    attempt_started: Instant,
+    inference: Option<InferenceDetails>,
+    inflight: Option<Arc<AtomicUsize>>,
     method: Method,
     path: String,
     project: Option<String>,
@@ -15,6 +37,12 @@ pub(crate) struct RequestContext {
 impl RequestContext {
     pub fn new(method: &Method, path: &str, project: Option<&str>) -> Self {
         Self {
+            id: NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+            started: Instant::now(),
+            attempt: 0,
+            attempt_started: Instant::now(),
+            inference: None,
+            inflight: None,
             method: method.clone(),
             path: bounded(path, 256),
             project: project.map(|value| bounded(value, 128)),
@@ -22,9 +50,42 @@ impl RequestContext {
         }
     }
 
-    pub fn for_account(&self, account: &str) -> Self {
+    pub fn inference(
+        mut self,
+        payload: Option<&Value>,
+        body_bytes: usize,
+        session: Option<&str>,
+        headers: &HeaderMap,
+        inflight: &Arc<AtomicUsize>,
+    ) -> Self {
+        self.inference = Some(InferenceDetails {
+            model: payload
+                .and_then(|value| value.get("model"))
+                .and_then(Value::as_str)
+                .map(|value| bounded(value, 128)),
+            max_tokens: payload
+                .and_then(|value| value.get("max_tokens"))
+                .and_then(Value::as_u64),
+            stream: payload
+                .and_then(|value| value.get("stream"))
+                .and_then(Value::as_bool),
+            body_bytes,
+            session_hash: session
+                .map(|value| format!("{:x}", Sha256::digest(value.as_bytes()))[..16].to_owned()),
+            client_retry: headers
+                .get("x-stainless-retry-count")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok()),
+        });
+        self.inflight = Some(inflight.clone());
+        self
+    }
+
+    pub fn for_account(&self, account: &str, attempt: usize) -> Self {
         Self {
             account: Some(account.to_owned()),
+            attempt,
+            attempt_started: Instant::now(),
             ..self.clone()
         }
     }
@@ -57,9 +118,33 @@ impl std::fmt::Display for RequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "method={} path={:?} project={:?} account={:?}",
-            self.method, self.path, self.project, self.account
-        )
+            "relay_id={}-{} method={} path={:?} project={:?} account={:?} attempt={} elapsed_ms={} attempt_ms={}",
+            std::process::id(),
+            self.id,
+            self.method,
+            self.path,
+            self.project,
+            self.account,
+            self.attempt,
+            self.started.elapsed().as_millis(),
+            self.attempt_started.elapsed().as_millis()
+        )?;
+        if let Some(details) = &self.inference {
+            write!(
+                f,
+                " model={:?} max_tokens={:?} stream={:?} body_bytes={} session_hash={:?} client_retry={:?}",
+                details.model,
+                details.max_tokens,
+                details.stream,
+                details.body_bytes,
+                details.session_hash,
+                details.client_retry
+            )?;
+        }
+        if let Some(inflight) = &self.inflight {
+            write!(f, " proxy_inflight={}", inflight.load(Ordering::SeqCst))?;
+        }
+        Ok(())
     }
 }
 
@@ -158,12 +243,16 @@ pub(crate) fn diagnostic_headers(headers: &HeaderMap) -> BTreeMap<String, String
                 "request-id"
                     | "x-request-id"
                     | "retry-after"
+                    | "retry-after-ms"
+                    | "x-should-retry"
+                    | "x-envoy-upstream-service-time"
                     | "content-type"
                     | "content-encoding"
                     | "content-length"
                     | "server"
                     | "cf-ray"
             ) || name.as_str().starts_with("anthropic-ratelimit-")
+                || name.as_str().starts_with("x-ratelimit-")
         })
         .filter_map(|(name, value)| {
             value
@@ -187,11 +276,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inference_context_correlates_attempts_without_logging_private_fields() {
+        let payload = serde_json::json!({
+            "model": "claude-test\nmodel", "max_tokens": 4096, "stream": true,
+            "messages": [{"role": "user", "content": "private-prompt"}],
+            "metadata": {"user_id": "private-identity"},
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer private-token".parse().unwrap());
+        headers.insert("x-stainless-retry-count", "2".parse().unwrap());
+        let inflight = Arc::new(AtomicUsize::new(3));
+        let context = RequestContext::new(&Method::POST, "/v1/messages", Some("p")).inference(
+            Some(&payload),
+            1234,
+            Some("private-session"),
+            &headers,
+            &inflight,
+        );
+        let first = context.for_account("a", 1);
+        let second = context.for_account("b", 2);
+        assert_eq!(first.id, second.id);
+        assert_ne!(
+            first.id,
+            RequestContext::new(&Method::POST, "/v1/messages", None).id
+        );
+        let text = second.to_string();
+        for expected in [
+            "model=Some(\"claude-test\\nmodel\")",
+            "max_tokens=Some(4096)",
+            "stream=Some(true)",
+            "body_bytes=1234",
+            "client_retry=Some(2)",
+            "attempt=2",
+            "proxy_inflight=3",
+            "session_hash=Some(",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(!text.contains("private-"), "{text}");
+        assert!(!text.contains('\n'));
+        inflight.store(1, Ordering::SeqCst);
+        assert!(second.to_string().contains("proxy_inflight=1"));
+    }
+
+    #[test]
+    fn inference_metadata_is_bounded_and_wrong_types_are_omitted() {
+        let payload = serde_json::json!({
+            "model": "ž".repeat(200), "max_tokens": "private-value", "stream": {},
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-stainless-retry-count", "private-retry".parse().unwrap());
+        let context = RequestContext::new(&Method::POST, "/v1/messages", None).inference(
+            Some(&payload),
+            0,
+            None,
+            &headers,
+            &Arc::default(),
+        );
+        let text = context.to_string();
+        assert!(text.contains(&format!("{}…", "ž".repeat(128))));
+        assert!(!text.contains(&"ž".repeat(129)));
+        for expected in [
+            "max_tokens=None",
+            "stream=None",
+            "client_retry=None",
+            "session_hash=None",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(!text.contains("private-"));
+    }
+
+    #[test]
     fn error_details_keep_diagnostics_without_dumping_headers_or_body() {
         let mut headers = HeaderMap::new();
         for (name, value) in [
             ("request-id", "req-123"),
             ("retry-after", "30"),
+            ("retry-after-ms", "30000"),
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-should-retry", "true"),
             ("anthropic-ratelimit-unified-reset", "2000"),
             ("authorization", "Bearer secret-token"),
             ("set-cookie", "private-cookie"),
@@ -208,6 +372,9 @@ mod tests {
             "req-123",
             "body-request-id",
             "retry-after",
+            "retry-after-ms",
+            "x-ratelimit-remaining-requests",
+            "x-should-retry",
             "30",
             "rate_limit_error",
             "Too many requests\\ntry later",
