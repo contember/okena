@@ -6266,6 +6266,7 @@ dependencies = [
  "jiff",
  "libc",
  "log",
+ "okena-agent-usage",
  "okena-core",
  "parking_lot",
  "reqwest",

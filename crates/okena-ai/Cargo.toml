@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 okena-core = { path = "../okena-core" }
+okena-agent-usage = { path = "../okena-agent-usage" }
 anyhow = "1.0"
 axum = "0.8"
 base64 = "0.22"

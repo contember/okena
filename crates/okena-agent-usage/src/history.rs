@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -14,33 +14,7 @@ const PRUNE_SLACK_SECS: f64 = 86400.0;
 // Claude reset timestamps jitter by fractions of a second between fetches.
 const RESET_TIME_TOLERANCE_SECS: f64 = 1.0;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Claude,
-    Codex,
-    Grok,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LimitSample {
-    pub name: String,
-    pub used_percent: f64,
-    pub window_seconds: f64,
-    pub reset_at: Option<f64>,
-}
-
-/// Version 1 timestamps are Unix epoch seconds (UTC).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UsageSample {
-    pub version: u32,
-    pub recorded_at: f64,
-    pub provider: Provider,
-    /// Codex account ID or Claude credential directory, never an access token.
-    pub source: String,
-    pub plan: Option<String>,
-    pub limits: Vec<LimitSample>,
-}
+pub use okena_core::usage_history::{LimitSample, Provider, UsageSample};
 
 #[derive(Clone, Default)]
 pub struct History(Arc<[UsageSample]>);
@@ -52,6 +26,16 @@ pub struct HistoryPoint {
 }
 
 impl History {
+    pub fn from_samples(samples: Vec<UsageSample>) -> Self {
+        Self(
+            samples
+                .into_iter()
+                .filter(valid_sample)
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
+
     pub fn points(&self, name: &str, reset_at: f64, period: f64, now: f64) -> Vec<HistoryPoint> {
         if !reset_at.is_finite() || !period.is_finite() || period <= 0.0 {
             return Vec::new();
@@ -234,7 +218,7 @@ fn filename(provider: Provider) -> &'static str {
     }
 }
 
-fn load(
+pub fn load(
     directory: &Path,
     provider: Provider,
     source: &str,
@@ -249,18 +233,10 @@ fn load(
         let Ok(sample) = serde_json::from_str::<UsageSample>(&line) else {
             continue;
         };
-        if sample.version != 1
+        if !valid_sample(&sample)
             || sample.provider != provider
             || sample.source != source
-            || !sample.recorded_at.is_finite()
             || sample.recorded_at < since
-            || sample.limits.iter().any(|limit| {
-                !limit.used_percent.is_finite()
-                    || limit.used_percent < 0.0
-                    || !limit.window_seconds.is_finite()
-                    || limit.window_seconds < 0.0
-                    || limit.reset_at.is_some_and(|reset| !reset.is_finite())
-            })
         {
             continue;
         }
@@ -269,7 +245,19 @@ fn load(
     Ok(samples)
 }
 
-fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
+fn valid_sample(sample: &UsageSample) -> bool {
+    sample.version == 1
+        && sample.recorded_at.is_finite()
+        && sample.limits.iter().all(|limit| {
+            limit.used_percent.is_finite()
+                && limit.used_percent >= 0.0
+                && limit.window_seconds.is_finite()
+                && limit.window_seconds >= 0.0
+                && limit.reset_at.is_none_or(f64::is_finite)
+        })
+}
+
+pub fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
     let mut line = serde_json::to_vec(sample)?;
     line.push(b'\n');
     fs::create_dir_all(directory)?;
@@ -281,7 +269,10 @@ fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
     // Multiple Okena profiles/processes share this history directory.
     file.lock()?;
     if let Err(error) = prune_if_stale(&mut file, sample.recorded_at) {
-        log::warn!("[usage-history] could not prune {:?} history: {error}", sample.provider);
+        log::warn!(
+            "[usage-history] could not prune {:?} history: {error}",
+            sample.provider
+        );
     }
     file.write_all(&line)
 }
@@ -390,6 +381,26 @@ mod tests {
         assert_eq!(out.first(), points.first());
         assert_eq!(out.last(), points.last());
         assert!(out.windows(2).all(|w| w[0].recorded_at < w[1].recorded_at));
+    }
+
+    #[test]
+    fn imported_samples_skip_invalid_values_and_unknown_versions() {
+        let valid = sample_at(1500.0, 19000.0, 23.0);
+        let mut unknown = valid.clone();
+        unknown.version = 2;
+        let mut negative = valid.clone();
+        negative.limits[0].used_percent = -1.0;
+        let mut nonfinite = valid.clone();
+        nonfinite.recorded_at = f64::NAN;
+        let history = History::from_samples(vec![valid, unknown, negative, nonfinite]);
+        let points = history.points("five_hour", 19000.0, 18000.0, 1600.0);
+        assert_eq!(
+            points,
+            vec![HistoryPoint {
+                recorded_at: 1500.0,
+                used_percent: 23.0
+            }]
+        );
     }
 
     #[test]
@@ -554,7 +565,11 @@ mod tests {
         let mut future = sample_at(now - day, now, 4.0);
         future.version = 2;
         append(temp.path(), &future).unwrap();
-        append(temp.path(), &sample_at(now + 1.0 * day, now + 2.0 * day, 5.0)).unwrap();
+        append(
+            temp.path(),
+            &sample_at(now + 1.0 * day, now + 2.0 * day, 5.0),
+        )
+        .unwrap();
         let later = now + 1.0 * day;
         append(temp.path(), &sample_at(later, later + day, 6.0)).unwrap();
         let kept: Vec<f64> = std::fs::read_to_string(&path)

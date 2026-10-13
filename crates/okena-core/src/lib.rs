@@ -21,4 +21,5 @@ pub mod theme;
 pub mod timing;
 pub mod types;
 pub mod usage;
+pub mod usage_history;
 pub mod ws;
