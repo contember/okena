@@ -25,7 +25,8 @@ pub const TEST_MODULE_RULE: &str = "builtin.module.cfg-test.v1";
 ///
 /// Rules are tried in this order, first match wins: generated, vendored,
 /// lockfile, snapshot, fixture, test, documentation, example, configuration,
-/// implementation, unclassified.
+/// implementation, unclassified. A fixture is given the Tests role; its own
+/// rule id keeps "why this role" precise.
 pub fn classify(path: &str) -> FileClassification {
     let lower = path.trim_start_matches("./").to_ascii_lowercase();
     let segments: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
@@ -40,8 +41,8 @@ pub fn classify(path: &str) -> FileClassification {
         (FileRole::Lockfile, LOCKFILE)
     } else if has_segment(&segments, SNAPSHOT_DIRS) || extension == "snap" {
         (FileRole::Snapshot, SNAPSHOT)
-    } else if has_segment(&segments, FIXTURE_DIRS) {
-        (FileRole::Fixture, FIXTURE)
+    } else if has_segment(&segments, FIXTURE_DIRS) || is_fixture_basename(basename) {
+        (FileRole::Test, FIXTURE)
     } else if has_segment(&segments, TEST_DIRS) || is_test_basename(basename) {
         (FileRole::Test, TEST)
     } else if has_segment(&segments, DOCUMENTATION_DIRS)
@@ -78,7 +79,7 @@ pub fn rule_label(rule_id: &str) -> &'static str {
         VENDORED => "a vendored-dependency directory",
         LOCKFILE => "a dependency lockfile",
         SNAPSHOT => "a snapshot directory or a .snap file",
-        FIXTURE => "a fixture or test-data directory",
+        FIXTURE => "a fixture or test-data directory, or a fixture filename",
         TEST => "a test directory or a test filename",
         DOCUMENTATION => "a docs directory, a prose extension, or a README-like name",
         EXAMPLE => "an examples directory",
@@ -93,17 +94,27 @@ fn has_segment(segments: &[&str], names: &[&str]) -> bool {
     segments.iter().any(|segment| names.contains(segment))
 }
 
+/// `engine-fixtures.ts`, `engine_fixture.py`, `engine.fixtures.ts`, or `fixtures.ts`.
+fn is_fixture_basename(basename: &str) -> bool {
+    stem_ends_with_word(stem(basename), &["fixture", "fixtures"])
+}
+
 /// `engine.test.ts`, `test_engine.py`, `engine_test.go`, a bare `test.rs`.
 fn is_test_basename(basename: &str) -> bool {
     if basename.contains(".test.") || basename.contains(".spec.") {
         return true;
     }
     let stem = stem(basename);
-    stem.starts_with("test_")
-        || matches!(stem, "test" | "spec")
-        || ["_test", "-test", ".test", "_spec", "-spec", ".spec"]
-            .iter()
-            .any(|suffix| stem.ends_with(suffix))
+    stem.starts_with("test_") || stem_ends_with_word(stem, &["test", "spec"])
+}
+
+/// Whether the stem is one of `words`, or ends in one after a `_`, `-` or `.`,
+/// so `engine_test` matches `test` and `latest` does not.
+fn stem_ends_with_word(stem: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| {
+        stem.strip_suffix(word)
+            .is_some_and(|head| head.is_empty() || head.ends_with(['_', '-', '.']))
+    })
 }
 
 fn is_configuration(segments: &[&str], basename: &str, extension: &str) -> bool {
@@ -244,12 +255,68 @@ mod tests {
     fn support_roles_win_over_the_code_extension() {
         assert_eq!(
             role("crates/okena-syntax/src/fixtures/review.ts"),
-            FileRole::Fixture
+            FileRole::Test
         );
         assert_eq!(role("src/__snapshots__/view.ts.snap"), FileRole::Snapshot);
         assert_eq!(role("examples/basic/main.rs"), FileRole::Example);
         assert_eq!(role("node_modules/left-pad/index.js"), FileRole::Vendored);
         assert_eq!(role("target/debug/build.rs"), FileRole::Generated);
+    }
+
+    #[test]
+    fn fixture_filenames_are_tests() {
+        for path in [
+            "src/services/report/document-signing-fixtures.ts",
+            "src/engine-fixture.ts",
+            "src/engine_fixture.py",
+            "src/engine_fixtures.ts",
+            "src/engine.fixture.ts",
+            "src/engine.fixtures.ts",
+            "src/fixture.ts",
+            "src/fixtures.ts",
+            "./src/ENGINE-FIXTURES.TS",
+        ] {
+            let classification = classify(path);
+            assert_eq!(classification.role, FileRole::Test, "{path}");
+            assert_eq!(classification.rule_id, FIXTURE, "{path}");
+        }
+    }
+
+    #[test]
+    fn fixture_and_test_data_directories_are_tests() {
+        for path in [
+            "src/fixture/data.ts",
+            "src/fixtures/data.json",
+            "src/__fixtures__/data.ts",
+            "src/__mocks__/client.ts",
+            "src/testdata/input.txt",
+            "src/test-data/input.txt",
+        ] {
+            let classification = classify(path);
+            assert_eq!(classification.role, FileRole::Test, "{path}");
+            assert_eq!(classification.rule_id, FIXTURE, "{path}");
+        }
+    }
+
+    #[test]
+    fn fixture_words_without_a_filename_boundary_stay_implementation() {
+        for path in [
+            "src/lightfixtures.ts",
+            "src/fixture_manager.ts",
+            "src/fixtures-service.ts",
+            "src/engine-fixtures-helper.ts",
+        ] {
+            assert_eq!(role(path), FileRole::Implementation, "{path}");
+        }
+    }
+
+    #[test]
+    fn fixture_filenames_respect_rule_precedence() {
+        assert_eq!(role("tests/engine-fixtures.ts"), FileRole::Test);
+        assert_eq!(role("src/engine-fixtures.json"), FileRole::Test);
+        assert_eq!(role("target/engine-fixtures.ts"), FileRole::Generated);
+        assert_eq!(role("vendor/engine-fixtures.ts"), FileRole::Vendored);
+        assert_eq!(role("snapshots/engine-fixtures.ts"), FileRole::Snapshot);
     }
 
     #[test]
