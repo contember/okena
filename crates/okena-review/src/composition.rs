@@ -810,11 +810,6 @@ mod gated_module_tests {
         let tests = volume(&composition, FileRole::Test);
         assert_eq!((tests.files, tests.changed_lines), (1, 3));
         assert_eq!(tests.percent, 100.0);
-        assert!(
-            !composition.roles.iter().any(|volume| {
-                matches!(volume.role, FileRole::Fixture | FileRole::Implementation)
-            })
-        );
     }
 
     #[test]

@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum FileRole {
     Implementation,
+    /// Daemons up to v0.34 sent fixtures as their own role.
+    #[serde(alias = "fixture")]
     Test,
-    Fixture,
     Snapshot,
     Example,
     Documentation,
@@ -27,10 +28,9 @@ pub enum FileRole {
 
 impl FileRole {
     /// Every role, in the order the legend lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::Implementation,
         Self::Test,
-        Self::Fixture,
         Self::Snapshot,
         Self::Example,
         Self::Documentation,
@@ -46,7 +46,6 @@ impl FileRole {
         match self {
             Self::Implementation => "Implementation",
             Self::Test => "Tests",
-            Self::Fixture => "Fixtures",
             Self::Snapshot => "Snapshots",
             Self::Example => "Examples",
             Self::Documentation => "Docs",
@@ -180,10 +179,16 @@ mod tests {
 
     #[test]
     fn every_role_has_a_label_and_appears_in_all() {
-        assert_eq!(FileRole::ALL.len(), 11);
+        assert_eq!(FileRole::ALL.len(), 10);
         for role in FileRole::ALL {
             assert!(!role.label().is_empty());
         }
+    }
+
+    #[test]
+    fn a_fixture_role_from_an_older_daemon_reads_as_tests() {
+        let role: FileRole = serde_json::from_str("\"fixture\"").unwrap();
+        assert_eq!(role, FileRole::Test);
     }
 
     #[test]

@@ -25,8 +25,8 @@ pub const TEST_MODULE_RULE: &str = "builtin.module.cfg-test.v1";
 ///
 /// Rules are tried in this order, first match wins: generated, vendored,
 /// lockfile, snapshot, fixture, test, documentation, example, configuration,
-/// implementation, unclassified. Fixture matches belong to Tests, while keeping
-/// their fixture rule id so the reason for classification stays precise.
+/// implementation, unclassified. A fixture is given the Tests role; its own
+/// rule id keeps "why this role" precise.
 pub fn classify(path: &str) -> FileClassification {
     let lower = path.trim_start_matches("./").to_ascii_lowercase();
     let segments: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
@@ -96,18 +96,7 @@ fn has_segment(segments: &[&str], names: &[&str]) -> bool {
 
 /// `engine-fixtures.ts`, `engine_fixture.py`, `engine.fixtures.ts`, or `fixtures.ts`.
 fn is_fixture_basename(basename: &str) -> bool {
-    let stem = stem(basename);
-    matches!(stem, "fixture" | "fixtures")
-        || [
-            "_fixture",
-            "-fixture",
-            ".fixture",
-            "_fixtures",
-            "-fixtures",
-            ".fixtures",
-        ]
-        .iter()
-        .any(|suffix| stem.ends_with(suffix))
+    stem_ends_with_word(stem(basename), &["fixture", "fixtures"])
 }
 
 /// `engine.test.ts`, `test_engine.py`, `engine_test.go`, a bare `test.rs`.
@@ -116,11 +105,16 @@ fn is_test_basename(basename: &str) -> bool {
         return true;
     }
     let stem = stem(basename);
-    stem.starts_with("test_")
-        || matches!(stem, "test" | "spec")
-        || ["_test", "-test", ".test", "_spec", "-spec", ".spec"]
-            .iter()
-            .any(|suffix| stem.ends_with(suffix))
+    stem.starts_with("test_") || stem_ends_with_word(stem, &["test", "spec"])
+}
+
+/// Whether the stem is one of `words`, or ends in one after a `_`, `-` or `.`,
+/// so `engine_test` matches `test` and `latest` does not.
+fn stem_ends_with_word(stem: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| {
+        stem.strip_suffix(word)
+            .is_some_and(|head| head.is_empty() || head.ends_with(['_', '-', '.']))
+    })
 }
 
 fn is_configuration(segments: &[&str], basename: &str, extension: &str) -> bool {

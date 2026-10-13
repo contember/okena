@@ -1,8 +1,8 @@
 //! Rust module gating across files.
 //!
-//! A file is not only what it contains. `#[cfg(test)] mod fixtures;` in one
-//! file makes the whole of `fixtures.rs` test code, and nothing inside that
-//! file says so. Resolving it means opening the declaring file — which the
+//! A file is not only what it contains. `#[cfg(test)] mod seed_data;` in one
+//! file makes the whole of `seed_data.rs` test code, and neither the file nor
+//! its name says so. Resolving it means opening the declaring file — which the
 //! comparison may not even have changed.
 
 use std::cell::RefCell;

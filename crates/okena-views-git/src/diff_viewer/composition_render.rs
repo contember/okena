@@ -17,7 +17,6 @@ fn swatch(role: FileRole, t: &ThemeColors) -> u32 {
     match role {
         FileRole::Implementation => t.folder_blue,
         FileRole::Test => t.folder_green,
-        FileRole::Fixture => t.folder_teal,
         FileRole::Snapshot => t.folder_cyan,
         FileRole::Example => t.folder_lime,
         FileRole::Documentation => t.folder_purple,
