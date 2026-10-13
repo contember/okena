@@ -793,7 +793,7 @@ mod gated_module_tests {
     }
 
     #[test]
-    fn a_fixture_filename_counts_wholly_as_fixtures_without_source_analysis() {
+    fn a_fixture_filename_counts_wholly_as_tests_without_source_analysis() {
         let composition = compose(
             &[added(
                 "worker/src/services/servis-report/servis-document-signing-fixtures.ts",
@@ -803,12 +803,18 @@ mod gated_module_tests {
             CompositionLimits::default(),
         );
         let file = &composition.files[0];
-        assert_eq!(file.role, FileRole::Fixture);
+        assert_eq!(file.role, FileRole::Test);
         assert_eq!(file.analysis, FileAnalysis::Skipped);
         assert_eq!(file.inline_test_lines, 0);
         assert_eq!(composition.coverage.candidates, 0);
-        let fixtures = volume(&composition, FileRole::Fixture);
-        assert_eq!((fixtures.files, fixtures.changed_lines), (1, 3));
+        let tests = volume(&composition, FileRole::Test);
+        assert_eq!((tests.files, tests.changed_lines), (1, 3));
+        assert_eq!(tests.percent, 100.0);
+        assert!(
+            !composition.roles.iter().any(|volume| {
+                matches!(volume.role, FileRole::Fixture | FileRole::Implementation)
+            })
+        );
     }
 
     #[test]
