@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn fixture_filenames_are_tests() {
         for path in [
-            "worker/src/services/servis-report/servis-document-signing-fixtures.ts",
+            "src/services/report/document-signing-fixtures.ts",
             "src/engine-fixture.ts",
             "src/engine_fixture.py",
             "src/engine_fixtures.ts",

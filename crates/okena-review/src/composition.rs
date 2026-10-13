@@ -796,7 +796,7 @@ mod gated_module_tests {
     fn a_fixture_filename_counts_wholly_as_tests_without_source_analysis() {
         let composition = compose(
             &[added(
-                "worker/src/services/servis-report/servis-document-signing-fixtures.ts",
+                "src/services/report/document-signing-fixtures.ts",
                 &[1, 2, 3],
             )],
             &sources(),
