@@ -169,9 +169,9 @@ emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../../mobile/rn/src/n
 | **Web client** | Complete (React SPA, xterm.js) |
 | **Mobile FFI crate** (`okena-mobile-ffi`) | Complete — self-contained, ~60 uniffi fns + packed buffer; `cargo test -p okena-mobile-ffi` passing (11 tests) |
 | **RN TS app** (`mobile/rn`) | Scaffold complete — screens, zustand stores (DI-testable), Skia `TerminalView`, packed-cell decoder; type-checks + lints |
-| **ubrn binding generation** | Config present (`mobile/rn/ubrn.config.yaml`); cross-compile not yet run (needs NDK/Xcode) |
-| **Native host projects** (`android/`, `ios/`) | Not generated yet — `react-native init` + merge, see `mobile/rn/README.md` |
-| **Phase-0 spikes** (toolchain S1, Skia throughput S2) | Not yet run on-device |
+| **ubrn binding generation** | npm scripts generate the local `modules/okena-mobile-ffi` package and apply Android fixes automatically |
+| **Native host projects** (`android/`, `ios/`) | Android sources versioned; iOS host generated separately |
+| **Android delivery** | `android.yml` builds validation artifacts on changes and signed AABs on manual dispatch; see the mobile README for device verification |
 
 See `mobile/rn/README.md` for the exact device-side steps and `mobile/RN_MIGRATION.md` for the
 phased plan.

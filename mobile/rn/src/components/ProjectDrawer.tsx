@@ -655,7 +655,7 @@ const ReorderSheet: React.FC<{
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   flexSpacer: { flex: 1 },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.5)' },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)' },
   drawer: {
     position: 'absolute',
     top: 0,

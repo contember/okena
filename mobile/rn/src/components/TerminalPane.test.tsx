@@ -27,6 +27,7 @@ const unusedFontMethod = (): never => {
 const FONT: SkFont = {
   __typename__: 'Font',
   dispose: unusedFontMethod,
+  [Symbol.dispose]: unusedFontMethod,
   measureText: unusedFontMethod,
   getTextWidth: unusedFontMethod,
   getGlyphWidths: unusedFontMethod,
@@ -130,7 +131,6 @@ describe('TerminalPane focus', () => {
   it('reports its own terminal id when the hidden input takes focus', () => {
     const onSelect = jest.fn();
     const renderer = renderPane('t2', { onSelect });
-
 
     act(() => {
       renderer.root.findByType(TextInput).props.onFocus();

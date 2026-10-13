@@ -364,8 +364,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   flexSpacer: { flex: 1 },
   appBar: {
-    height: 96,
-    paddingTop: 44,
+    height: 52,
     paddingHorizontal: 8,
     flexDirection: 'row',
     alignItems: 'center',

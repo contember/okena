@@ -187,7 +187,6 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: OkenaColors.background,
-    paddingTop: 44, // approximate top safe-area inset (no SafeAreaView dep)
   },
 
   // Header

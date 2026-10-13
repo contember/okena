@@ -1,114 +1,145 @@
-# Okena mobile — React Native
+# Okena mobile
 
-The **React Native** mobile client: the UI layer over the shared Rust core
-(`crates/okena-mobile-ffi`, exposed to TypeScript via uniffi/ubrn), with a native
-`react-native-skia` terminal renderer (**no `xterm.js`**). This replaces the retired Flutter
-app; the migration plan is [`../RN_MIGRATION.md`](../RN_MIGRATION.md) and the architecture
-overview is [`../../docs/reference/mobile.md`](../../docs/reference/mobile.md).
+React Native terminal client over `crates/okena-mobile-ffi`, with a native Skia renderer.
+See [architecture](../../docs/reference/mobile.md).
 
-## What's here
+## Android toolchain
 
-A complete RN 0.76 project **minus the native host directories** (`android/`, `ios/`), which
-are machine-generated (see step 1 below). What is in the repo:
+- Node 24, npm (`package-lock.json`), JDK 17.
+- Rust from the repository's `rust-toolchain.toml`; `cargo-ndk` 4.1.2.
+- Android SDK 36, Build Tools 36.0.0, NDK 28.2.13676358, CMake 3.22.1.
+- React Native 0.86.3 / React 19.2.3 / Skia 2.14.0.
+- UniFFI 0.31 and ubrn 0.31.0-3 must stay paired.
 
-- **JS host config** — `index.js`, `app.json`, `metro.config.js`, `babel.config.js`,
-  `react-native.config.js`, `tsconfig.json`, `jest.config.js`, `.eslintrc.js`, `.prettierrc`.
-- **The native↔TS binding contract** — `src/native/okena.ts`: the `OkenaNative` interface
-  (the ~60 functions exported from `crates/okena-mobile-ffi/src/lib.rs`) + all record/enum
-  types, plus `getOkenaNative()` which resolves the ubrn-generated module from `src/generated`.
-- **The packed-cell decoder** — `src/native/cells.ts`: reads the little-endian cell buffer
-  that `get_visible_cells_packed` produces (the render hot path).
-- **App** — screens (`ServerList`, `Pairing`, `Workspace`), zustand stores (dependency-
-  injected, so testable with a mock `OkenaNative`), `TerminalView` (Skia 3-pass paint),
-  `KeyToolbar`, `LayoutRenderer`, `ProjectDrawer`, theme, and the JetBrainsMono fonts
-  (`assets/`).
-
-### Verified vs. not verified
-
-Verified in CI / on any machine (no mobile toolchain needed):
+The Android host is versioned. Do not run `react-native init` over it. The native module
+is generated inside `modules/okena-mobile-ffi`; only its package.json is versioned.
+The npm scripts run ubrn from that package, then fix its Node package resolution and
+missing Android manifest. No manual post-generation edits are needed.
 
 ```bash
-cd mobile/rn
+# From mobile/rn; set ANDROID_HOME to your installed SDK.
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+rustup target add aarch64-linux-android x86_64-linux-android
+cpu-lease run -n 2 -- cargo install cargo-ndk --version 4.1.2 --locked
 npm ci
-npm run typecheck   # tsc --noEmit, strict
-npm run lint        # eslint
-npm test            # jest (packed-cell decoder + keyboard modifier tests)
+cpu-lease run -n 4 -- env CARGO_BUILD_JOBS=4 npm run ubrn:android
+cpu-lease run -n 2 -- npm run typecheck
+cpu-lease run -n 2 -- npm run lint
+cpu-lease run -n 2 -- npm test -- --runInBand
 ```
 
-The ubrn cross-compile, the Skia native binaries, and an on-device run need the mobile
-toolchain — see the device steps below, and the **verified Android run** notes next for the
-gotchas that the generic steps don't mention.
+Android builds include arm64-v8a and x86_64. Regenerate bindings after changing the Rust
+FFI, before building the app. The host bundles fonts directly from `assets/` through a
+Gradle copy task; no `react-native-asset` command is needed.
 
-> Package manager: **npm** (the lockfile is `package-lock.json`). RN 0.76 native autolinking,
-> CocoaPods, and ubrn are validated against npm/yarn — don't swap in a different manager here.
+```bash
+# Unsigned release validation; includes the JS bundle and needs no Metro server.
+cd android
+cpu-lease run -n 4 -- ./gradlew --no-daemon --max-workers=4 :app:bundleRelease :app:assembleRelease :app:lintRelease
+cd ..
+python3 scripts/check-native-alignment.py android/app/build/outputs/bundle/release/app-release.aab
 
----
+# Device development: run Metro separately with npm start.
+cpu-lease run -n 4 -- npm run android
+```
 
-## Verified Android run — what it actually took (2026-06)
+Never upload an unsigned validation artifact. Release builds do not fall back to a debug
+key. Local builds are for validation; publish through CI.
 
-The native chain has been run on both an Android emulator and a physical Android device: build →
-connect → pair → workspace → live terminal → input/output. Both ADB-reversed plaintext
-loopback and a real LAN TLS connection have been verified. The TypeScript adapter passes all five
-arguments expected by Rust's `connect(host, port, token, tls, fingerprint)` API, so saved
-certificate pins are enforced. First-use fingerprints are read back through `get_cert_fingerprint`
-and persisted onto the `SavedServer` next to the token; a token saved without a pin is withheld on
-reconnect so the server falls back to pairing.
+## Google Play internal beta
 
-> **Regenerate the bindings after pulling.** `src/generated` and
-> `modules/okena-mobile-ffi/` are gitignored, and `react-native run-android|run-ios` does **not**
-> run ubrn. A tree whose bindings predate a new `#[uniffi::export]` keeps the old JS surface: the
-> app detects that for `get_cert_fingerprint` and logs a one-time warning (pins are then neither
-> read nor persisted), but there is no such fallback for functions added later. Run
-> `npm run ubrn:android` / `npm run ubrn:ios` after any change to `crates/okena-mobile-ffi`.
+Application ID: `com.contember.okena`. Display name: Okena. Version name: 0.1.0.
+The application ID is permanent after the first Play upload.
 
-The generic steps below are correct in spirit but several things needed fixing/wiring that aren't
-obvious — captured here.
+The **Android beta** workflow (`.github/workflows/android.yml`) builds unsigned validation
+artifacts on relevant pushes/PRs. Merge the workflow into the default branch before its
+manual dispatch is available in GitHub Actions. For a signed release, run it manually on the branch to
+release, enable `signed`, and supply a `version_code` greater than every previous Play
+upload. Download the artifact named `okena-android-signed-<version_code>`.
+CI cross-compiles Rust, generates the native module, runs TypeScript/lint/Jest, builds the
+AAB/APK, runs Android lint, verifies 16 KB ELF/APK alignment, and checks the AAB signature.
 
-**The turbo module is a local package.** ubrn treats a project as a *library* and would clobber
-the app's root `android/build.gradle`, so the generated module is kept as its own package at
-`modules/okena-mobile-ffi/` and the app depends on it (`"okena-mobile-ffi": "file:./modules/okena-mobile-ffi"`,
-autolinked + a Metro symlink). Only that package's hand-authored `package.json` (with
-`codegenConfig`) is committed; **everything else under it is generated by ubrn and gitignored**
-(incl. the multi-hundred-MB Rust static lib in `jniLibs` — never commit it). `getOkenaNative()`
-in `src/native/okena.ts` `require`s `'okena-mobile-ffi'` (its entry installs the JSI bindings).
+Configure these repository secrets before requesting a signed build:
 
-**Fixes that are committed** (needed to build + run at all):
+| Secret | Value |
+| --- | --- |
+| `ANDROID_UPLOAD_KEYSTORE_BASE64` | Base64-encoded upload keystore |
+| `ANDROID_UPLOAD_STORE_PASSWORD` | Keystore password |
+| `ANDROID_UPLOAD_KEY_ALIAS` | Upload key alias |
+| `ANDROID_UPLOAD_KEY_PASSWORD` | Key password |
 
-- **TLS provider → `ring`.** `okena-core` (and the desktop server) now build rustls with the
-  `ring` crypto provider, not `aws-lc-rs` — `aws-lc-rs`'s jitter-entropy init **segfaults on
-  Android** during the TLS handshake. (Supersedes the "rustls-tls, no OpenSSL" note below.)
-- **ubrn enum/record adapters** (`src/native/okena.ts`). ubrn 0.31 emits enums in shapes the
-  hand-written contract didn't match: `ConnectionStatus` as a PascalCase-`.tag` class (payload
-  under `.inner`), `CursorShape` as a numeric enum, `ProjectInfo.terminalNames` as a JS `Map`.
-  `getOkenaNative()` translates these at the boundary to the app's `{ kind }` / string / object
-  contract. Plain-string enums (split direction, diff mode) and other records pass through.
-- **Skia `setEmbolden` dropped** (`src/components/TerminalView.tsx`). react-native-skia 1.12.4's
-  native binding rejects the (typed `boolean`) arg with *"Value is false, expected a number"*;
-  all four JetBrainsMono variants are bundled so synthetic bold is unused anyway.
-- **`@ubjs/core` Metro alias** (`metro.config.js`). ubrn 0.31's generated bindings import the
-  TS runtime as `@ubjs/core`; we alias it to the runtime shipped inside
-  `uniffi-bindgen-react-native` (same bytes, guaranteed version match) instead of a 2nd install.
+Keep a separate secure backup of the keystore and passwords. GitHub secrets cannot be
+read back. The workflow removes the decoded key after each run.
 
-**Post-generation fixups** — apply after `npm run ubrn:android` (ubrn regenerates these, so they
-are *not* committed; a small post-gen step should automate them):
+Gradle reads the corresponding `OKENA_UPLOAD_STORE_FILE`, `OKENA_UPLOAD_STORE_PASSWORD`,
+`OKENA_UPLOAD_KEY_ALIAS`, and `OKENA_UPLOAD_KEY_PASSWORD` environment variables. Set all
+four or none. `OKENA_VERSION_CODE` defaults to 1 for local validation.
 
-- `modules/okena-mobile-ffi/android/CMakeLists.txt` resolves the runtime via
-  `node -p "require.resolve('uniffi-bindgen-react-native/package.json')"`, which **throws on
-  Node ≥ 20** (`ERR_PACKAGE_PATH_NOT_EXPORTED` — the package's `exports` doesn't expose
-  `./package.json`). Replace it with `node -e "…require.resolve('uniffi-bindgen-react-native')…"`
-  sliced back to the package root.
-- The generated lib `build.gradle` (AGP 8 path) references `src/main/AndroidManifestNew.xml`,
-  but ubrn doesn't create it — add a minimal namespace-less `<manifest/>`.
+In Play Console:
 
-**Pairing:** get the 6-char code from the desktop host with `okena pair` (CLI, prints
-`XXXX-XXXX`, 60s TTL) and enter it as-is (with the dash). From the emulator the host is `10.0.2.2`.
+1. Create/select the app for this application ID and enable Play App Signing.
+2. Create an Internal testing release using the signed CI AAB.
+3. Add tester Google accounts or a Google Group, and a feedback contact.
+4. Roll out the internal release and share the opt-in link with those testers.
+5. Verify installation and an update through Play before expanding the group.
 
-**Emulator caveat (rendering):** `react-native-skia`'s GL present crashes **intermittently**
-inside the Android emulator's EGL driver (`libEGL_emulation.so` → `createNativeSync` /
-`eglSwapBuffers`, from `RNSkia::OpenGLWindowContext::present`). It is **not an app bug** and does
-not happen on physical devices; the `-gpu host|swiftshader_indirect|angle_indirect` flags don't
-help (the guest EGL is fixed by the system image). **Use a real Android device** for stable
-terminal rendering.
+Internal testing supports up to 100 testers and can start before completing the store
+listing. Apps distributed exclusively on this track are exempt from the Data safety form.
+See [Google's testing documentation](https://support.google.com/googleplay/android-developer/answer/9845334?hl=en).
+The workflow produces artifacts; it does not create a Play listing or roll out a release.
+
+### Release acceptance on a device
+
+- Install the Play-delivered release without Metro or ADB port forwarding.
+- Pair over LAN/VPN with TLS, restart, and reconnect using the saved certificate pin.
+- Verify terminal output, typing, Ctrl-C, arrows, clipboard and Compose.
+- Check keyboard, system bars, landscape, and navigation on Android 16.
+- Background/foreground the app; interrupt and restore network connectivity.
+- Install the next Play version and confirm saved servers survive.
+- Run on a 16 KB Android image/device; binary alignment alone does not prove runtime behavior.
+
+### Tester setup
+
+Okena mobile controls an existing Okena server; it does not provide a shell on the phone.
+Run the desktop/server on a host reachable from the phone over LAN or VPN. Add its host
+and port (normally 19100), keep TLS enabled, and enter the pairing code from `okena pair`.
+The code expires after 60 seconds. For an emulator, `10.0.2.2` addresses the development host.
+
+### iOS
+
+The iOS host remains generated and unverified for this release. Generate a matching
+React Native 0.86.3 host named `OkenaMobile` separately, copy its `ios/` directory,
+run `npm run ubrn:ios`, then install pods and build with Xcode. Android verification does
+not establish iOS compatibility.
+
+## Beta verification (2026-10-12)
+
+Verified locally from freshly generated Android bindings:
+
+- TypeScript, ESLint and all 25 Jest tests.
+- Release AAB/APK for arm64-v8a and x86_64; Android lint: 0 errors, 14 warnings.
+- Bundletool validation, upload-key signatures, 16 KB alignment of all 26 native
+  libraries, APK ZIP alignment, and `PAGE_ALIGNMENT_16K` in the AAB configuration.
+- Signed release installation, APK update preserving saved servers, and cold start on the
+  Android 16 / API 36 Google APIs
+  16 KB x86_64 emulator, without Metro.
+- TLS pairing to an isolated daemon, Skia terminal rendering, a shell command/output
+  round trip, Compose Run, and saved-access reconnect after force-stopping the application.
+- Portrait soft-keyboard layout: terminal key rail, Add Server fields/button, and Compose
+  input/actions remain above the keyboard.
+
+This is local validation. A GitHub Actions run, a Play-delivered install/update, and
+physical-device acceptance of the upgraded app are still required. The emulator
+landscape keyboard can consume almost all terminal space; use portrait for this beta
+and validate landscape ergonomics on physical devices. Android lint warnings
+include upstream template resources, backup-rule guidance, and launcher-icon conventions.
+
+## Historical device verification
+
+The notes below describe the previous RN 0.76 build, not acceptance of the upgraded beta.
+The earlier build was exercised on a physical Android 13 phone. New native versions need
+the release acceptance checks above.
 
 ### Terminal input controls
 
@@ -144,7 +175,7 @@ Verified remotely on a physical OnePlus DN2103 running Android 13:
 
 - install and restart with saved token, ADB-reversed loopback connection, stable Skia rendering,
   command input, and returned output,
-- LAN TLS pairing and saved-token reconnect to `10.145.103.64:19100` with no ADB reverse rule,
+- LAN TLS pairing and saved-token reconnect to the LAN host with no ADB reverse rule,
   including a terminal command/output round-trip,
 - code-friendly soft keyboard behavior: lowercase input is preserved and the canvas, rail, and IME
   remain usable together,
@@ -165,101 +196,3 @@ Still worth checking with a person holding the device:
 4. one-handed reach, long-press timing, landscape keyboard layout, and iOS behavior.
 
 ---
-
-## Device-side setup (run on a machine with the RN toolchain)
-
-Prereqs: Node ≥ 18, Watchman, JDK 17, Android SDK + NDK + `cargo-ndk` (Android), Xcode +
-CocoaPods (iOS), and the Rust mobile targets:
-
-```bash
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-cargo install cargo-ndk
-```
-
-### 1. Generate the native host projects (`android/`, `ios/`)
-
-`@shopify/react-native-skia` and the ubrn TurboModule are Fabric/TurboModules, so a **bare**
-RN app (new architecture ON — the RN 0.76 default) is required; Expo Go won't work.
-
-```bash
-# from a temp dir: generate a host with the SAME app name as app.json ("OkenaMobile")
-npx @react-native-community/cli@latest init OkenaMobile --version 0.76.5
-# copy ONLY the generated native dirs into this project:
-cp -R OkenaMobile/android OkenaMobile/ios ./
-```
-
-The JS/config files in this repo (`index.js`, `app.json`, `metro.config.js`, …) already match
-what the template produces, so you only need its `android/` and `ios/` directories (both are
-gitignored here). Confirm new-arch is on: `android/gradle.properties → newArchEnabled=true`.
-
-### 2. Install JS deps + link fonts
-
-```bash
-npm ci
-npx react-native-asset           # links assets/JetBrainsMono-*.ttf (react-native.config.js)
-```
-
-The Skia renderer additionally loads the same ttf via `useFont(require('../../assets/...'))`
-in `WorkspaceScreen.tsx`, so the fonts are both linked (for `<Text fontFamily>`) and bundled.
-
-### 3. Generate the Rust↔TS bindings with ubrn
-
-`uniffi-bindgen-react-native` (`ubrn`) cross-compiles `crates/okena-mobile-ffi` and emits the
-JSI TurboModule + TypeScript into `src/generated` (gitignored). Config: `ubrn.config.yaml`.
-
-```bash
-npm run ubrn:android     # ubrn build android --config ubrn.config.yaml --and-generate --release
-npm run ubrn:ios         # ubrn build ios     --config ubrn.config.yaml --and-generate --release
-( cd ios && pod install ) # pick up the generated xcframework
-```
-
-`getOkenaNative()` (`src/native/okena.ts`) already `require`s `../generated`, so once this
-runs the app is wired — no code edit needed.
-
-> **Version pairing:** ubrn and uniffi minor versions must match. This repo pins
-> `uniffi-bindgen-react-native@0.31.0-3` (devDependency) ↔ `uniffi = "0.31"` in
-> `crates/okena-mobile-ffi/Cargo.toml`. If `ubrn` reports a metadata/contract-version
-> mismatch, bump both together.
-
-> **NDK / TLS:** ensure `$HOME/.cargo/bin` is on the PATH the Gradle daemon sees. The crate
-> already selects `rustls-tls` (via `okena-transport`'s `client` feature), so no OpenSSL is
-> cross-compiled for the NDK.
-
-### 4. Run
-
-```bash
-npm run android     # device/emulator
-npm run ios         # simulator
-```
-
-### 5. Phase-0 spikes (validate the two unknowns — see `../RN_MIGRATION.md` §3)
-
-- **S1 (toolchain):** confirm `initApp()` + `connect()` + `connectionStatus()` work end-to-end
-  through the ubrn module on a real Android device *and* iOS sim.
-- **S2 (rendering):** confirm `react-native-skia` sustains the cell-grid paint at 60fps.
-
----
-
-## File map
-
-```
-mobile/rn/
-├── index.js · app.json                # RN entry + app name
-├── metro.config.js · babel.config.js  # bundler + transpiler
-├── react-native.config.js             # font asset linking
-├── ubrn.config.yaml                   # ubrn: crate path, targets, output dirs
-├── jest.config.js · __tests__/        # jest (cells decoder + keyboard logic)
-├── .eslintrc.js · .prettierrc         # lint + format
-├── tsconfig.json · package.json
-├── assets/JetBrainsMono-*.ttf         # bundled monospace fonts
-└── src/
-    ├── App.tsx · theme.ts
-    ├── native/
-    │   ├── okena.ts                    # OkenaNative contract + getOkenaNative()
-    │   └── cells.ts                    # packed cell-buffer decoder
-    ├── state/                          # zustand stores (DI), persistence, navigation
-    ├── screens/                        # ServerList, Pairing, Workspace
-    ├── components/                     # TerminalView (Skia), KeyToolbar, LayoutRenderer, …
-    └── models/                         # SavedServer, LayoutNode
-```

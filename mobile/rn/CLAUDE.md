@@ -18,14 +18,16 @@ npm run format      # prettier (opt-in; NOT enforced by lint)
 ```
 
 Device build (needs Android NDK / Xcode — see `README.md`): `npm run ubrn:android|ios` then
-`npm run android|ios`. The native host dirs (`android/`, `ios/`) and ubrn output
-(`src/generated/`) are generated and gitignored.
+`npm run android|ios`. Android host sources are versioned; do not regenerate the app host.
+The iOS host and generated contents of `modules/okena-mobile-ffi/` remain gitignored.
+The npm scripts run ubrn from that local package and apply Android generation fixes.
+See `README.md` for the pinned toolchain, CPU leases, and signed CI release procedure.
 
 ## Key boundaries
 
 - **`src/native/okena.ts`** — the `OkenaNative` TS interface: the hand-maintained contract for
   the ~60 functions in `crates/okena-mobile-ffi/src/lib.rs`. Keep both sides in sync.
-  `getOkenaNative()` `require`s the ubrn-generated module from `src/generated` (throws with a
+  `getOkenaNative()` `require`s the local `okena-mobile-ffi` package (throws with a
   "run ubrn" message until generated).
 - **`src/native/cells.ts`** — decoder for the packed cell buffer from `get_visible_cells_packed`
   (the render hot path). Its byte layout is the contract the Rust encoder must match; the jest
