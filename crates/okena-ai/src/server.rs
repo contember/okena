@@ -682,6 +682,16 @@ mod tests {
             "retry_at_ms=Some",
             "account=Some(\"a\")",
             "account=Some(\"b\")",
+            "relay_id=",
+            "model=Some(\"m\")",
+            "attempt=2",
+            "attempt_ms=",
+            "proxy_inflight=",
+            "account_availability",
+            "cooldown_until_ms=Some",
+            "blocked_until_ms=Some",
+            "recent_traffic",
+            "rate_limited_1h=1",
         ] {
             assert!(logs.contains(expected), "{logs}");
         }
@@ -694,6 +704,19 @@ mod tests {
         ] {
             assert!(!logs.contains(secret), "{logs}");
         }
+        let errors: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains("upstream_error"))
+            .collect();
+        let relay_id = |line: &str| {
+            line.split_whitespace()
+                .find(|field| field.starts_with("relay_id="))
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(errors.len(), 3, "{logs}");
+        assert_eq!(relay_id(errors[0]), relay_id(errors[1]), "{logs}");
+        assert_ne!(relay_id(errors[1]), relay_id(errors[2]), "{logs}");
     }
 
     #[tokio::test]

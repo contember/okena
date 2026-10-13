@@ -109,6 +109,21 @@ pub struct Activity {
 }
 
 impl Activity {
+    pub(crate) fn log_traffic(&self, context: &crate::diagnostics::RequestContext) {
+        let snapshot = self.snapshot();
+        for route in snapshot.routes {
+            log::warn!(
+                "[ai-proxy] recent_traffic {context} pool_account={:?} answered_60s={} answered_1h={} errors_1h={} rate_limited_1h={} activity_since_ms={}",
+                route.account_id,
+                route.per_minute.last().copied().unwrap_or(0),
+                route.per_minute.iter().sum::<u32>(),
+                route.errors,
+                route.rate_limited,
+                snapshot.since_ms,
+            );
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             started_ms: crate::now_ms(),
