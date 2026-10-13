@@ -159,14 +159,31 @@ fn validate_binary_with_timeout(binary: &Path, timeout: Duration) -> Result<()> 
     }
 }
 
+/// ETXTBSY: a child forked by another thread can still hold the write fd of the
+/// freshly copied binary until it execs, so the exec is retried briefly.
+fn spawn_version_probe(binary: &Path) -> std::io::Result<std::process::Child> {
+    let mut retries_left = 10;
+    loop {
+        let spawned = crate::process::command(&binary.to_string_lossy())
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        match spawned {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && retries_left > 0 =>
+            {
+                retries_left -= 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
 fn run_version_probe(binary: &Path, timeout: Duration) -> Result<()> {
-    let mut child = crate::process::command(&binary.to_string_lossy())
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn binary for validation")?;
+    let mut child = spawn_version_probe(binary).context("failed to spawn binary for validation")?;
 
     let start = std::time::Instant::now();
     loop {
@@ -397,17 +414,15 @@ mod tests {
     fn nonzero_exit_restores_the_previous_binary() {
         let (dir, binary, old) = staged("exit", &script("exit 3"), 0o755);
         let error = validate_binary(&binary).expect_err("validation must fail");
-        assert!(format!("{error:#}").contains("exit"));
+        let message = format!("{error:#}");
+        assert!(message.contains("failed validation (exit"), "{message}");
         assert_rolled_back(&binary, &old);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn timeout_restores_the_previous_binary() {
-        // A shell builtin, not `exec sleep`. On a loaded CI runner `sleep` has
-        // exited immediately, so validation failed with an exit status and this
-        // assertion never saw "timed out". The loop cannot exit on its own.
-        let (dir, binary, old) = staged("timeout", &script("while :; do :; done"), 0o755);
+        let (dir, binary, old) = staged("timeout", &script("exec sleep 30"), 0o755);
         let error = validate_binary_with_timeout(&binary, Duration::from_millis(200))
             .expect_err("validation must time out");
         let message = format!("{error:#}");
