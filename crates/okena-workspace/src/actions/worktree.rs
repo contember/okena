@@ -1536,10 +1536,13 @@ impl Workspace {
 
     /// Drop the given dismissals. Discovery passes the ones whose checkout is
     /// gone, so a later worktree at the same path is tracked like a new one.
-    pub fn forget_dismissed_worktrees(&mut self, paths: &[String]) {
+    /// Returns whether any was dropped.
+    pub fn forget_dismissed_worktrees(&mut self, paths: &[String]) -> bool {
+        let before = self.data.dismissed_worktree_paths.len();
         self.data
             .dismissed_worktree_paths
             .retain(|dismissed| !paths.contains(dismissed));
+        self.data.dismissed_worktree_paths.len() != before
     }
 }
 

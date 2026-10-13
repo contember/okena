@@ -85,11 +85,12 @@ async fn scan_once(
     settings: &Arc<Mutex<AppSettings>>,
 ) -> Vec<String> {
     let config = settings.lock().worktree.clone();
-    let input = ScanInput::snapshot(
-        &workspace.lock(),
-        config.auto_track,
-        config.auto_track_ignore,
-    );
+    // Opt-in. Switched off, a pass touches neither the workspace nor the
+    // filesystem; dismissals of deleted checkouts wait for it to come back on.
+    if !config.auto_track {
+        return Vec::new();
+    }
+    let input = ScanInput::snapshot(&workspace.lock(), config.auto_track_ignore);
 
     // Opening repositories and statting paths is filesystem work; keep it off
     // the reactor.
@@ -103,7 +104,7 @@ async fn scan_once(
 
     let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
     let mut ws = workspace.lock();
-    ws.forget_dismissed_worktrees(&plan.gone_dismissals);
+    let forgot = ws.forget_dismissed_worktrees(&plan.gone_dismissals);
     let mut added = Vec::new();
     for found in plan.discovered {
         // The plan was made without the lock. Anything that started in the
@@ -139,7 +140,11 @@ async fn scan_once(
             ),
         }
     }
-    ws.notify_data(&mut cx);
+    // A candidate that keeps failing would otherwise rewrite workspace.json
+    // and broadcast a snapshot on every pass.
+    if forgot || !added.is_empty() {
+        ws.notify_data(&mut cx);
+    }
     added
 }
 
@@ -154,22 +159,17 @@ struct ScanInput {
 }
 
 impl ScanInput {
-    fn snapshot(workspace: &Workspace, auto_track: bool, ignore: Vec<String>) -> Self {
+    fn snapshot(workspace: &Workspace, ignore: Vec<String>) -> Self {
         let data = workspace.data();
-        let parents = if auto_track {
-            data.projects
-                .iter()
-                .filter(|project| project.worktree_info.is_none())
-                .filter(|project| project.connection_id.is_none())
-                .filter(|project| !workspace.is_project_closing(&project.id))
-                .filter(|project| !workspace.is_creating_project(&project.id))
-                .map(|project| (project.id.clone(), project.path.clone()))
-                .collect()
-        } else {
-            // Still pass through the planner so dismissals of deleted
-            // checkouts are pruned while discovery is switched off.
-            Vec::new()
-        };
+        let parents = data
+            .projects
+            .iter()
+            .filter(|project| project.worktree_info.is_none())
+            .filter(|project| project.connection_id.is_none())
+            .filter(|project| !workspace.is_project_closing(&project.id))
+            .filter(|project| !workspace.is_creating_project(&project.id))
+            .map(|project| (project.id.clone(), project.path.clone()))
+            .collect();
         let tracked = data
             .projects
             .iter()
@@ -204,6 +204,19 @@ struct ScanPlan {
 }
 
 fn plan_scan(input: ScanInput) -> ScanPlan {
+    let mut plan = ScanPlan {
+        gone_dismissals: input
+            .dismissed
+            .iter()
+            .filter(|path| checkout_is_gone(Path::new(path)))
+            .cloned()
+            .collect(),
+        ..ScanPlan::default()
+    };
+    if input.parents.is_empty() {
+        return plan;
+    }
+
     let ignore = build_ignore_set(&input.ignore);
     let tracked: Vec<PhysicalPathIdentity> = input
         .tracked
@@ -218,16 +231,6 @@ fn plan_scan(input: ScanInput) -> ScanPlan {
     let is_known = |path: &Path| {
         let identity = Workspace::physical_path_identity(path);
         tracked.contains(&identity) || dismissed.contains(&identity)
-    };
-
-    let mut plan = ScanPlan {
-        gone_dismissals: input
-            .dismissed
-            .iter()
-            .filter(|path| !Path::new(path).exists())
-            .cloned()
-            .collect(),
-        ..ScanPlan::default()
     };
 
     let mut scanned_roots = HashSet::new();
@@ -248,18 +251,9 @@ fn plan_scan(input: ScanInput) -> ScanPlan {
             continue;
         }
 
-        let linked: Vec<PhysicalPathIdentity> =
-            okena_git::repository::list_linked_worktree_paths(&git_root)
-                .iter()
-                .map(|path| Workspace::physical_path_identity(path))
-                .collect();
-        for (worktree_path, branch) in okena_git::repository::list_git_worktrees(&git_root) {
+        for (worktree_path, branch) in okena_git::repository::list_linked_git_worktrees(&git_root) {
             let path = Path::new(&worktree_path);
-            if !linked.contains(&Workspace::physical_path_identity(path))
-                || !path.is_dir()
-                || is_ignored(&ignore, &git_root, path)
-                || is_known(path)
-            {
+            if !path.is_dir() || is_ignored(&ignore, &git_root, path) || is_known(path) {
                 continue;
             }
             plan.discovered.push(Discovered {
@@ -270,6 +264,20 @@ fn plan_scan(input: ScanInput) -> ScanPlan {
         }
     }
     plan
+}
+
+/// A dismissed checkout counts as gone only when its directory is missing
+/// from a parent that is still there. A checkout on an unmounted volume or a
+/// disconnected share has no parent either, and one we may not read answers
+/// with another error; dropping those dismissals would bring the worktree
+/// back as soon as it is reachable again.
+fn checkout_is_gone(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            path.parent().is_some_and(Path::is_dir)
+        }
+        _ => false,
+    }
 }
 
 /// `*` stays within a path segment so `agent-*` can't swallow a whole subtree.
@@ -420,10 +428,26 @@ mod tests {
     fn a_dismissal_is_forgotten_once_its_checkout_is_gone() {
         let repo = repo();
         let mut input = repo.input();
+        std::fs::create_dir_all(repo.root.join("wt")).unwrap();
         let gone = repo.root.join("wt/removed").to_string_lossy().into_owned();
         input.dismissed.push(gone.clone());
 
         assert_eq!(plan_scan(input).gone_dismissals, vec![gone]);
+    }
+
+    #[test]
+    fn a_dismissal_on_an_unreachable_volume_is_kept() {
+        let repo = repo();
+        let mut input = repo.input();
+        // Neither the checkout nor its parent: an unmounted drive or share.
+        let unreachable = repo
+            .root
+            .join("unmounted/repo-wt/feature")
+            .to_string_lossy()
+            .into_owned();
+        input.dismissed.push(unreachable);
+
+        assert!(plan_scan(input).gone_dismissals.is_empty());
     }
 
     #[test]
