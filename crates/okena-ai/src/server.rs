@@ -292,6 +292,14 @@ mod tests {
     static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static TEST_LOGGER: TestLogger = TestLogger;
 
+    fn init_test_logger() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            log::set_logger(&TEST_LOGGER).unwrap();
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
     struct TestLogger;
 
     impl log::Log for TestLogger {
@@ -314,7 +322,7 @@ mod tests {
         replies: Mutex<HashMap<String, Vec<u16>>>,
         seen: Mutex<Vec<(String, String)>>,
         refreshes: AtomicUsize,
-        error_bodies: Mutex<HashMap<String, String>>,
+        error_bodies: Mutex<HashMap<String, axum::body::Bytes>>,
         error_headers: Mutex<HeaderMap>,
     }
 
@@ -578,8 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_provider_failures_and_local_rejections_without_changing_the_response() {
-        log::set_logger(&TEST_LOGGER).unwrap();
-        log::set_max_level(log::LevelFilter::Warn);
+        init_test_logger();
         let h = harness(vec![
             account("a", "token-a", "uuid-a"),
             account("b", "token-b", "uuid-b"),
@@ -665,6 +672,71 @@ mod tests {
             "caller-own-token",
         ] {
             assert!(!logs.contains(secret), "{logs}");
+        }
+    }
+
+    #[tokio::test]
+    async fn compressed_provider_errors_are_logged_and_relayed_decoded() {
+        use std::io::Write;
+
+        init_test_logger();
+        let rate_limited = r#"{"error":{"type":"rate_limit_error","message":"Too many concurrent requests"},"private":"private-response-data"}"#;
+        for encoding in ["gzip", "deflate"] {
+            let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+            let encoded = if encoding == "gzip" {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(rate_limited.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            } else {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(rate_limited.as_bytes()).unwrap();
+                encoder.finish().unwrap()
+            };
+            let encoded_len = encoded.len();
+            h.fake
+                .error_bodies
+                .lock()
+                .insert("token-a".into(), encoded.into());
+            h.fake.replies.lock().insert("token-a".into(), vec![429]);
+            for (name, value) in [
+                ("content-encoding", encoding.to_owned()),
+                ("content-type", "application/json".to_owned()),
+                ("content-length", encoded_len.to_string()),
+            ] {
+                h.fake
+                    .error_headers
+                    .lock()
+                    .insert(name, value.parse().unwrap());
+            }
+            let project = format!("compressed-diagnostics-{encoding}");
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .build()
+                .unwrap()
+                .post(format!("{}/v1/messages", h.endpoint.project_url(&project)))
+                .header("accept-encoding", encoding)
+                .body(r#"{"model":"m"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(!response.headers().contains_key("content-encoding"));
+            assert_eq!(response.text().await.unwrap(), rate_limited);
+            let logs = LOG_MESSAGES
+                .lock()
+                .iter()
+                .filter(|line| line.contains(&project))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(logs.contains("Too many concurrent requests"), "{logs}");
+            assert!(logs.contains("parse_error=None"), "{logs}");
+            assert!(!logs.contains("private-response-data"), "{logs}");
         }
     }
 
