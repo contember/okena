@@ -1,5 +1,6 @@
 //! Account pool: persisted credentials, runtime quota state and account selection.
 
+use crate::diagnostics::RequestContext;
 use crate::now_ms;
 use crate::oauth::{self, Pkce, RefreshError, Tokens, Upstream};
 use okena_core::ai_proxy::{
@@ -536,6 +537,29 @@ impl Accounts {
             if let Err(error) = self.persist(&state) {
                 log::error!("[ai-proxy] failed to persist account state: {error}");
             }
+        }
+    }
+
+    pub(crate) fn log_availability(&self, context: &RequestContext, excluded: &[String]) {
+        let state = self.state.lock();
+        let now = now_ms();
+        let policy = state.routing.policy(context.project());
+        for account in &state.accounts {
+            let id = &account.stored.id;
+            log::warn!(
+                "[ai-proxy] account_availability {context} pool_account={id:?} rule={:?} enabled={} needs_login={} excluded={} cooldown_until_ms={:?} blocked_until_ms={:?} five_hour={:?} seven_day={:?}",
+                policy.rule(id),
+                account.stored.enabled,
+                account.stored.needs_login,
+                excluded.contains(id),
+                account
+                    .runtime
+                    .cooldown_until_ms
+                    .filter(|until| *until > now),
+                account.runtime.blocked_until(now),
+                account.runtime.five_hour,
+                account.runtime.seven_day,
+            );
         }
     }
 

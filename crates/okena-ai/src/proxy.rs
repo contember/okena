@@ -88,11 +88,18 @@ impl Relay {
 
         let mut payload: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
         let session = session_id(&headers, payload.as_ref());
+        let context = context.inference(
+            payload.as_ref(),
+            body.len(),
+            session.as_deref(),
+            &headers,
+            &self.inflight,
+        );
         let mut excluded: Vec<String> = Vec::new();
         let mut refreshed: Vec<String> = Vec::new();
         let mut rate_limited: Option<ErrorResponse> = None;
         let mut selected = None;
-        for _ in 0..MAX_ATTEMPTS {
+        for attempt in 1..=MAX_ATTEMPTS {
             let account = match selected.take() {
                 Some(account) => account,
                 None => match self
@@ -108,6 +115,7 @@ impl Relay {
                         };
                     }
                     Selection::NoPermittedAccount => {
+                        self.accounts.log_availability(&context, &excluded);
                         log::warn!(
                             "[ai-proxy] proxy_rejection {context} status=400 reason=no_permitted_account"
                         );
@@ -122,6 +130,7 @@ impl Relay {
                         );
                     }
                     Selection::Exhausted { retry_at_ms } => {
+                        self.accounts.log_availability(&context, &excluded);
                         log::warn!(
                             "[ai-proxy] proxy_rejection {context} status=429 reason=accounts_unavailable retry_at_ms={retry_at_ms:?}"
                         );
@@ -130,7 +139,7 @@ impl Relay {
                     }
                 },
             };
-            let account_context = context.for_account(&account.id);
+            let account_context = context.for_account(&account.id, attempt);
             let outgoing = match (payload.as_mut(), account.account_uuid.as_deref()) {
                 (Some(payload), Some(uuid)) => {
                     if rewrite_account_uuid(payload, uuid) {
@@ -160,9 +169,8 @@ impl Relay {
             };
             let status = response.status();
             log::debug!(
-                "[ai-proxy] {path} for project {} via account {}: {status}",
-                project.unwrap_or("-"),
-                account.id
+                "[ai-proxy] upstream_response {account_context} status={status} headers={:?}",
+                diagnostic_headers(response.headers())
             );
             self.accounts.observe(
                 &account.id,
@@ -173,6 +181,7 @@ impl Relay {
             match status {
                 StatusCode::UNAUTHORIZED => {
                     read_error_response(response, &account_context).await;
+                    self.activity.log_traffic(&account_context);
                     self.activity.event(
                         project,
                         AiActivityKind::Unauthorized {
@@ -202,9 +211,16 @@ impl Relay {
                 StatusCode::TOO_MANY_REQUESTS => {
                     self.activity.rate_limited(project, &account.id);
                     rate_limited = Some(read_error_response(response, &account_context).await);
+                    self.activity.log_traffic(&account_context);
+                    self.accounts.log_availability(&account_context, &excluded);
                     excluded.push(account.id);
                 }
                 _ => {
+                    if attempt > 1 && status.is_success() {
+                        log::info!(
+                            "[ai-proxy] failover_recovered {account_context} status={status}"
+                        );
+                    }
                     return self.answer(account_context, response, guard).await;
                 }
             }
@@ -237,6 +253,7 @@ impl Relay {
             status.as_u16(),
             failure.message.clone(),
         );
+        self.activity.log_traffic(&context);
         failure.into_response()
     }
 
@@ -245,6 +262,7 @@ impl Relay {
         log::warn!("[ai-proxy] connection_error {context} error={err}");
         self.activity
             .unanswered(context.project(), context.account(), upstream_failure(&err));
+        self.activity.log_traffic(context);
         error(StatusCode::BAD_GATEWAY, "Upstream connection failed")
     }
 

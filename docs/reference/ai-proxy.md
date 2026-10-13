@@ -192,6 +192,26 @@ authorization headers, and cookies are not included. These diagnostics apply
 to the relay; SSE error events inside an otherwise successful HTTP stream are
 forwarded without parsing.
 
+Inference diagnostics include a process-local `relay_id` (PID and sequence),
+attempt number and elapsed times, model, requested `max_tokens`, streaming flag,
+request byte size, a SHA-256 session hash prefix, the numeric SDK retry count,
+and the current number of in-flight requests across the proxy. Retries within
+one relay keep the same ID; client retries can be matched by the session hash.
+These fields exclude message content and the raw session/user identity.
+On provider failures, `recent_traffic` reports each active account's answers in
+the last 60 seconds and hour, plus hourly errors and 429s. Successful streams
+are counted when headers arrive; HTTP errors after reading their body, and
+connection failures when detected. These counts do not establish that a stream
+completed successfully. 429 attempts are counted separately.
+`account_availability` accompanies 429s and local account
+rejections with policy, enabled/login state, retry exclusions, quota windows,
+and cooldown/block expiry for each account. `failover_recovered` logs a
+successful response after another upstream attempt at info level.
+These error diagnostics work at the default log level. Debug logging also
+records each upstream response with the same request context and selected
+headers. Response diagnostics additionally allow `x-ratelimit-*`,
+`retry-after-ms`, `x-should-retry`, and `x-envoy-upstream-service-time`.
+
 ## Limits
 
 - Hook and service terminals carry no project and use the default policy.
