@@ -404,10 +404,14 @@ mod tests {
 
     #[test]
     fn timeout_restores_the_previous_binary() {
-        let (dir, binary, old) = staged("timeout", &script("exec sleep 30"), 0o755);
+        // A shell builtin, not `exec sleep`. On a loaded CI runner `sleep` has
+        // exited immediately, so validation failed with an exit status and this
+        // assertion never saw "timed out". The loop cannot exit on its own.
+        let (dir, binary, old) = staged("timeout", &script("while :; do :; done"), 0o755);
         let error = validate_binary_with_timeout(&binary, Duration::from_millis(200))
             .expect_err("validation must time out");
-        assert!(format!("{error:#}").contains("timed out"));
+        let message = format!("{error:#}");
+        assert!(message.contains("timed out"), "{message}");
         assert_rolled_back(&binary, &old);
         let _ = std::fs::remove_dir_all(dir);
     }
