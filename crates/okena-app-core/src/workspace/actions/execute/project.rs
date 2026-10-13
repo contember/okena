@@ -229,6 +229,24 @@ pub(super) fn change_project_path(
     }
 }
 
+/// Root of the linked worktree checkout `project` lives in, if any: the
+/// recorded checkout of a worktree row, else the repository root of the
+/// project path when that is a linked worktree. The second case covers a
+/// linked worktree added as a plain project, and an older worktree row that
+/// never recorded its checkout (a monorepo subdir project would otherwise
+/// dismiss the subdirectory, which discovery never compares against).
+fn linked_checkout_root(project: &crate::workspace::state::ProjectData) -> Option<String> {
+    if let Some(metadata) = &project.worktree_info
+        && !metadata.worktree_path.is_empty()
+    {
+        return Some(metadata.worktree_path.clone());
+    }
+    let root = okena_git::repository::get_repo_root(std::path::Path::new(&project.path))?;
+    root.join(".git")
+        .is_file()
+        .then(|| root.to_string_lossy().into_owned())
+}
+
 pub(super) fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
@@ -255,14 +273,7 @@ pub(super) fn delete_project(
     }
     // Deleting a worktree row leaves its checkout alone. Remember that, or
     // worktree discovery would add the row straight back on its next scan.
-    let dismissed_checkout = ws
-        .project(&project_id)
-        .filter(|project| project.worktree_info.is_some())
-        .map(|project| {
-            okena_workspace::persistence::worktree_checkout_path(project)
-                .to_string_lossy()
-                .into_owned()
-        });
+    let dismissed_checkout = ws.project(&project_id).and_then(linked_checkout_root);
     let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
     if let Some(checkout) = dismissed_checkout {
@@ -1127,6 +1138,87 @@ mod hook_action_tests {
         );
 
         assert!(workspace.data().dismissed_worktree_paths.is_empty());
+    }
+
+    /// A repository with one commit and a linked worktree of it. Returns the
+    /// fixture directory (remove it when done) and the worktree checkout.
+    fn linked_worktree_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let dir = std::env::temp_dir().join(format!("okena-dismiss-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = dir.join("main");
+        std::fs::create_dir_all(main.join("packages/app")).expect("create repo dir");
+        git(&main, &["init", "--initial-branch=main"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        git(&main, &["config", "user.name", "Test"]);
+        std::fs::write(main.join("packages/app/README.md"), b"hello").expect("write file");
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-m", "init"]);
+        let worktree = dir.join("wt");
+        git(
+            &main,
+            &["worktree", "add", worktree.to_str().unwrap(), "-b", "topic"],
+        );
+        let worktree = std::fs::canonicalize(&worktree).expect("canonicalize worktree");
+        (dir, worktree)
+    }
+
+    fn delete_p1(workspace: &mut Workspace) {
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+        let result = delete_project(
+            workspace,
+            &mut FocusManager::default(),
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+        assert!(matches!(result, ActionResult::Ok(_)));
+    }
+
+    #[test]
+    fn deleting_a_linked_worktree_added_as_a_plain_project_dismisses_its_checkout() {
+        let (dir, worktree) = linked_worktree_fixture("plain");
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = worktree.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+
+        delete_p1(&mut workspace);
+
+        assert!(workspace.is_worktree_dismissed(&worktree));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_a_worktree_row_without_a_recorded_checkout_dismisses_the_checkout_root() {
+        let (dir, worktree) = linked_worktree_fixture("subdir");
+        let subdir = worktree.join("packages/app");
+        let mut data = workspace_with_worktree_hook("hook-1").data().clone();
+        data.projects[0].path = subdir.to_string_lossy().into_owned();
+        data.projects[0]
+            .worktree_info
+            .as_mut()
+            .unwrap()
+            .worktree_path = String::new();
+        let mut workspace = Workspace::new(data);
+
+        delete_p1(&mut workspace);
+
+        assert!(workspace.is_worktree_dismissed(&worktree));
+        assert!(!workspace.is_worktree_dismissed(&subdir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

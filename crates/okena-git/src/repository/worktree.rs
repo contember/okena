@@ -834,21 +834,35 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
         result.push((workdir.to_string_lossy().into_owned(), branch));
     }
 
-    // Linked worktrees from .git/worktrees/*.
-    if let Ok(worktrees) = repo.worktrees() {
-        for proxy in worktrees {
-            let Some(workdir) = proxy.base().ok() else {
-                continue;
-            };
-            let Ok(wt_repo) = proxy.into_repo_with_possibly_inaccessible_worktree() else {
-                continue;
-            };
-            if let Some(branch) = head_branch_short(&wt_repo) {
-                result.push((workdir.to_string_lossy().into_owned(), branch));
-            }
+    result.extend(linked_worktrees_with_branch(&repo));
+    result
+}
+
+/// Linked worktrees of a repository with their branch, the main worktree
+/// excluded. Detached worktrees are skipped.
+pub fn list_linked_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
+    crate::gix_helpers::open(repo_path)
+        .map(|repo| linked_worktrees_with_branch(&repo))
+        .unwrap_or_default()
+}
+
+/// Linked worktrees from .git/worktrees/*.
+fn linked_worktrees_with_branch(repo: &gix::Repository) -> Vec<(String, String)> {
+    let Ok(worktrees) = repo.worktrees() else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for proxy in worktrees {
+        let Some(workdir) = proxy.base().ok() else {
+            continue;
+        };
+        let Ok(wt_repo) = proxy.into_repo_with_possibly_inaccessible_worktree() else {
+            continue;
+        };
+        if let Some(branch) = head_branch_short(&wt_repo) {
+            result.push((workdir.to_string_lossy().into_owned(), branch));
         }
     }
-
     result
 }
 
@@ -903,6 +917,23 @@ mod tests {
         entries.sort_by(|a, b| a.1.cmp(&b.1));
         let branches: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
         assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn list_linked_git_worktrees_leaves_out_the_main_checkout() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+
+        let entries = list_linked_git_worktrees(&repo);
+        let branches: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(branches, vec!["feat"]);
+        // Asked from inside the linked worktree, the answer is the same.
+        assert_eq!(list_linked_git_worktrees(&wt_path), entries);
     }
 
     #[test]
