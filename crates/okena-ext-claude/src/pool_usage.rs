@@ -6,77 +6,179 @@ use crate::usage::{FIVE_HOUR_SECS, SEVEN_DAY_SECS, compute_time_elapsed_pct_from
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::ai_proxy::{AiAccount, AiUsage};
-use okena_extensions::ThemeColors;
+use okena_core::ai_proxy::{AiAccount, AiProxyCommand, AiProxyState, AiUsage};
+use okena_core::api::ActionRequest;
+use okena_extensions::{ExtensionActions, ThemeColors};
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
-use okena_usage::history::History;
+use okena_usage::history::{History, Provider};
 use okena_usage::{
     SegmentUnit, TriggerItem, UsageRow, WorkingDays, effective_time_pct, format_reset_time_epoch,
-    render_usage_row, usage_body_container, usage_divider, usage_trigger_items,
+    render_usage_row, usage_body_container, usage_trigger_items,
 };
 use okena_workspace::remote_sync::HostAiAccounts;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
-/// Both quota windows and availability for every enabled pool account.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AccountKey {
+    pub connection_id: String,
+    pub account_id: String,
+}
+
+impl AccountKey {
+    pub fn new(host: &HostAiAccounts, account: &AiAccount) -> Self {
+        Self {
+            connection_id: host.connection_id.clone(),
+            account_id: account.id.clone(),
+        }
+    }
+
+    pub fn element_id(&self) -> String {
+        format!(
+            "claude-pool:{}:{}{}",
+            self.connection_id.len(),
+            self.connection_id,
+            self.account_id
+        )
+    }
+}
+
+struct GlobalPoolHistory(WeakEntity<PoolHistory>);
+impl Global for GlobalPoolHistory {}
+
+#[derive(Default)]
+pub(crate) struct AccountHistory {
+    pub history: History,
+    pub error: Option<String>,
+    fetched_at: Option<Instant>,
+    request: Option<Task<()>>,
+}
+
+#[derive(Default)]
+pub(crate) struct PoolHistory {
+    pub entries: BTreeMap<AccountKey, AccountHistory>,
+}
+
+impl PoolHistory {
+    pub fn shared(cx: &mut App) -> Entity<Self> {
+        if let Some(existing) = cx
+            .try_global::<GlobalPoolHistory>()
+            .and_then(|g| g.0.upgrade())
+        {
+            return existing;
+        }
+        let entity = cx.new(|_| Self::default());
+        cx.set_global(GlobalPoolHistory(entity.downgrade()));
+        entity
+    }
+
+    pub fn request(&mut self, key: AccountKey, cx: &mut Context<Self>) {
+        let entry = self.entries.entry(key.clone()).or_default();
+        if entry.request.is_some()
+            || entry
+                .fetched_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        let response = ExtensionActions::send(
+            &key.connection_id,
+            ActionRequest::AiProxy {
+                request: AiProxyCommand::UsageHistory {
+                    account_id: key.account_id.clone(),
+                },
+            },
+            cx,
+        );
+        let request_key = key.clone();
+        let task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = response
+                .await
+                .and_then(|value| parse_history(value, &key.account_id));
+            let _ = this.update(cx, |this, cx| {
+                let entry = this.entries.entry(key).or_default();
+                entry.request = None;
+                entry.fetched_at = Some(Instant::now());
+                match result {
+                    Ok(history) => {
+                        entry.error = None;
+                        entry.history = history;
+                    }
+                    Err(error) => {
+                        entry.error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.entries.entry(request_key).or_default().request = Some(task);
+    }
+}
+
+fn parse_history(value: serde_json::Value, account_id: &str) -> Result<History, String> {
+    let state: AiProxyState =
+        serde_json::from_value(value).map_err(|error| format!("Invalid usage history: {error}"))?;
+    if let Some(failure) = state.failure {
+        return Err(failure);
+    }
+    let history = state
+        .status
+        .and_then(|status| status.usage_history)
+        .ok_or("Usage history is unavailable from this proxy")?;
+    if history.account_id != account_id
+        || history
+            .samples
+            .iter()
+            .any(|sample| sample.source != account_id || sample.provider != Provider::Claude)
+    {
+        return Err("Usage history belongs to another account".into());
+    }
+    Ok(History::from_samples(history.samples))
+}
+
 pub(crate) fn render_trigger(
-    hosts: &[HostAiAccounts],
+    account: &AiAccount,
     working: WorkingDays,
     t: &ThemeColors,
     cx: &App,
-) -> Vec<AnyElement> {
+) -> AnyElement {
     let now_ms = jiff::Timestamp::now().as_millisecond();
-    let accounts: Vec<AnyElement> = hosts
-        .iter()
-        .flat_map(|host| &host.accounts)
-        .filter(|account| account.enabled && !account.needs_login)
-        .map(|account| {
-            let status = account
-                .cooldown_until_ms
-                .filter(|until| *until > now_ms && account.exhausted_period(now_ms).is_none())
-                .map(|_| "429 cooldown");
-            let items = trigger_items(account, working);
-            h_flex()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(account.label.clone()),
-                )
-                .when_some(status, |el, status| {
-                    el.child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .text_color(rgb(t.warning))
-                            .child(status),
-                    )
-                })
-                .children(usage_trigger_items(t, cx, &items))
-                .when(items.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child("Usage unknown"),
-                    )
-                })
-                .into_any_element()
+    let status = if account.needs_login || !account.enabled {
+        account_status(account, now_ms)
+    } else {
+        account
+            .cooldown_until_ms
+            .filter(|until| *until > now_ms && account.exhausted_period(now_ms).is_none())
+            .map(|_| "429 cooldown".to_string())
+    };
+    let items = trigger_items(account, working);
+    h_flex()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child(account.label.clone()),
+        )
+        .when_some(status, |el, status| {
+            el.child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.warning))
+                    .child(status),
+            )
         })
-        .collect();
-    if !accounts.is_empty() {
-        return accounts;
-    }
-    let count: usize = hosts.iter().map(|host| host.accounts.len()).sum();
-    vec![
-        div()
-            .text_size(ui_text_sm(cx))
-            .text_color(rgb(t.text_muted))
-            .child(format!(
-                "Claude · {count} account{}",
-                if count == 1 { "" } else { "s" }
-            ))
-            .into_any_element(),
-    ]
+        .children(usage_trigger_items(t, cx, &items))
+        .when(items.is_empty(), |el| {
+            el.child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Usage unknown"),
+            )
+        })
+        .into_any_element()
 }
 
 fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> {
@@ -107,60 +209,24 @@ fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> 
 }
 
 pub(crate) fn render_body(
-    hosts: &[HostAiAccounts],
+    host: &HostAiAccounts,
+    account: &AiAccount,
+    history: &History,
     working: WorkingDays,
     chart_state: &Entity<okena_usage::HistoryChartState>,
     t: &ThemeColors,
     cx: &App,
 ) -> Div {
-    let name_hosts = hosts.len() > 1
-        || hosts
-            .iter()
-            .any(|host| host.connection_id != LOCAL_DAEMON_CONNECTION_ID);
+    let host_name =
+        (host.connection_id != LOCAL_DAEMON_CONNECTION_ID).then_some(host.host_name.as_str());
+    let marker = AccountKey::new(host, account).element_id();
     let now_ms = jiff::Timestamp::now().as_millisecond();
-    let mut body = usage_body_container();
-    for (index, (host, account)) in hosts
-        .iter()
-        .flat_map(|host| host.accounts.iter().map(move |account| (host, account)))
-        .enumerate()
-    {
-        if index > 0 {
-            body = body.child(usage_divider(t));
-        }
-        let host_name = name_hosts.then_some(host.host_name.as_str());
-        let marker = format!("claude-pool-{}-{}", host.connection_id, account.id);
-        body = body.child(render_account(
-            account,
-            host_name,
-            &marker,
-            now_ms,
-            working,
-            chart_state,
-            t,
-            cx,
-        ));
-    }
-    body
-}
-
-#[allow(clippy::too_many_arguments)] // one account row's inputs, all needed to render it
-fn render_account(
-    account: &AiAccount,
-    host_name: Option<&str>,
-    marker: &str,
-    now_ms: i64,
-    working: WorkingDays,
-    chart_state: &Entity<okena_usage::HistoryChartState>,
-    t: &ThemeColors,
-    cx: &App,
-) -> impl IntoElement {
     let mut title = account.label.clone();
     if let Some(host_name) = host_name {
         title = format!("{host_name} / {title}");
     }
     let plan = account.plan.as_deref().map(capitalize_first);
     let status = account_status(account, now_ms);
-    let history = History::default();
     let row = |label: &str, period: &str, usage: &AiUsage, period_secs: f64, unit: SegmentUnit| {
         render_usage_row(
             t,
@@ -176,61 +242,63 @@ fn render_account(
                 marker_id: format!("{marker}-{period}").into(),
             },
             working,
-            &history,
+            history,
             period,
             chart_state,
         )
         .into_any_element()
     };
 
-    v_flex()
-        .gap(px(7.0))
-        .child(
-            h_flex()
-                .items_baseline()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        .items_baseline()
-                        .child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(t.text_primary))
-                                .child(title),
-                        )
-                        .when_some(plan, |el, plan| {
-                            el.child(
+    usage_body_container().child(
+        v_flex()
+            .gap(px(7.0))
+            .child(
+                h_flex()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        h_flex()
+                            .gap(px(6.0))
+                            .items_baseline()
+                            .child(
                                 div()
-                                    .text_size(ui_text_xs(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(plan),
+                                    .text_size(ui_text_ms(cx))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(t.text_primary))
+                                    .child(title),
                             )
-                        }),
-                )
-                .when_some(status, |el, status| {
-                    el.child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(status),
+                            .when_some(plan, |el, plan| {
+                                el.child(
+                                    div()
+                                        .text_size(ui_text_xs(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(plan),
+                                )
+                            }),
                     )
-                }),
-        )
-        .when_some(account.five_hour.as_ref(), |el, usage| {
-            el.child(row(
-                "Session",
-                "5h",
-                usage,
-                FIVE_HOUR_SECS,
-                SegmentUnit::Hour,
-            ))
-        })
-        .when_some(account.seven_day.as_ref(), |el, usage| {
-            el.child(row("Weekly", "7d", usage, SEVEN_DAY_SECS, SegmentUnit::Day))
-        })
+                    .when_some(status, |el, status| {
+                        el.child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(status),
+                        )
+                    }),
+            )
+            .when_some(account.five_hour.as_ref(), |el, usage| {
+                el.child(row(
+                    "Session",
+                    "5h",
+                    usage,
+                    FIVE_HOUR_SECS,
+                    SegmentUnit::Hour,
+                ))
+            })
+            .when_some(account.seven_day.as_ref(), |el, usage| {
+                el.child(row("Weekly", "7d", usage, SEVEN_DAY_SECS, SegmentUnit::Day))
+            }),
+    )
 }
 
 /// Why the proxy does not route to the account right now, if it does not.
@@ -276,7 +344,7 @@ fn time_pct(
 
 #[cfg(test)]
 mod tests {
-    use super::{account_status, trigger_items};
+    use super::{AccountKey, account_status, parse_history, trigger_items};
     use okena_core::ai_proxy::{AiAccount, AiUsage};
     use okena_usage::WorkingDays;
 
@@ -294,6 +362,121 @@ mod tests {
             requests: 0,
             last_used_ms: None,
         }
+    }
+
+    #[gpui::test]
+    fn history_requests_are_shared_and_isolated_by_host(cx: &mut gpui::TestAppContext) {
+        use super::PoolHistory;
+        use gpui::Task;
+        use okena_core::ai_proxy::AiProxyCommand;
+        use okena_core::api::ActionRequest;
+        use okena_extensions::ExtensionActions;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let (first, second) = cx.update(|cx| {
+            cx.set_global(ExtensionActions::new(move |connection, action, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let ActionRequest::AiProxy { request: AiProxyCommand::UsageHistory { account_id } } = action else {
+                    panic!("expected a usage history request");
+                };
+                let percent = if connection == "local" { 23.0 } else { 71.0 };
+                Task::ready(Ok(serde_json::json!({
+                    "status": {
+                        "version": "test", "inflight": 0, "accounts": [], "logins": [],
+                        "usage_history": { "account_id": account_id, "samples": [{
+                            "version": 1, "recorded_at": 1500.0, "provider": "claude", "source": account_id, "plan": null,
+                            "limits": [{ "name": "5h", "used_percent": percent, "window_seconds": 18000.0, "reset_at": 19000.0 }]
+                        }] }
+                    }, "failure": null
+                })))
+            }));
+            (PoolHistory::shared(cx), PoolHistory::shared(cx))
+        });
+        assert_eq!(first, second);
+        let local = AccountKey {
+            connection_id: "local".into(),
+            account_id: "a".into(),
+        };
+        let remote = AccountKey {
+            connection_id: "remote".into(),
+            account_id: "a".into(),
+        };
+        cx.update(|cx| {
+            first.update(cx, |history, cx| history.request(local.clone(), cx));
+            second.update(cx, |history, cx| history.request(local.clone(), cx));
+            second.update(cx, |history, cx| history.request(remote.clone(), cx));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            second.update(cx, |history, cx| history.request(local.clone(), cx));
+            let history = first.read(cx);
+            for (key, percent) in [(local, 23.0), (remote, 71.0)] {
+                let entry = &history.entries[&key];
+                assert!(entry.error.is_none());
+                assert_eq!(
+                    entry.history.points("5h", 19000.0, 18000.0, 1600.0)[0].used_percent,
+                    percent
+                );
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn history_response_keeps_account_and_window_boundaries() {
+        let response = serde_json::json!({
+            "status": {
+                "version": "test", "inflight": 0, "accounts": [], "logins": [],
+                "usage_history": { "account_id": "a", "samples": [{
+                    "version": 1, "recorded_at": 1500.0, "provider": "claude", "source": "a", "plan": null,
+                    "limits": [{ "name": "5h", "used_percent": 23.0, "window_seconds": 18000.0, "reset_at": 19000.0 }]
+                }] }
+            }, "failure": null
+        });
+        let history = parse_history(response.clone(), "a").unwrap();
+        assert_eq!(
+            history.points("5h", 19000.0, 18000.0, 1600.0)[0].used_percent,
+            23.0
+        );
+        assert!(history.points("7d", 19000.0, 604800.0, 1600.0).is_empty());
+        assert!(parse_history(response.clone(), "b").is_err());
+        let mut mixed = response.clone();
+        mixed["status"]["usage_history"]["samples"][0]["source"] = "b".into();
+        assert!(parse_history(mixed, "a").is_err());
+        let mut legacy = response;
+        legacy["status"]["usage_history"] = serde_json::Value::Null;
+        assert!(parse_history(legacy, "a").is_err());
+        assert!(
+            parse_history(
+                serde_json::json!({"status": null, "failure": "Offline"}),
+                "a"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn account_keys_do_not_mix_hosts_or_ambiguous_ids() {
+        let first = AccountKey {
+            connection_id: "ab".into(),
+            account_id: "c".into(),
+        };
+        let second = AccountKey {
+            connection_id: "a".into(),
+            account_id: "bc".into(),
+        };
+        assert_ne!(first, second);
+        assert_ne!(first.element_id(), second.element_id());
+        let remote = AccountKey {
+            connection_id: "remote".into(),
+            account_id: first.account_id.clone(),
+        };
+        assert_ne!(first, remote);
     }
 
     #[test]

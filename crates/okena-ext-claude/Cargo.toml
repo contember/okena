@@ -22,4 +22,5 @@ jiff = "0.2"
 sha2 = "0.10"
 
 [dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
 tempfile = "3"
