@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Upstream attempts per request (account failover, one refresh retry).
 const MAX_ATTEMPTS: usize = 4;
+const QUOTA_PROBE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 pub struct Relay {
     pub accounts: Arc<Accounts>,
@@ -88,13 +89,38 @@ impl Relay {
 
         let mut payload: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
         let session = session_id(&headers, payload.as_ref());
-        let context = context.inference(
+        let mut context = context.inference(
             payload.as_ref(),
             body.len(),
             session.as_deref(),
             &headers,
             &self.inflight,
         );
+        let mut body = body;
+        if path == "/v1/messages"
+            && let Some(payload) = payload.as_mut()
+            && rewrite_quota_probe_model(payload)
+        {
+            body = match serde_json::to_vec(payload) {
+                Ok(body) => Bytes::from(body),
+                Err(_) => {
+                    return error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Could not encode quota check",
+                    );
+                }
+            };
+            log::info!(
+                "[ai-proxy] quota_probe_model_rewrite {context} upstream_model={QUOTA_PROBE_MODEL:?}"
+            );
+            context = context.inference(
+                Some(payload),
+                body.len(),
+                session.as_deref(),
+                &headers,
+                &self.inflight,
+            );
+        }
         let mut excluded: Vec<String> = Vec::new();
         let mut refreshed: Vec<String> = Vec::new();
         let mut rate_limited: Option<ErrorResponse> = None;
@@ -450,6 +476,58 @@ fn ensure_oauth_beta(headers: &mut HeaderMap) {
     }
 }
 
+fn rewrite_quota_probe_model(payload: &mut serde_json::Value) -> bool {
+    let Some(request) = payload.as_object_mut() else {
+        return false;
+    };
+    if request.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "model" | "max_tokens" | "messages" | "metadata" | "stream"
+        )
+    }) || request
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || request
+            .get("stream")
+            .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return false;
+    }
+    let Some(messages) = request
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let [message] = messages.as_slice() else {
+        return false;
+    };
+    let Some(message) = message.as_object() else {
+        return false;
+    };
+    if message.len() != 2
+        || message.get("role").and_then(serde_json::Value::as_str) != Some("user")
+        || message.get("content").and_then(serde_json::Value::as_str) != Some("quota")
+    {
+        return false;
+    }
+    let Some(model) = request.get_mut("model") else {
+        return false;
+    };
+    if !model
+        .as_str()
+        .is_some_and(|model| !model.is_empty() && model != QUOTA_PROBE_MODEL)
+    {
+        return false;
+    }
+    // Claude Code's startup probe can select Opus behind a custom base URL;
+    // its minimal request gets a bare 429 where the same probe on Haiku succeeds.
+    *model = serde_json::Value::String(QUOTA_PROBE_MODEL.to_owned());
+    true
+}
+
 /// The conversation id Claude Code sends, used for account affinity.
 fn session_id(headers: &HeaderMap, payload: Option<&serde_json::Value>) -> Option<String> {
     if let Some(value) = headers
@@ -494,6 +572,77 @@ fn rewrite_account_uuid(payload: &mut serde_json::Value, account_uuid: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_minimal_quota_probe_changes_model() {
+        let probe = serde_json::json!({
+            "model": "claude-opus-5-5", "max_tokens": 1,
+            "messages": [{"role": "user", "content": "quota"}],
+            "metadata": {"user_id": "preserve-identity"},
+        });
+        for stream in [None, Some(false)] {
+            let mut payload = probe.clone();
+            if let Some(stream) = stream {
+                payload["stream"] = stream.into();
+            }
+            let mut expected = payload.clone();
+            expected["model"] = QUOTA_PROBE_MODEL.into();
+            assert!(rewrite_quota_probe_model(&mut payload));
+            assert_eq!(payload, expected);
+            assert!(!rewrite_quota_probe_model(&mut payload));
+        }
+
+        for (key, value) in [
+            ("stream", serde_json::json!(true)),
+            ("stream", serde_json::Value::Null),
+            ("stream", serde_json::json!("false")),
+            ("max_tokens", serde_json::json!(2)),
+            ("max_tokens", serde_json::json!("1")),
+            ("system", serde_json::json!("")),
+            ("tools", serde_json::json!([])),
+            ("thinking", serde_json::json!({"type": "adaptive"})),
+            ("temperature", serde_json::json!(0)),
+            ("model", serde_json::Value::Null),
+            ("model", serde_json::json!("")),
+            ("messages", serde_json::json!([])),
+            (
+                "messages",
+                serde_json::json!([{"role": "user", "content": "hello"}]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"role": "assistant", "content": "quota"}]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"role": "user", "content": "quota", "extra": true}]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"role": "user", "content": [{"type": "text", "text": "quota"}]}]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"role": "user", "content": "quota"}, {"role": "user", "content": "quota"}]),
+            ),
+        ] {
+            let mut payload = probe.clone();
+            payload[key] = value;
+            let original = payload.clone();
+            assert!(!rewrite_quota_probe_model(&mut payload), "{original}");
+            assert_eq!(payload, original);
+        }
+        for key in ["model", "max_tokens", "messages"] {
+            let mut payload = probe.clone();
+            payload.as_object_mut().unwrap().remove(key);
+            let original = payload.clone();
+            assert!(!rewrite_quota_probe_model(&mut payload));
+            assert_eq!(payload, original);
+        }
+        for mut payload in [serde_json::Value::Null, serde_json::json!([])] {
+            assert!(!rewrite_quota_probe_model(&mut payload));
+        }
+    }
 
     #[test]
     fn rewrites_json_and_legacy_user_ids() {

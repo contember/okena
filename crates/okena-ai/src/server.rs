@@ -386,6 +386,7 @@ mod tests {
         }
         let app = axum::Router::new()
             .route("/v1/messages", axum::routing::post(messages))
+            .route("/v1/messages/count_tokens", axum::routing::post(messages))
             .route("/api/oauth/profile", axum::routing::post(messages))
             .route(
                 "/v1/stall-headers",
@@ -554,6 +555,84 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             false
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_probe_rewrite_reaches_upstream_with_or_without_account_identity() {
+        let mut without_identity = account("a", "token-a", "uuid-a");
+        without_identity["account_uuid"] = serde_json::Value::Null;
+        for (accounts, expected_uuid) in [
+            (vec![], "caller"),
+            (vec![without_identity], "caller"),
+            (vec![account("a", "token-a", "uuid-a")], "uuid-a"),
+        ] {
+            let h = harness(accounts).await;
+            let probe = serde_json::json!({
+                "model": "claude-opus-5-5", "max_tokens": 1,
+                "messages": [{"role": "user", "content": "quota"}],
+                "metadata": {"user_id": "{\"account_uuid\":\"caller\",\"session_id\":\"s\"}"},
+            });
+            for path in [
+                "/v1/messages?beta=true",
+                "/api/oauth/profile",
+                "/v1/messages/count_tokens",
+            ] {
+                let response = h
+                    .http
+                    .post(format!("{}{path}", h.base_url))
+                    .header("authorization", "Bearer caller-own-token")
+                    .json(&probe)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                response.text().await.unwrap();
+            }
+            let seen = h.fake.seen.lock();
+            let rewritten: serde_json::Value = serde_json::from_str(&seen[0].1).unwrap();
+            let passthrough: serde_json::Value = serde_json::from_str(&seen[1].1).unwrap();
+            assert_eq!(rewritten["model"], "claude-haiku-4-5-20251001");
+            assert_eq!(rewritten["messages"], probe["messages"]);
+            let identity: serde_json::Value =
+                serde_json::from_str(rewritten["metadata"]["user_id"].as_str().unwrap()).unwrap();
+            assert_eq!(identity["session_id"], "s");
+            assert_eq!(identity["account_uuid"], expected_uuid);
+            assert_eq!(passthrough, probe);
+            let count_tokens: serde_json::Value = serde_json::from_str(&seen[2].1).unwrap();
+            assert_eq!(count_tokens["model"], "claude-opus-5-5");
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_probe_stays_on_haiku_across_account_failover() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        h.fake.replies.lock().insert("token-a".into(), vec![429]);
+        let response = h
+            .http
+            .post(format!("{}/v1/messages", h.base_url))
+            .json(&serde_json::json!({
+                "model": "claude-opus-5-5", "max_tokens": 1,
+                "messages": [{"role": "user", "content": "quota"}],
+                "metadata": {"user_id": "{\"account_uuid\":\"caller\"}"},
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "served by token-b");
+        let seen = h.fake.seen.lock();
+        assert_eq!(seen.len(), 2);
+        for ((_, body), uuid) in seen.iter().zip(["uuid-a", "uuid-b"]) {
+            let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(payload["model"], "claude-haiku-4-5-20251001");
+            let identity: serde_json::Value =
+                serde_json::from_str(payload["metadata"]["user_id"].as_str().unwrap()).unwrap();
+            assert_eq!(identity["account_uuid"], uuid);
         }
     }
 
