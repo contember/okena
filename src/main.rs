@@ -518,6 +518,7 @@ fn main() {
         let mut ext_registry = okena_extensions::ExtensionRegistry::new();
         ext_registry.register(okena_ext_claude::register());
         ext_registry.register(okena_ext_codex::register());
+        ext_registry.register(okena_ext_grok::register());
         ext_registry.register(okena_ext_github::register());
         ext_registry.register(okena_ext_updater::register());
         cx.set_global(ext_registry);
