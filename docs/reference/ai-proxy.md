@@ -51,8 +51,21 @@ covers accounts added later.
   is judged after `..` segments are resolved, so it cannot reach another
   endpoint with the account's token. The `authorization` header is replaced
   with that account's OAuth token and `metadata.user_id.account_uuid` is
-  rewritten to the serving account. Everything else (OAuth, profile, telemetry)
-  passes through untouched.
+  rewritten to the serving account. The minimal startup quota probe described
+  below also has its model rewritten. Other endpoints (OAuth, profile, telemetry)
+  pass through untouched.
+- Claude Code's startup quota probe uses `claude-haiku-4-5-20251001` on
+  `/v1/messages`. It must have integer `max_tokens: 1`, exactly one message
+  containing only `role: "user"` and string `content: "quota"`, and streaming
+  absent or `false`. Only `model`, `max_tokens`, `messages`, `metadata`, and
+  `stream` fields are accepted for this rewrite; system prompts, tools, other
+  generation options, and unknown fields leave the request unchanged. This
+  also applies when the pool is empty and the caller's login is used.
+  The workaround keeps the probe on Haiku when Claude Code selects the main
+  model behind a custom base URL: the minimal probe can receive a bare 429
+  on Opus even while regular inference succeeds. `quota_probe_model_rewrite`
+  logs the original request context and target model at info level; subsequent
+  attempt diagnostics show the rewritten model.
 - Only accounts the terminal's policy does not forbid are used.
 - An account with a known 5-hour or weekly utilization of 100% is skipped
   until that window resets or a usage update reports remaining quota. This
