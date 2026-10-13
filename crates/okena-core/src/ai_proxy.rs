@@ -158,6 +158,10 @@ fn private_temp_file(path: &Path, bytes: &[u8]) -> anyhow::Result<tempfile::Name
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AiProxyCommand {
     Status,
+    /// Load one account's persisted quota samples without enlarging status snapshots.
+    UsageHistory {
+        account_id: String,
+    },
     /// Begin an OAuth login; the authorization URL appears in `AiProxyStatus::logins`.
     StartLogin {
         label: String,
@@ -258,6 +262,14 @@ pub struct AiProxyStatus {
     pub routing: AiRouting,
     #[serde(default)]
     pub activity: AiActivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_history: Option<AiAccountHistory>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiAccountHistory {
+    pub account_id: String,
+    pub samples: Vec<crate::usage_history::UsageSample>,
 }
 
 /// What the proxy did with `/v1/messages` requests in the last hour. Kept in

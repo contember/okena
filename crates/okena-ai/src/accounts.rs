@@ -3,9 +3,10 @@
 use crate::now_ms;
 use crate::oauth::{self, Pkce, RefreshError, Tokens, Upstream};
 use okena_core::ai_proxy::{
-    AiAccount, AiAccountRule, AiActivity, AiPendingLogin, AiProxyStatus, AiRouting,
-    AiRoutingPolicy, AiUsage, is_routable_project_id, write_private,
+    AiAccount, AiAccountHistory, AiAccountRule, AiActivity, AiPendingLogin, AiProxyStatus,
+    AiRouting, AiRoutingPolicy, AiUsage, is_routable_project_id, write_private,
 };
+use okena_core::usage_history::{self, LimitSample, Provider, UsageSample};
 use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -120,6 +121,7 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> anyhow::R
 pub struct Accounts {
     path: PathBuf,
     routing_path: PathBuf,
+    history_path: PathBuf,
     http: reqwest::Client,
     upstream: Upstream,
     state: Mutex<State>,
@@ -166,6 +168,7 @@ impl Accounts {
         Ok(Self {
             path,
             routing_path,
+            history_path: dir.join("usage-history"),
             http,
             upstream,
             state: Mutex::new(State {
@@ -235,6 +238,7 @@ impl Accounts {
                 .collect(),
             routing: state.routing.clone(),
             activity,
+            usage_history: None,
         }
     }
 
@@ -571,6 +575,29 @@ impl Accounts {
         }
     }
 
+    pub async fn usage_history(&self, account_id: &str) -> anyhow::Result<AiAccountHistory> {
+        self.state.lock().account(account_id)?;
+        let source = account_id.to_owned();
+        let path = self.history_path.clone();
+        let samples = tokio::task::spawn_blocking(move || {
+            match usage_history::load(
+                &path,
+                Provider::Claude,
+                &source,
+                now_ms() as f64 / 1000.0 - 7.0 * 86400.0,
+            ) {
+                Ok(samples) => Ok(samples),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(error) => Err(error),
+            }
+        })
+        .await??;
+        Ok(AiAccountHistory {
+            account_id: account_id.to_owned(),
+            samples,
+        })
+    }
+
     /// Refresh quota windows from the usage endpoint, so idle accounts are ranked
     /// by real numbers rather than by whatever the last response said.
     pub async fn poll_usage(&self) {
@@ -593,17 +620,61 @@ impl Accounts {
             };
             match oauth::fetch_usage(&self.http, &self.upstream, &selected.access_token).await {
                 Ok(usage) => {
-                    let mut state = self.state.lock();
-                    if let Ok(account) = state.account(&id) {
-                        account.runtime.five_hour =
-                            usage.five_hour.or(account.runtime.five_hour.take());
-                        account.runtime.seven_day =
-                            usage.seven_day.or(account.runtime.seven_day.take());
+                    let sample = {
+                        let mut state = self.state.lock();
+                        if let Ok(account) = state.account(&id) {
+                            account.runtime.five_hour =
+                                usage.five_hour.or(account.runtime.five_hour.take());
+                            account.runtime.seven_day =
+                                usage.seven_day.or(account.runtime.seven_day.take());
+                            Some(usage_sample(account))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(sample) = sample.filter(|sample| !sample.limits.is_empty()) {
+                        let path = self.history_path.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            usage_history::append(&path, &sample)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            result => {
+                                log::warn!("[ai-proxy] could not save usage history: {result:?}")
+                            }
+                        }
                     }
                 }
                 Err(error) => log::warn!("[ai-proxy] usage poll failed for {id}: {error}"),
             }
         }
+    }
+}
+
+fn usage_sample(account: &Account) -> UsageSample {
+    let limits = [
+        ("5h", account.runtime.five_hour.as_ref(), 18000.0),
+        ("7d", account.runtime.seven_day.as_ref(), 604800.0),
+    ]
+    .into_iter()
+    .filter_map(|(name, usage, window_seconds)| {
+        let usage = usage?;
+        Some(LimitSample {
+            name: name.into(),
+            used_percent: usage.utilization,
+            window_seconds,
+            reset_at: usage.resets_at_ms.map(|ms| ms as f64 / 1000.0),
+        })
+    })
+    .collect();
+    UsageSample {
+        version: 1,
+        recorded_at: now_ms() as f64 / 1000.0,
+        provider: Provider::Claude,
+        source: account.stored.id.clone(),
+        plan: account.stored.plan.clone(),
+        limits,
     }
 }
 
