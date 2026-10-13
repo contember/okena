@@ -721,21 +721,21 @@ mod gated_module_tests {
     use super::tests::*;
     use super::*;
 
-    /// `src/ui/mod.rs` gates `fixtures`, and the comparison never touches it.
+    /// `src/ui/mod.rs` gates `seed_data`, and the comparison never touches it.
     fn ui_sources() -> impl SourceLoader {
         crate::composition::tests::sources()
             .with_head(
                 "src/ui/mod.rs",
-                "mod panel;\n#[cfg(test)]\npub mod fixtures;\n",
+                "mod panel;\n#[cfg(test)]\npub mod seed_data;\n",
             )
-            .with_head("src/ui/fixtures.rs", "pub fn seed() -> u32 {\n    1\n}\n")
+            .with_head("src/ui/seed_data.rs", "pub fn seed() -> u32 {\n    1\n}\n")
             .with_head("src/ui/panel.rs", "pub fn draw() {}\n")
     }
 
     #[test]
     fn a_file_gated_by_its_declaring_module_counts_wholly_as_tests() {
         let composition = compose(
-            &[added("src/ui/fixtures.rs", &[1, 2, 3])],
+            &[added("src/ui/seed_data.rs", &[1, 2, 3])],
             &ui_sources(),
             CompositionLimits::default(),
         );
@@ -764,7 +764,7 @@ mod gated_module_tests {
     #[test]
     fn a_gated_file_is_not_parsed_and_so_is_not_a_coverage_candidate() {
         let composition = compose(
-            &[added("src/ui/fixtures.rs", &[1, 2, 3])],
+            &[added("src/ui/seed_data.rs", &[1, 2, 3])],
             &ui_sources(),
             CompositionLimits::default(),
         );
@@ -778,7 +778,7 @@ mod gated_module_tests {
         let composition = compose(
             &[
                 added("src/ui/panel.rs", &[1]),
-                added("src/ui/fixtures.rs", &[1, 2, 3]),
+                added("src/ui/seed_data.rs", &[1, 2, 3]),
             ],
             &ui_sources(),
             CompositionLimits {
@@ -790,6 +790,25 @@ mod gated_module_tests {
         assert_eq!(composition.files[1].role, FileRole::Implementation);
         assert_eq!(composition.files[1].analysis, FileAnalysis::NotReached);
         assert!(!composition.coverage.is_complete());
+    }
+
+    #[test]
+    fn a_fixture_filename_counts_wholly_as_fixtures_without_source_analysis() {
+        let composition = compose(
+            &[added(
+                "worker/src/services/servis-report/servis-document-signing-fixtures.ts",
+                &[1, 2, 3],
+            )],
+            &sources(),
+            CompositionLimits::default(),
+        );
+        let file = &composition.files[0];
+        assert_eq!(file.role, FileRole::Fixture);
+        assert_eq!(file.analysis, FileAnalysis::Skipped);
+        assert_eq!(file.inline_test_lines, 0);
+        assert_eq!(composition.coverage.candidates, 0);
+        let fixtures = volume(&composition, FileRole::Fixture);
+        assert_eq!((fixtures.files, fixtures.changed_lines), (1, 3));
     }
 
     #[test]
