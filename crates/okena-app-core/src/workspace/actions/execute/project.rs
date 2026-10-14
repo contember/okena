@@ -565,17 +565,17 @@ pub(super) fn add_discovered_worktree(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&parent_project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", parent_project_id));
-    }
-    let new_id =
-        match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
-            Ok(id) => id,
-            Err(error) => return ActionResult::Err(error),
-        };
-    ws.undismiss_worktree(std::path::Path::new(&worktree_path));
-    ws.add_to_worktree_ids(&parent_project_id, &new_id);
-    // `add_discovered_worktree` deliberately doesn't notify (caller's job).
+    let new_id = match track_discovered_worktree(
+        ws,
+        window_id,
+        &parent_project_id,
+        &worktree_path,
+        &branch,
+        true,
+    ) {
+        Ok(id) => id,
+        Err(error) => return ActionResult::Err(error),
+    };
     ws.notify_data(cx);
     let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, None, cx);
     let terminal_id = ws
@@ -589,6 +589,34 @@ pub(super) fn add_discovered_worktree(
         }))),
         err => err,
     }
+}
+
+/// Put a worktree that already exists on disk under its parent project: the
+/// row, the parent's worktree list, and forgetting an earlier dismissal so the
+/// user's choice to track it again sticks. Shared by the user's add and by
+/// background discovery. Neither notifies nor spawns; that is the caller's
+/// call, since discovery batches a pass and leaves the shell for later.
+pub fn track_discovered_worktree(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    parent_project_id: &str,
+    worktree_path: &str,
+    branch: &str,
+    with_terminal: bool,
+) -> Result<String, String> {
+    if ws.project(parent_project_id).is_none() {
+        return Err(format!("project not found: {parent_project_id}"));
+    }
+    let new_id = ws.add_discovered_worktree(
+        worktree_path,
+        branch,
+        parent_project_id,
+        window_id,
+        with_terminal,
+    )?;
+    ws.undismiss_worktree(std::path::Path::new(worktree_path));
+    ws.add_to_worktree_ids(parent_project_id, &new_id);
+    Ok(new_id)
 }
 
 /// Rerun a lifecycle-hook terminal: kill the old PTY, spawn a fresh shell at the
@@ -1218,6 +1246,33 @@ mod hook_action_tests {
 
         assert!(workspace.is_worktree_dismissed(&worktree));
         assert!(!workspace.is_worktree_dismissed(&subdir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tracking_a_discovered_worktree_without_a_terminal_leaves_a_bookmark() {
+        let (dir, worktree) = linked_worktree_fixture("track");
+        let main = std::fs::canonicalize(dir.join("main")).unwrap();
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = main.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+        let worktree_path = worktree.to_string_lossy().into_owned();
+        workspace.dismiss_worktree(&worktree_path);
+
+        let id = super::track_discovered_worktree(
+            &mut workspace,
+            crate::workspace::state::WindowId::Main,
+            "p1",
+            &worktree_path,
+            "topic",
+            false,
+        )
+        .unwrap();
+
+        let project = workspace.project(&id).unwrap();
+        assert!(project.layout.is_none(), "no pane waiting for a PTY");
+        assert!(workspace.project("p1").unwrap().worktree_ids.contains(&id));
+        assert!(!workspace.is_worktree_dismissed(&worktree));
         let _ = std::fs::remove_dir_all(dir);
     }
 

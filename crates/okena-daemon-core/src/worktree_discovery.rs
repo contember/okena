@@ -17,10 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use okena_app_core::workspace::actions::execute::{ActionResult, spawn_uninitialized_terminals};
+use okena_app_core::workspace::actions::execute::track_discovered_worktree;
 use okena_hooks::{HookMonitor, HookRunner};
-use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
 use okena_workspace::persistence::{AppSettings, worktree_checkout_path};
 use okena_workspace::state::{PhysicalPathIdentity, WindowId, Workspace};
 use parking_lot::Mutex;
@@ -33,19 +31,16 @@ use crate::workspace_cx::DaemonWorkspaceCx;
 /// agent that made it is still starting up.
 const SCAN_INTERVAL: Duration = Duration::from_secs(10);
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_worktree_discovery(
     workspace: Arc<Mutex<Workspace>>,
     workspace_tick: watch::Sender<u64>,
     hook_runner: Option<HookRunner>,
     hook_monitor: Option<HookMonitor>,
-    backend: Arc<dyn TerminalBackend>,
-    terminals: TerminalsRegistry,
     settings: Arc<Mutex<AppSettings>>,
 ) {
     loop {
         tokio::time::sleep(SCAN_INTERVAL).await;
-        let added = scan_once(
+        scan_once(
             &workspace,
             &workspace_tick,
             &hook_runner,
@@ -53,42 +48,25 @@ pub async fn run_worktree_discovery(
             &settings,
         )
         .await;
-        if added.is_empty() {
-            continue;
-        }
-        let app_settings = settings.lock().clone();
-        for project_id in added {
-            let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
-            let mut ws = workspace.lock();
-            if let ActionResult::Err(error) = spawn_uninitialized_terminals(
-                &mut ws,
-                &project_id,
-                &*backend,
-                &terminals,
-                &app_settings,
-                None,
-                &mut cx,
-            ) {
-                log::error!("worktree discovery: no terminal for {project_id}: {error}");
-            }
-        }
     }
 }
 
-/// Run one scan. Returns the ids of the worktree projects it added; their
-/// terminals are not spawned yet.
+/// Run one scan. A worktree it adds gets no terminal: turning discovery on in
+/// a repository with dozens of worktrees must not start dozens of shells, and
+/// a shell sitting in a checkout gets in the way of the tool that made it
+/// removing it again. The row shows Start Terminal until the user opens one.
 async fn scan_once(
     workspace: &Arc<Mutex<Workspace>>,
     workspace_tick: &watch::Sender<u64>,
     hook_runner: &Option<HookRunner>,
     hook_monitor: &Option<HookMonitor>,
     settings: &Arc<Mutex<AppSettings>>,
-) -> Vec<String> {
+) {
     let config = settings.lock().worktree.clone();
     // Opt-in. Switched off, a pass touches neither the workspace nor the
     // filesystem; dismissals of deleted checkouts wait for it to come back on.
     if !config.auto_track {
-        return Vec::new();
+        return;
     }
     let input = ScanInput::snapshot(&workspace.lock(), config.auto_track_ignore);
 
@@ -96,44 +74,43 @@ async fn scan_once(
     // the reactor.
     let Ok(plan) = tokio::task::spawn_blocking(move || plan_scan(input)).await else {
         log::warn!("worktree discovery task panicked");
-        return Vec::new();
+        return;
     };
     if plan.discovered.is_empty() && plan.gone_dismissals.is_empty() {
-        return Vec::new();
+        return;
     }
 
     let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
     let mut ws = workspace.lock();
-    let forgot = ws.forget_dismissed_worktrees(&plan.gone_dismissals);
-    let mut added = Vec::new();
+    let mut changed = ws.forget_dismissed_worktrees(&plan.gone_dismissals);
     for found in plan.discovered {
         // The plan was made without the lock. Anything that started in the
-        // meantime wins: a removal of this checkout, a delete of the parent,
-        // or the user untracking this very worktree.
-        if ws.project(&found.parent_id).is_none()
-            || ws.is_project_closing(&found.parent_id)
-            || ws.lifecycle.is_worktree_removing(&found.worktree_path)
+        // meantime wins: a delete of the parent, or the user untracking this
+        // very worktree. A checkout Okena is busy removing or creating is
+        // refused by the path claim checks inside `track_discovered_worktree`.
+        if ws.is_project_closing(&found.parent_id)
             || ws.is_worktree_dismissed(Path::new(&found.worktree_path))
         {
             continue;
         }
-        match ws.add_discovered_worktree(
+        match track_discovered_worktree(
+            &mut ws,
+            WindowId::Main,
+            &found.parent_id,
             &found.worktree_path,
             &found.branch,
-            &found.parent_id,
-            WindowId::Main,
+            false,
         ) {
-            Ok(project_id) => {
+            Ok(_) => {
                 log::info!(
                     "worktree discovery: tracking {} ({})",
                     found.worktree_path,
                     found.branch
                 );
-                ws.add_to_worktree_ids(&found.parent_id, &project_id);
-                added.push(project_id);
+                changed = true;
             }
-            // Tracked by a project the snapshot didn't cover, or a path claim
-            // the workspace refuses. Either way it is not ours to add.
+            // Parent gone, tracked by a project the snapshot didn't cover, or
+            // a path claim the workspace refuses. Either way not ours to add.
             Err(error) => log::debug!(
                 "worktree discovery: skipping {}: {error}",
                 found.worktree_path
@@ -142,10 +119,9 @@ async fn scan_once(
     }
     // A candidate that keeps failing would otherwise rewrite workspace.json
     // and broadcast a snapshot on every pass.
-    if forgot || !added.is_empty() {
+    if changed {
         ws.notify_data(&mut cx);
     }
-    added
 }
 
 /// Everything a scan needs from the workspace, copied out under the lock.
