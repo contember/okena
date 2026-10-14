@@ -699,8 +699,6 @@ impl DaemonCore {
                 reactor.workspace_tick.clone(),
                 reactor.hook_runner.clone(),
                 reactor.hook_monitor.clone(),
-                backend.clone(),
-                terminals.clone(),
                 settings.clone(),
             ));
 

@@ -775,12 +775,16 @@ impl Workspace {
     /// opt-in -- mirroring the user-initiated add path. Single-window
     /// users (zero extras) see the prior "default hidden" behavior since
     /// `WindowId::Main` with no extras degenerates to a no-op.
+    ///
+    /// `with_terminal` false adds the row as a bookmark with no layout: it
+    /// shows the Start Terminal button instead of a pane waiting for a PTY.
     pub fn add_discovered_worktree(
         &mut self,
         wt_path: &str,
         branch: &str,
         parent_id: &str,
         window_id: WindowId,
+        with_terminal: bool,
     ) -> Result<String, String> {
         // For monorepo projects, resolve the subdirectory offset so the
         // project path points to the right place inside the worktree.
@@ -815,7 +819,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path,
-            layout: Some(LayoutNode::new_terminal()),
+            layout: with_terminal.then(LayoutNode::new_terminal),
             terminal_names: HashMap::new(),
             status: None,
             hidden_terminals: HashMap::new(),

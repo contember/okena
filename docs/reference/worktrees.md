@@ -41,7 +41,10 @@ scans do this:
 - **Discovery** (every **10 seconds**, opt-in) adds linked worktrees that were created
   outside Okena (from a terminal, by a script, by Claude Code's `claude -w`)
   under their parent project. It opens every parent repository with gix and
-  reads its worktree list, so a pass spawns no processes.
+  reads its worktree list, so a pass spawns no processes. A discovered
+  worktree gets no terminal: its row shows **Start Terminal** until you open
+  one, so turning discovery on in a repository with many worktrees doesn't
+  start a shell in each.
 - **Stale sweep** (every **30 seconds**) removes worktree projects whose
   checkout directory no longer exists (`git worktree remove` from a terminal,
   `rm -rf`, a cleanup script).
