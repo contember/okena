@@ -282,11 +282,15 @@ fn checkout_is_gone(path: &Path) -> bool {
 
 /// `*` stays within a path segment so `agent-*` can't swallow a whole subtree.
 /// A pattern that doesn't parse is dropped with a warning rather than
-/// disabling discovery.
+/// disabling discovery. An absolute pattern is also added in its canonical
+/// spelling, see [`canonical_pattern`].
 fn build_ignore_set(patterns: &[String]) -> GlobSet {
     let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        match GlobBuilder::new(pattern).literal_separator(true).build() {
+    let spellings = patterns
+        .iter()
+        .flat_map(|pattern| std::iter::once(pattern.clone()).chain(canonical_pattern(pattern)));
+    for pattern in spellings {
+        match GlobBuilder::new(&pattern).literal_separator(true).build() {
             Ok(glob) => {
                 builder.add(glob);
             }
@@ -301,14 +305,74 @@ fn build_ignore_set(patterns: &[String]) -> GlobSet {
     })
 }
 
+/// An absolute pattern with its literal leading directories resolved, or
+/// `None` when that changes nothing. Git may record a worktree under its real
+/// path while the user writes the pattern through a symlink or an alias
+/// (`/tmp` is `/private/tmp` on macOS), and the two must still meet.
+fn canonical_pattern(pattern: &str) -> Option<String> {
+    let path = Path::new(pattern);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut prefix = PathBuf::new();
+    let mut rest = Vec::new();
+    for component in path.components() {
+        let text = component.as_os_str().to_string_lossy();
+        if rest.is_empty() && !text.contains(['*', '?', '[', '{']) {
+            prefix.push(component);
+        } else {
+            rest.push(text.into_owned());
+        }
+    }
+    let resolved = canonical(&prefix);
+    if resolved == prefix {
+        return None;
+    }
+    let mut out = resolved.to_string_lossy().into_owned();
+    for segment in rest {
+        out.push(std::path::MAIN_SEPARATOR);
+        out.push_str(&segment);
+    }
+    Some(out)
+}
+
 /// Match a checkout inside the repository by its path relative to the root
 /// (`.claude/worktrees/agent-1`), and one outside it by its absolute path.
+/// Both the path as Git reports it and its canonical spelling are tried, so a
+/// symlink on either side doesn't hide a match.
 fn is_ignored(ignore: &GlobSet, git_root: &Path, worktree: &Path) -> bool {
-    let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
-    match worktree.strip_prefix(git_root) {
-        Ok(relative) => ignore.is_match(relative),
-        Err(_) => ignore.is_match(&worktree),
+    let roots = [git_root.to_path_buf(), canonical(git_root)];
+    [worktree.to_path_buf(), canonical(worktree)]
+        .iter()
+        .any(
+            |path| match roots.iter().find_map(|root| path.strip_prefix(root).ok()) {
+                Some(relative) => ignore.is_match(relative),
+                None => ignore.is_match(path),
+            },
+        )
+}
+
+/// `path` with symlinks resolved, or unchanged when it can't be resolved.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .map(without_verbatim_prefix)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `canonicalize` on Windows answers `\\?\C:\...`, which no pattern written
+/// as `C:\...` matches (and whose `?` is a glob metacharacter).
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
     }
+    path
 }
 
 #[cfg(test)]
@@ -498,6 +562,25 @@ mod tests {
             Path::new("/repo"),
             Path::new("/tmp/other")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_pattern_matches_through_a_symlink_on_either_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("scratch/a")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let repo = Path::new("/repo");
+
+        // Pattern through the alias, worktree reported by its real path.
+        let ignore = build_ignore_set(&[format!("{}/scratch/**", alias.display())]);
+        assert!(is_ignored(&ignore, repo, &real.join("scratch/a")));
+
+        // Pattern by the real path, worktree reported through the alias.
+        let ignore = build_ignore_set(&[format!("{}/scratch/**", real.display())]);
+        assert!(is_ignored(&ignore, repo, &alias.join("scratch/a")));
     }
 
     #[test]
