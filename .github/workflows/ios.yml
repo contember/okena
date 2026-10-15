@@ -95,13 +95,7 @@ jobs:
         run: npm run ubrn:ios -- --no-sim
       - name: Install pods
         working-directory: mobile/rn/ios
-        run: bundle exec pod install
-      - uses: actions/upload-artifact@v4
-        with:
-          name: okena-ios-podfile-lock
-          path: mobile/rn/ios/Podfile.lock
-          if-no-files-found: error
-          retention-days: 14
+        run: bundle exec pod install --deployment
       - name: Archive
         working-directory: mobile/rn/ios
         run: |

@@ -128,6 +128,8 @@ npm run ubrn:ios
 npm run ios
 ```
 
+`ios/Podfile.lock` is versioned. CI runs `pod install --deployment` and fails when the lock
+is stale; commit the updated lock after changing native dependencies or the FFI podspec.
 To run on a physical device, select your team in Xcode. Do not commit `DEVELOPMENT_TEAM`.
 
 ## TestFlight internal beta
