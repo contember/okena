@@ -40,7 +40,7 @@ struct Service {
 /// profile's lock, or after a management shutdown.
 pub fn run(profile_root: PathBuf) -> anyhow::Result<()> {
     let dir = proxy_dir(&profile_root);
-    std::fs::create_dir_all(&dir)?;
+    okena_core::ai_proxy::create_private_dir(&dir)?;
     init_logging(&dir);
     let lock = std::fs::OpenOptions::new()
         .create(true)
