@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone)]
 pub struct WorktreeRemovalPlan {
     pub project_id: String,
+    root_project_id: String,
     /// The git worktree root to remove (may differ from project.path for monorepos).
     pub worktree_path: std::path::PathBuf,
     /// The main repo path — used for `git worktree prune` in the fast removal.
@@ -230,6 +231,7 @@ pub fn close_worktree_merge_git(
     fetch_enabled: bool,
     push_enabled: bool,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -266,6 +268,7 @@ pub fn close_worktree_merge_git(
         project_hooks,
         global_hooks,
         project_id,
+        root_project_id,
         project_name,
         project_path,
         branch,
@@ -288,6 +291,7 @@ pub fn close_worktree_merge_git(
             project_hooks,
             global_hooks,
             project_id,
+            root_project_id,
             project_name,
             project_path,
             branch,
@@ -688,6 +692,7 @@ impl Workspace {
             let hook_results = hooks::fire_on_worktree_create(
                 &new_project_hooks,
                 &id,
+                parent_project_id,
                 &new_project_name,
                 project_path,
                 branch,
@@ -715,6 +720,7 @@ impl Workspace {
             return;
         };
         let hooks_config = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let name = project.name.clone();
         let path = project.path.clone();
         // Read branch from git at runtime, falling back to project name
@@ -743,6 +749,7 @@ impl Workspace {
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
             project_id,
+            &root_project_id,
             &name,
             &path,
             &branch,
@@ -1040,6 +1047,7 @@ impl Workspace {
         let folder_id = folder.map(|f| f.id.clone());
         let folder_name = folder.map(|f| f.name.clone());
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
@@ -1047,6 +1055,7 @@ impl Workspace {
 
         Ok(WorktreeRemovalPlan {
             project_id: project_id.to_string(),
+            root_project_id,
             worktree_path,
             main_repo_path,
             target,
@@ -1226,6 +1235,7 @@ impl Workspace {
             &plan.project_hooks,
             global_hooks,
             &plan.project_id,
+            &plan.root_project_id,
             &plan.project_name,
             &plan.main_repo_path,
             &plan.branch,
@@ -1314,6 +1324,7 @@ impl Workspace {
         let project_name = project.name.clone();
         let project_path = project.path.clone();
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
 
         let main_repo_path = self.worktree_parent_path(project_id).unwrap_or_default();
         let branch =
@@ -1351,6 +1362,7 @@ impl Workspace {
                 fetch_enabled,
                 push_enabled,
                 project_id,
+                &root_project_id,
                 &project_name,
                 &project_path,
                 &branch,
@@ -1399,6 +1411,7 @@ impl Workspace {
                 &project_hooks,
                 global_hooks,
                 project_id,
+                &root_project_id,
                 &project_name,
                 &project_path,
                 &branch,
@@ -1435,6 +1448,7 @@ impl Workspace {
                     &project_hooks,
                     global_hooks,
                     project_id,
+                    &root_project_id,
                     &project_name,
                     &project_path,
                     &branch,
@@ -1454,6 +1468,7 @@ impl Workspace {
                     &project_hooks,
                     global_hooks,
                     project_id,
+                    &root_project_id,
                     &project_name,
                     &project_path,
                     &branch,
@@ -1599,6 +1614,7 @@ mod merge_pipeline_tests {
             false,
             false,
             "p1",
+            "main",
             "Project",
             path_str(&worktree),
             "feature",
@@ -1647,6 +1663,7 @@ mod merge_pipeline_tests {
             false,
             false,
             "p1",
+            "main",
             "Project",
             path_str(&worktree),
             "feature",
@@ -1699,6 +1716,7 @@ mod merge_pipeline_tests {
             false,
             false,
             "p1",
+            "main",
             "Project",
             path_str(&worktree),
             "feature",
@@ -1913,6 +1931,7 @@ mod merge_pipeline_tests {
             true,
             true,
             "p1",
+            "main",
             "Project",
             path_str(&worktree),
             "feature",
@@ -1990,6 +2009,7 @@ mod merge_pipeline_tests {
         };
         let plan = WorktreeRemovalPlan {
             project_id: "p1".to_string(),
+            root_project_id: "main".to_string(),
             worktree_path: worktree.clone(),
             main_repo_path: main_repo.to_string_lossy().into_owned(),
             target: WorktreeRemovalTarget::Linked(verified_worktree),
@@ -2088,6 +2108,7 @@ mod merge_pipeline_tests {
             okena_git::verify_linked_worktree_fresh(&main_repo, &worktree).unwrap();
         let plan = WorktreeRemovalPlan {
             project_id: "p1".to_string(),
+            root_project_id: "main".to_string(),
             worktree_path: worktree.clone(),
             main_repo_path: main_repo.to_string_lossy().into_owned(),
             target: WorktreeRemovalTarget::Linked(verified_worktree),

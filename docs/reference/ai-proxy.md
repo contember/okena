@@ -13,7 +13,8 @@ separate process: [ADR-0004](../decisions/0004-ai-proxy-process.md). Code:
    field, then click **Finish**. Repeat for more accounts.
 3. Open a new terminal and run `claude` as usual.
 
-Turning the proxy on affects **new** terminals only. A project terminal gets
+Turning the proxy on affects **new** terminals only. A project terminal,
+including the project's hook and service terminals, gets
 `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/<token>/p/<project-id>` (a worktree
 terminal names its main project); other terminals get the URL without
 `/p/<project-id>`. Running terminals keep their environment; turning the proxy
@@ -240,7 +241,6 @@ headers. Response diagnostics additionally allow `x-ratelimit-*`,
 
 ## Limits
 
-- Hook and service terminals carry no project and use the default policy.
 - The project in the URL routes requests; it does not isolate them. A process of
   the same user can put another project's id into its URL.
 - A corrupt `routing.json` stops the proxy from starting rather than dropping
