@@ -195,9 +195,15 @@ impl Relay {
             };
             let mut request_headers = forward_headers(&headers);
             request_headers.remove("x-api-key");
-            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", account.access_token)) {
-                request_headers.insert("authorization", value);
-            }
+            request_headers.remove("authorization");
+            let Ok(authorization) =
+                HeaderValue::from_str(&format!("Bearer {}", account.access_token))
+            else {
+                log::warn!("[ai-proxy] access_token_not_a_header_value {account_context}");
+                excluded.push(account.id);
+                continue;
+            };
+            request_headers.insert("authorization", authorization);
             ensure_oauth_beta(&mut request_headers);
             let response = match self
                 .http
