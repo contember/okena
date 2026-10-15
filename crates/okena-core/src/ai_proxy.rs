@@ -135,11 +135,23 @@ fn create_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
 }
 
+/// Create `dir` and keep it owner-only, so the log and usage history inside it
+/// are as private as the credential files.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Owner-only temporary file next to `path`, holding `bytes` and ready to persist.
 fn private_temp_file(path: &Path, bytes: &[u8]) -> anyhow::Result<tempfile::NamedTempFile> {
     use std::io::Write;
     let dir = path.parent().context("path has no parent directory")?;
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     #[cfg(unix)]
     {
