@@ -37,7 +37,7 @@ import {
   type SavedServer,
 } from '../models';
 import { useConnectionStore } from '../state';
-import { OkenaColors, OkenaTypography } from '../theme';
+import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 
 const DEFAULT_PORT = '19100';
 
@@ -354,7 +354,7 @@ const styles = StyleSheet.create({
     ...OkenaTypography.caption,
     marginTop: 3,
     color: OkenaColors.textTertiary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
   },
   chevron: { color: OkenaColors.textTertiary, fontSize: 18, marginLeft: 8 },
   deleteBtn: {

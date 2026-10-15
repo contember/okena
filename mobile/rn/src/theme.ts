@@ -7,6 +7,8 @@
  * `color` props want `#RRGGBBAA`, NOT `#AARRGGBB`).
  */
 
+import { Platform } from 'react-native';
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /** `0xAARRGGBB` (Flutter order) → `#RRGGBBAA` (RN/CSS order). */
@@ -65,8 +67,8 @@ export const OkenaColors: Readonly<Record<ColorName, string>> = Object.fromEntri
 // ── Terminal theme (mirrors TerminalTheme in app_theme.dart) ───────────────
 
 export const TerminalTheme = {
-  /** Must match the loaded font family name (see README font-linking step). */
-  fontFamily: 'JetBrainsMono',
+  /** iOS resolves the font's family name; Android resolves the bundled file name. */
+  fontFamily: Platform.select({ ios: 'JetBrains Mono', default: 'JetBrainsMono' }),
   fontFamilyFallback: ['Menlo', 'Consolas', 'DejaVu Sans Mono', 'monospace'] as const,
 
   defaultFontSize: 13,

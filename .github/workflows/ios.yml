@@ -1,0 +1,146 @@
+name: iOS beta
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "mobile/rn/**"
+      - "crates/okena-mobile-ffi/**"
+      - "crates/okena-core/**"
+      - "crates/okena-transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "mobile/rn/**"
+      - "crates/okena-mobile-ffi/**"
+      - "crates/okena-core/**"
+      - "crates/okena-transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: Sign and upload the build to TestFlight
+        type: boolean
+        default: false
+      build_number:
+        description: iOS build number (must exceed every previous upload of this version)
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  archive:
+    runs-on: macos-26
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: mobile/rn
+    env:
+      CARGO_INCREMENTAL: "0"
+      OKENA_BUILD_NUMBER: ${{ inputs.build_number || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check build number
+        run: |
+          [[ "$OKENA_BUILD_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || {
+            echo 'build_number must be a positive integer.' >&2
+            exit 1
+          }
+      - name: Prepare App Store Connect key
+        if: ${{ inputs.upload }}
+        env:
+          API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$API_KEY_P8" && test -n "$API_KEY_ID" && test -n "$API_ISSUER_ID" && test -n "$TEAM_ID" || {
+            echo 'Configure APP_STORE_CONNECT_API_KEY_P8, APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_API_ISSUER_ID and APPLE_TEAM_ID before requesting an upload.' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: mobile/rn/package-lock.json
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: mobile/rn
+      - name: Install Rust target
+        run: rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Build Rust and generate bindings
+        run: npm run ubrn:ios -- --no-sim
+      - name: Install pods
+        working-directory: mobile/rn/ios
+        run: bundle exec pod install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okena-ios-podfile-lock
+          path: mobile/rn/ios/Podfile.lock
+          if-no-files-found: error
+          retention-days: 14
+      - name: Archive
+        working-directory: mobile/rn/ios
+        run: |
+          xcodebuild archive -quiet \
+            -workspace OkenaMobile.xcworkspace \
+            -scheme OkenaMobile \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -archivePath "$RUNNER_TEMP/OkenaMobile.xcarchive" \
+            CURRENT_PROJECT_VERSION="$OKENA_BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Validate archive contents
+        run: |
+          app="$RUNNER_TEMP/OkenaMobile.xcarchive/Products/Applications/OkenaMobile.app"
+          for file in main.jsbundle PrivacyInfo.xcprivacy JetBrainsMono-{Regular,Bold,Italic,BoldItalic}.ttf; do
+            test -f "$app/$file" || { echo "Missing $file in the app bundle." >&2; exit 1; }
+          done
+          test "$(plutil -extract CFBundleIdentifier raw "$app/Info.plist")" = com.contember.okena
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Info.plist")" = 0.1.0
+          test "$(plutil -extract CFBundleVersion raw "$app/Info.plist")" = "$OKENA_BUILD_NUMBER"
+      # Export signs with the team's cloud-managed distribution certificate and uploads.
+      - name: Sign and upload to TestFlight
+        if: ${{ inputs.upload }}
+        working-directory: mobile/rn/ios
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cp ExportOptions.plist "$RUNNER_TEMP/ExportOptions.plist"
+          plutil -insert teamID -string "$TEAM_ID" "$RUNNER_TEMP/ExportOptions.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/OkenaMobile.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID"
+      - name: Remove App Store Connect key
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"

@@ -49,7 +49,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 
 import type { OkenaNative, SpecialKey } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
-import { OkenaColors } from '../theme';
+import { OkenaColors, TerminalTheme } from '../theme';
 
 // ── Shared modifier state ──────────────────────────────────────────────────
 
@@ -931,7 +931,7 @@ const styles = StyleSheet.create({
   keyPressed: { opacity: 0.62 },
   keyText: {
     color: OkenaColors.keyText,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1041,7 +1041,7 @@ const styles = StyleSheet.create({
   },
   deckKeyText: {
     color: OkenaColors.textPrimary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1116,7 +1116,7 @@ const styles = StyleSheet.create({
     minHeight: 120,
     maxHeight: 240,
     color: OkenaColors.textPrimary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 14,
     backgroundColor: OkenaColors.surfaceElevated,
     borderRadius: 8,

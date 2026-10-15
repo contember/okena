@@ -1,6 +1,4 @@
 node_modules/
-# iOS host is generated separately; Android host is versioned.
-ios/
 .expo/
 *.log
 
@@ -26,3 +24,12 @@ android/app/src/main/assets/fonts/
 *.jks
 *.p12
 *.pfx
+
+ios/Pods/
+ios/build/
+ios/*.xcworkspace/
+ios/.xcode.env.local
+ios/**/xcuserdata/
+vendor/bundle/
+*.ipa
+*.p8

@@ -18,10 +18,10 @@ npm run format      # prettier (opt-in; NOT enforced by lint)
 ```
 
 Device build (needs Android NDK / Xcode — see `README.md`): `npm run ubrn:android|ios` then
-`npm run android|ios`. Android host sources are versioned; do not regenerate the app host.
-The iOS host and generated contents of `modules/okena-mobile-ffi/` remain gitignored.
+`npm run android|ios`. Android and iOS host sources are versioned; do not regenerate them from
+the React Native template. Generated contents of `modules/okena-mobile-ffi/` remain gitignored.
 The npm scripts run ubrn from that local package and apply Android generation fixes.
-See `README.md` for the pinned toolchain, CPU leases, and signed CI release procedure.
+See `README.md` for the pinned toolchains, CPU leases, and signed CI release procedures.
 
 ## Key boundaries
 

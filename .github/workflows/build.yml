@@ -128,7 +128,7 @@ jobs:
 
   # React Native mobile client — TypeScript checks.
   #
-  # Android native builds and signed beta artifacts run in android.yml.
+  # Native builds and signed beta artifacts run in android.yml and ios.yml.
   mobile-rn:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
