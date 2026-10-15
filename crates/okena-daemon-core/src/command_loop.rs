@@ -198,12 +198,12 @@ fn apply_scrollback_after_committed_settings_change(
 fn refresh_claude_pty_env_after_committed_settings_change(
     outcome: &SettingsUpdateOutcome,
     settings: &Arc<Mutex<AppSettings>>,
-    backend: &dyn TerminalBackend,
+    backend: &Arc<dyn TerminalBackend>,
+    runtime: &tokio::runtime::Handle,
 ) {
     if outcome.committed {
-        backend.set_extra_env(okena_workspace::claude_env::claude_pty_env_for_settings(
-            &settings.lock(),
-        ));
+        backend.set_launch_environment(crate::ai_proxy::launch_environment(&settings.lock()));
+        crate::ai_proxy::start_if_enabled(settings, backend, runtime);
     }
 }
 
@@ -878,6 +878,7 @@ async fn recover_quiesced_project_runtime(
 }
 
 struct PreparedServiceOwner {
+    root_project_id: String,
     project_path: String,
     data_replacement_epoch: u64,
     service_state: ServiceProjectStateToken,
@@ -888,14 +889,19 @@ fn snapshot_service_owner(
     workspace: &Arc<Mutex<Workspace>>,
     service_manager: &Arc<Mutex<ServiceManager>>,
 ) -> Option<PreparedServiceOwner> {
-    let (project_path, data_replacement_epoch) = {
+    let (root_project_id, project_path, data_replacement_epoch) = {
         let workspace = workspace.lock();
-        workspace
-            .project(project_id)
-            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+        workspace.project(project_id).map(|project| {
+            (
+                project.root_project_id().to_owned(),
+                project.path.clone(),
+                workspace.data_replacement_epoch(),
+            )
+        })
     }?;
     let service_state = service_manager.lock().project_state_token(project_id);
     Some(PreparedServiceOwner {
+        root_project_id,
         project_path,
         data_replacement_epoch,
         service_state,
@@ -1054,6 +1060,7 @@ where
     // reconnecting their ids here would race their asynchronous teardown.
     let status = manager.load_project_services_prepared_without_auto_start(
         project_id,
+        &owner.root_project_id,
         &owner.project_path,
         prepared,
         &mut cx,
@@ -1098,11 +1105,15 @@ fn recover_project_services_for_backend_migration(
 ) {
     let project_owner = {
         let workspace = workspace.lock();
-        workspace
-            .project(project_id)
-            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+        workspace.project(project_id).map(|project| {
+            (
+                project.root_project_id().to_owned(),
+                project.path.clone(),
+                workspace.data_replacement_epoch(),
+            )
+        })
     };
-    let Some((project_path, data_replacement_epoch)) = project_owner else {
+    let Some((root_project_id, project_path, data_replacement_epoch)) = project_owner else {
         return;
     };
     if !std::path::Path::new(&project_path).exists() {
@@ -1116,7 +1127,12 @@ fn recover_project_services_for_backend_migration(
     let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
     manager.set_project_writeback_owner(project_id, &project_path, data_replacement_epoch);
-    manager.load_project_services_for_backend_migration(project_id, &project_path, &mut cx);
+    manager.load_project_services_for_backend_migration(
+        project_id,
+        &root_project_id,
+        &project_path,
+        &mut cx,
+    );
 }
 
 struct TerminalBackendMigrationGuard {
@@ -2585,6 +2601,7 @@ fn spawn_merge_worktree_close(
         let project_name = project.name.clone();
         let project_path = project.path.clone();
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let main_repo_path = ws.worktree_parent_path(&project_id).unwrap_or_default();
         let folder = ws.folder_for_project_or_parent(&project_id);
         let folder_id = folder.map(|folder| folder.id.clone());
@@ -2593,6 +2610,7 @@ fn spawn_merge_worktree_close(
         cx.notify();
         (
             ws.data_replacement_epoch(),
+            root_project_id,
             project_name,
             project_path,
             project_hooks,
@@ -2618,6 +2636,7 @@ fn spawn_merge_worktree_close(
         };
         let (
             operation_epoch,
+            root_project_id,
             project_name,
             project_path,
             project_hooks,
@@ -2644,6 +2663,7 @@ fn spawn_merge_worktree_close(
                         fetch,
                         push,
                         &blocking_project_id,
+                        &root_project_id,
                         &project_name,
                         &project_path,
                         &branch,
@@ -2842,6 +2862,7 @@ pub async fn daemon_command_loop(
     mut daemon_config: DaemonConfig,
     deadlines: SoftCloseDeadlines,
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
+    ai_proxy_accounts: crate::ai_proxy::AiProxyAccounts,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -2884,6 +2905,19 @@ pub async fn daemon_command_loop(
         };
 
         let command = match command {
+            // Talks to the AI proxy over loopback (and may start it), so it runs
+            // off the loop.
+            RemoteCommand::Action(ActionRequest::AiProxy { request }) => {
+                let ai_proxy_accounts = ai_proxy_accounts.clone();
+                runtime.spawn(async move {
+                    let state = crate::ai_proxy::execute(request).await;
+                    ai_proxy_accounts.refresh();
+                    if let Some(reply) = reply {
+                        let _ = reply.send(CommandResult::Ok(serde_json::to_value(state).ok()));
+                    }
+                });
+                continue;
+            }
             RemoteCommand::Action(ActionRequest::SearchContent {
                 project_id,
                 query,
@@ -3060,10 +3094,11 @@ pub async fn daemon_command_loop(
                         )
                         .await;
                         refresh_claude_pty_env_after_committed_settings_change(
-                            &outcome,
-                            &settings,
-                            backend.as_ref(),
+                            &outcome, &settings, &backend, &runtime,
                         );
+                        if outcome.committed {
+                            ai_proxy_accounts.refresh();
+                        }
                         apply_scrollback_after_committed_settings_change(
                             &outcome, &settings, &terminals,
                         );
@@ -4308,6 +4343,7 @@ pub async fn daemon_command_loop(
                     &agent_statuses,
                     windows,
                     hooks,
+                    ai_proxy_accounts.snapshot(),
                 );
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
@@ -4885,6 +4921,7 @@ mod tests {
                 self.daemon_config,
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
+                crate::ai_proxy::AiProxyAccounts::new(watch::channel(0).0),
             ))
         }
     }
@@ -4979,7 +5016,7 @@ mod tests {
             self.events.lock().push("flush".to_string());
         }
 
-        fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {
+        fn set_launch_environment(&self, _environment: okena_terminal::backend::LaunchEnvironment) {
             self.events.lock().push("env".to_string());
         }
 
@@ -5271,9 +5308,16 @@ mod tests {
     #[test]
     fn claude_pty_env_refreshes_only_after_committed_settings_changes() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let backend =
-            RecordingMigrationBackend::new(events.clone(), SessionBackend::None, false, false);
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
+            events.clone(),
+            SessionBackend::None,
+            false,
+            false,
+        ));
         let settings = Arc::new(Mutex::new(default_settings()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
 
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome {
@@ -5282,11 +5326,13 @@ mod tests {
             },
             &settings,
             &backend,
+            runtime.handle(),
         );
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome::uncommitted(CommandResult::Err("rejected".to_string())),
             &settings,
             &backend,
+            runtime.handle(),
         );
 
         assert_eq!(&*events.lock(), &["env".to_string()]);
@@ -5471,6 +5517,7 @@ mod tests {
                     let mut cx = reactor_ref.cx();
                     manager.set_project_writeback_owner("p1", &project_path, current_epoch);
                     manager.load_project_services_prepared(
+                        "p1",
                         "p1",
                         &project_path,
                         &HashMap::new(),
@@ -5675,6 +5722,7 @@ mod tests {
                     let mut manager = service_manager.lock();
                     let mut cx = reactor_ref.cx();
                     manager.load_project_services_prepared(
+                        "p1",
                         "p1",
                         project_path,
                         &HashMap::new(),
@@ -5885,6 +5933,7 @@ mod tests {
                     let mut cx = reactor_ref.cx();
                     manager.load_project_services_prepared(
                         "p1",
+                        "p1",
                         project_path,
                         &HashMap::new(),
                         PreparedProjectConfig::Loaded {
@@ -5979,6 +6028,7 @@ mod tests {
             let mut manager = service_manager.lock();
             let mut cx = reactor_ref.cx();
             manager.load_project_services_prepared(
+                "p1",
                 "p1",
                 project_path,
                 &HashMap::new(),
@@ -8705,6 +8755,7 @@ mod tests {
             assert_eq!(
                 manager.load_project_services_prepared_without_auto_start(
                     "wt1",
+                    "p1",
                     &worktree_path.to_string_lossy(),
                     PreparedProjectConfig::Loaded {
                         config: None,

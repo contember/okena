@@ -3,6 +3,7 @@
 pub mod agent_harness;
 pub mod agent_session;
 pub mod agent_status;
+pub mod ai_proxy;
 pub mod api;
 pub mod git_poll;
 pub mod keys;
@@ -18,4 +19,5 @@ pub mod soft_close;
 pub mod theme;
 pub mod timing;
 pub mod types;
+pub mod usage_history;
 pub mod ws;

@@ -152,6 +152,7 @@ impl WorkspaceReplacementCompletion {
 fn prepare_layout_terminals(
     node: &mut LayoutNode,
     project_id: &str,
+    root_project_id: &str,
     cwd: &str,
     project_default_shell: Option<&okena_terminal::shell_config::ShellType>,
     settings: &AppSettings,
@@ -182,6 +183,7 @@ fn prepare_layout_terminals(
                         .clone()
                         .resolve_default(project_default_shell, &settings.default_shell),
                 )
+                .for_project(root_project_id)
             } else {
                 effective_terminal_launch(
                     shell_type.clone(),
@@ -197,6 +199,7 @@ fn prepare_layout_terminals(
                     None,
                     env,
                 )
+                .for_project(root_project_id)
             };
             launches.push(PreparedTerminalLaunch::new(
                 project_id.to_string(),
@@ -212,6 +215,7 @@ fn prepare_layout_terminals(
                 prepare_layout_terminals(
                     child,
                     project_id,
+                    root_project_id,
                     cwd,
                     project_default_shell,
                     settings,
@@ -279,10 +283,12 @@ pub fn prepare_workspace_replacement(
             folder.map(|folder| folder.id.as_str()),
             folder.map(|folder| folder.name.as_str()),
         );
+        let root_project_id = project.root_project_id().to_owned();
         if let Some(layout) = &mut project.layout {
             prepare_layout_terminals(
                 layout,
                 &project.id,
+                &root_project_id,
                 &project.path,
                 project.default_shell.as_ref(),
                 settings,
@@ -298,6 +304,7 @@ pub fn prepare_workspace_replacement(
             uuid::Uuid::new_v4().to_string(),
             &project.hooks,
             &project.id,
+            &root_project_id,
             &project.name,
             &project.path,
             folder.map(|folder| folder.id.as_str()),

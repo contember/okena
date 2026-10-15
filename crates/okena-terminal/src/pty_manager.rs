@@ -1,5 +1,6 @@
 use crate::backend::{
-    TeardownIncomplete, TerminalLaunchPlan, TerminalSessionTeardown, TerminalTeardownRoute,
+    LaunchEnvironment, TeardownIncomplete, TerminalLaunchPlan, TerminalSessionTeardown,
+    TerminalTeardownRoute,
 };
 use crate::pty_write_queue::{PtyWriteQueue, Queued};
 use crate::session_backend::SessionCommand;
@@ -565,11 +566,11 @@ pub struct PtyManager {
     /// Optional sink for streaming PTY output to external consumers (e.g. remote clients).
     /// Publishing happens directly from reader threads to avoid UI event loop latency.
     output_sink: Arc<Mutex<Option<Arc<dyn PtyOutputSink>>>>,
-    /// Extra environment overrides applied to every spawned PTY. `Some(val)` sets
-    /// the variable; `None` removes it from the inherited environment so a stale
-    /// value (e.g. a `CLAUDE_CONFIG_DIR` exported in the user's shell that launched
-    /// Okena) cannot leak into the terminal.
-    extra_env: Mutex<Vec<(String, Option<String>)>>,
+    /// Environment overrides applied to every spawned PTY. A `None` value removes
+    /// the variable from the inherited environment so a stale value (e.g. a
+    /// `CLAUDE_CONFIG_DIR` exported in the user's shell that launched Okena)
+    /// cannot leak into the terminal.
+    launch_env: Mutex<LaunchEnvironment>,
     /// Sender for the shared teardown worker pool. `kill`/`cleanup_exited` enqueue
     /// jobs here instead of spawning a detached thread per call. Wrapped in `Option`
     /// only so `Drop` can `take()` it and close the channel, signaling workers to
@@ -691,7 +692,7 @@ impl PtyManager {
                     resolved: session_backend,
                 }),
                 output_sink: Arc::new(Mutex::new(None)),
-                extra_env: Mutex::new(Vec::new()),
+                launch_env: Mutex::new(Arc::new(|_| Vec::new())),
                 teardown_tx: Some(teardown_tx),
                 reaper_tx: Some(reaper_tx),
                 teardown_tracker,
@@ -781,11 +782,9 @@ impl PtyManager {
         *self.output_sink.lock() = Some(sink);
     }
 
-    /// Set the extra environment overrides applied to every spawned PTY.
-    /// `Some(val)` sets the variable; `None` removes it from the inherited
-    /// environment. Replaces any previously configured overrides.
-    pub fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
-        *self.extra_env.lock() = env;
+    /// Replace the environment overrides applied to every spawned PTY.
+    pub fn set_launch_environment(&self, environment: LaunchEnvironment) {
+        *self.launch_env.lock() = environment;
     }
 
     fn session_backend(&self) -> ResolvedBackend {
@@ -1186,7 +1185,8 @@ impl PtyManager {
     }
 
     fn launch_environment(&self, plan: &TerminalLaunchPlan) -> Vec<(String, Option<String>)> {
-        let mut environment = self.extra_env.lock().clone();
+        let launch_env = self.launch_env.lock().clone();
+        let mut environment = launch_env(plan.project_id.as_deref());
         for (key, value) in &plan.environment {
             environment.retain(|(existing, _)| existing != key);
             environment.push((key.clone(), Some(value.clone())));
@@ -2654,6 +2654,32 @@ mod tests {
     }
 
     #[test]
+    fn launch_environment_gets_the_plan_project_and_yields_to_plan_variables() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        manager.set_launch_environment(Arc::new(|project| {
+            vec![
+                ("PROJECT".to_string(), project.map(str::to_owned)),
+                ("SHARED".to_string(), Some("launch".to_string())),
+            ]
+        }));
+        let plan = TerminalLaunchPlan::for_shell(ShellType::Default)
+            .with_environment(vec![("SHARED".to_string(), "plan".to_string())])
+            .for_project("main");
+        assert_eq!(
+            manager.launch_environment(&plan),
+            [
+                ("PROJECT".to_string(), Some("main".to_string())),
+                ("SHARED".to_string(), Some("plan".to_string())),
+            ]
+        );
+        let plain = TerminalLaunchPlan::for_shell(ShellType::Default);
+        assert_eq!(
+            manager.launch_environment(&plain)[0],
+            ("PROJECT".to_string(), None)
+        );
+    }
+
+    #[test]
     fn reconnect_replaces_old_exit_claim_before_session_kill() {
         let (manager, _events) = PtyManager::new(SessionBackend::None);
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
@@ -2741,6 +2767,7 @@ mod tests {
                 ],
             }),
             environment: Vec::new(),
+            project_id: None,
         };
         let terminal_id = manager
             .create_terminal_with_plan(&fixture.to_string_lossy(), &plan)
@@ -3140,6 +3167,7 @@ mod tests {
                 args: vec!["-c".to_string(), "sleep 30".to_string()],
             }),
             environment: Vec::new(),
+            project_id: None,
         };
         let terminal_id = manager
             .create_terminal_with_plan(&cwd, &plan)
@@ -3187,6 +3215,7 @@ mod tests {
                 args: vec!["-c".to_string(), "sleep 30".to_string()],
             }),
             environment: Vec::new(),
+            project_id: None,
         };
         let terminal_id = manager
             .create_terminal_with_plan(&cwd, &plan)

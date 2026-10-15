@@ -39,6 +39,12 @@ pub struct TerminalLaunchCommand {
     pub args: Vec<String>,
 }
 
+/// Environment for terminals created from now on, given the project passed in
+/// [`TerminalLaunchPlan::project_id`]. `Some(val)` sets a variable; `None`
+/// removes it from the inherited environment.
+pub type LaunchEnvironment =
+    Arc<dyn Fn(Option<&str>) -> Vec<(String, Option<String>)> + Send + Sync>;
+
 /// Transient launch data; only `route` comes from persisted workspace state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalLaunchPlan {
@@ -46,6 +52,9 @@ pub struct TerminalLaunchPlan {
     pub initial_command: Option<TerminalLaunchCommand>,
     /// Environment owned by this launch, kept out of shell command strings.
     pub environment: Vec<(String, String)>,
+    /// Project handed to the backend's [`LaunchEnvironment`]; a worktree
+    /// terminal passes its main project.
+    pub project_id: Option<String>,
 }
 
 impl TerminalLaunchPlan {
@@ -54,7 +63,13 @@ impl TerminalLaunchPlan {
             route,
             initial_command: None,
             environment: Vec::new(),
+            project_id: None,
         }
+    }
+
+    pub fn for_project(mut self, project_id: &str) -> Self {
+        self.project_id = Some(project_id.to_owned());
+        self
     }
 
     pub fn with_environment(mut self, mut environment: Vec<(String, String)>) -> Self {
@@ -147,8 +162,8 @@ pub trait TerminalBackend: Send + Sync {
         self.flush_teardown();
         Ok(())
     }
-    /// Replace environment overrides applied to terminals created from now on.
-    fn set_extra_env(&self, _env: Vec<(String, Option<String>)>) {}
+    /// Replace the environment of terminals created from now on.
+    fn set_launch_environment(&self, _environment: LaunchEnvironment) {}
     /// Whether this backend can switch persistence routes without replacement.
     fn supports_session_backend_reconfiguration(&self) -> bool {
         false
@@ -256,8 +271,8 @@ impl TerminalBackend for LocalBackend {
             .flush_teardown_with_timeout(timeout, terminal_ids)
     }
 
-    fn set_extra_env(&self, env: Vec<(String, Option<String>)>) {
-        self.pty_manager.set_extra_env(env);
+    fn set_launch_environment(&self, environment: LaunchEnvironment) {
+        self.pty_manager.set_launch_environment(environment);
     }
 
     fn supports_session_backend_reconfiguration(&self) -> bool {

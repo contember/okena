@@ -1,0 +1,257 @@
+# AI proxy (Claude account pool)
+
+Okena can route `claude` running in its terminals through a local proxy that
+spreads requests over several Claude subscription accounts. Why it is a
+separate process: [ADR-0004](../decisions/0004-ai-proxy-process.md). Code:
+`crates/okena-ai` (see its `CLAUDE.md`).
+
+## Use it
+
+1. **Settings → AI Proxy**, turn on *Route Claude Through the AI Proxy*.
+2. Under **Add Account**, enter a name and click **Log In**. Open the login
+   page, sign in with the account to add, and paste the code it shows into the
+   field, then click **Finish**. Repeat for more accounts.
+3. Open a new terminal and run `claude` as usual.
+
+Turning the proxy on affects **new** terminals only. A project terminal,
+including the project's hook and service terminals, gets
+`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/<token>/p/<project-id>` (a worktree
+terminal names its main project); other terminals get the URL without
+`/p/<project-id>`. Running terminals keep their environment; turning the proxy
+off leaves the proxy running for them.
+
+`claude` itself still needs its normal login (it refuses to start without one).
+That login is used only when the pool has no enabled, logged-in account: then
+the proxy forwards requests with the terminal's own credentials.
+
+## Project policies
+
+A policy says which pool accounts a project's terminals may use. Each account
+is **Prefer**, **Allow** or **Never**, and **New Accounts** (Allow or Never)
+covers accounts added later.
+
+| Need | Policy |
+|---|---|
+| Project X must use account A | A: Allow, others Never, New Accounts: Never |
+| Project Y may use all, B first | B: Prefer, others Allow |
+| Project Z must not use account C | C: Never, others Allow |
+
+- **Settings → AI Proxy → Default Policy** applies to terminals of projects
+  without their own policy, and to terminals without a project.
+- To give a project its own policy, pick the project in the selector at the top
+  of Settings, open **AI Proxy** and choose **Custom**. It starts as a copy of
+  the default policy. **Default** removes it again.
+- **Project Policies** on the User page lists the projects with their own
+  policy; a deleted project's policy can be removed there.
+- The proxy looks the policy up on every request: a change applies to running
+  `claude` sessions with their next request.
+
+## How requests are routed
+
+- A `POST` to `/v1/messages` or a path under it gets a pool account. The path
+  is judged after `..` segments are resolved, so it cannot reach another
+  endpoint with the account's token. The `authorization` header is replaced
+  with that account's OAuth token and `metadata.user_id.account_uuid` is
+  rewritten to the serving account. The minimal startup quota probe described
+  below also has its model rewritten. Other endpoints (OAuth, profile, telemetry)
+  pass through untouched.
+- Claude Code's startup quota probe uses `claude-haiku-4-5-20251001` on
+  `/v1/messages`. It must have integer `max_tokens: 1`, exactly one message
+  containing only `role: "user"` and string `content: "quota"`, and streaming
+  absent or `false`. Only `model`, `max_tokens`, `messages`, `metadata`, and
+  `stream` fields are accepted for this rewrite; system prompts, tools, other
+  generation options, and unknown fields leave the request unchanged. This
+  also applies when the pool is empty and the caller's login is used.
+  The workaround keeps the probe on Haiku when Claude Code selects the main
+  model behind a custom base URL: the minimal probe can receive a bare 429
+  on Opus even while regular inference succeeds. `quota_probe_model_rewrite`
+  logs the original request context and target model at info level; subsequent
+  attempt diagnostics show the rewritten model.
+- Only accounts the terminal's policy does not forbid are used.
+- An account with a known 5-hour or weekly utilization of 100% is skipped
+  until that window resets or a usage update reports remaining quota. This
+  does not require a preceding 429 response.
+- A conversation (`x-claude-code-session-id`) stays on the account that served
+  it last while that account is usable and permitted, so prompt caches keep
+  working. A preferred account does not pull a conversation away from its
+  account; a forbidden one moves it.
+- Otherwise a preferred account goes before an allowed one. Among those, an
+  account whose weekly quota would expire unused goes first: one that has more
+  remaining than 20% per day until its weekly reset can consume. The account
+  that would lose the most goes first. When no account would lose quota, the
+  account with the lowest 5-hour utilization is chosen.
+- **429**: the account cools down until the provider's reset time
+  (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,
+  and the request moves to the next permitted account. When all permitted
+  accounts are limited, the provider's 429 is returned and `claude` waits and
+  retries itself; a project that must use A waits for A.
+  When the proxy rejects a request locally, a known exhausted quota window
+  includes the unified status, representative claim and reset headers that
+  let Claude Code display the usage limit and resume time. They describe the
+  blocking window of the permitted account that becomes available first.
+  A cooldown alone does not produce quota headers.
+- **No account at all:** with no enabled, logged-in account the proxy forwards
+  requests with the terminal's own Claude login, unless the policy forbids an
+  account (that login may be the forbidden one). Such a project, and any
+  project whose permitted accounts are all disabled or logged out, gets a 400
+  with the reason. (400, not 403: `claude` shows the message, where a 401/403
+  can send the user to `/login`.) A request that a pool account already tried
+  never falls back to the terminal's own login; it gets a 400 instead.
+- **401**: the access token is refreshed once and the request retried; if the
+  token endpoint answers `invalid_grant` (or an error without a code) the
+  account is marked *Needs login*. Other token endpoint errors are temporary.
+  A refresh runs to completion and is saved even when the request that started
+  it is cancelled, because the provider rotates the refresh token.
+- A request is never retried after its response started streaming.
+- An upstream that sends nothing for 15 minutes (no response headers, or no
+  next chunk of a streaming body) is cut: before headers `claude` gets a 502,
+  during a stream the connection ends. This is longer than `claude`'s own
+  request timeout and stream watchdog, so it only ends requests `claude` has
+  already given up on.
+
+Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
+headers and from polling the usage endpoint every five minutes.
+
+The status bar shows a separate entry for each pool account, with both
+**5h** and **7d** when available. Disabled accounts and accounts needing login
+show their state alongside the name. A red **100%** conveys quota exhaustion
+without an extra status label; the popover and activity view name the exhausted
+window as **5h/7d limit reached**.
+**429 cooldown** means the provider returned 429 and the proxy is waiting before trying that
+account again. A 429 alone does not establish that either quota is at 100%.
+The activity view records these responses as HTTP 429 events separately from
+the account's current quota state.
+
+Pool usage refreshes in the proxy, first five seconds after startup and then
+every five minutes, and also follows response headers. The daemon publishes
+the account state every 15 seconds. Opening the pool popover does not fetch
+usage with the local Claude login; both the status bar and popover use the
+accounts published by the daemon.
+
+While new terminals are routed through the proxy, the daemon reads the accounts
+from it every 15 seconds and after each management command, and sends them to
+clients with the workspace state. The Claude usage widget in the status bar then
+shows the pool instead of the `claude` login's own usage: the 5-hour and 7-day
+usage of each account in the bar. Hovering an account opens its own popover
+with its usage, plan and state (disabled, needs login, quota exhausted or
+cooling down). Remote accounts include the host name in their popover.
+
+Successful five-minute usage polls append quota samples to
+`<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection
+continues while the proxy runs, even with the desktop closed. Samples survive
+proxy restarts; history begins with the first successful poll after upgrading.
+The popup loads the selected account's last seven days through the authenticated
+`usage_history` management command, at most once a minute across desktop windows.
+History is omitted from ordinary status and workspace snapshots. The shared
+storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
+them without owning proxy persistence.
+
+## Activity
+
+**AI Proxy Activity** (command palette; bind `ShowAiProxyActivity` in
+`keybindings.json` for a shortcut) shows what the proxy did with `/v1/messages`
+requests in the last hour. It updates every 5 seconds while open.
+
+- **Accounts**: per pool account, its state, requests answered in the last
+  minute and the last hour, error answers, 429s, and a per-minute graph. A row
+  for the terminal's own login appears when requests went out with it.
+- **Recent Events**: the last 50 failovers (429), rejected tokens, requests no
+  account could take (all rate limited, no permitted account) and error
+  answers with the provider's message, each with the terminal's project.
+  A repeat of a listed event moves it to the top and raises its count.
+
+The proxy keeps this in memory only: it starts empty after a proxy restart.
+With *Route Claude Through the AI Proxy* off, the overlay does not start the
+proxy and shows nothing.
+
+## Lifecycle
+
+- The daemon starts the proxy when the setting is on (at startup and when the
+  setting changes) and whenever the AI Proxy settings page sends a command.
+  While the setting is on, it asks the proxy for its accounts every 15 seconds
+  and starts it again when it does not answer; after each failed start it waits
+  twice as long, up to 10 minutes.
+- The proxy holds `ai-proxy/proxy.lock`; a second instance exits immediately.
+- It is never stopped by the daemon, the GUI or an update. A daemon that finds a
+  proxy of another version asks it to exit only while it has no request in
+  flight, then starts its own.
+- There is no restart button. **Refresh** in AI Proxy settings sends a status
+  command through this version check; it replaces an idle proxy only when its
+  version differs. A rebuild with the same version does not replace the proxy.
+  A busy older proxy is checked again on a later management command.
+- If the persisted port is taken by another program, the proxy moves to a free
+  port and rewrites `endpoint.json`; only new terminals get the new URL, from
+  the next 15-second check on.
+- The terminal URL only sends requests through the proxy. Management
+  (`/_okena/…`: health, commands, shutdown) needs `management.key` as a bearer
+  token, and only the daemon sends it. Any process of the same OS user can still
+  read the key file; it keeps management out of reach of anything that only
+  has the URL from a shell's environment.
+
+## Files (`<profile>/ai-proxy/`, owner-only directory)
+
+| File | Content |
+|---|---|
+| `endpoint.json` | port + path token (0600) |
+| `management.key` | bearer token for the management routes (0600) |
+| `accounts.json` | accounts with OAuth access/refresh tokens (0600) |
+| `routing.json` | default and per-project policies, by account id (0600) |
+| `proxy.lock` | instance lock |
+| `proxy.log` | proxy log (`RUST_LOG=okena_ai=debug` logs every routed request) |
+
+Provider HTTP errors, including 401 and 429 attempts that are retried, are
+logged at warning level with method, endpoint path, project/account IDs, status,
+error type/message, request ID, and selected response headers (`retry-after`,
+`anthropic-ratelimit-*`, request IDs, `cf-ray`, content type/encoding/length,
+and server). Gzip, Brotli and deflate responses are decoded before logging or
+relaying; the relay removes obsolete encoding and length headers.
+Diagnostics accept nested error objects, string errors and top-level
+`message`, `error_description` or `detail` fields. An unexpected JSON shape
+lists up to 16 field names at the root and inside `error`, each limited to 64
+characters, without dumping unknown values. Invalid JSON records the parse
+error category and position. Request IDs fall back to response headers.
+Messages are limited to 2,048 characters and header values to 256 characters;
+control characters are escaped. Non-JSON error bodies are represented by
+their size, headers and parse failure, not dumped into the log.
+
+`upstream_error` identifies provider responses. `proxy_rejection` identifies
+local rejections and includes the reason and earliest retry time when known.
+Connection failures, unreadable error bodies, and interrupted response streams
+have separate log entries with request context. Request bodies, query strings,
+authorization headers, and cookies are not included. These diagnostics apply
+to the relay; SSE error events inside an otherwise successful HTTP stream are
+forwarded without parsing.
+
+Inference diagnostics include a process-local `relay_id` (PID and sequence),
+attempt number and elapsed times, model, requested `max_tokens`, streaming flag,
+request byte size, a SHA-256 session hash prefix, the numeric SDK retry count,
+and the current number of in-flight requests across the proxy. Retries within
+one relay keep the same ID; client retries can be matched by the session hash.
+These fields exclude message content and the raw session/user identity.
+On provider failures, `recent_traffic` reports each active account's answers in
+the last 60 seconds and hour, plus hourly errors and 429s. Successful streams
+are counted when headers arrive; HTTP errors after reading their body, and
+connection failures when detected. These counts do not establish that a stream
+completed successfully. 429 attempts are counted separately.
+`account_availability` accompanies 429s and local account
+rejections with policy, enabled/login state, retry exclusions, quota windows,
+and cooldown/block expiry for each account. `failover_recovered` logs a
+successful response after another upstream attempt at info level.
+These error diagnostics work at the default log level. Debug logging also
+records each upstream response with the same request context and selected
+headers. Response diagnostics additionally allow `x-ratelimit-*`,
+`retry-after-ms`, `x-should-retry`, and `x-envoy-upstream-service-time`.
+
+## Limits
+
+- The project in the URL routes requests; it does not isolate them. A process of
+  the same user can put another project's id into its URL.
+- A corrupt `routing.json` stops the proxy from starting rather than dropping
+  the policies.
+
+- Cooldown is per account, not per model: a weekly Opus limit also pauses Sonnet
+  requests on that account until the reported reset.
+- Accounts belong to the host that runs the daemon; a remote host has its own
+  pool, managed through its own daemon.
+- Only the desktop has management UI; the `ai_proxy` action is available to any
+  client over the remote API.

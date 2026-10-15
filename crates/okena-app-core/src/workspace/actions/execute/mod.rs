@@ -681,7 +681,8 @@ pub fn execute_action(
         | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
-        | ActionRequest::InvokeAction { .. } => {
+        | ActionRequest::InvokeAction { .. }
+        | ActionRequest::AiProxy { .. } => {
             ActionResult::Err("app-scoped action must be handled by the remote bridge".to_string())
         }
     }
@@ -713,7 +714,8 @@ pub fn ensure_terminal(
             let shell = shell_type
                 .clone()
                 .resolve_default(project.default_shell.as_ref(), &settings.default_shell);
-            reconnect = Some((project.path.clone(), TerminalLaunchPlan::for_shell(shell)));
+            let plan = TerminalLaunchPlan::for_shell(shell).for_project(project.root_project_id());
+            reconnect = Some((project.path.clone(), plan));
             break;
         }
     }
@@ -779,6 +781,7 @@ pub fn reserve_uninitialized_terminal_launches(
         let project_path = project.path.clone();
         let project_name = project.name.clone();
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let is_worktree = project.worktree_info.is_some();
         let parent_hooks = project
             .worktree_info
@@ -822,7 +825,8 @@ pub fn reserve_uninitialized_terminal_launches(
                     // no restore-time resume is queued for them.
                     None,
                     &env,
-                ),
+                )
+                .for_project(&root_project_id),
             ));
         }
     }
@@ -927,6 +931,7 @@ pub fn spawn_uninitialized_terminals(
     let spawn_cwd = inherit_cwd.unwrap_or_else(|| project_path.clone());
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
+    let root_project_id = project.root_project_id().to_owned();
     let is_worktree = project.worktree_info.is_some();
     let parent_hooks = project
         .worktree_info
@@ -997,7 +1002,8 @@ pub fn spawn_uninitialized_terminals(
             on_create_cmd.as_deref(),
             resume_command.as_deref(),
             &env,
-        );
+        )
+        .for_project(&root_project_id);
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {

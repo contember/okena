@@ -337,9 +337,8 @@ impl DaemonCore {
         // right account — the same override the GUI's `sync_claude_pty_env`
         // applies, computed by the gpui-free `okena_workspace::claude_env` from
         // the daemon's own settings (the GUI's `ExtensionSettingsStore` is gpui).
-        pty_manager.set_extra_env(okena_workspace::claude_env::claude_pty_env_for_settings(
-            &params.settings,
-        ));
+        // With the AI proxy enabled, new shells also get its ANTHROPIC_BASE_URL.
+        pty_manager.set_launch_environment(crate::ai_proxy::launch_environment(&params.settings));
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -390,6 +389,9 @@ impl DaemonCore {
         // `AppSettings`. Terminals created before this point would silently get
         // alacritty's 10 000-line default, so set it before any PTY spawns.
         okena_terminal::terminal::set_process_scrollback_lines(settings.lock().scrollback_lines);
+
+        // The proxy outlives daemons; this starts it only if none is running.
+        crate::ai_proxy::start_if_enabled(&settings, &backend, &handle);
 
         // Retire hook terminals that piled up before eviction existed (or under
         // an older build). Their PTYs did not survive the restart, so this only
@@ -572,6 +574,13 @@ impl DaemonCore {
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
             ));
+            let ai_proxy_accounts =
+                crate::ai_proxy::AiProxyAccounts::new(reactor.state_version.clone());
+            tokio::task::spawn_local(crate::ai_proxy::run_accounts_poll(
+                ai_proxy_accounts.clone(),
+                settings.clone(),
+                backend.clone(),
+            ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
                 remote_subscribed_terminals,
@@ -662,6 +671,7 @@ impl DaemonCore {
                 daemon_config,
                 soft_close_deadlines,
                 git_poll_trigger_tx,
+                ai_proxy_accounts,
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {

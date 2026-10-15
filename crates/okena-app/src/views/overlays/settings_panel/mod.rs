@@ -8,6 +8,7 @@ mod components;
 mod controls;
 mod footer;
 mod header;
+mod render_ai_proxy;
 mod render_extensions;
 mod render_font;
 mod render_general;
@@ -19,6 +20,7 @@ mod sidebar;
 
 use categories::SettingsCategory;
 use components::opt_string;
+pub(crate) use render_ai_proxy::{format_remaining, send_ai_proxy_command};
 
 use crate::keybindings::Cancel;
 use crate::remote::auth::TokenInfo;
@@ -105,6 +107,7 @@ pub struct SettingsPanel {
     // is fetched over its REST API rather than read from an in-process store.
     pub(super) daemon_endpoint: Option<DaemonEndpoint>,
     pub(super) paired_devices: PairedDevices,
+    ai_proxy: render_ai_proxy::AiProxyPanel,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
     /// Scroll position of the content pane, shared with its overlay scrollbar.
@@ -927,6 +930,7 @@ impl SettingsPanel {
             file_opener_input,
             listen_address_input,
             paired_devices: PairedDevices::Loading,
+            ai_proxy: render_ai_proxy::AiProxyPanel::new(cx),
             daemon_endpoint,
             extension_views: HashMap::new(),
             content_scroll: ScrollHandle::new(),
@@ -1304,6 +1308,7 @@ impl SettingsPanel {
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),
             SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),
+            SettingsCategory::AiProxy => self.render_ai_proxy(cx).into_any_element(),
             SettingsCategory::Extension(ext_id) => {
                 self.render_extension_settings(ext_id.clone(), cx)
             }

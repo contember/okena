@@ -41,6 +41,10 @@ pub struct StateResponse {
     /// older servers (which omit the field) deserializable.
     #[serde(default)]
     pub hooks: Vec<ApiHookExecution>,
+    /// The host's AI proxy accounts while its new shells are routed through the
+    /// proxy; empty otherwise, so clients show the `claude` login's own usage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_accounts: Vec<crate::ai_proxy::AiAccount>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1294,6 +1298,13 @@ pub enum ActionRequest {
         #[serde(default)]
         window: Option<String>,
     },
+
+    // ── AI proxy (app-scoped; handled at the remote bridge) ───────────
+    /// Manage the host's AI proxy account pool. Replies with
+    /// [`crate::ai_proxy::AiProxyState`].
+    AiProxy {
+        request: crate::ai_proxy::AiProxyCommand,
+    },
 }
 
 /// Result of processing a remote command on the GPUI thread.
@@ -1500,6 +1511,7 @@ mod tests {
                 sidebar_open: Some(true),
             }],
             hooks: Vec::new(),
+            ai_accounts: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

@@ -1142,6 +1142,29 @@ pub fn revoke_paired_device(endpoint: &DaemonEndpoint, id: &str) -> Result<(), S
     error_for_status(resp, "Device revocation").map(|_| ())
 }
 
+/// Run one action on the local daemon (`POST /v1/actions`) and return its payload.
+pub fn post_action(
+    endpoint: &DaemonEndpoint,
+    action: &okena_core::api::ActionRequest,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let (client, url) = endpoint.client_and_url("/v1/actions");
+    let resp = client
+        .post(&url)
+        .bearer_auth(&endpoint.token)
+        .json(action)
+        .timeout(timeout)
+        .send()
+        .map_err(|e| format!("Failed to reach the daemon: {e}"))?;
+    let body: serde_json::Value = error_for_status(resp, "Action")?
+        .json()
+        .map_err(|e| format!("Failed to parse action response: {e}"))?;
+    match body.get("error").and_then(|error| error.as_str()) {
+        Some(error) => Err(error.to_string()),
+        None => Ok(body),
+    }
+}
+
 fn blocking_client_and_url(
     host: &str,
     port: u16,

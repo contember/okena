@@ -10,6 +10,7 @@ okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
 okena-extensions = { path = "../okena-extensions" }
 okena-ui = { path = "../okena-ui" }
 okena-usage = { path = "../okena-usage" }
+okena-workspace = { path = "../okena-workspace" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 serde_json = "1.0"
@@ -21,4 +22,5 @@ jiff = "0.2"
 sha2 = "0.10"
 
 [dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
 tempfile = "3"
