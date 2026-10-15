@@ -91,9 +91,13 @@ covers accounts added later.
   account (that login may be the forbidden one). Such a project, and any
   project whose permitted accounts are all disabled or logged out, gets a 400
   with the reason. (400, not 403: `claude` shows the message, where a 401/403
-  can send the user to `/login`.)
+  can send the user to `/login`.) A request that a pool account already tried
+  never falls back to the terminal's own login; it gets a 400 instead.
 - **401**: the access token is refreshed once and the request retried; if the
-  refresh token is rejected the account is marked *Needs login*.
+  token endpoint answers `invalid_grant` (or an error without a code) the
+  account is marked *Needs login*. Other token endpoint errors are temporary.
+  A refresh runs to completion and is saved even when the request that started
+  it is cancelled, because the provider rotates the refresh token.
 - A request is never retried after its response started streaming.
 - An upstream that sends nothing for 15 minutes (no response headers, or no
   next chunk of a streaming body) is cut: before headers `claude` gets a 502,
@@ -160,6 +164,9 @@ proxy and shows nothing.
 
 - The daemon starts the proxy when the setting is on (at startup and when the
   setting changes) and whenever the AI Proxy settings page sends a command.
+  While the setting is on, it asks the proxy for its accounts every 15 seconds
+  and starts it again when it does not answer; after each failed start it waits
+  twice as long, up to 10 minutes.
 - The proxy holds `ai-proxy/proxy.lock`; a second instance exits immediately.
 - It is never stopped by the daemon, the GUI or an update. A daemon that finds a
   proxy of another version asks it to exit only while it has no request in
@@ -169,14 +176,15 @@ proxy and shows nothing.
   version differs. A rebuild with the same version does not replace the proxy.
   A busy older proxy is checked again on a later management command.
 - If the persisted port is taken by another program, the proxy moves to a free
-  port and rewrites `endpoint.json`; only new terminals get the new URL.
+  port and rewrites `endpoint.json`; only new terminals get the new URL, from
+  the next 15-second check on.
 - The terminal URL only sends requests through the proxy. Management
   (`/_okena/…`: health, commands, shutdown) needs `management.key` as a bearer
   token, and only the daemon sends it. Any process of the same OS user can still
   read the key file; it keeps management out of reach of anything that only
   has the URL from a shell's environment.
 
-## Files (`<profile>/ai-proxy/`)
+## Files (`<profile>/ai-proxy/`, owner-only directory)
 
 | File | Content |
 |---|---|
