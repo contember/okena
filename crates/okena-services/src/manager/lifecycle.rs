@@ -8,6 +8,15 @@ use crate::config::{PreparedProjectConfig, load_project_config, prepare_project_
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
+/// What a load brings up besides the service definitions.
+enum LoadStart<'a> {
+    /// Reconnect the saved terminals (service name → terminal id), then start
+    /// the auto-start services that are still stopped.
+    Resume(&'a HashMap<String, String>),
+    /// Start nothing, preserving explicit stopped state.
+    DefinitionsOnly,
+}
+
 impl ServiceManager {
     /// Parse `okena.yaml` for a project, create `ServiceInstance` entries,
     /// reconnect to saved sessions, and auto-start services where configured.
@@ -15,15 +24,16 @@ impl ServiceManager {
     pub fn load_project_services(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
-        self.load_project_services_with_auto_start(
+        self.load_project_services_from_disk(
             project_id,
+            root_project_id,
             project_path,
-            saved_terminal_ids,
-            true,
+            LoadStart::Resume(saved_terminal_ids),
             cx,
         )
     }
@@ -32,24 +42,25 @@ impl ServiceManager {
     pub fn load_project_services_for_backend_migration(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
-        self.load_project_services_with_auto_start(
+        self.load_project_services_from_disk(
             project_id,
+            root_project_id,
             project_path,
-            &HashMap::new(),
-            false,
+            LoadStart::DefinitionsOnly,
             cx,
         )
     }
 
-    fn load_project_services_with_auto_start(
+    fn load_project_services_from_disk(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
-        saved_terminal_ids: &HashMap<String, String>,
-        start_auto_services: bool,
+        start: LoadStart<'_>,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
         let prepared = match load_project_config(project_path) {
@@ -63,12 +74,12 @@ impl ServiceManager {
             }
             Err(error) => PreparedProjectConfig::Failed(error.to_string()),
         };
-        self.load_project_services_prepared_with_auto_start(
+        self.load_project_services_prepared_with_start(
             project_id,
+            root_project_id,
             project_path,
-            saved_terminal_ids,
             prepared,
-            start_auto_services,
+            start,
             cx,
         )
     }
@@ -77,17 +88,18 @@ impl ServiceManager {
     pub fn load_project_services_prepared(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
         saved_terminal_ids: &HashMap<String, String>,
         prepared: PreparedProjectConfig,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
-        self.load_project_services_prepared_with_auto_start(
+        self.load_project_services_prepared_with_start(
             project_id,
+            root_project_id,
             project_path,
-            saved_terminal_ids,
             prepared,
-            true,
+            LoadStart::Resume(saved_terminal_ids),
             cx,
         )
     }
@@ -96,29 +108,35 @@ impl ServiceManager {
     pub fn load_project_services_prepared_without_auto_start(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
         prepared: PreparedProjectConfig,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
-        self.load_project_services_prepared_with_auto_start(
+        self.load_project_services_prepared_with_start(
             project_id,
+            root_project_id,
             project_path,
-            &HashMap::new(),
             prepared,
-            false,
+            LoadStart::DefinitionsOnly,
             cx,
         )
     }
 
-    fn load_project_services_prepared_with_auto_start(
+    fn load_project_services_prepared_with_start(
         &mut self,
         project_id: &str,
+        root_project_id: &str,
         project_path: &str,
-        saved_terminal_ids: &HashMap<String, String>,
         prepared: PreparedProjectConfig,
-        start_auto_services: bool,
+        start: LoadStart<'_>,
         cx: &mut impl ServiceCx,
     ) -> ServiceLoadStatus {
+        let no_saved_terminals = HashMap::new();
+        let (saved_terminal_ids, start_auto_services) = match start {
+            LoadStart::Resume(saved_terminal_ids) => (saved_terminal_ids, true),
+            LoadStart::DefinitionsOnly => (&no_saved_terminals, false),
+        };
         log::info!(
             "[services] load_project_services project_id={} path={}",
             project_id,
@@ -145,6 +163,8 @@ impl ServiceManager {
                 self.begin_project_incarnation(project_id, project_path);
                 self.project_paths
                     .insert(project_id.to_string(), project_path.to_string());
+                self.project_roots
+                    .insert(project_id.to_string(), root_project_id.to_string());
                 self.load_docker_compose_services_prepared(
                     project_id,
                     project_path,
@@ -174,6 +194,8 @@ impl ServiceManager {
         self.begin_project_incarnation(project_id, project_path);
         self.project_paths
             .insert(project_id.to_string(), project_path.to_string());
+        self.project_roots
+            .insert(project_id.to_string(), root_project_id.to_string());
 
         let (config, detected_compose_file) = config;
         let auto_start_names: Vec<String> = if start_auto_services {
@@ -342,6 +364,7 @@ impl ServiceManager {
 
         self.configs.remove(project_id);
         self.project_paths.remove(project_id);
+        self.project_roots.remove(project_id);
         self.project_writeback_owners.remove(project_id);
         self.port_detection_active
             .retain(|(pid, _), _| pid != project_id);
@@ -378,9 +401,16 @@ impl ServiceManager {
                 config: None,
                 detected_compose_file,
             } => {
+                // A reload keeps the project's identity, so it keeps its main project.
+                let root_project_id = self
+                    .project_roots
+                    .get(project_id)
+                    .cloned()
+                    .unwrap_or_else(|| project_id.to_string());
                 self.unload_project_services(project_id, cx);
                 return self.load_project_services_prepared(
                     project_id,
+                    &root_project_id,
                     project_path,
                     &HashMap::new(),
                     PreparedProjectConfig::Loaded {

@@ -882,6 +882,7 @@ async fn recover_quiesced_project_runtime(
 }
 
 struct PreparedServiceOwner {
+    root_project_id: String,
     project_path: String,
     data_replacement_epoch: u64,
     service_state: ServiceProjectStateToken,
@@ -892,14 +893,19 @@ fn snapshot_service_owner(
     workspace: &Arc<Mutex<Workspace>>,
     service_manager: &Arc<Mutex<ServiceManager>>,
 ) -> Option<PreparedServiceOwner> {
-    let (project_path, data_replacement_epoch) = {
+    let (root_project_id, project_path, data_replacement_epoch) = {
         let workspace = workspace.lock();
-        workspace
-            .project(project_id)
-            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+        workspace.project(project_id).map(|project| {
+            (
+                project.root_project_id().to_owned(),
+                project.path.clone(),
+                workspace.data_replacement_epoch(),
+            )
+        })
     }?;
     let service_state = service_manager.lock().project_state_token(project_id);
     Some(PreparedServiceOwner {
+        root_project_id,
         project_path,
         data_replacement_epoch,
         service_state,
@@ -1058,6 +1064,7 @@ where
     // reconnecting their ids here would race their asynchronous teardown.
     let status = manager.load_project_services_prepared_without_auto_start(
         project_id,
+        &owner.root_project_id,
         &owner.project_path,
         prepared,
         &mut cx,
@@ -1102,11 +1109,15 @@ fn recover_project_services_for_backend_migration(
 ) {
     let project_owner = {
         let workspace = workspace.lock();
-        workspace
-            .project(project_id)
-            .map(|project| (project.path.clone(), workspace.data_replacement_epoch()))
+        workspace.project(project_id).map(|project| {
+            (
+                project.root_project_id().to_owned(),
+                project.path.clone(),
+                workspace.data_replacement_epoch(),
+            )
+        })
     };
-    let Some((project_path, data_replacement_epoch)) = project_owner else {
+    let Some((root_project_id, project_path, data_replacement_epoch)) = project_owner else {
         return;
     };
     if !std::path::Path::new(&project_path).exists() {
@@ -1120,7 +1131,12 @@ fn recover_project_services_for_backend_migration(
     let mut manager = service_manager.lock();
     let mut cx = reactor_ref.cx();
     manager.set_project_writeback_owner(project_id, &project_path, data_replacement_epoch);
-    manager.load_project_services_for_backend_migration(project_id, &project_path, &mut cx);
+    manager.load_project_services_for_backend_migration(
+        project_id,
+        &root_project_id,
+        &project_path,
+        &mut cx,
+    );
 }
 
 struct TerminalBackendMigrationGuard {
@@ -2589,6 +2605,7 @@ fn spawn_merge_worktree_close(
         let project_name = project.name.clone();
         let project_path = project.path.clone();
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let main_repo_path = ws.worktree_parent_path(&project_id).unwrap_or_default();
         let folder = ws.folder_for_project_or_parent(&project_id);
         let folder_id = folder.map(|folder| folder.id.clone());
@@ -2597,6 +2614,7 @@ fn spawn_merge_worktree_close(
         cx.notify();
         (
             ws.data_replacement_epoch(),
+            root_project_id,
             project_name,
             project_path,
             project_hooks,
@@ -2622,6 +2640,7 @@ fn spawn_merge_worktree_close(
         };
         let (
             operation_epoch,
+            root_project_id,
             project_name,
             project_path,
             project_hooks,
@@ -2648,6 +2667,7 @@ fn spawn_merge_worktree_close(
                         fetch,
                         push,
                         &blocking_project_id,
+                        &root_project_id,
                         &project_name,
                         &project_path,
                         &branch,
@@ -5579,6 +5599,7 @@ mod tests {
                     manager.set_project_writeback_owner("p1", &project_path, current_epoch);
                     manager.load_project_services_prepared(
                         "p1",
+                        "p1",
                         &project_path,
                         &HashMap::new(),
                         prepare_project_config(&project_path),
@@ -5782,6 +5803,7 @@ mod tests {
                     let mut manager = service_manager.lock();
                     let mut cx = reactor_ref.cx();
                     manager.load_project_services_prepared(
+                        "p1",
                         "p1",
                         project_path,
                         &HashMap::new(),
@@ -5992,6 +6014,7 @@ mod tests {
                     let mut cx = reactor_ref.cx();
                     manager.load_project_services_prepared(
                         "p1",
+                        "p1",
                         project_path,
                         &HashMap::new(),
                         PreparedProjectConfig::Loaded {
@@ -6086,6 +6109,7 @@ mod tests {
             let mut manager = service_manager.lock();
             let mut cx = reactor_ref.cx();
             manager.load_project_services_prepared(
+                "p1",
                 "p1",
                 project_path,
                 &HashMap::new(),
@@ -9041,6 +9065,7 @@ mod tests {
             assert_eq!(
                 manager.load_project_services_prepared_without_auto_start(
                     "wt1",
+                    "p1",
                     &worktree_path.to_string_lossy(),
                     PreparedProjectConfig::Loaded {
                         config: None,

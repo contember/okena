@@ -48,6 +48,7 @@ pub struct HookActionPlan {
     hook_type: &'static str,
     project_name: String,
     project_id: String,
+    root_project_id: String,
     keep_alive: bool,
 }
 
@@ -65,6 +66,7 @@ pub fn execute_hook_action_plan(
         &plan.project_name,
         runner,
         &plan.project_id,
+        &plan.root_project_id,
         plan.keep_alive,
     )
 }
@@ -118,6 +120,7 @@ impl PreparedHookTerminal {
 impl HookRunner {
     /// Create a PTY-backed terminal for a hook command.
     /// Returns (terminal_id, full_cmd). The terminal is registered in the TerminalsRegistry.
+    /// `root_project_id` selects the AI routing policy; a worktree hook passes its main project.
     ///
     /// When `keep_alive` is true, the terminal starts a regular interactive shell and
     /// types the command into it — the shell stays alive after the command finishes.
@@ -128,6 +131,7 @@ impl HookRunner {
         command: &str,
         env_vars: &HashMap<String, String>,
         project_path: &str,
+        root_project_id: &str,
         keep_alive: bool,
     ) -> Result<(String, String), String> {
         // Store an independently rerunnable command, including persistent env setup.
@@ -145,8 +149,9 @@ impl HookRunner {
             // Use sh -c so the PTY exits when the command completes.
             ShellType::for_command(full_cmd.clone())
         };
-        let plan =
-            TerminalLaunchPlan::for_shell(shell).with_environment(safe_hook_environment(env_vars));
+        let plan = TerminalLaunchPlan::for_shell(shell)
+            .for_project(root_project_id)
+            .with_environment(safe_hook_environment(env_vars));
         let terminal_id = self
             .backend
             .create_terminal_with_plan(cwd, &plan)
@@ -206,6 +211,7 @@ pub fn prepare_project_open_hook(
     terminal_id: String,
     project_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     folder_id: Option<&str>,
@@ -227,6 +233,7 @@ pub fn prepare_project_open_hook(
         project_path.to_string()
     };
     let launch_plan = TerminalLaunchPlan::for_shell(keep_alive_hook_shell(&full_command))
+        .for_project(root_project_id)
         .with_environment(safe_hook_environment(&env_vars));
     Some(PreparedHookTerminal {
         result: HookTerminalResult {
@@ -481,6 +488,7 @@ fn run_hook_actions(
     project_name: &str,
     runner: Option<&HookRunner>,
     project_id: &str,
+    root_project_id: &str,
     keep_alive: bool,
 ) -> HookActionOutcome {
     let actions = parse_hook_actions(command);
@@ -498,6 +506,7 @@ fn run_hook_actions(
                     project_name,
                     runner,
                     project_id,
+                    root_project_id,
                     keep_alive,
                 ) {
                     hook_results.push(result);
@@ -564,6 +573,7 @@ fn run_hook(
     project_name: &str,
     runner: Option<&HookRunner>,
     project_id: &str,
+    root_project_id: &str,
     keep_alive: bool,
 ) -> Option<HookTerminalResult> {
     // PTY path: create a real terminal so output is visible in the service panel
@@ -579,7 +589,13 @@ fn run_hook(
             project_path.clone()
         };
 
-        match runner.create_hook_terminal(&command, &env_vars, &project_path, keep_alive) {
+        match runner.create_hook_terminal(
+            &command,
+            &env_vars,
+            &project_path,
+            root_project_id,
+            keep_alive,
+        ) {
             Ok((terminal_id, full_cmd)) => {
                 // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
                 let _ = monitor.map(|m| {
@@ -678,6 +694,7 @@ fn run_hook_sync(
     project_name: &str,
     runner: Option<&HookRunner>,
     project_id: &str,
+    root_project_id: &str,
 ) -> Result<Option<HookTerminalResult>, String> {
     // PTY path: requires both runner and monitor (monitor provides the exit waiter channel).
     // If runner exists but monitor is missing, fall through to headless execution.
@@ -694,8 +711,13 @@ fn run_hook_sync(
         };
 
         let exit_reservation = monitor.reserve_exit_waiter();
-        let (terminal_id, full_cmd) =
-            runner.create_hook_terminal(command, &env_vars, &project_path, false)?;
+        let (terminal_id, full_cmd) = runner.create_hook_terminal(
+            command,
+            &env_vars,
+            &project_path,
+            root_project_id,
+            false,
+        )?;
 
         // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
         let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
@@ -822,6 +844,7 @@ fn project_env(
 pub fn fire_on_project_open(
     project_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     folder_id: Option<&str>,
@@ -850,6 +873,7 @@ pub fn fire_on_project_open(
             project_name,
             runner,
             project_id,
+            root_project_id,
             true,
         ) {
             return vec![result];
@@ -893,6 +917,7 @@ pub fn fire_on_project_close(
             project_name,
             None,
             project_id,
+            project_id,
             true,
         );
     }
@@ -931,6 +956,7 @@ pub fn fire_on_project_close_headless_sync(
         project_name,
         None,
         project_id,
+        project_id,
     )?;
     Ok(())
 }
@@ -941,6 +967,7 @@ pub fn fire_on_project_close_headless_sync(
 pub fn fire_on_worktree_create(
     project_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -968,6 +995,7 @@ pub fn fire_on_worktree_create(
             project_name,
             runner,
             project_id,
+            root_project_id,
             true,
         ) {
             return vec![result];
@@ -1014,6 +1042,7 @@ pub fn fire_on_worktree_close_with_services(
             project_name,
             None,
             project_id,
+            project_id,
             true,
         );
     }
@@ -1056,6 +1085,7 @@ pub fn fire_on_worktree_close_headless_sync(
         project_name,
         None,
         project_id,
+        project_id,
     )?;
     Ok(())
 }
@@ -1095,7 +1125,7 @@ fn run_hook_sync_bare(
     command: &str,
     env_vars: HashMap<String, String>,
 ) -> Result<Option<HookTerminalResult>, String> {
-    run_hook_sync(command, env_vars, None, "", "", None, "")
+    run_hook_sync(command, env_vars, None, "", "", None, "", "")
 }
 
 /// Build extended environment for merge/worktree-remove hooks.
@@ -1127,6 +1157,7 @@ pub fn fire_pre_merge(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1157,6 +1188,7 @@ pub fn fire_pre_merge(
             project_name,
             runner,
             project_id,
+            root_project_id,
         );
     }
     Ok(None)
@@ -1167,6 +1199,7 @@ pub fn fire_post_merge(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1197,6 +1230,7 @@ pub fn fire_post_merge(
             project_name,
             runner,
             project_id,
+            root_project_id,
             true,
         ) {
             return vec![result];
@@ -1242,6 +1276,7 @@ pub fn fire_post_merge_headless_sync(
         project_name,
         None,
         project_id,
+        project_id,
     )?;
     Ok(())
 }
@@ -1251,6 +1286,7 @@ pub fn fire_before_worktree_remove(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1282,6 +1318,7 @@ pub fn fire_before_worktree_remove(
             project_name,
             runner,
             project_id,
+            root_project_id,
         );
     }
     Ok(None)
@@ -1294,6 +1331,7 @@ pub fn fire_before_worktree_remove_async(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1325,6 +1363,7 @@ pub fn fire_before_worktree_remove_async(
             project_name,
             runner,
             project_id,
+            root_project_id,
             false,
         ) {
             return vec![result];
@@ -1339,6 +1378,7 @@ pub fn plan_on_rebase_conflict(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1372,6 +1412,7 @@ pub fn plan_on_rebase_conflict(
             hook_type: "on_rebase_conflict",
             project_name: project_name.to_string(),
             project_id: project_id.to_string(),
+            root_project_id: root_project_id.to_string(),
             keep_alive: true,
         });
     }
@@ -1384,6 +1425,7 @@ pub fn fire_on_rebase_conflict(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1399,6 +1441,7 @@ pub fn fire_on_rebase_conflict(
         project_hooks,
         global_hooks,
         project_id,
+        root_project_id,
         project_name,
         project_path,
         branch,
@@ -1420,6 +1463,7 @@ pub fn fire_on_dirty_worktree_close(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1449,6 +1493,7 @@ pub fn fire_on_dirty_worktree_close(
             project_name,
             runner,
             project_id,
+            root_project_id,
             true,
         );
     }
@@ -1497,6 +1542,7 @@ pub fn fire_on_dirty_worktree_close_headless(
             project_name,
             None,
             project_id,
+            project_id,
         )?;
     }
     Ok(())
@@ -1507,6 +1553,7 @@ pub fn fire_worktree_removed(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
     project_id: &str,
+    root_project_id: &str,
     project_name: &str,
     project_path: &str,
     branch: &str,
@@ -1538,6 +1585,7 @@ pub fn fire_worktree_removed(
             project_name,
             runner,
             project_id,
+            root_project_id,
             true,
         ) {
             return vec![result];
@@ -1760,6 +1808,7 @@ pub fn fire_terminal_on_close_with_services(
             project_name,
             None,
             project_id,
+            project_id,
             true,
         );
     }
@@ -1892,6 +1941,7 @@ mod tests {
             "Project",
             Some(&runner),
             "p1",
+            "p1",
         );
         let terminal_id = event_thread.join().expect("event thread joins");
 
@@ -1997,6 +2047,7 @@ mod tests {
             "proj",
             None,
             "proj-id",
+            "proj-id",
             true,
         );
         assert_eq!(terminal_actions.len(), 1);
@@ -2016,6 +2067,7 @@ mod tests {
         let plan = plan_on_rebase_conflict(
             &hooks,
             &HooksConfig::default(),
+            "p1",
             "p1",
             "Project",
             ".",
@@ -2095,6 +2147,136 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert!(history[0].terminal_id.is_none());
         assert!(matches!(history[0].status, HookStatus::Succeeded { .. }));
+    }
+
+    #[derive(Default)]
+    struct PlanRecordingBackend {
+        plans: parking_lot::Mutex<Vec<TerminalLaunchPlan>>,
+    }
+
+    struct NullTransport;
+
+    impl okena_terminal::terminal::TerminalTransport for NullTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    impl TerminalBackend for PlanRecordingBackend {
+        fn transport(&self) -> Arc<dyn okena_terminal::terminal::TerminalTransport> {
+            Arc::new(NullTransport)
+        }
+
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            unreachable!("hook terminals launch through a plan")
+        }
+
+        fn create_terminal_with_plan(
+            &self,
+            _cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            let mut plans = self.plans.lock();
+            plans.push(plan.clone());
+            Ok(format!("hook-{}", plans.len()))
+        }
+
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            unreachable!("hook tests do not reconnect terminals")
+        }
+
+        fn kill(&self, _terminal_id: &str) {}
+
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+
+        fn is_remote(&self) -> bool {
+            false
+        }
+
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn worktree_hook_terminals_launch_under_the_main_project() {
+        let hooks = HooksConfig {
+            worktree: WorktreeHooks {
+                on_create: Some("true".into()),
+                on_rebase_conflict: Some("true".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let backend = Arc::new(PlanRecordingBackend::default());
+        let runner = HookRunner::new(backend.clone(), Default::default());
+
+        let created = fire_on_worktree_create(
+            &hooks,
+            "worktree",
+            "main",
+            "feature",
+            ".",
+            "feature",
+            None,
+            None,
+            &HooksConfig::default(),
+            Some(&runner),
+            None,
+        );
+        let plan = plan_on_rebase_conflict(
+            &hooks,
+            &HooksConfig::default(),
+            "worktree",
+            "main",
+            "feature",
+            ".",
+            "feature",
+            "main",
+            ".",
+            "conflict",
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, conflict) = execute_hook_action_plan(plan, None, Some(&runner));
+
+        assert_eq!(created[0].project_id, "worktree");
+        assert_eq!(conflict[0].project_id, "worktree");
+        let plans = backend.plans.lock();
+        assert_eq!(plans.len(), 2);
+        assert!(
+            plans
+                .iter()
+                .all(|plan| plan.project_id.as_deref() == Some("main"))
+        );
+        assert!(plans.iter().all(|plan| {
+            plan.environment
+                .contains(&("OKENA_PROJECT_ID".to_string(), "worktree".to_string()))
+        }));
     }
 
     #[test]
