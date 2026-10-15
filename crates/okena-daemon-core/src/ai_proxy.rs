@@ -4,7 +4,8 @@
 
 use crate::claude_remote::PaneEnv;
 use okena_core::ai_proxy::{
-    AiAccount, AiProxyCommand, AiProxyState, ensure_endpoint, ensure_management_key, load_endpoint,
+    AiAccount, AiProxyCommand, AiProxyState, ProxyEndpoint, ensure_endpoint, ensure_management_key,
+    load_endpoint,
 };
 use okena_terminal::backend::{LaunchEnvironment, TerminalBackend};
 use okena_workspace::persistence::AppSettings;
@@ -16,6 +17,8 @@ use tokio::sync::{Notify, watch};
 
 /// How often the published accounts follow the proxy's usage and cooldowns.
 const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// Longest wait between attempts to start a proxy that keeps failing to come up.
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(10 * 60);
 
 fn profile_root() -> Option<PathBuf> {
     okena_core::profiles::try_current().map(|profile| profile.root.clone())
@@ -142,20 +145,36 @@ impl AiProxyAccounts {
 }
 
 /// Keep [`AiProxyAccounts`] in step with the proxy while new shells are routed
-/// through it. With routing off, or the proxy unreachable, nothing is
-/// published: the `claude` login's own usage is then the relevant one.
+/// through it. New shells get its URL whether or not it listens, so a proxy
+/// that died is started again, and a port it moved to reaches new shells.
+/// With routing off, or the proxy unreachable, nothing is published: the
+/// `claude` login's own usage is then the relevant one.
 pub(crate) async fn run_accounts_poll(
     accounts: AiProxyAccounts,
     settings: Arc<Mutex<AppSettings>>,
+    backend: Arc<dyn TerminalBackend>,
+    pane_env: Arc<PaneEnv>,
 ) {
+    let mut routed_endpoint: Option<ProxyEndpoint> = None;
+    let mut restart = RestartBackoff::new();
     loop {
         let enabled = settings.lock().ai_proxy_enabled;
         let current = if enabled {
-            read_accounts()
-                .await
-                .inspect_err(|error| log::debug!("[ai-proxy] accounts unavailable: {error:#}"))
-                .unwrap_or_default()
+            match read_or_restart(&mut restart).await {
+                Ok((endpoint, current)) => {
+                    if routed_endpoint.as_ref() != Some(&endpoint) {
+                        backend.set_launch_environment(pane_env.launch_environment(&settings.lock()));
+                        routed_endpoint = Some(endpoint);
+                    }
+                    current
+                }
+                Err(error) => {
+                    log::warn!("[ai-proxy] proxy unreachable: {error:#}");
+                    Vec::new()
+                }
+            }
         } else {
+            routed_endpoint = None;
             Vec::new()
         };
         accounts.publish(current);
@@ -166,10 +185,59 @@ pub(crate) async fn run_accounts_poll(
     }
 }
 
+/// Read the running proxy's accounts; when it does not answer, start it, at
+/// most as often as `restart` allows.
+async fn read_or_restart(
+    restart: &mut RestartBackoff,
+) -> anyhow::Result<(ProxyEndpoint, Vec<AiAccount>)> {
+    match read_accounts().await {
+        Ok(read) => {
+            restart.reset();
+            return Ok(read);
+        }
+        Err(error) if !restart.due() => return Err(error),
+        Err(error) => log::warn!("[ai-proxy] proxy unreachable, starting it: {error:#}"),
+    }
+    restart.back_off();
+    connect().await?;
+    read_accounts().await
+}
+
 /// Ask a running proxy for its accounts without starting one.
-async fn read_accounts() -> anyhow::Result<Vec<AiAccount>> {
+async fn read_accounts() -> anyhow::Result<(ProxyEndpoint, Vec<AiAccount>)> {
     let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
     let endpoint = load_endpoint(&root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
-    let client = okena_ai::client::ProxyClient::new(endpoint, ensure_management_key(&root)?);
-    Ok(client.command(&AiProxyCommand::Status).await?.accounts)
+    let client =
+        okena_ai::client::ProxyClient::new(endpoint.clone(), ensure_management_key(&root)?);
+    let accounts = client.command(&AiProxyCommand::Status).await?.accounts;
+    Ok((endpoint, accounts))
+}
+
+/// Doubling delay between start attempts, so a proxy that exits at once (e.g.
+/// on a corrupt `accounts.json`) is not respawned on every poll.
+struct RestartBackoff {
+    next_attempt: tokio::time::Instant,
+    delay: Duration,
+}
+
+impl RestartBackoff {
+    fn new() -> Self {
+        Self {
+            next_attempt: tokio::time::Instant::now(),
+            delay: ACCOUNTS_POLL_INTERVAL,
+        }
+    }
+
+    fn due(&self) -> bool {
+        tokio::time::Instant::now() >= self.next_attempt
+    }
+
+    fn back_off(&mut self) {
+        self.next_attempt = tokio::time::Instant::now() + self.delay;
+        self.delay = (self.delay * 2).min(MAX_RESTART_DELAY);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
