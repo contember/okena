@@ -74,7 +74,10 @@ covers accounts added later.
   it last while that account is usable and permitted, so prompt caches keep
   working. A preferred account does not pull a conversation away from its
   account; a forbidden one moves it.
-- Otherwise a preferred account goes before an allowed one, and among those the
+- Otherwise a preferred account goes before an allowed one. Among those, an
+  account whose weekly quota would expire unused goes first: one that has more
+  remaining than 20% per day until its weekly reset can consume. The account
+  that would lose the most goes first. When no account would lose quota, the
   account with the lowest 5-hour utilization is chosen.
 - **429**: the account cools down until the provider's reset time
   (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,

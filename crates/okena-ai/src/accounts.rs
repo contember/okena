@@ -19,6 +19,9 @@ use std::sync::Arc;
 const AFFINITY_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 const LOGIN_TTL_MS: i64 = 30 * 60 * 1000;
 const DEFAULT_COOLDOWN_MS: i64 = 60 * 1000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Weekly quota one account can realistically burn per day (an even pace is ~14.3).
+const MAX_WEEKLY_PERCENT_PER_DAY: f64 = 20.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredAccount {
@@ -58,6 +61,20 @@ impl Runtime {
             .into_iter()
             .chain(quota_resets)
             .max()
+    }
+
+    /// Weekly quota (percentage points) that expires unused even when the account
+    /// is drawn at the maximum pace until its reset. Zero while the window is unknown.
+    fn weekly_quota_at_risk(&self, now: i64) -> f64 {
+        let Some(usage) = &self.seven_day else {
+            return 0.0;
+        };
+        let Some(reset) = usage.resets_at_ms.filter(|reset| *reset > now) else {
+            return 0.0;
+        };
+        let days_left = (reset - now) as f64 / DAY_MS as f64;
+        let remaining = 100.0 - usage.utilization;
+        (remaining - MAX_WEEKLY_PERCENT_PER_DAY * days_left).max(0.0)
     }
 }
 
@@ -382,7 +399,7 @@ impl Accounts {
 
     /// Pick an account the project's policy permits: the conversation's previous
     /// account while it is usable, otherwise a preferred one before an allowed
-    /// one, the least-used first.
+    /// one, the one losing the most weekly quota first, then the least-used.
     pub async fn select(
         self: &Arc<Self>,
         project: Option<&str>,
@@ -399,6 +416,7 @@ impl Accounts {
                     |account: &&Account| policy.rule(&account.stored.id) != AiAccountRule::Forbid;
                 let preferred =
                     |account: &Account| policy.rule(&account.stored.id) == AiAccountRule::Prefer;
+                let at_risk = |account: &Account| account.runtime.weekly_quota_at_risk(now);
                 let usable = |account: &&Account| {
                     account.available(now)
                         && !excluded.contains(&account.stored.id)
@@ -431,6 +449,7 @@ impl Accounts {
                         };
                         preferred(b)
                             .cmp(&preferred(a))
+                            .then_with(|| at_risk(b).total_cmp(&at_risk(a)))
                             .then_with(|| {
                                 load(a)
                                     .partial_cmp(&load(b))
@@ -866,12 +885,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn exhausted_quota_is_skipped_without_waiting_for_a_429() {
-        let dir = tempfile::tempdir().unwrap();
+    fn open_pool(dir: &Path, ids: &[&str]) -> Arc<Accounts> {
         let stored = StoredAccounts {
-            accounts: ["a", "b"]
-                .into_iter()
+            accounts: ids
+                .iter()
+                .copied()
                 .map(|id| StoredAccount {
                     id: id.into(),
                     label: id.into(),
@@ -889,13 +907,17 @@ mod tests {
                 .collect(),
         };
         write_private(
-            &dir.path().join("accounts.json"),
+            &dir.join("accounts.json"),
             &serde_json::to_vec(&stored).unwrap(),
         )
         .unwrap();
-        let accounts = Arc::new(
-            Accounts::open(dir.path(), reqwest::Client::new(), Upstream::default()).unwrap(),
-        );
+        Arc::new(Accounts::open(dir, reqwest::Client::new(), Upstream::default()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn exhausted_quota_is_skipped_without_waiting_for_a_429() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["a", "b"]);
         let reset = (now_ms() / 1000 + 3_600).to_string();
         accounts.observe(
             "a",
@@ -936,6 +958,58 @@ mod tests {
             panic!("both accounts have exhausted their quota");
         };
         assert_eq!(retry_at_ms, Some(reset.parse::<i64>().unwrap() * 1000));
+    }
+
+    #[test]
+    fn weekly_quota_at_risk_is_what_the_maximum_pace_cannot_use() {
+        let now = 1_000_000;
+        let weekly = |utilization: f64, resets_at_ms: Option<i64>| Runtime {
+            seven_day: Some(AiUsage {
+                utilization,
+                resets_at_ms,
+            }),
+            ..Runtime::default()
+        };
+        let at_risk = weekly(40.0, Some(now + 2 * DAY_MS)).weekly_quota_at_risk(now);
+        assert!((at_risk - 20.0).abs() < 1e-9);
+        assert_eq!(
+            weekly(10.0, Some(now + 6 * DAY_MS)).weekly_quota_at_risk(now),
+            0.0
+        );
+        assert_eq!(weekly(40.0, None).weekly_quota_at_risk(now), 0.0);
+        assert_eq!(weekly(40.0, Some(now - 1)).weekly_quota_at_risk(now), 0.0);
+        assert_eq!(Runtime::default().weekly_quota_at_risk(now), 0.0);
+    }
+
+    #[tokio::test]
+    async fn weekly_quota_at_risk_goes_before_lower_session_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["a", "b"]);
+        let reset_in_days = |days: i64| ((now_ms() + days * DAY_MS) / 1000).to_string();
+        let observe = |id: &str, five_hour: &str, seven_day: &str, reset: &str| {
+            accounts.observe(
+                id,
+                None,
+                200,
+                &headers(&[
+                    ("anthropic-ratelimit-unified-5h-utilization", five_hour),
+                    ("anthropic-ratelimit-unified-7d-utilization", seven_day),
+                    ("anthropic-ratelimit-unified-7d-reset", reset),
+                ]),
+            )
+        };
+        observe("a", "0.5", "0.4", &reset_in_days(2));
+        observe("b", "0", "0.1", &reset_in_days(6));
+        let Selection::Selected(selected) = accounts.select(None, None, &[]).await else {
+            panic!("an account should be selected");
+        };
+        assert_eq!(selected.id, "a");
+
+        observe("a", "0.5", "0.9", &reset_in_days(2));
+        let Selection::Selected(selected) = accounts.select(None, None, &[]).await else {
+            panic!("an account should be selected");
+        };
+        assert_eq!(selected.id, "b");
     }
 
     #[test]
