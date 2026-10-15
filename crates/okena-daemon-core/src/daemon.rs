@@ -579,6 +579,7 @@ impl DaemonCore {
             tokio::task::spawn_local(crate::ai_proxy::run_accounts_poll(
                 ai_proxy_accounts.clone(),
                 settings.clone(),
+                backend.clone(),
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
