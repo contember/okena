@@ -33,6 +33,8 @@ pub struct ServiceManager {
     pub(super) instances: HashMap<(String, String), ServiceInstance>,
     pub(super) terminal_to_service: HashMap<String, (String, String)>,
     pub(super) project_paths: HashMap<String, String>,
+    /// Main project of each loaded project; service PTYs launch under its AI routing policy.
+    pub(super) project_roots: HashMap<String, String>,
     /// Workspace replacement epoch owning each project's persisted terminal map.
     /// Daemon write-back uses this to reject notifications from an older snapshot.
     project_writeback_owners: HashMap<String, (String, u64)>,
@@ -487,6 +489,7 @@ impl ServiceManager {
             instances: HashMap::new(),
             terminal_to_service: HashMap::new(),
             project_paths: HashMap::new(),
+            project_roots: HashMap::new(),
             project_writeback_owners: HashMap::new(),
             project_lifecycles: ProjectLifecycles::default(),
             pending_okena_launches: HashMap::new(),

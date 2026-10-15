@@ -304,6 +304,7 @@ pub fn prepare_workspace_replacement(
             uuid::Uuid::new_v4().to_string(),
             &project.hooks,
             &project.id,
+            &root_project_id,
             &project.name,
             &project.path,
             folder.map(|folder| folder.id.as_str()),

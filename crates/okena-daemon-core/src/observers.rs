@@ -91,6 +91,7 @@ impl Drop for AutosaveJob {
 #[derive(Clone)]
 struct ProjectSnapshot {
     id: String,
+    root_project_id: String,
     path: String,
     is_creating: bool,
     is_closing: bool,
@@ -526,6 +527,7 @@ async fn run_services_sync_with_preparer<Prepare>(
                 .iter()
                 .map(|p| ProjectSnapshot {
                     id: p.id.clone(),
+                    root_project_id: p.root_project_id().to_owned(),
                     path: p.path.clone(),
                     is_creating: p.is_creating,
                     is_closing: p.is_closing,
@@ -722,8 +724,14 @@ fn sync_prepared_services(
         }
 
         sm.set_project_writeback_owner(&p.id, &p.path, p.data_replacement_epoch);
-        let load_status =
-            sm.load_project_services_prepared(&p.id, &p.path, &saved_for_attempt, config, cx);
+        let load_status = sm.load_project_services_prepared(
+            &p.id,
+            &p.root_project_id,
+            &p.path,
+            &saved_for_attempt,
+            config,
+            cx,
+        );
         let claimed: HashSet<String> = sm.service_terminal_ids(&p.id).into_values().collect();
         let unclaimed: HashSet<String> = saved_ids_for_attempt
             .difference(&claimed)
@@ -932,6 +940,7 @@ mod tests {
     fn project(id: &str, path: &str) -> ProjectSnapshot {
         ProjectSnapshot {
             id: id.to_string(),
+            root_project_id: id.to_string(),
             path: path.to_string(),
             is_creating: false,
             is_closing: false,
@@ -1669,6 +1678,7 @@ mod tests {
                     manager.set_project_writeback_owner("project", &new_path, 0);
                     assert_eq!(
                         manager.load_project_services_prepared(
+                            "project",
                             "project",
                             &new_path,
                             &renamed.service_terminals,
