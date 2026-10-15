@@ -12,6 +12,9 @@ pub const OAUTH_BETA: &str = "oauth-2025-04-20";
 const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+/// Token, profile and usage calls share the inference client, whose silence
+/// timeout is minutes long; a refresh holds the account's refresh lock meanwhile.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Upstream hosts and how long they may stay silent. Tests point both hosts at
 /// a loopback fake.
@@ -118,6 +121,7 @@ pub async fn exchange_code(
     anyhow::ensure!(state == pkce.state, "The code belongs to a different login");
     let response = http
         .post(&upstream.token_url)
+        .timeout(CONTROL_TIMEOUT)
         .json(&serde_json::json!({
             "grant_type": "authorization_code",
             "code": code,
@@ -160,6 +164,7 @@ pub async fn refresh(
 ) -> Result<Tokens, RefreshError> {
     let response = http
         .post(&upstream.token_url)
+        .timeout(CONTROL_TIMEOUT)
         .json(&serde_json::json!({
             "grant_type": "refresh_token",
             "refresh_token": tokens.refresh_token,
@@ -218,6 +223,7 @@ pub async fn fetch_plan(
 ) -> Option<String> {
     let profile: serde_json::Value = http
         .get(format!("{}/api/oauth/profile", upstream.api))
+        .timeout(CONTROL_TIMEOUT)
         .bearer_auth(access_token)
         .send()
         .await
@@ -244,6 +250,7 @@ pub async fn fetch_usage(
 ) -> anyhow::Result<UsageSnapshot> {
     let body: serde_json::Value = http
         .get(format!("{}/api/oauth/usage", upstream.api))
+        .timeout(CONTROL_TIMEOUT)
         .bearer_auth(access_token)
         .header("anthropic-beta", OAUTH_BETA)
         .send()
