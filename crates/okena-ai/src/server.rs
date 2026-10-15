@@ -132,10 +132,11 @@ pub async fn serve(
         },
         shutdown: Notify::new(),
     });
+    let poller_accounts = accounts.clone();
     let poller = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
-            accounts.poll_usage().await;
+            poller_accounts.poll_usage().await;
             tokio::time::sleep(USAGE_POLL_INTERVAL).await;
         }
     });
@@ -156,6 +157,7 @@ pub async fn serve(
         })
         .await;
     poller.abort();
+    accounts.finish_refreshes().await;
     log::info!("[ai-proxy] shut down");
     Ok(result?)
 }
@@ -334,6 +336,7 @@ mod tests {
         usage: Mutex<HashMap<String, serde_json::Value>>,
         error_bodies: Mutex<HashMap<String, axum::body::Bytes>>,
         error_headers: Mutex<HeaderMap>,
+        token_delay: Mutex<Duration>,
     }
 
     async fn fake_upstream(fake: Arc<Fake>) -> String {
@@ -377,6 +380,8 @@ mod tests {
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> Response {
             assert_eq!(body["grant_type"], "refresh_token");
+            let delay = *fake.token_delay.lock();
+            tokio::time::sleep(delay).await;
             fake.refreshes.fetch_add(1, Ordering::SeqCst);
             axum::Json(serde_json::json!({
                 "access_token": format!("{}-refreshed", body["refresh_token"].as_str().unwrap()),
@@ -670,6 +675,37 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(body, "served by a-rt-refreshed");
         assert_eq!(h.fake.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_outlives_the_request_that_started_it() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        h.fake.replies.lock().insert("token-a".into(), vec![401]);
+        *h.fake.token_delay.lock() = Duration::from_millis(300);
+        let abandoned = h
+            .http
+            .post(format!("{}/v1/messages", h.base_url))
+            .body("{}")
+            .timeout(Duration::from_millis(100))
+            .send()
+            .await;
+        assert!(abandoned.is_err(), "the caller gives up during the refresh");
+        let path = proxy_dir(h._dir.path()).join("accounts.json");
+        let persisted_token = || {
+            let stored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            stored["accounts"][0]["tokens"]["access_token"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        for _ in 0..50 {
+            if persisted_token() == "a-rt-refreshed" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the refreshed credentials were not persisted");
     }
 
     #[tokio::test]

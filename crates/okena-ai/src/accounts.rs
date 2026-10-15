@@ -384,7 +384,7 @@ impl Accounts {
     /// account while it is usable, otherwise a preferred one before an allowed
     /// one, the least-used first.
     pub async fn select(
-        &self,
+        self: &Arc<Self>,
         project: Option<&str>,
         session: Option<&str>,
         exclude: &[String],
@@ -501,12 +501,12 @@ impl Accounts {
     /// Return a valid access token, refreshing when it is about to expire or when
     /// `rejected` (a token the provider just refused) is still the current one.
     pub async fn fresh_token(
-        &self,
+        self: &Arc<Self>,
         account_id: &str,
         rejected: Option<&str>,
     ) -> anyhow::Result<Selected> {
         let lock = self.state.lock().account(account_id)?.refresh.clone();
-        let _refreshing = lock.lock().await;
+        let refreshing = lock.lock_owned().await;
         let (tokens, account_uuid) = {
             let mut state = self.state.lock();
             let account = state.account(account_id)?;
@@ -524,7 +524,24 @@ impl Accounts {
                 account_uuid,
             });
         }
-        match oauth::refresh(&self.http, &self.upstream, &tokens).await {
+        // The provider rotates the refresh token: once the call is sent, its reply
+        // must be persisted even when the request that needed it is dropped.
+        let accounts = self.clone();
+        let id = account_id.to_owned();
+        tokio::spawn(async move {
+            let _refreshing = refreshing;
+            accounts.refresh(&id, &tokens, account_uuid).await
+        })
+        .await?
+    }
+
+    async fn refresh(
+        &self,
+        account_id: &str,
+        tokens: &Tokens,
+        account_uuid: Option<String>,
+    ) -> anyhow::Result<Selected> {
+        match oauth::refresh(&self.http, &self.upstream, tokens).await {
             Ok(refreshed) => {
                 let mut state = self.state.lock();
                 let account = state.account(account_id)?;
@@ -548,6 +565,21 @@ impl Accounts {
                 anyhow::bail!("refresh token rejected")
             }
             Err(RefreshError::Transient(error)) => Err(error),
+        }
+    }
+
+    /// Wait until no refresh is running; one cut short by process exit would lose
+    /// the rotated refresh token.
+    pub async fn finish_refreshes(&self) {
+        let locks: Vec<_> = self
+            .state
+            .lock()
+            .accounts
+            .iter()
+            .map(|account| account.refresh.clone())
+            .collect();
+        for lock in locks {
+            drop(lock.lock().await);
         }
     }
 
@@ -645,7 +677,7 @@ impl Accounts {
 
     /// Refresh quota windows from the usage endpoint, so idle accounts are ranked
     /// by real numbers rather than by whatever the last response said.
-    pub async fn poll_usage(&self) {
+    pub async fn poll_usage(self: &Arc<Self>) {
         let ids: Vec<String> = {
             let state = self.state.lock();
             state
@@ -861,8 +893,9 @@ mod tests {
             &serde_json::to_vec(&stored).unwrap(),
         )
         .unwrap();
-        let accounts =
-            Accounts::open(dir.path(), reqwest::Client::new(), Upstream::default()).unwrap();
+        let accounts = Arc::new(
+            Accounts::open(dir.path(), reqwest::Client::new(), Upstream::default()).unwrap(),
+        );
         let reset = (now_ms() / 1000 + 3_600).to_string();
         accounts.observe(
             "a",
