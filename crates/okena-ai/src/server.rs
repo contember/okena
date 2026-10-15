@@ -682,6 +682,97 @@ mod tests {
         let (status, body) = h.message("conv").await;
         assert_eq!(status, 429);
         assert!(body.contains("rate limited"), "{body}");
+        let response = h.post("/v1/messages").await;
+        assert_eq!(response.status(), 429);
+        assert!(response.headers().contains_key("retry-after"));
+        assert!(
+            !response
+                .headers()
+                .contains_key("anthropic-ratelimit-unified-status")
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key("anthropic-ratelimit-unified-representative-claim")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_quota_rejection_reports_the_first_permitted_accounts_blocking_window() {
+        let h = harness(vec![
+            account("a", "token-a", "uuid-a"),
+            account("b", "token-b", "uuid-b"),
+        ])
+        .await;
+        let session_reset = "2099-01-01T00:00:00Z";
+        let weekly_reset = "2099-01-02T00:00:00Z";
+        for (token, weekly_utilization) in [("token-a", 25.0), ("token-b", 100.0)] {
+            h.fake.usage.lock().insert(
+                format!("Bearer {token}"),
+                serde_json::json!({
+                    "five_hour": {"utilization": 100.0, "resets_at": session_reset},
+                    "seven_day": {"utilization": weekly_utilization, "resets_at": weekly_reset},
+                }),
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+                if status.accounts.iter().all(|account| {
+                    account
+                        .five_hour
+                        .as_ref()
+                        .is_some_and(|usage| usage.utilization == 100.0)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        for (policy, claim, reset) in [
+            (
+                serde_json::json!({"others": "allow"}),
+                "five_hour",
+                "4070908800",
+            ),
+            (
+                serde_json::json!({"others": "forbid", "accounts": {"b": "allow"}}),
+                "seven_day",
+                "4070995200",
+            ),
+        ] {
+            h.set_policy("quota-project", policy).await;
+            for _ in 0..2 {
+                let response = h
+                    .http
+                    .post(format!(
+                        "{}/v1/messages",
+                        h.endpoint.project_url("quota-project")
+                    ))
+                    .json(&serde_json::json!({"model": "test", "max_tokens": 8, "messages": []}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 429);
+                assert_eq!(
+                    response.headers()["anthropic-ratelimit-unified-status"],
+                    "rejected"
+                );
+                assert_eq!(
+                    response.headers()["anthropic-ratelimit-unified-representative-claim"],
+                    claim
+                );
+                assert_eq!(
+                    response.headers()["anthropic-ratelimit-unified-reset"],
+                    reset,
+                );
+                assert!(response.headers().contains_key("retry-after"));
+            }
+        }
+        assert!(h.fake.seen.lock().is_empty());
     }
 
     #[tokio::test]

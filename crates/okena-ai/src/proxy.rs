@@ -155,13 +155,16 @@ impl Relay {
                              logged in. Check the policy in Settings > AI Proxy.",
                         );
                     }
-                    Selection::Exhausted { retry_at_ms } => {
+                    Selection::Exhausted {
+                        retry_at_ms,
+                        quota_claim,
+                    } => {
                         self.accounts.log_availability(&context, &excluded);
                         log::warn!(
                             "[ai-proxy] proxy_rejection {context} status=429 reason=accounts_unavailable retry_at_ms={retry_at_ms:?}"
                         );
                         self.activity.event(project, AiActivityKind::AllRateLimited);
-                        return exhausted(rate_limited, retry_at_ms);
+                        return exhausted(rate_limited, retry_at_ms, quota_claim);
                     }
                 },
             };
@@ -255,7 +258,7 @@ impl Relay {
             "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={MAX_ATTEMPTS}"
         );
         self.activity.event(project, AiActivityKind::AllRateLimited);
-        exhausted(rate_limited, None)
+        exhausted(rate_limited, None, None)
     }
 
     /// Relay the response that answers a `/v1/messages` request and record it.
@@ -379,7 +382,11 @@ fn buffered(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Response {
     response
 }
 
-fn exhausted(rate_limited: Option<ErrorResponse>, retry_at_ms: Option<i64>) -> Response {
+fn exhausted(
+    rate_limited: Option<ErrorResponse>,
+    retry_at_ms: Option<i64>,
+    quota_claim: Option<&'static str>,
+) -> Response {
     if let Some(response) = rate_limited {
         return response.into_response();
     }
@@ -392,6 +399,21 @@ fn exhausted(rate_limited: Option<ErrorResponse>, retry_at_ms: Option<i64>) -> R
         .unwrap_or(60);
     if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
         response.headers_mut().insert("retry-after", value);
+    }
+    // Claude Code treats a 429 without quota headers as a transient capacity error.
+    if let (Some(claim), Some(reset)) = (quota_claim, retry_at_ms) {
+        let headers = response.headers_mut();
+        headers.insert(
+            "anthropic-ratelimit-unified-status",
+            HeaderValue::from_static("rejected"),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-representative-claim",
+            HeaderValue::from_static(claim),
+        );
+        if let Ok(value) = HeaderValue::from_str(&(reset / 1000).to_string()) {
+            headers.insert("anthropic-ratelimit-unified-reset", value);
+        }
     }
     response
 }
