@@ -23,7 +23,7 @@
     "*.xcframework"
   ],
   "codegenConfig": {
-    "name": "OkenaMobileFfi",
+    "name": "OkenaMobileFfiSpec",
     "type": "modules",
     "jsSrcsDir": "src",
     "android": {
