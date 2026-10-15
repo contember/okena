@@ -134,11 +134,25 @@ impl Relay {
                     .await
                 {
                     Selection::Selected(account) => account,
-                    Selection::NoAccounts => {
+                    Selection::NoAccounts if attempt == 1 => {
                         return match self.passthrough(method, url, &headers, body).await {
                             Ok(response) => self.answer(context, response, guard).await,
                             Err(err) => self.unanswered(&context, err),
                         };
+                    }
+                    // The pool already tried this request; the caller's own
+                    // credentials must not silently take over mid-failover.
+                    Selection::NoAccounts => {
+                        self.accounts.log_availability(&context, &excluded);
+                        log::warn!(
+                            "[ai-proxy] proxy_rejection {context} status=400 reason=pool_emptied attempts={}",
+                            attempt - 1
+                        );
+                        return error(
+                            StatusCode::BAD_REQUEST,
+                            "No pool account is enabled and logged in any more. \
+                             Check Settings > AI Proxy.",
+                        );
                     }
                     Selection::NoPermittedAccount => {
                         self.accounts.log_availability(&context, &excluded);
