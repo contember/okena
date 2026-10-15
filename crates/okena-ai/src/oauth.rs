@@ -175,7 +175,8 @@ pub async fn refresh(
         .map_err(|error| RefreshError::Transient(error.into()))?;
     let status = response.status();
     if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(RefreshError::Rejected);
+        let body = response.bytes().await.unwrap_or_default();
+        return Err(refresh_failure(status, &body));
     }
     if !status.is_success() {
         return Err(RefreshError::Transient(anyhow::anyhow!(
@@ -193,6 +194,22 @@ pub async fn refresh(
         Some(&tokens.refresh_token),
     )
     .map_err(RefreshError::Transient)
+}
+
+/// Only `invalid_grant` (or an error without a code) means the refresh token is
+/// dead; other codes, e.g. `invalid_request`, would take every account offline.
+fn refresh_failure(status: reqwest::StatusCode, body: &[u8]) -> RefreshError {
+    let value: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let code = value["error"]
+        .as_str()
+        .or_else(|| value["error"]["type"].as_str());
+    match code {
+        Some(code) if code != "invalid_grant" => {
+            let code: String = code.chars().take(64).collect();
+            RefreshError::Transient(anyhow::anyhow!("token refresh returned {status} ({code})"))
+        }
+        _ => RefreshError::Rejected,
+    }
 }
 
 fn tokens_from(
@@ -342,5 +359,21 @@ mod tests {
         }));
         assert_eq!(limits.five_hour.unwrap().utilization, 100.0);
         assert_eq!(limits.seven_day.unwrap().utilization, 3.0);
+    }
+
+    #[test]
+    fn only_a_dead_grant_rejects_the_refresh_token() {
+        let rejected = |status: u16, body: &str| {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            matches!(
+                refresh_failure(status, body.as_bytes()),
+                RefreshError::Rejected
+            )
+        };
+        assert!(rejected(400, r#"{"error":"invalid_grant"}"#));
+        assert!(rejected(400, r#"{"error":{"type":"invalid_grant"}}"#));
+        assert!(rejected(401, "not json"));
+        assert!(!rejected(400, r#"{"error":"invalid_request"}"#));
+        assert!(!rejected(401, r#"{"error":{"type":"invalid_client"}}"#));
     }
 }
