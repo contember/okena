@@ -87,6 +87,15 @@ pub struct WorktreeConfig {
     /// Default: enable delete branch on close
     #[serde(default)]
     pub default_delete_branch: bool,
+    /// Add worktrees created outside Okena (a terminal, Claude Code, a script)
+    /// to the sidebar under their parent project. Opt-in: off by default.
+    #[serde(default)]
+    pub auto_track: bool,
+    /// Worktrees discovery leaves alone. Globs over the checkout path relative
+    /// to the repository root, or over the absolute path for a checkout outside
+    /// it; `*` stays within one path segment, `**` spans several.
+    #[serde(default = "default_auto_track_ignore")]
+    pub auto_track_ignore: Vec<String>,
 }
 
 impl Default for WorktreeConfig {
@@ -98,8 +107,17 @@ impl Default for WorktreeConfig {
             default_fetch: true,
             default_push: false,
             default_delete_branch: false,
+            auto_track: false,
+            auto_track_ignore: default_auto_track_ignore(),
         }
     }
+}
+
+/// Claude Code's subagent worktrees: one per isolated subagent, many per
+/// session, and removed by Claude itself when the subagent leaves no changes.
+/// Its session worktrees (`claude -w <name>`) live next to them and are kept.
+fn default_auto_track_ignore() -> Vec<String> {
+    vec![".claude/worktrees/agent-*".to_string()]
 }
 
 fn default_worktree_path_template() -> String {
@@ -986,6 +1004,14 @@ mod tests {
         let config = HooksConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn worktree_auto_track_is_opt_in() {
+        assert!(!WorktreeConfig::default().auto_track);
+        let config: WorktreeConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.auto_track);
+        assert_eq!(config.auto_track_ignore, default_auto_track_ignore());
     }
 
     #[test]

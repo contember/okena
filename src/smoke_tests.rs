@@ -126,6 +126,7 @@ mod tests {
         let _workspace = cx.new(|_cx| {
             okena_workspace::state::Workspace::new(okena_workspace::state::WorkspaceData {
                 agent_session_history: Default::default(),
+                dismissed_worktree_paths: Vec::new(),
                 version: 1,
                 projects: vec![],
                 project_order: vec![],

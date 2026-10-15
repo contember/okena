@@ -38,3 +38,8 @@ uuid = { version = "1.10", features = ["v4"] }
 # `RemoteServer::start` (which returns `anyhow::Result`) + the tokio runtime
 # builder (`io::Result`) coalesce through it.
 anyhow = "1.0"
+# `worktree.auto_track_ignore` patterns.
+globset = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

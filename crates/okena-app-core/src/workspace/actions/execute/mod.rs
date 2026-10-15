@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
+    track_discovered_worktree,
 };
 
 pub use files::{
@@ -1389,6 +1390,7 @@ mod reconnect_shell_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["project".into()],
             folders: Vec::new(),

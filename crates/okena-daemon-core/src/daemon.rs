@@ -642,6 +642,14 @@ impl DaemonCore {
                 reactor.hook_runner.clone(),
                 reactor.hook_monitor.clone(),
             ));
+            // Track worktrees created outside Okena (a terminal, Claude Code).
+            tokio::task::spawn_local(crate::worktree_discovery::run_worktree_discovery(
+                reactor.workspace.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
+                settings.clone(),
+            ));
 
             // The command loop is the "main" task; it runs until the bridge
             // closes. Race it against ctrl-c so the daemon can shut down cleanly.

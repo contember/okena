@@ -60,6 +60,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `toast_poll.rs` | Drains `HookMonitor` toasts onto the stream. |
 | `worktree_close_watchdog.rs` | Watches pending worktree closes. |
 | `worktree_stale_sweep.rs` | Drops worktree projects whose checkout was deleted outside Okena. |
+| `worktree_discovery.rs` | Adds worktrees created outside Okena, minus `worktree.auto_track_ignore` and ones the user untracked (`dismissed_worktree_paths`). |
 
 ## Patterns
 

@@ -1592,6 +1592,7 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1893,6 +1894,7 @@ mod gpui_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -3233,6 +3235,7 @@ mod gpui_tests {
                         "discovered",
                         "parent",
                         WindowId::Main,
+                        true,
                     )
                     .unwrap_err();
                 let rename_error = ws

@@ -645,6 +645,7 @@ mod tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project_with(layout)],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),
