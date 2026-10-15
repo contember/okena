@@ -142,9 +142,10 @@ pub enum Selection {
     /// The policy forbids an account and no account it permits is enabled and
     /// logged in. Never served with the caller's own credentials.
     NoPermittedAccount,
-    /// No usable account; the earliest cooldown end, if any account is cooling down.
+    /// No usable account; the earliest unblock time and its known quota window.
     Exhausted {
         retry_at_ms: Option<i64>,
+        quota_claim: Option<&'static str>,
     },
 }
 
@@ -456,14 +457,34 @@ impl Accounts {
                                 Selection::NoAccounts
                             };
                         }
-                        let retry_at_ms = state
+                        let first_available = state
                             .accounts
                             .iter()
                             .filter(in_service)
                             .filter(permitted)
-                            .filter_map(|account| account.runtime.blocked_until(now))
-                            .min();
-                        return Selection::Exhausted { retry_at_ms };
+                            .filter_map(|account| {
+                                account.runtime.blocked_until(now).map(|at| (account, at))
+                            })
+                            .min_by_key(|(_, at)| *at);
+                        let retry_at_ms = first_available.map(|(_, at)| at);
+                        let quota_claim = first_available.and_then(|(account, at)| {
+                            [
+                                ("five_hour", account.runtime.five_hour.as_ref()),
+                                ("seven_day", account.runtime.seven_day.as_ref()),
+                            ]
+                            .into_iter()
+                            .find_map(|(claim, usage)| {
+                                usage
+                                    .filter(|usage| {
+                                        usage.is_exhausted(now) && usage.resets_at_ms == Some(at)
+                                    })
+                                    .map(|_| claim)
+                            })
+                        });
+                        return Selection::Exhausted {
+                            retry_at_ms,
+                            quota_claim,
+                        };
                     }
                 }
             };
@@ -877,7 +898,8 @@ mod tests {
                 ("anthropic-ratelimit-unified-5h-reset", &reset),
             ]),
         );
-        let Selection::Exhausted { retry_at_ms } = accounts.select(None, None, &[]).await else {
+        let Selection::Exhausted { retry_at_ms, .. } = accounts.select(None, None, &[]).await
+        else {
             panic!("both accounts have exhausted their quota");
         };
         assert_eq!(retry_at_ms, Some(reset.parse::<i64>().unwrap() * 1000));
