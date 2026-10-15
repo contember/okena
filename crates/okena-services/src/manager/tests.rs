@@ -1370,7 +1370,8 @@ fn malformed_initial_load_reports_failure_without_claiming_path() {
     let mut manager = manager();
     let mut cx = RecordingCx::default();
 
-    let status = manager.load_project_services("project", &path, &HashMap::new(), &mut cx);
+    let status =
+        manager.load_project_services("project", "project", &path, &HashMap::new(), &mut cx);
 
     assert_eq!(status, ServiceLoadStatus::Failed);
     assert_eq!(manager.project_path("project"), None);
@@ -1386,7 +1387,8 @@ fn empty_loaded_project_publishes_an_explicit_empty_writeback() {
     let mut cx = RecordingCx::default();
     manager.set_project_writeback_owner("project", &path, 7);
 
-    let status = manager.load_project_services("project", &path, &HashMap::new(), &mut cx);
+    let status =
+        manager.load_project_services("project", "project", &path, &HashMap::new(), &mut cx);
 
     assert_eq!(status, ServiceLoadStatus::Loaded);
     assert_eq!(
@@ -1410,7 +1412,8 @@ fn backend_migration_reload_does_not_restart_a_stopped_auto_start_service() {
     let mut manager = manager();
     let mut cx = RecordingCx::default();
 
-    let status = manager.load_project_services_for_backend_migration("project", &path, &mut cx);
+    let status =
+        manager.load_project_services_for_backend_migration("project", "project", &path, &mut cx);
 
     assert_eq!(status, ServiceLoadStatus::Loaded);
     assert_eq!(
@@ -1424,7 +1427,7 @@ fn backend_migration_reload_does_not_restart_a_stopped_auto_start_service() {
 }
 
 #[test]
-fn initial_okena_launch_applies_service_environment() {
+fn initial_okena_launch_applies_service_environment_and_main_project() {
     let path = "/project";
     let (service_manager, plans) = recording_manager();
     let executor = Rc::new(smol::LocalExecutor::new());
@@ -1438,7 +1441,8 @@ fn initial_okena_launch_applies_service_environment() {
     smol::block_on(executor.run(async {
         let mut cx = ExecutingCx { handle };
         service_manager.borrow_mut().load_project_services_prepared(
-            "project",
+            "worktree",
+            "main",
             path,
             &HashMap::new(),
             PreparedProjectConfig::Loaded {
@@ -1470,6 +1474,7 @@ fn initial_okena_launch_applies_service_environment() {
                 ("PORT".into(), "4100".into()),
             ]
         );
+        assert_eq!(plan.project_id.as_deref(), Some("main"));
     }));
 }
 
@@ -1532,7 +1537,14 @@ fn starting_launch_completes_after_same_project_reload() {
     };
     let mut manager = manager();
     let mut cx = RecordingCx::default();
-    manager.load_project_services_prepared("project", path, &HashMap::new(), prepared(), &mut cx);
+    manager.load_project_services_prepared(
+        "project",
+        "project",
+        path,
+        &HashMap::new(),
+        prepared(),
+        &mut cx,
+    );
 
     manager.start_service("project", "web", path, &mut cx);
     let key = ("project".to_string(), "web".to_string());

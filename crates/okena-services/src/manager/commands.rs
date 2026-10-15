@@ -303,6 +303,7 @@ impl ServiceManager {
             return;
         }
         let launch_token = self.begin_okena_launch(&key, project_path);
+        let root_project_id = self.project_roots.get(project_id).cloned();
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
             None => return,
@@ -321,8 +322,11 @@ impl ServiceManager {
             .to_string_lossy()
             .to_string();
 
-        let launch_plan = TerminalLaunchPlan::for_shell(ShellType::for_command(command))
+        let mut launch_plan = TerminalLaunchPlan::for_shell(ShellType::for_command(command))
             .with_environment(instance.definition.env.clone().into_iter().collect());
+        if let Some(root_project_id) = &root_project_id {
+            launch_plan = launch_plan.for_project(root_project_id);
+        }
 
         instance.status = ServiceStatus::Starting;
         instance.terminal_id = Some(terminal_id.clone());
