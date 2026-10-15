@@ -81,6 +81,11 @@ covers accounts added later.
   and the request moves to the next permitted account. When all permitted
   accounts are limited, the provider's 429 is returned and `claude` waits and
   retries itself; a project that must use A waits for A.
+  When the proxy rejects a request locally, a known exhausted quota window
+  includes the unified status, representative claim and reset headers that
+  let Claude Code display the usage limit and resume time. They describe the
+  blocking window of the permitted account that becomes available first.
+  A cooldown alone does not produce quota headers.
 - **No account at all:** with no enabled, logged-in account the proxy forwards
   requests with the terminal's own Claude login, unless the policy forbids an
   account (that login may be the forbidden one). Such a project, and any
