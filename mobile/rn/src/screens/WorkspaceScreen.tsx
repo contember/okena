@@ -34,6 +34,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { useFont } from '@shopify/react-native-skia';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useWorkspaceStore, useConnectionStore } from '../state';
 import { parseLayout } from '../models';
@@ -56,6 +57,7 @@ const native: OkenaNative = (() => {
 })();
 
 export const WorkspaceScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   // ── fonts (Skia useFont; null until loaded) ────────────────────────────────
   const fontSize = TerminalTheme.defaultFontSize;
   const regular = useFont(require('../../assets/JetBrainsMono-Regular.ttf'), fontSize);
@@ -249,6 +251,9 @@ export const WorkspaceScreen: React.FC = () => {
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // The keyboard frame is in screen coordinates, but this view's frame is
+        // relative to the safe-area container; offset by the top inset.
+        keyboardVerticalOffset={insets.top}
       >
         <View style={styles.flex}>{renderBody()}</View>
         {showToolbar && connId ? (

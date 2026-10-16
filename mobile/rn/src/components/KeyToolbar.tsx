@@ -830,7 +830,7 @@ const ComposeSheet: React.FC<{
     >
       <KeyboardAvoidingView
         style={styles.composeContainer}
-        behavior={Platform.OS === 'android' ? 'padding' : undefined}
+        behavior="padding"
       >
         <Pressable style={styles.composeBackdrop} onPress={onClose} />
         <View style={styles.composeSheet}>
