@@ -32,6 +32,10 @@ on:
         description: Google Play version code (must exceed every previous upload)
         type: string
         default: "1"
+      application_id:
+        description: Android application ID (permanent per Play app after its first upload)
+        type: string
+        default: com.contember.okena
 
 permissions:
   contents: read
@@ -51,6 +55,7 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       OKENA_VERSION_CODE: ${{ inputs.version_code || '1' }}
+      OKENA_APPLICATION_ID: ${{ inputs.application_id || 'com.contember.okena' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -130,7 +135,7 @@ jobs:
           grep -q 'jar verified' "$RUNNER_TEMP/signature.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: okena-android-${{ inputs.signed && 'signed' || 'unsigned-validation' }}-${{ inputs.version_code || '1' }}
+          name: okena-android-${{ inputs.signed && 'signed' || 'unsigned-validation' }}-${{ inputs.application_id || 'com.contember.okena' }}-${{ inputs.version_code || '1' }}
           path: |
             mobile/rn/android/app/build/outputs/bundle/release/*.aab
             mobile/rn/android/app/build/outputs/apk/release/*.apk

@@ -18,6 +18,10 @@ def releaseVersionCode = providers.environmentVariable("OKENA_VERSION_CODE").get
 if (!(releaseVersionCode ==~ /[1-9][0-9]*/) || releaseVersionCode.toLong() > 2100000000) {
     throw new GradleException("OKENA_VERSION_CODE must be a positive integer at most 2100000000.")
 }
+def releaseApplicationId = providers.environmentVariable("OKENA_APPLICATION_ID").getOrElse("com.contember.okena")
+if (!(releaseApplicationId ==~ /[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+/)) {
+    throw new GradleException("OKENA_APPLICATION_ID must be a valid Android application ID.")
+}
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -26,7 +30,7 @@ android {
     namespace "com.okenamobile"
 
     defaultConfig {
-        applicationId "com.contember.okena"
+        applicationId releaseApplicationId
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode releaseVersionCode.toInteger()

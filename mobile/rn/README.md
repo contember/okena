@@ -49,14 +49,16 @@ key. Local builds are for validation; publish through CI.
 
 ## Google Play internal beta
 
-Application ID: `com.contember.okena`. Display name: Okena. Version name: 0.1.0.
-The application ID is permanent after the first Play upload.
+Application ID: `com.contember.okena` by default. Display name: Okena. Version name: 0.1.0.
+The application ID is permanent after the first Play upload. The manGoweb Play internal
+beta uses `cz.mangoweb.okena` (matching its TestFlight build); pass it as the workflow's
+`application_id` input, or locally as `OKENA_APPLICATION_ID`.
 
 The **Android beta** workflow (`.github/workflows/android.yml`) builds unsigned validation
 artifacts on relevant pushes/PRs. Merge the workflow into the default branch before its
 manual dispatch is available in GitHub Actions. For a signed release, run it manually on the branch to
 release, enable `signed`, and supply a `version_code` greater than every previous Play
-upload. Download the artifact named `okena-android-signed-<version_code>`.
+upload. Download the artifact named `okena-android-signed-<application_id>-<version_code>`.
 CI cross-compiles Rust, generates the native module, runs TypeScript/lint/Jest, builds the
 AAB/APK, runs Android lint, verifies 16 KB ELF/APK alignment, and checks the AAB signature.
 
