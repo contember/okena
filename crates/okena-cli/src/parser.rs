@@ -171,6 +171,32 @@ pub enum Command {
         #[command(subcommand)]
         cmd: UpdateCmd,
     },
+
+    /// Claude Code integration for remote clients; run by `claude`, not by people
+    #[command(name = crate::CLAUDE_REMOTE_SUBCOMMAND, hide = true)]
+    ClaudeRemote {
+        #[command(subcommand)]
+        cmd: ClaudeRemoteCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ClaudeRemoteCmd {
+    /// Forward a Claude Code hook (JSON on stdin) to the daemon
+    Hook {
+        #[command(subcommand)]
+        cmd: ClaudeHookCmd,
+    },
+    /// MCP stdio server that delivers remote prompts as channel messages
+    Channel,
+}
+
+#[derive(Subcommand)]
+pub enum ClaudeHookCmd {
+    /// `PermissionRequest` hook: wait for a remote decision and print it
+    Permission,
+    /// Any other hook event: report it to the daemon
+    Event,
 }
 
 #[derive(Subcommand)]
@@ -513,9 +539,28 @@ pub enum TermCmd {
 /// control back to GUI/profile launch.
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
-        "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
-        "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
-        "command", "update",
+        "pair",
+        "health",
+        "state",
+        "action",
+        "services",
+        "service",
+        "whoami",
+        "ls",
+        "project",
+        "worktree",
+        "folder",
+        "term",
+        "send",
+        "run",
+        "key",
+        "read",
+        "skill",
+        "settings",
+        "theme",
+        "command",
+        "update",
+        "claude-remote",
     ]
 }
 
@@ -565,6 +610,17 @@ mod tests {
                 "subcommand '{name}' missing from subcommand_names()"
             );
         }
+    }
+
+    #[test]
+    fn claude_remote_is_gated_but_hidden_from_help() {
+        assert_eq!(crate::CLAUDE_REMOTE_SUBCOMMAND, "claude-remote");
+        assert!(subcommand_names().contains(&crate::CLAUDE_REMOTE_SUBCOMMAND));
+        let command = Cli::command();
+        let claude_remote = command
+            .find_subcommand(crate::CLAUDE_REMOTE_SUBCOMMAND)
+            .expect("claude-remote is declared");
+        assert!(claude_remote.is_hide_set());
     }
 
     #[test]
@@ -618,6 +674,10 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "permission"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "event"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "claude-remote", "channel"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "claude-remote", "hook"]).is_err());
         // --user and --project are mutually exclusive.
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--user", "--project"]).is_err());
         // Missing required positional → error.
