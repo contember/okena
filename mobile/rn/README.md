@@ -231,6 +231,10 @@ key rail visible below the canvas:
 - Compose offers **Insert** (send exactly the edited text) and **Run** (send text followed by Enter).
 - Long-press and drag selects terminal text; release copies it to the OS clipboard and briefly
   shows a `Copied` confirmation. Double-tap copies the selected word.
+- Vertical drag scrolls the pane under the finger: scrollback in a normal shell, or wheel events
+  when the app enabled mouse reporting (vim, tmux `mouse on`, agent TUIs), like the desktop.
+  Typing or a special key snaps back to the bottom. Tapping a pane makes it the keyboard and
+  toolbar target. The mobile mirror only holds scrollback received since it attached.
 
 ### Input UX validation status (2026-07-17)
 

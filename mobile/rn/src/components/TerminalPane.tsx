@@ -17,7 +17,9 @@
  *     so Android backspace on an empty field still fires). Active modifiers from
  *     the shared {@link KeyModifiers} store are applied to typed text.
  *   - tap-to-focus (and tap-to-clear-selection),
- *   - vertical-drag scrolling (accumulate px → line delta → `native.scroll`),
+ *   - vertical-drag scrolling (accumulate px → line delta → `native.scrollWheel`,
+ *     which moves the scrollback or, when the app enabled mouse reporting,
+ *     sends wheel events — the desktop split; see `terminalScroll.ts`),
  *   - long-press to start/extend a character selection; release copies the
  *     selected text to the clipboard and clears. Double-tap selects a word.
  *   - it owns the `selecting` flag and threads it into `TerminalView` so the
@@ -43,7 +45,6 @@ import {
   StyleSheet,
   Keyboard,
   Platform,
-  type LayoutChangeEvent,
   type NativeSyntheticEvent,
   type TextInputChangeEventData,
   type GestureResponderEvent,
@@ -55,6 +56,7 @@ import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalView, type TerminalFonts } from './TerminalView';
 import { KeyModifiers, applyModifiersToText } from './KeyToolbar';
+import { accumulateScroll, exceedsTouchSlop, pointToCell } from './terminalScroll';
 
 // Sentinel buffer: keeps spaces in the TextInput so backspace always has
 // something to delete. Without this, Android's soft keyboard backspace is a
@@ -119,21 +121,19 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     // Mirror of what's currently in the hidden TextInput (sentinel-padded).
     const lastInputText = useRef<string>(SENTINEL);
 
-    // Grid geometry — TerminalView measures + computes cols/rows; we mirror it
-    // so touch coordinates can be converted to cells. Cell size is derived from
-    // the laid-out box / grid (TerminalView floors width/cellWidth, so this is
-    // an approximation good enough for hit-testing).
+    // Grid geometry — TerminalView measures the glyph cell and computes
+    // cols/rows; we mirror it so touch coordinates can be converted to cells
+    // and drag distance to lines.
     const grid = useRef<Grid>({
       cols: 80,
       rows: 24,
       cellWidth: 0,
       cellHeight: 0,
     });
-    const boxSize = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
     // Vertical-scroll accumulator (px) → whole-line deltas.
     const scrollAccum = useRef(0);
-    const dragLastY = useRef<number | null>(null);
+    const dragLastPageY = useRef<number | null>(null);
 
     useImperativeHandle(
       ref,
@@ -144,27 +144,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       [],
     );
 
-    const onGridSizeChange = useCallback((cols: number, rows: number) => {
-      const { w, h } = boxSize.current;
-      grid.current = {
-        cols,
-        rows,
-        cellWidth: cols > 0 && w > 0 ? w / cols : 0,
-        cellHeight: rows > 0 && h > 0 ? h / rows : 0,
-      };
-    }, []);
-
-    const onLayout = useCallback((e: LayoutChangeEvent) => {
-      const { width, height } = e.nativeEvent.layout;
-      boxSize.current = { w: width, h: height };
-      const { cols, rows } = grid.current;
-      grid.current = {
-        cols,
-        rows,
-        cellWidth: cols > 0 ? width / cols : 0,
-        cellHeight: rows > 0 ? height / rows : 0,
-      };
-    }, []);
+    const onGridSizeChange = useCallback(
+      (cols: number, rows: number, cellWidth: number, cellHeight: number) => {
+        grid.current = { cols, rows, cellWidth, cellHeight };
+      },
+      [],
+    );
 
     // ── soft keyboard input ──────────────────────────────────────────────────
 
@@ -189,15 +174,6 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       if (selected && Keyboard.isVisible()) inputRef.current?.focus();
     }, [selected]);
 
-    const scrollToBottom = useCallback(() => {
-      try {
-        const offset = native.getScrollInfo(connId, terminalId).displayOffset;
-        if (offset > 0) native.scroll(connId, terminalId, -offset);
-      } catch {
-        // Native not ready — ignore.
-      }
-    }, [native, connId, terminalId]);
-
     const onChange = useCallback(
       (e: NativeSyntheticEvent<TextInputChangeEventData>) => {
         const newText = e.nativeEvent.text;
@@ -210,8 +186,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             delta = applyModifiersToText(modifiers, delta);
             modifiers.reset();
           }
+          // `sendText` / `sendSpecialKey` snap the view back to the bottom
+          // natively, like every desktop input path.
           if (delta.length > 0) {
-            scrollToBottom();
             void native.sendText(connId, terminalId, delta);
           }
         } else if (newText.length < prev.length) {
@@ -230,24 +207,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           resetSentinel();
         }
       },
-      [native, connId, terminalId, modifiers, scrollToBottom, resetSentinel],
+      [native, connId, terminalId, modifiers, resetSentinel],
     );
 
     // ── touch → cell ──────────────────────────────────────────────────────────
 
     const touchToCell = useCallback(
-      (x: number, y: number): { col: number; row: number } => {
-        const { cellWidth, cellHeight, cols, rows } = grid.current;
-        const col =
-          cellWidth > 0
-            ? Math.min(Math.max(Math.floor(x / cellWidth), 0), cols - 1)
-            : 0;
-        const row =
-          cellHeight > 0
-            ? Math.min(Math.max(Math.floor(y / cellHeight), 0), rows - 1)
-            : 0;
-        return { col, row };
-      },
+      (x: number, y: number): { col: number; row: number } =>
+        pointToCell(x, y, grid.current),
       [],
     );
 
@@ -274,9 +241,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     }, [native, connId, terminalId]);
 
     // ── gesture responder (tap / drag-scroll / long-press select) ───────────────
+    //
+    // Positions: `locationX/Y` is only trusted at grant (where it is relative to
+    // this pane). After that, movement is measured with `pageX/Y` deltas — RN
+    // reports `location*` relative to whatever view is under the finger, which
+    // breaks once a drag leaves the pane (e.g. into the other half of a split).
 
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const grantPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+    const grantPage = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
     const lastTap = useRef<{ x: number; y: number; t: number } | null>(null);
     const moved = useRef(false);
     const selectingRef = useRef(false);
@@ -288,11 +261,21 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       }
     }, []);
 
+    /** Current touch position in pane coordinates (grant point + page delta). */
+    const panePoint = useCallback((e: GestureResponderEvent) => {
+      const { pageX, pageY } = e.nativeEvent;
+      return {
+        x: grantPos.current.x + (pageX - grantPage.current.x),
+        y: grantPos.current.y + (pageY - grantPage.current.y),
+      };
+    }, []);
+
     const onGrant = useCallback(
       (e: GestureResponderEvent) => {
-        const { locationX: x, locationY: y } = e.nativeEvent;
+        const { locationX: x, locationY: y, pageX, pageY } = e.nativeEvent;
         grantPos.current = { x, y };
-        dragLastY.current = y;
+        grantPage.current = { x: pageX, y: pageY };
+        dragLastPageY.current = pageY;
         scrollAccum.current = 0;
         moved.current = false;
 
@@ -317,7 +300,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     const onMove = useCallback(
       (e: GestureResponderEvent) => {
-        const { locationX: x, locationY: y } = e.nativeEvent;
+        const { x, y } = panePoint(e);
 
         if (selectingRef.current) {
           // Extend the active selection.
@@ -330,40 +313,50 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           return;
         }
 
-        const dx = x - grantPos.current.x;
-        const dy = y - grantPos.current.y;
-        if (!moved.current && Math.hypot(dx, dy) > 8) {
+        if (
+          !moved.current &&
+          exceedsTouchSlop(x - grantPos.current.x, y - grantPos.current.y)
+        ) {
           moved.current = true;
           clearLongPress();
         }
         if (!moved.current) return;
 
         // Vertical-drag scrolling: accumulate px, emit whole-line deltas.
-        const { cellHeight } = grid.current;
-        if (cellHeight <= 0 || dragLastY.current === null) return;
-        scrollAccum.current += y - dragLastY.current;
-        dragLastY.current = y;
-        const lineDelta = Math.trunc(scrollAccum.current / cellHeight);
-        if (lineDelta !== 0) {
-          scrollAccum.current -= lineDelta * cellHeight;
+        const { pageY } = e.nativeEvent;
+        if (dragLastPageY.current === null) return;
+        const step = accumulateScroll(
+          scrollAccum.current,
+          pageY - dragLastPageY.current,
+          grid.current.cellHeight,
+        );
+        dragLastPageY.current = pageY;
+        scrollAccum.current = step.remainderPx;
+        if (step.lines !== 0) {
+          const { col, row } = touchToCell(x, y);
           try {
-            native.scroll(connId, terminalId, lineDelta);
+            native.scrollWheel(connId, terminalId, step.lines, col, row);
           } catch {
             // ignore
           }
         }
       },
-      [native, connId, terminalId, touchToCell, clearLongPress],
+      [native, connId, terminalId, touchToCell, clearLongPress, panePoint],
     );
 
+    const endGesture = useCallback(() => {
+      clearLongPress();
+      dragLastPageY.current = null;
+      scrollAccum.current = 0;
+    }, [clearLongPress]);
+
     const onRelease = useCallback(
-      (e: GestureResponderEvent) => {
-        clearLongPress();
+      () => {
+        endGesture();
 
         if (selectingRef.current) {
           selectingRef.current = false;
           copySelectionAndClear();
-          dragLastY.current = null;
           return;
         }
 
@@ -371,12 +364,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           // A tap. If a selection exists, clear it; else (double-tap?) word
           // select, otherwise focus the keyboard.
           const now = Date.now();
-          const { locationX: x, locationY: y } = e.nativeEvent;
+          const { x, y } = grantPos.current;
           const prevTap = lastTap.current;
           const isDouble =
             prevTap !== null &&
             now - prevTap.t < 300 &&
             Math.hypot(x - prevTap.x, y - prevTap.y) < 24;
+
+          // Any tap makes this pane the toolbar / keyboard target — in a split
+          // this is how the user picks the pane to work in.
+          onSelect?.(terminalId);
 
           if (selecting) {
             try {
@@ -397,13 +394,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             copySelectionAndClear();
           } else {
             // `focus()` on an already-focused input does not re-fire `onFocus`,
-            // so report the selection here too or a tap cannot re-sync it.
-            onSelect?.(terminalId);
+            // so the `onSelect` above is what re-syncs the toolbar target.
             inputRef.current?.focus();
           }
           lastTap.current = { x, y, t: now };
         }
-        dragLastY.current = null;
       },
       [
         native,
@@ -412,13 +407,23 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         touchToCell,
         selecting,
         copySelectionAndClear,
-        clearLongPress,
+        endGesture,
         onSelect,
       ],
     );
 
+    // The system took the touch (e.g. an OS gesture). Never treat that as a
+    // tap; finish an in-flight selection the same way a release would.
+    const onTerminate = useCallback(() => {
+      endGesture();
+      if (selectingRef.current) {
+        selectingRef.current = false;
+        copySelectionAndClear();
+      }
+    }, [endGesture, copySelectionAndClear]);
+
     return (
-      <View style={styles.root} onLayout={onLayout}>
+      <View style={styles.root}>
         {/* The Skia renderer. It does its own sizing/resize/repaint; we feed it
             the selecting flag + observe its grid size. */}
         <View style={StyleSheet.absoluteFill}>
@@ -439,8 +444,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           onMoveShouldSetResponder={() => true}
           onResponderGrant={onGrant}
           onResponderMove={onMove}
+          // Once a pane owns a touch it keeps it: a scroll or selection drag
+          // must not be stolen by an ancestor mid-gesture.
+          onResponderTerminationRequest={() => false}
           onResponderRelease={onRelease}
-          onResponderTerminate={onRelease}
+          onResponderTerminate={onTerminate}
         />
 
         {/* Hidden soft-keyboard input. Near-invisible (opacity keeps the IME

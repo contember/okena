@@ -284,6 +284,19 @@ export interface OkenaNative {
   /** Scroll the display: positive = up (into scrollback), negative = down. */
   scroll(connId: ConnId, terminalId: TerminalId, delta: number): void;
 
+  /**
+   * Scroll gesture of `lines` notches at cell `col`/`row` (positive = up). Like
+   * the desktop: wheel events to the app when it enabled mouse reporting,
+   * otherwise the local scrollback moves.
+   */
+  scrollWheel(
+    connId: ConnId,
+    terminalId: TerminalId,
+    lines: number,
+    col: number,
+    row: number,
+  ): void;
+
   /** Total/visible line counts and the current display offset. */
   getScrollInfo(connId: ConnId, terminalId: TerminalId): ScrollInfo;
 
@@ -337,8 +350,11 @@ export interface OkenaNative {
   /** Layout tree for a project, serialized as JSON (`ApiLayoutNode`). */
   getProjectLayoutJson(connId: ConnId, projectId: ProjectId): string | undefined;
 
-  /** Whether a terminal has unread output since the last cell fetch. */
+  /** Whether a terminal has changed (output/resize/scroll/selection). Never cleared. */
   isDirty(connId: ConnId, terminalId: TerminalId): boolean;
+
+  /** Consume the dirty flag: true once per batch of changes. Drives the repaint loop. */
+  takeDirty(connId: ConnId, terminalId: TerminalId): boolean;
 
   /** Send a named special key (async — goes over the WS). */
   sendSpecialKey(connId: ConnId, terminalId: TerminalId, key: SpecialKey): Promise<void>;
@@ -546,6 +562,14 @@ export function getOkenaNative(): OkenaNative {
         (gen.getProjects(connId) as Array<ProjectInfo & {terminalNames: unknown}>).map(
           toProjectInfo,
         ),
+      // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep
+      // scrolling the local scrollback and keep the always-repaint loop.
+      scrollWheel:
+        typeof gen.scrollWheel === 'function'
+          ? gen.scrollWheel
+          : (connId: ConnId, terminalId: TerminalId, lines: number) =>
+              gen.scroll(connId, terminalId, lines),
+      takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
       canReportCertFingerprint: () => pinsReadable,
       getCertFingerprint: (connId: ConnId) =>
         pinsReadable ? gen.getCertFingerprint(connId) : undefined,

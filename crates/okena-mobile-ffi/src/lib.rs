@@ -219,9 +219,12 @@ pub fn get_cursor(conn_id: String, terminal_id: String) -> CursorState {
 }
 
 /// Send text input to a terminal. Synchronous: only enqueues a WS message.
+/// Like every desktop input path, typing snaps the view back to the bottom.
 #[uniffi::export]
 pub fn send_text(conn_id: String, terminal_id: String, text: String) {
-    ConnectionManager::get().send_ws_message(
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.scroll_to_bottom());
+    mgr.send_ws_message(
         &conn_id,
         WsClientMessage::SendInput {
             terminal_id,
@@ -255,6 +258,31 @@ pub fn scroll(conn_id: String, terminal_id: String, delta: i32) {
     mgr.with_terminal(&conn_id, &terminal_id, |holder| {
         holder.scroll(delta);
     });
+}
+
+/// Scroll gesture of `lines` notches at visual cell `col`/`row` (positive = up).
+///
+/// Mirrors the desktop `TerminalContent::handle_scroll`: when the app enabled
+/// mouse reporting (vim, less with mouse, tmux `mouse on`, agent TUIs) the
+/// notches go to the PTY as wheel events; otherwise the local scrollback moves.
+#[uniffi::export]
+pub fn scroll_wheel(conn_id: String, terminal_id: String, lines: i32, col: u16, row: u16) {
+    if lines == 0 {
+        return;
+    }
+    let mgr = ConnectionManager::get();
+    let wheel = mgr
+        .with_terminal(&conn_id, &terminal_id, |holder| {
+            let wheel = holder.mouse_wheel_input(lines > 0, col, row, lines.unsigned_abs());
+            if wheel.is_none() {
+                holder.scroll(lines);
+            }
+            wheel
+        })
+        .flatten();
+    if let Some(data) = wheel {
+        mgr.send_ws_message(&conn_id, WsClientMessage::SendInput { terminal_id, data });
+    }
 }
 
 /// Get scroll info: total lines, visible lines, display offset.
@@ -395,6 +423,15 @@ pub fn is_dirty(conn_id: String, terminal_id: String) -> bool {
         .unwrap_or(false)
 }
 
+/// Consume the dirty flag: true once per batch of changes (output, resize,
+/// scroll, selection). The render loop polls this so idle panes stop repainting.
+#[uniffi::export]
+pub fn take_dirty(conn_id: String, terminal_id: String) -> bool {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.take_dirty())
+        .unwrap_or(false)
+}
+
 /// Get all terminal IDs from the cached remote state (flat list).
 #[uniffi::export]
 pub fn get_all_terminal_ids(conn_id: String) -> Vec<String> {
@@ -421,7 +458,9 @@ pub fn send_special_key(
             message: format!("Unknown special key: {key}"),
         })?;
     let bytes = special_key.to_bytes();
-    ConnectionManager::get().send_ws_message(
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.scroll_to_bottom());
+    mgr.send_ws_message(
         &conn_id,
         WsClientMessage::SendInput {
             terminal_id,

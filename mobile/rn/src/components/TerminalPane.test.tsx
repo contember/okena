@@ -3,20 +3,32 @@
 
 /**
  * TerminalPane regression: keyboard focus and the toolbar's target agree
- * (CORR-14).
+ * (CORR-14), and touch drags scroll the pane they started in.
  */
 
 import React from 'react';
-import { Keyboard, TextInput } from 'react-native';
+import { Keyboard, TextInput, View } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 import type { SkFont } from '@shopify/react-native-skia';
 
 import { KeyModifiers } from './KeyToolbar';
 import { TerminalPane } from './TerminalPane';
+import type { OkenaNative } from '../native/okena';
 
 // The Skia renderer needs a GPU surface and the clipboard a native module;
 // the input chrome under test needs neither.
-jest.mock('./TerminalView', () => ({ TerminalView: () => null }));
+// The mock keeps the renderer's props so a test can report a grid size.
+const mockTerminalViewProps: {
+  current?: {
+    onGridSizeChange?: (cols: number, rows: number, cw: number, ch: number) => void;
+  };
+} = {};
+jest.mock('./TerminalView', () => ({
+  TerminalView: (props: typeof mockTerminalViewProps.current) => {
+    mockTerminalViewProps.current = props;
+    return null;
+  },
+}));
 jest.mock('../native/okena', () => ({ getOkenaNative: () => ({}) }));
 jest.mock('@react-native-clipboard/clipboard', () => ({ setString: () => {} }));
 
@@ -54,6 +66,7 @@ const FONT: SkFont = {
 interface PaneOptions {
   onSelect?: (id: string) => void;
   selected?: boolean;
+  native?: OkenaNative;
 }
 
 function pane(terminalId: string, options: PaneOptions) {
@@ -65,6 +78,7 @@ function pane(terminalId: string, options: PaneOptions) {
       modifiers={new KeyModifiers()}
       onSelect={options.onSelect}
       selected={options.selected}
+      native={options.native}
     />
   );
 }
@@ -143,6 +157,106 @@ describe('TerminalPane focus', () => {
   it('renders without a selection callback', () => {
     const renderer = renderPane('t1');
     expect(renderer.root.findAllByType(TextInput)).toHaveLength(1);
+    act(() => renderer.unmount());
+  });
+});
+
+describe('TerminalPane drag scrolling', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  function scrollNative() {
+    const scrollWheel = jest.fn();
+    const native = {
+      scrollWheel,
+      startSelection: jest.fn(),
+      updateSelection: jest.fn(),
+      clearSelection: jest.fn(),
+      getSelectedText: jest.fn(),
+    } as unknown as OkenaNative;
+    return { native, scrollWheel };
+  }
+
+  /** The full-bleed responder view (the only one claiming touches). */
+  function gestureSurface(renderer: TestRenderer.ReactTestRenderer) {
+    return renderer.root.find(
+      (n) => n.type === View && typeof n.props.onResponderMove === 'function',
+    );
+  }
+
+  function touch(locationX: number, locationY: number, pageX: number, pageY: number) {
+    return { nativeEvent: { locationX, locationY, pageX, pageY } };
+  }
+
+  function setup(onSelect?: (id: string) => void) {
+    jest.useFakeTimers();
+    const { native, scrollWheel } = scrollNative();
+    const renderer = renderPane('t1', { native, onSelect });
+    act(() => {
+      mockTerminalViewProps.current?.onGridSizeChange?.(40, 20, 8, 16);
+    });
+    spyOnInputFocus(renderer);
+    return { renderer, scrollWheel, surface: gestureSurface(renderer) };
+  }
+
+  it('scrolls whole lines in the finger direction', () => {
+    const { renderer, scrollWheel, surface } = setup();
+    act(() => {
+      surface.props.onResponderGrant(touch(20, 100, 20, 300));
+      surface.props.onResponderMove(touch(20, 120, 20, 320)); // past slop, 1 line
+      surface.props.onResponderMove(touch(20, 150, 20, 350)); // 50px total
+      surface.props.onResponderRelease(touch(20, 150, 20, 350));
+    });
+    // 20px → 1 line (4px left), +30px → 34px → 2 lines. Cell at y=150 → row 9.
+    expect(scrollWheel.mock.calls).toEqual([
+      ['conn-1', 't1', 1, 2, 7],
+      ['conn-1', 't1', 2, 2, 9],
+    ]);
+    act(() => renderer.unmount());
+  });
+
+  it('measures movement from page coordinates once the finger leaves the pane', () => {
+    const { renderer, scrollWheel, surface } = setup();
+    act(() => {
+      surface.props.onResponderGrant(touch(20, 100, 20, 300));
+      // locationY is relative to whatever view is under the finger now (here a
+      // view below this pane): it must not be read as a pane coordinate.
+      surface.props.onResponderMove(touch(20, 5, 20, 268));
+      surface.props.onResponderRelease(touch(20, 5, 20, 268));
+    });
+    expect(scrollWheel).toHaveBeenCalledWith('conn-1', 't1', -2, 2, 4);
+    act(() => renderer.unmount());
+  });
+
+  it('treats a still touch as a tap that selects the pane, not a scroll', () => {
+    const onSelect = jest.fn();
+    const { renderer, scrollWheel, surface } = setup(onSelect);
+    act(() => {
+      surface.props.onResponderGrant(touch(20, 100, 20, 300));
+      surface.props.onResponderMove(touch(22, 103, 22, 303));
+      surface.props.onResponderRelease(touch(22, 103, 22, 303));
+    });
+    expect(scrollWheel).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith('t1');
+    act(() => renderer.unmount());
+  });
+
+  it('does not count a system-cancelled touch as a tap', () => {
+    const onSelect = jest.fn();
+    const { renderer, surface } = setup(onSelect);
+    act(() => {
+      surface.props.onResponderGrant(touch(20, 100, 20, 300));
+      surface.props.onResponderTerminate(touch(20, 100, 20, 300));
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('keeps the touch for the whole gesture', () => {
+    const { renderer, surface } = setup();
+    expect(surface.props.onResponderTerminationRequest()).toBe(false);
     act(() => renderer.unmount());
   });
 });
