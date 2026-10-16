@@ -29,10 +29,17 @@ fn hook_decision(
     tool_input: &Value,
     permission_suggestions: &[Value],
 ) -> Value {
+    // Claude drops an allow without `updatedInput` for tools whose dialog is
+    // the interaction itself (ExitPlanMode); the unchanged input is accepted
+    // for every tool.
     match decision {
-        ApiClaudeDecision::Allow { always: false } => json!({"behavior": "allow"}),
+        ApiClaudeDecision::Allow { always: false } => json!({
+            "behavior": "allow",
+            "updatedInput": tool_input,
+        }),
         ApiClaudeDecision::Allow { always: true } => json!({
             "behavior": "allow",
+            "updatedInput": tool_input,
             "updatedPermissions": session_scoped(permission_suggestions),
         }),
         ApiClaudeDecision::Deny { message } => json!({
@@ -92,7 +99,7 @@ mod tests {
             output,
             json!({"hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": {"behavior": "allow"}
+                "decision": {"behavior": "allow", "updatedInput": {"command": "ls"}}
             }})
         );
     }
@@ -112,11 +119,26 @@ mod tests {
             decision,
             json!({
                 "behavior": "allow",
+                "updatedInput": {},
                 "updatedPermissions": [
                     {"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "session"},
                     {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn allow_keeps_the_plan_of_exit_plan_mode() {
+        let tool_input = json!({"plan": "1. Do it", "planFilePath": "/p.md"});
+        let decision = decision_of(decided_output(
+            &ApiClaudeDecision::Allow { always: false },
+            &tool_input,
+            &[],
+        ));
+        assert_eq!(
+            decision,
+            json!({"behavior": "allow", "updatedInput": tool_input})
         );
     }
 

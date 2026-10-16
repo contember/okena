@@ -47,7 +47,7 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
   if (dialog.tool_name === 'ExitPlanMode') {
     return (
       <PlanCard
-        plan={readClaudePlan(dialog.tool_input) ?? ''}
+        plan={readClaudePlan(dialog.tool_input)}
         onDecide={onDecide}
       />
     );
@@ -100,18 +100,25 @@ const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
 // ── ExitPlanMode: approve / keep planning ────────────────────────────────────
 
 const PlanCard: React.FC<{
-  plan: string;
+  // Without a plan file Claude sends no plan; it is then in the transcript.
+  plan: string | undefined;
   onDecide: ClaudeDialogCardProps['onDecide'];
 }> = ({ plan, onDecide }) => {
   const [feedback, setFeedback] = useState('');
   return (
     <View style={styles.card}>
       <Text style={styles.title}>Plan ready for review</Text>
-      <ScrollView style={styles.plan} nestedScrollEnabled>
-        <Text style={styles.body} selectable>
-          {plan}
+      {plan !== undefined ? (
+        <ScrollView style={styles.plan} nestedScrollEnabled>
+          <Text style={styles.body} selectable>
+            {plan}
+          </Text>
+        </ScrollView>
+      ) : (
+        <Text style={styles.body}>
+          Claude wants to exit plan mode. The plan is in the transcript above.
         </Text>
-      </ScrollView>
+      )}
       <ReasonInput
         value={feedback}
         onChange={setFeedback}

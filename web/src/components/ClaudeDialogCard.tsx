@@ -66,22 +66,25 @@ export function ClaudeDialogCard({
   }
 
   if (dialog.tool_name === "ExitPlanMode") {
+    // Without a plan file Claude sends no plan; it is then in the transcript.
     const plan = toolInputPlan(dialog.tool_input);
-    if (plan !== null) {
-      return (
-        <CardFrame title="Plan approval" error={decision.error}>
+    return (
+      <CardFrame title="Plan approval" error={decision.error}>
+        {plan !== null ? (
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-[3px] bg-[var(--ok-canvas)] p-2 text-[12px]">
             {plan}
           </pre>
-          <DenyRow
-            decision={decision}
-            approveLabel="Approve"
-            denyLabel="Keep planning"
-            placeholder="What to change (optional)"
-          />
-        </CardFrame>
-      );
-    }
+        ) : (
+          <div className="text-[11px] text-[var(--ok-text-muted)]">Claude wants to exit plan mode. The plan is in the transcript above.</div>
+        )}
+        <DenyRow
+          decision={decision}
+          approveLabel="Approve"
+          denyLabel="Keep planning"
+          placeholder="What to change (optional)"
+        />
+      </CardFrame>
+    );
   }
 
   return (

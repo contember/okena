@@ -817,11 +817,11 @@ mod tests {
         let cases = [
             (
                 ApiClaudeDecision::Allow { always: false },
-                json!({"behavior": "allow"}),
+                json!({"behavior": "allow", "updatedInput": ask_input}),
             ),
             (
                 ApiClaudeDecision::Allow { always: true },
-                json!({"behavior": "allow", "updatedPermissions": [
+                json!({"behavior": "allow", "updatedInput": ask_input, "updatedPermissions": [
                     {"type": "addRules", "rules": [{"toolName": "AskUserQuestion"}], "behavior": "allow", "destination": "session"}
                 ]}),
             ),
