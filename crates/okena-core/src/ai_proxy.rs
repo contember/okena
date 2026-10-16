@@ -351,6 +351,9 @@ pub struct AiAccount {
     pub email: Option<String>,
     /// Subscription type reported by the provider (e.g. "max").
     pub plan: Option<String>,
+    /// Quota size within the plan (e.g. "default_claude_max_20x").
+    #[serde(default)]
+    pub rate_limit_tier: Option<String>,
     pub enabled: bool,
     /// The refresh token was rejected; the account needs a new login.
     pub needs_login: bool,

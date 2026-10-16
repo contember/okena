@@ -30,6 +30,8 @@ struct StoredAccount {
     email: Option<String>,
     account_uuid: Option<String>,
     plan: Option<String>,
+    #[serde(default)]
+    rate_limit_tier: Option<String>,
     enabled: bool,
     needs_login: bool,
     tokens: Tokens,
@@ -47,6 +49,8 @@ struct Runtime {
     seven_day: Option<AiUsage>,
     requests: u64,
     last_used_ms: Option<i64>,
+    /// The plan was looked up in this process.
+    plan_checked: bool,
 }
 
 impl Runtime {
@@ -233,6 +237,7 @@ impl Accounts {
                     label: account.stored.label.clone(),
                     email: account.stored.email.clone(),
                     plan: account.stored.plan.clone(),
+                    rate_limit_tier: account.stored.rate_limit_tier.clone(),
                     enabled: account.stored.enabled,
                     needs_login: account.stored.needs_login,
                     cooldown_until_ms: account
@@ -330,7 +335,11 @@ impl Accounts {
             account.stored.tokens = result.tokens;
             account.stored.needs_login = false;
             account.stored.email = result.email.or(account.stored.email.take());
-            account.stored.plan = plan.or(account.stored.plan.take());
+            if let Some(plan) = plan {
+                account.stored.plan = Some(plan.kind);
+                account.stored.rate_limit_tier = plan.rate_limit_tier;
+            }
+            account.runtime.plan_checked = true;
             account.runtime.cooldown_until_ms = None;
         } else {
             state.accounts.push(Account {
@@ -339,12 +348,16 @@ impl Accounts {
                     label,
                     email: result.email,
                     account_uuid: result.account_uuid,
-                    plan,
+                    rate_limit_tier: plan.as_ref().and_then(|plan| plan.rate_limit_tier.clone()),
+                    plan: plan.map(|plan| plan.kind),
                     enabled: true,
                     needs_login: false,
                     tokens: result.tokens,
                 },
-                runtime: Runtime::default(),
+                runtime: Runtime {
+                    plan_checked: true,
+                    ..Runtime::default()
+                },
                 refresh: Arc::default(),
             });
         }
@@ -714,6 +727,7 @@ impl Accounts {
                     continue;
                 }
             };
+            self.learn_plan(&id, &selected.access_token).await;
             match oauth::fetch_usage(&self.http, &self.upstream, &selected.access_token).await {
                 Ok(usage) => {
                     let sample = {
@@ -744,6 +758,33 @@ impl Accounts {
                 }
                 Err(error) => log::warn!("[ai-proxy] usage poll failed for {id}: {error}"),
             }
+        }
+    }
+
+    /// Accounts logged in before the tier was stored learn it once per process.
+    async fn learn_plan(&self, id: &str, access_token: &str) {
+        let needed = {
+            let mut state = self.state.lock();
+            state.account(id).is_ok_and(|account| {
+                let needed =
+                    !account.runtime.plan_checked && account.stored.rate_limit_tier.is_none();
+                account.runtime.plan_checked = true;
+                needed
+            })
+        };
+        if !needed {
+            return;
+        }
+        let Some(plan) = oauth::fetch_plan(&self.http, &self.upstream, access_token).await else {
+            return;
+        };
+        let mut state = self.state.lock();
+        if let Ok(account) = state.account(id) {
+            account.stored.plan = Some(plan.kind);
+            account.stored.rate_limit_tier = plan.rate_limit_tier;
+        }
+        if let Err(error) = self.persist(&state) {
+            log::warn!("[ai-proxy] could not save the plan of {id}: {error}");
         }
     }
 }
@@ -896,6 +937,7 @@ mod tests {
                     email: None,
                     account_uuid: None,
                     plan: None,
+                    rate_limit_tier: None,
                     enabled: true,
                     needs_login: false,
                     tokens: Tokens {

@@ -354,6 +354,7 @@ mod tests {
             label: "Work".into(),
             email: None,
             plan: None,
+            rate_limit_tier: None,
             enabled: true,
             needs_login: false,
             cooldown_until_ms: None,

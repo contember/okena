@@ -232,12 +232,19 @@ fn tokens_from(
     })
 }
 
-/// Subscription type ("max", "pro", …) from the OAuth profile, as the CLI derives it.
+#[derive(Debug, PartialEq)]
+pub struct Plan {
+    /// Subscription type ("max", "pro", …), as the CLI derives it.
+    pub kind: String,
+    /// Quota size within the type (e.g. "default_claude_max_20x").
+    pub rate_limit_tier: Option<String>,
+}
+
 pub async fn fetch_plan(
     http: &reqwest::Client,
     upstream: &Upstream,
     access_token: &str,
-) -> Option<String> {
+) -> Option<Plan> {
     let profile: serde_json::Value = http
         .get(format!("{}/api/oauth/profile", upstream.api))
         .timeout(CONTROL_TIMEOUT)
@@ -250,8 +257,18 @@ pub async fn fetch_plan(
         .json()
         .await
         .ok()?;
-    let kind = profile["organization"]["organization_type"].as_str()?;
-    Some(kind.strip_prefix("claude_").unwrap_or(kind).to_owned())
+    parse_plan(&profile)
+}
+
+fn parse_plan(profile: &serde_json::Value) -> Option<Plan> {
+    let organization = &profile["organization"];
+    let kind = organization["organization_type"].as_str()?;
+    Some(Plan {
+        kind: kind.strip_prefix("claude_").unwrap_or(kind).to_owned(),
+        rate_limit_tier: organization["rate_limit_tier"]
+            .as_str()
+            .map(ToOwned::to_owned),
+    })
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -324,6 +341,25 @@ fn parse_timestamp_ms(value: &serde_json::Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_keeps_the_rate_limit_tier() {
+        let plan = parse_plan(&serde_json::json!({"organization": {
+            "organization_type": "claude_max",
+            "rate_limit_tier": "default_claude_max_20x"
+        }}));
+        assert_eq!(
+            plan,
+            Some(Plan {
+                kind: "max".into(),
+                rate_limit_tier: Some("default_claude_max_20x".into()),
+            })
+        );
+        let without_tier =
+            parse_plan(&serde_json::json!({"organization": {"organization_type": "pro"}}));
+        assert_eq!(without_tier.and_then(|plan| plan.rate_limit_tier), None);
+        assert_eq!(parse_plan(&serde_json::json!({})), None);
+    }
 
     #[test]
     fn authorize_url_carries_pkce_and_state() {
