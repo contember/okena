@@ -178,25 +178,30 @@ impl Render for ClaudeSettingsView {
 impl ClaudeSettingsView {
     fn render_pool_display(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let display = PoolDisplay::read(cx);
+        // Rows in display order; the index names the flag in `PoolDisplay::KEYS`.
         let rows = [
             (
+                0,
                 "Per-account usage",
                 "The 5h and 7d usage of every account.",
                 display.accounts,
             ),
             (
-                "Runway",
-                "How long nonstop work at your usual pace lasts before every account is blocked.",
-                display.runway,
-            ),
-            (
+                2,
                 "Today",
-                "How much more work today leaves enough weekly quota for every working day until the next resets.",
+                "Soft limit: how much more work today leaves enough weekly quota for every working day until the next resets.",
                 display.today,
             ),
+            (
+                1,
+                "Nonstop",
+                "Hard limit: how long nonstop work at your usual pace lasts before every account is blocked.",
+                display.runway,
+            ),
         ];
+        let last = rows.len() - 1;
         let mut container = section_container(t);
-        for (index, (label, description, shown)) in rows.into_iter().enumerate() {
+        for (position, (index, label, description, shown)) in rows.into_iter().enumerate() {
             container = container.child(
                 settings_row_with_desc(
                     format!("claude-pool-display-{index}"),
@@ -204,7 +209,7 @@ impl ClaudeSettingsView {
                     description,
                     t,
                     cx,
-                    index < 2,
+                    position < last,
                 )
                 .child(
                     toggle_switch(format!("claude-pool-display-toggle-{index}"), shown, t)

@@ -138,26 +138,29 @@ settings choose any combination of three items per host:
   Hovering an account opens its own popover with its usage, plan and state
   (disabled, needs login, quota exhausted or cooling down). Remote accounts
   include the host name in their popover.
-- **Runway**: how long nonstop work at the usual pace lasts before every
-  account is blocked. A simulation serves the pace from one account at a time,
+- **Nonstop** (hard limit): how long nonstop work at the usual pace lasts
+  before every account is blocked. A simulation serves the pace from one account at a time,
   the one whose weekly quota expires first, and returns accounts as their
   windows reset. The pace is the 75th percentile of the last week's active
   hours; the cost of a session point in weekly points comes from the same
   history. Both fall back to defaults until there is enough history.
-- **Today**: how much more work today leaves enough weekly quota for every
-  working day until the next resets. A simulation over the next seven local
+- **Today** (soft limit): how much more work today leaves enough weekly quota
+  for every working day until the next resets. Work beyond it is possible but
+  runs the pool short later in the week. A simulation over the next seven local
   days draws each day's use from the quota that resets first and finds the
   most a working day may use without running short, at most the pool's
   long-run share (all weekly quota over the working days). Non-working days
   use what they used last week. The value is that maximum minus today's use,
   shown as work at the usual pace ("3h left", "45m over").
 
-Runway and Today weigh accounts by plan size (Pro 1, Max 5x 5, Max 20x 20),
+Today and Nonstop weigh accounts by plan size (Pro 1, Max 5x 5, Max 20x 20),
 from the `rate_limit_tier` of the OAuth profile. The proxy stores
 it at login; accounts logged in before learn it once per proxy process from the
-usage poll. Hovering either item opens the pool popover: today's use, the
-safe daily use and its tightest point, where the last 24 hours' pace runs
-short, the next weekly refills, and one row per account. Clicking a row shows
+usage poll. Hovering either item opens the pool popover with one section per
+limit, each with a sentence on what it means. The soft-limit section adds
+today's use, the safe daily use and its tightest point, where the last 24
+hours' pace runs short, and the next weekly refills; one row per account
+follows. Clicking a row shows
 that account's usage and history chart in the same popover.
 
 Successful five-minute usage polls append quota samples to
@@ -166,7 +169,7 @@ continues while the proxy runs, even with the desktop closed. Samples survive
 proxy restarts; history begins with the first successful poll after upgrading.
 The popup loads the selected account's last seven days through the authenticated
 `usage_history` management command, at most once a minute across desktop windows.
-While Runway or Today is shown, every pool account's history is loaded the same
+While Today or Nonstop is shown, every pool account's history is loaded the same
 way.
 History is omitted from ordinary status and workspace snapshots. The shared
 storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
