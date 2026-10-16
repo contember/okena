@@ -130,7 +130,9 @@ impl ProfileIndex {
         std::fs::create_dir_all(config_root)?;
         let path = config_root.join("profiles.json");
         let content = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
+        // Per-process temp name: concurrent `okena` processes saving at once
+        // must not truncate each other's temp file before the rename.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, &content)?;
         #[cfg(unix)]
         {
@@ -208,6 +210,24 @@ pub fn resolve_active_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
     #[allow(clippy::unwrap_used)]
     let entry = index.profiles.iter().find(|p| p.id == id).unwrap().clone();
     make_profile_paths(&entry, &root)
+}
+
+/// Resolve the profile like [`resolve_active_profile`] but without writing
+/// anything: no bootstrap of a missing index and no `last_used` update. For
+/// short-lived helper processes that run many times concurrently.
+pub fn resolve_existing_profile(flag_id: Option<String>) -> Result<ProfilePaths> {
+    let root = config_root();
+    let index = ProfileIndex::load(&root)?;
+    let id = match flag_id.or_else(|| std::env::var("OKENA_PROFILE").ok()) {
+        Some(requested) => requested,
+        None => pick_profile_id(&index)?,
+    };
+    let entry = index
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .with_context(|| format!("Profile '{id}' not found"))?;
+    make_profile_paths(entry, &root)
 }
 
 fn pick_profile_id(index: &ProfileIndex) -> Result<String> {
