@@ -8,3 +8,5 @@ gets pulled into a `../sprints/` plan) or it's **deleted**. It is never a place 
 decided work or status.
 
 <!-- index the ideas here, one line each -->
+
+- [claude-remote-over-channels](claude-remote-over-channels.md) — phone remote for `claude` panes behind the AI proxy, via MCP channels + `PermissionRequest` hooks (spike-verified).
