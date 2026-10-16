@@ -25,6 +25,7 @@ const PROJECT: ProjectInfo = {
   gitLinesRemoved: 0,
   services: [],
   folderColor: 'blue',
+  worktreeIds: [],
 };
 
 /** Two tab layouts over the same terminals — only `activeTab` differs. */
@@ -92,5 +93,35 @@ describe('workspace layout tracking', () => {
 
     useWorkspaceStore.getState().stop();
     expect(useWorkspaceStore.getState().projectLayoutJson).toBeNull();
+  });
+});
+
+describe('workspace folder tracking', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes a reorder inside a folder (same folder ids)', () => {
+    const before = [{ id: 'f', name: 'Work', projectIds: ['a', 'b'], folderColor: 'blue' }];
+    const after = [{ id: 'f', name: 'Work', projectIds: ['b', 'a'], folderColor: 'blue' }];
+    let tick = 0;
+    configureWorkspaceStore({
+      native: {
+        ...stubNative([TABS_FIRST_ACTIVE]),
+        getFolders: () => (tick++ === 0 ? before : after),
+      },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual(['a', 'b']);
+
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+
+    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual(['b', 'a']);
   });
 });

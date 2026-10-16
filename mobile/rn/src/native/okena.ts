@@ -176,6 +176,10 @@ export interface ProjectInfo {
   services: ServiceInfo[];
   /** Lowercased folder color name (e.g. `"blue"`). */
   folderColor: string;
+  /** Parent project id when this project is a git worktree. */
+  parentProjectId?: ProjectId;
+  /** Worktree child ids, in the order the desktop sidebar lists them. */
+  worktreeIds: ProjectId[];
 }
 
 /** Folder info — mirrors FFI `FolderInfo` (`api/state.rs`). */
@@ -518,13 +522,17 @@ function toCursorState(c: {col: number; row: number; shape: number; visible: boo
 }
 
 // Generated records carry `terminalNames` as a JS `Map`; the app reads it as a
-// plain `Record`. Convert and pass everything else through.
-function toProjectInfo(p: ProjectInfo & {terminalNames: unknown}): ProjectInfo {
+// plain `Record`. Convert and pass everything else through. Bindings generated
+// before `worktree_ids` existed omit it, so default it to an empty list.
+function toProjectInfo(
+  p: Omit<ProjectInfo, 'worktreeIds'> & {terminalNames: unknown; worktreeIds?: ProjectId[]},
+): ProjectInfo {
   const names = p.terminalNames;
   return {
     ...p,
     terminalNames:
       names instanceof Map ? Object.fromEntries(names) : (names as Record<string, string>),
+    worktreeIds: p.worktreeIds ?? [],
   };
 }
 
@@ -559,7 +567,7 @@ export function getOkenaNative(): OkenaNative {
       getCursor: (connId: ConnId, terminalId: TerminalId) =>
         toCursorState(gen.getCursor(connId, terminalId)),
       getProjects: (connId: ConnId) =>
-        (gen.getProjects(connId) as Array<ProjectInfo & {terminalNames: unknown}>).map(
+        (gen.getProjects(connId) as Array<Parameters<typeof toProjectInfo>[0]>).map(
           toProjectInfo,
         ),
       // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep

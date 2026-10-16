@@ -28,6 +28,12 @@ pub struct ProjectInfo {
     /// Per-terminal AI agent status, for terminals currently reporting one.
     /// Mirrors what the desktop shows on the tab and in the sidebar Agents list.
     pub terminal_agent_status: HashMap<String, AgentStatusInfo>,
+    /// Parent project id when this project is a git worktree. The desktop
+    /// sidebar nests worktrees under their parent instead of listing them at
+    /// the top level.
+    pub parent_project_id: Option<String>,
+    /// Ids of this project's worktree children, in sidebar display order.
+    pub worktree_ids: Vec<String>,
 }
 
 /// FFI-friendly agent status.
@@ -137,6 +143,11 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                         )
                     })
                     .collect(),
+                parent_project_id: p
+                    .worktree_info
+                    .as_ref()
+                    .map(|w| w.parent_project_id.clone()),
+                worktree_ids: p.worktree_ids.clone(),
             }
         })
         .collect()

@@ -23,3 +23,13 @@ export {
   type SplitNode,
   type TabsNode,
 } from './layoutNode';
+
+export {
+  buildProjectList,
+  filterProjectList,
+  flattenProjectList,
+  projectDisplayName,
+  type ProjectListItem,
+  type ProjectListRow,
+  type ProjectNode,
+} from './projectList';

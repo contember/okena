@@ -5,9 +5,10 @@
  * (an absolutely-positioned overlay animated with `Animated`, NOT
  * `@react-navigation/drawer`) rendered above the workspace. It shows:
  *   - a header (app name + active server name + a small status dot),
+ *   - a search field filtering projects by name / path (case-insensitive),
  *   - the ordered project list: standalone projects + folders (folder header +
- *     its indented projects). Ordering follows `projectOrder`, with any
- *     leftover projects appended (matches the Dart `_ProjectList`).
+ *     its indented projects), worktrees nested under their parent. Ordering
+ *     matches the desktop sidebar's manual view (see `models/projectList.ts`).
  *   - tapping a project selects it (`selectProject`) and expands it inline to
  *     show its terminals; tapping a terminal selects + focuses it and closes the
  *     drawer.
@@ -40,6 +41,12 @@ import {
 } from '../state';
 import type { FolderInfo, OkenaNative, ProjectInfo } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
+import {
+  buildProjectList,
+  filterProjectList,
+  projectDisplayName,
+  type ProjectNode,
+} from '../models';
 import { OkenaColors } from '../theme';
 
 // ── Folder colors (mirror _folderColorToColor in project_drawer.dart) ────────
@@ -76,6 +83,7 @@ function folderColor(name: string): string {
 
 const DRAWER_WIDTH_FRACTION = 0.82;
 const DRAWER_MAX_WIDTH = 360;
+const INDENT_STEP = 16;
 
 export interface ProjectDrawerProps {
   open: boolean;
@@ -95,8 +103,11 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   // Keep the Modal mounted through the close animation.
   const [mounted, setMounted] = useState(open);
 
+  const [query, setQuery] = useState('');
+
   useEffect(() => {
     if (open) setMounted(true);
+    else setQuery('');
     Animated.timing(slide, {
       toValue: open ? 1 : 0,
       duration: 220,
@@ -131,11 +142,12 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     total: number;
   } | null>(null);
 
-  // Build the ordered display list (folders + standalone projects).
-  const items = useMemo(
-    () => buildOrderedItems(projects, folders, projectOrder),
+  // Build the ordered display list (folders + standalone projects), then filter.
+  const allItems = useMemo(
+    () => buildProjectList(projects, folders, projectOrder),
     [projects, folders, projectOrder],
   );
+  const items = useMemo(() => filterProjectList(allItems, query), [allItems, query]);
 
   if (!mounted) return null;
 
@@ -198,8 +210,33 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           </View>
         </View>
 
+        {/* Search */}
+        <View style={styles.searchWrap}>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search projects"
+            placeholderTextColor={OkenaColors.textTertiary}
+            value={query}
+            onChangeText={setQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            clearButtonMode="while-editing"
+            returnKeyType="search"
+            keyboardAppearance="dark"
+          />
+        </View>
+
         {/* Project / folder list */}
-        <ScrollView style={styles.flex}>
+        <ScrollView
+          style={styles.flex}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          automaticallyAdjustKeyboardInsets
+        >
+          {items.length === 0 && query.trim().length > 0 ? (
+            <Text style={styles.emptyText}>No matching projects</Text>
+          ) : null}
           {items.map((item) =>
             item.kind === 'folder' ? (
               <FolderSection
@@ -213,27 +250,34 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
                 onSelectProject={handleSelectProject}
                 onSelectTerminal={handleSelectTerminal}
                 onLongPressFolder={() => openColorPickerForFolder(item.folder)}
-                onLongPressProject={(project, index) =>
+                onLongPressProject={(project) => {
+                  // Index into the folder's own `projectIds` — the list the
+                  // daemon's `reorder_project_in_folder` indexes — not into the
+                  // (possibly filtered) displayed rows.
+                  const index = item.folder.projectIds.indexOf(project.id);
+                  if (index < 0) return;
                   setReorder({
                     project,
                     folderId: item.folder.id,
                     index,
-                    total: item.projects.length,
-                  })
-                }
+                    total: item.folder.projectIds.length,
+                  });
+                }}
+                onLongPressWorktree={openColorPickerForProject}
               />
             ) : (
-              <ProjectRow
-                key={`project-${item.project.id}`}
-                project={item.project}
-                indent={false}
+              <ProjectNodeRows
+                key={`project-${item.node.project.id}`}
+                node={item.node}
+                depth={0}
                 selectedProjectId={selectedProjectId}
                 selectedTerminalId={selectedTerminalId}
                 connId={connId}
                 native={native}
                 onSelectProject={handleSelectProject}
                 onSelectTerminal={handleSelectTerminal}
-                onLongPress={() => openColorPickerForProject(item.project)}
+                onLongPressProject={openColorPickerForProject}
+                onLongPressWorktree={openColorPickerForProject}
               />
             ),
           )}
@@ -300,51 +344,6 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   );
 };
 
-// ── Ordered list builder (mirrors _ProjectList in project_drawer.dart) ───────
-
-type DisplayItem =
-  | { kind: 'folder'; folder: FolderInfo; projects: ProjectInfo[] }
-  | { kind: 'project'; project: ProjectInfo };
-
-function buildOrderedItems(
-  projects: ProjectInfo[],
-  folders: FolderInfo[],
-  projectOrder: string[],
-): DisplayItem[] {
-  const items: DisplayItem[] = [];
-
-  if (projectOrder.length > 0 || folders.length > 0) {
-    const folderMap = new Map(folders.map((f) => [f.id, f]));
-    const projectMap = new Map(projects.map((p) => [p.id, p]));
-    const displayed = new Set<string>();
-
-    for (const entryId of projectOrder) {
-      const folder = folderMap.get(entryId);
-      if (folder) {
-        const folderProjects = folder.projectIds
-          .map((pid) => projectMap.get(pid))
-          .filter((p): p is ProjectInfo => p !== undefined);
-        items.push({ kind: 'folder', folder, projects: folderProjects });
-        folder.projectIds.forEach((pid) => displayed.add(pid));
-      } else {
-        const project = projectMap.get(entryId);
-        if (project) {
-          items.push({ kind: 'project', project });
-          displayed.add(entryId);
-        }
-      }
-    }
-    // Append any projects not in the order.
-    for (const p of projects) {
-      if (!displayed.has(p.id)) items.push({ kind: 'project', project: p });
-    }
-  } else {
-    for (const p of projects) items.push({ kind: 'project', project: p });
-  }
-
-  return items;
-}
-
 // ── Folder section ────────────────────────────────────────────────────────
 
 interface RowCommon {
@@ -359,11 +358,12 @@ interface RowCommon {
 const FolderSection: React.FC<
   RowCommon & {
     folder: FolderInfo;
-    projects: ProjectInfo[];
+    projects: ProjectNode[];
     onLongPressFolder: () => void;
-    onLongPressProject: (project: ProjectInfo, index: number) => void;
+    onLongPressProject: (project: ProjectInfo) => void;
+    onLongPressWorktree: (project: ProjectInfo) => void;
   }
-> = ({ folder, projects, onLongPressFolder, onLongPressProject, ...row }) => {
+> = ({ folder, projects, onLongPressFolder, ...row }) => {
   const color = folderColor(folder.folderColor);
   return (
     <View>
@@ -371,30 +371,59 @@ const FolderSection: React.FC<
         <Text style={[styles.folderIcon, { color }]}>{'▸'}</Text>
         <Text style={[styles.folderName, { color }]}>{folder.name}</Text>
       </Pressable>
-      {projects.map((project, index) => (
-        <ProjectRow
-          key={`folder-${folder.id}-${project.id}`}
-          project={project}
-          indent
+      {projects.map((node) => (
+        <ProjectNodeRows
+          key={`folder-${folder.id}-${node.project.id}`}
+          node={node}
+          depth={1}
           {...row}
-          onLongPress={() => onLongPressProject(project, index)}
         />
       ))}
     </View>
   );
 };
 
+// ── A project + its nested worktrees ────────────────────────────────────────
+
+const ProjectNodeRows: React.FC<
+  RowCommon & {
+    node: ProjectNode;
+    depth: number;
+    onLongPressProject: (project: ProjectInfo) => void;
+    onLongPressWorktree: (project: ProjectInfo) => void;
+  }
+> = ({ node, depth, onLongPressProject, onLongPressWorktree, ...row }) => (
+  <View>
+    <ProjectRow
+      project={node.project}
+      depth={depth}
+      {...row}
+      onLongPress={() => onLongPressProject(node.project)}
+    />
+    {node.worktrees.map((wt) => (
+      <ProjectRow
+        key={`worktree-${wt.id}`}
+        project={wt}
+        depth={depth + 1}
+        {...row}
+        onLongPress={() => onLongPressWorktree(wt)}
+      />
+    ))}
+  </View>
+);
+
 // ── Project row (+ inline expansion when selected) ──────────────────────────
 
 const ProjectRow: React.FC<
   RowCommon & {
     project: ProjectInfo;
-    indent: boolean;
+    /** Nesting level: folder member and/or worktree. */
+    depth: number;
     onLongPress: () => void;
   }
 > = ({
   project,
-  indent,
+  depth,
   selectedProjectId,
   selectedTerminalId,
   connId,
@@ -418,18 +447,18 @@ const ProjectRow: React.FC<
           style={[
             styles.projectIcon,
             { color: isSelected ? OkenaColors.accent : color },
-            indent && styles.indent,
+            depth > 0 && { marginLeft: INDENT_STEP * depth },
           ]}
         >
-          {'▸'}
+          {project.parentProjectId ? '⎇' : '▸'}
         </Text>
         <View style={styles.flex}>
           <Text style={styles.projectName} numberOfLines={1}>
-            {project.name}
+            {projectDisplayName(project)}
           </Text>
-          {project.gitBranch || runningServices > 0 ? (
+          {(project.gitBranch && !project.parentProjectId) || runningServices > 0 ? (
             <View style={styles.subtitleRow}>
-              {project.gitBranch ? (
+              {project.gitBranch && !project.parentProjectId ? (
                 <Text style={styles.subtitleText} numberOfLines={1}>
                   {`⎇ ${project.gitBranch}`}
                 </Text>
@@ -615,6 +644,10 @@ const ReorderSheet: React.FC<{
   info: { project: ProjectInfo; folderId: string; index: number; total: number } | null;
   onClose: () => void;
   onChangeColor: () => void;
+  /**
+   * `newIndex` is an insert-before position in the original list, matching the
+   * daemon's `reorder_project_in_folder` (it subtracts one when moving down).
+   */
   onMove: (newIndex: number) => void;
 }> = ({ info, onClose, onChangeColor, onMove }) => {
   if (!info) return null;
@@ -633,7 +666,7 @@ const ReorderSheet: React.FC<{
           </Pressable>
         ) : null}
         {index < total - 1 ? (
-          <Pressable style={styles.sheetItem} onPress={() => onMove(index + 1)}>
+          <Pressable style={styles.sheetItem} onPress={() => onMove(index + 2)}>
             <Text style={styles.sheetItemText}>Move Down</Text>
           </Pressable>
         ) : null}
@@ -643,7 +676,7 @@ const ReorderSheet: React.FC<{
           </Pressable>
         ) : null}
         {index < total - 1 ? (
-          <Pressable style={styles.sheetItem} onPress={() => onMove(total - 1)}>
+          <Pressable style={styles.sheetItem} onPress={() => onMove(total)}>
             <Text style={styles.sheetItemText}>Move to Bottom</Text>
           </Pressable>
         ) : null}
@@ -694,7 +727,21 @@ const styles = StyleSheet.create({
   },
   projectRowSelected: { backgroundColor: OkenaColors.surfaceOverlay },
   projectIcon: { fontSize: 16, marginRight: 12 },
-  indent: { marginLeft: 16 },
+  searchWrap: { paddingHorizontal: 12, paddingVertical: 8 },
+  searchInput: {
+    backgroundColor: OkenaColors.surfaceElevated,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: OkenaColors.textPrimary,
+    fontSize: 14,
+  },
+  emptyText: {
+    color: OkenaColors.textTertiary,
+    fontSize: 13,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
   projectName: { color: OkenaColors.textPrimary, fontSize: 15 },
   subtitleRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
   subtitleText: { color: OkenaColors.textTertiary, fontSize: 11 },

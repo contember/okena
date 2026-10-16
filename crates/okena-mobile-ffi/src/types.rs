@@ -205,6 +205,8 @@ pub struct ProjectInfo {
     pub services: Vec<ServiceInfo>,
     pub folder_color: String,
     pub terminal_agent_status: HashMap<String, AgentStatusInfo>,
+    pub parent_project_id: Option<String>,
+    pub worktree_ids: Vec<String>,
 }
 
 impl From<NativeProjectInfo> for ProjectInfo {
@@ -226,6 +228,8 @@ impl From<NativeProjectInfo> for ProjectInfo {
                 .into_iter()
                 .map(|(id, status)| (id, status.into()))
                 .collect(),
+            parent_project_id: p.parent_project_id,
+            worktree_ids: p.worktree_ids,
         }
     }
 }
