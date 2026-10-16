@@ -41,6 +41,11 @@ pub struct StateResponse {
     /// older servers (which omit the field) deserializable.
     #[serde(default)]
     pub hooks: Vec<ApiHookExecution>,
+    /// Open Claude remote dialogs per terminal id (see
+    /// [`crate::claude_remote::ApiClaudeDialog`]); terminals without one are
+    /// absent. Runtime-only.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub claude_dialogs: std::collections::HashMap<String, u32>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1567,6 +1572,7 @@ mod tests {
                 sidebar_open: Some(true),
             }],
             hooks: Vec::new(),
+            claude_dialogs: Default::default(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

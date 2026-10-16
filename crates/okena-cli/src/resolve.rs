@@ -363,6 +363,7 @@ mod tests {
             folders: vec![],
             windows,
             hooks: Vec::new(),
+            claude_dialogs: Default::default(),
         }
     }
 

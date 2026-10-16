@@ -214,5 +214,6 @@ pub fn build_state_response(
         folders,
         windows,
         hooks,
+        claude_dialogs: Default::default(),
     }
 }

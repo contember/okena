@@ -38,6 +38,9 @@ pub enum RemoteCommand {
     GetTerminalSizes { terminal_ids: Vec<String> },
     /// Bracketed-paste server-local text into the target terminal.
     PastePath { terminal_id: String, text: String },
+    /// Agent session + lifecycle of a pane, answered with a serialized
+    /// [`okena_core::claude_remote::ClaudeTerminalInfo`].
+    ClaudeTerminalInfo { terminal_id: String },
 }
 
 /// Channel types for the bridge.

@@ -444,8 +444,13 @@ impl DaemonCore {
         // ── 6. Start the remote server ───────────────────────────────────────
         // It owns its OWN internal tokio runtime and talks to us only via the
         // channels above; that is fine — the daemon's runtime drives the reactor.
+        let claude_hub = okena_remote_server::claude_remote::ClaudeRemoteHub::new(
+            bridge_tx.clone(),
+            state_version.clone(),
+        );
         let remote_server = RemoteServer::start(
             bridge_tx,
+            claude_hub,
             auth_store.clone(),
             broadcaster.clone(),
             state_version.clone(),

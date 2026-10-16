@@ -35,6 +35,7 @@ impl RemoteServer {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         bridge_tx: BridgeSender,
+        claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
         state_version: Arc<watch::Sender<u64>>,
@@ -204,6 +205,7 @@ impl RemoteServer {
 
             let app = routes::build_router(
                 bridge_tx,
+                claude_hub,
                 auth_store,
                 broadcaster,
                 state_version,

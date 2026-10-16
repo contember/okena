@@ -958,6 +958,7 @@ mod tests {
             folders: Vec::new(),
             windows: Vec::new(),
             hooks: Vec::new(),
+            claude_dialogs: Default::default(),
         }
     }
 

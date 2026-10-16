@@ -4360,6 +4360,12 @@ pub async fn daemon_command_loop(
                     None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
                 }
             }
+
+            // ── ClaudeTerminalInfo ───────────────────────────────────────────
+            RemoteCommand::ClaudeTerminalInfo { terminal_id } => {
+                let _ = terminal_id;
+                CommandResult::Err("U2: ClaudeTerminalInfo not implemented".to_string())
+            }
         };
 
         if let Some(reply) = reply {

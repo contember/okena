@@ -625,6 +625,7 @@ mod tests {
             folders,
             windows: vec![],
             hooks: Vec::new(),
+            claude_dialogs: Default::default(),
         }
     }
 

@@ -41,6 +41,7 @@ struct WebAssets;
 #[derive(Clone)]
 pub struct AppState {
     pub bridge_tx: BridgeSender,
+    pub claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
     pub auth_store: Arc<AuthStore>,
     pub broadcaster: Arc<PtyBroadcaster>,
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
@@ -126,6 +127,7 @@ fn request_is_unix_socket(req: &Request) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn build_router(
     bridge_tx: BridgeSender,
+    claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
     auth_store: Arc<AuthStore>,
     broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
@@ -146,6 +148,7 @@ pub fn build_router(
 ) -> Router {
     let state = AppState {
         bridge_tx,
+        claude_hub,
         auth_store,
         broadcaster,
         state_version,
@@ -390,8 +393,13 @@ mod tests {
         // Dropping the bridge receiver makes authorized calls fail at the
         // bridge instead of hanging on a reply that never comes.
         let (bridge_tx, _) = crate::bridge::bridge_channel();
+        let claude_hub = crate::claude_remote::ClaudeRemoteHub::new(
+            bridge_tx.clone(),
+            Arc::new(tokio::sync::watch::channel(0).0),
+        );
         build_router(
             bridge_tx,
+            claude_hub,
             auth_store,
             Arc::new(PtyBroadcaster::new()),
             Arc::new(tokio::sync::watch::channel(0).0),

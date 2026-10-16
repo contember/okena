@@ -333,6 +333,17 @@ pub struct AppSettings {
     /// session whose agent is (still) running, so nothing is resumed.
     #[serde(default)]
     pub auto_resume_agent_sessions: bool,
+    /// Claude remote: let other clients (phone, web) follow and steer `claude`
+    /// sessions in panes. When on, new panes get a `BUN_OPTIONS` preload that
+    /// adds Okena's hooks (and the MCP channel, see `claude_remote_channel`)
+    /// to every interactive `claude`. Opt-in (default off). Unix only.
+    #[serde(default)]
+    pub claude_remote: bool,
+    /// With `claude_remote` on, also load Okena's MCP channel so remote prompts
+    /// reach Claude while it works. Claude shows a confirmation dialog for it
+    /// on every start; when off, prompts are typed into the idle terminal.
+    #[serde(default = "default_true")]
+    pub claude_remote_channel: bool,
 
     // File opener settings
     /// Editor command to open file paths (e.g. "code", "cursor", "zed", "subl", "vim")
@@ -510,6 +521,8 @@ impl Default for AppSettings {
             auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
+            claude_remote: false,
+            claude_remote_channel: true,
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
