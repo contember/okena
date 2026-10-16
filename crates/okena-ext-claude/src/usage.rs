@@ -1,4 +1,5 @@
 use crate::pool_usage::{AccountKey, PoolHistory};
+use crate::settings::PoolDisplay;
 use crate::ui_helpers::capitalize_first;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -756,6 +757,17 @@ impl ClaudeUsageData {
     }
 }
 
+/// A status-bar entry with its own popover.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Trigger {
+    /// The `claude` login's own usage.
+    #[default]
+    Login,
+    Account(AccountKey),
+    /// The pool summary of the host with this connection id.
+    Pool(String),
+}
+
 /// Claude API usage indicator with hover popover.
 ///
 /// One of these exists per window; they all share a single [`ClaudeUsageData`]
@@ -766,15 +778,15 @@ pub struct ClaudeUsage {
     /// are shown instead of the `claude` login's usage.
     pool: Vec<HostAiAccounts>,
     pool_history: Entity<PoolHistory>,
-    active_account: Option<AccountKey>,
-    account_bounds: BTreeMap<AccountKey, Bounds<Pixels>>,
+    active: Trigger,
+    trigger_bounds: BTreeMap<Trigger, Bounds<Pixels>>,
     workspace: Option<Entity<Workspace>>,
     _workspace_observation: Option<Subscription>,
     chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
-    trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
     history_refresh_task: Option<Task<()>>,
+    _summary_history_task: Task<()>,
 }
 
 impl ClaudeUsage {
@@ -789,19 +801,37 @@ impl ClaudeUsage {
         // Extensions may activate before the app installs the workspace.
         cx.observe_global::<GlobalWorkspace>(|this, cx| this.bind_workspace(cx))
             .detach();
+        cx.observe_global::<ExtensionSettingsStore>(|this, cx| {
+            this.request_summary_history(cx);
+            cx.notify();
+        })
+        .detach();
+        // The summary reads every account's history; the shared cache
+        // refetches each at most once a minute.
+        let summary_history_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                smol::Timer::after(Duration::from_secs(60)).await;
+                if this
+                    .update(cx, |this, cx| this.request_summary_history(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut this = Self {
             data,
             pool: Vec::new(),
             pool_history,
-            active_account: None,
-            account_bounds: BTreeMap::new(),
+            active: Trigger::Login,
+            trigger_bounds: BTreeMap::new(),
             workspace: None,
             _workspace_observation: None,
             chart_state,
             popover_visible: false,
-            trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
             history_refresh_task: None,
+            _summary_history_task: summary_history_task,
         };
         this.bind_workspace(cx);
         this
@@ -829,45 +859,76 @@ impl ClaudeUsage {
         let pool = workspace.read(cx).remote_sync.ai_accounts();
         if self.pool != pool {
             self.pool = pool.to_vec();
-            self.account_bounds.retain(|key, _| {
-                self.pool.iter().any(|host| {
+            let pool = &self.pool;
+            self.trigger_bounds.retain(|trigger, _| match trigger {
+                Trigger::Login => true,
+                Trigger::Account(key) => pool.iter().any(|host| {
                     host.connection_id == key.connection_id
                         && host
                             .accounts
                             .iter()
                             .any(|account| account.id == key.account_id)
-                })
+                }),
+                Trigger::Pool(connection_id) => {
+                    pool.iter().any(|host| &host.connection_id == connection_id)
+                }
             });
-            if self
-                .active_account
-                .as_ref()
-                .is_some_and(|key| !self.account_bounds.contains_key(key))
-            {
+            if !self.trigger_bounds.contains_key(&self.active) {
                 self.hover_token.fetch_add(1, Ordering::SeqCst);
-                self.active_account = None;
+                self.active = Trigger::Login;
                 self.popover_visible = false;
                 self.history_refresh_task = None;
             }
             if self.popover_visible {
                 self.request_pool_history(cx);
             }
+            self.request_summary_history(cx);
             cx.notify();
         }
     }
 
-    fn request_pool_history(&self, cx: &mut Context<Self>) {
-        if let Some(key) = &self.active_account {
-            self.pool_history
-                .update(cx, |history, cx| history.request(key.clone(), cx));
-        }
+    fn request_history(&self, keys: Vec<AccountKey>, cx: &mut Context<Self>) {
+        self.pool_history.update(cx, |history, cx| {
+            for key in keys {
+                history.request(key, cx);
+            }
+        });
     }
 
-    fn show_popover(&mut self, account: Option<AccountKey>, cx: &mut Context<Self>) {
-        if self.popover_visible && self.active_account == account {
+    fn host_keys(host: &HostAiAccounts) -> impl Iterator<Item = AccountKey> + '_ {
+        host.accounts
+            .iter()
+            .map(move |account| AccountKey::new(host, account))
+    }
+
+    fn request_pool_history(&self, cx: &mut Context<Self>) {
+        let keys = match &self.active {
+            Trigger::Login => return,
+            Trigger::Account(key) => vec![key.clone()],
+            Trigger::Pool(connection_id) => self
+                .pool
+                .iter()
+                .filter(|host| &host.connection_id == connection_id)
+                .flat_map(Self::host_keys)
+                .collect(),
+        };
+        self.request_history(keys, cx);
+    }
+
+    fn request_summary_history(&self, cx: &mut Context<Self>) {
+        if !PoolDisplay::read(cx).summary() {
+            return;
+        }
+        let keys = self.pool.iter().flat_map(Self::host_keys).collect();
+        self.request_history(keys, cx);
+    }
+
+    fn show_popover(&mut self, trigger: Trigger, cx: &mut Context<Self>) {
+        if self.popover_visible && self.active == trigger {
             self.hover_token.fetch_add(1, Ordering::SeqCst);
             return;
         }
-        self.active_account = account;
+        self.active = trigger;
         self.popover_visible = false;
         self.history_refresh_task = None;
         cx.notify();
@@ -886,7 +947,7 @@ impl ClaudeUsage {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
                     this.request_pool_history(cx);
-                    if this.active_account.is_some() {
+                    if this.active != Trigger::Login {
                         this.history_refresh_task =
                             Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
                                 loop {
@@ -942,79 +1003,96 @@ impl ClaudeUsage {
             return div().size_0().into_any_element();
         }
         let working = read_working_days(cx);
-        let (title, plan, body, bounds) = if let Some(key) = &self.active_account {
-            let Some(host) = self
-                .pool
-                .iter()
-                .find(|host| host.connection_id == key.connection_id)
-            else {
-                return div().size_0().into_any_element();
-            };
-            let Some(account) = host
-                .accounts
-                .iter()
-                .find(|account| account.id == key.account_id)
-            else {
-                return div().size_0().into_any_element();
-            };
-            let Some(bounds) = self.account_bounds.get(key) else {
-                return div().size_0().into_any_element();
-            };
-            let history = self
-                .pool_history
-                .read(cx)
-                .entries
-                .get(key)
-                .map(|entry| entry.history.clone())
-                .unwrap_or_default();
-            (
-                "CLAUDE ACCOUNT",
-                None,
-                div()
-                    .child(crate::pool_usage::render_body(
-                        host,
-                        account,
-                        &history,
-                        working,
-                        &self.chart_state,
-                        t,
-                        cx,
-                    ))
-                    .when_some(
-                        self.pool_history
-                            .read(cx)
-                            .entries
-                            .get(key)
-                            .and_then(|entry| entry.error.as_ref()),
-                        |el, error| {
-                            el.child(
-                                div()
-                                    .px(px(12.0))
-                                    .pb(px(10.0))
-                                    .text_size(okena_ui::tokens::ui_text_xs(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("History unavailable: {error}")),
-                            )
-                        },
-                    )
-                    .into_any_element(),
-                *bounds,
-            )
-        } else {
-            if !self.pool.is_empty() {
-                return div().size_0().into_any_element();
+        let Some(bounds) = self.trigger_bounds.get(&self.active).copied() else {
+            return div().size_0().into_any_element();
+        };
+        let (title, plan, body) = match &self.active {
+            Trigger::Account(key) => {
+                let Some(host) = self
+                    .pool
+                    .iter()
+                    .find(|host| host.connection_id == key.connection_id)
+                else {
+                    return div().size_0().into_any_element();
+                };
+                let Some(account) = host
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == key.account_id)
+                else {
+                    return div().size_0().into_any_element();
+                };
+                let history = self
+                    .pool_history
+                    .read(cx)
+                    .entries
+                    .get(key)
+                    .map(|entry| entry.history.clone())
+                    .unwrap_or_default();
+                (
+                    "CLAUDE ACCOUNT",
+                    None,
+                    div()
+                        .child(crate::pool_usage::render_body(
+                            host,
+                            account,
+                            &history,
+                            working,
+                            &self.chart_state,
+                            t,
+                            cx,
+                        ))
+                        .when_some(
+                            self.pool_history
+                                .read(cx)
+                                .entries
+                                .get(key)
+                                .and_then(|entry| entry.error.as_ref()),
+                            |el, error| {
+                                el.child(
+                                    div()
+                                        .px(px(12.0))
+                                        .pb(px(10.0))
+                                        .text_size(okena_ui::tokens::ui_text_xs(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("History unavailable: {error}")),
+                                )
+                            },
+                        )
+                        .into_any_element(),
+                )
             }
-            let shared = self.data.read(cx);
-            let Some(data) = shared.data.lock().clone() else {
-                return div().size_0().into_any_element();
-            };
-            (
-                "CLAUDE USAGE",
-                data.plan.as_deref().map(capitalize_first),
-                self.render_usage_body(&data, working, t, cx)
-                    .into_any_element(),
-                self.trigger_bounds,
-            )
+            Trigger::Pool(connection_id) => {
+                let Some(host) = self
+                    .pool
+                    .iter()
+                    .find(|host| &host.connection_id == connection_id)
+                else {
+                    return div().size_0().into_any_element();
+                };
+                let summary =
+                    crate::pool_summary::summarize(host, self.pool_history.read(cx), working);
+                (
+                    "CLAUDE POOL",
+                    summary.host_name.clone(),
+                    crate::pool_summary::render_body(&summary, t, cx).into_any_element(),
+                )
+            }
+            Trigger::Login => {
+                if !self.pool.is_empty() {
+                    return div().size_0().into_any_element();
+                }
+                let shared = self.data.read(cx);
+                let Some(data) = shared.data.lock().clone() else {
+                    return div().size_0().into_any_element();
+                };
+                (
+                    "CLAUDE USAGE",
+                    data.plan.as_deref().map(capitalize_first),
+                    self.render_usage_body(&data, working, t, cx)
+                        .into_any_element(),
+                )
+            }
         };
         let position = point(bounds.origin.x, bounds.origin.y - px(4.0));
 
@@ -1196,17 +1274,35 @@ impl Render for ClaudeUsage {
             let Some(items) = self.legacy_trigger_items(working, cx) else {
                 return div().size_0().into_any_element();
             };
-            vec![self.render_trigger(None, usage_trigger_items(&t, cx, &items), &t, cx)]
+            vec![self.render_trigger(Trigger::Login, usage_trigger_items(&t, cx, &items), &t, cx)]
         } else {
-            self.pool
-                .iter()
-                .flat_map(|host| host.accounts.iter().map(move |account| (host, account)))
-                .map(|(host, account)| {
-                    let key = AccountKey::new(host, account);
-                    let content = crate::pool_usage::render_trigger(account, working, &t, cx);
-                    self.render_trigger(Some(key), vec![content], &t, cx)
-                })
-                .collect()
+            let display = PoolDisplay::read(cx);
+            let mut triggers = Vec::new();
+            for host in &self.pool {
+                if display.summary() {
+                    let summary =
+                        crate::pool_summary::summarize(host, self.pool_history.read(cx), working);
+                    let content = crate::pool_summary::render_trigger(&summary, display, &t, cx);
+                    triggers.push(self.render_trigger(
+                        Trigger::Pool(host.connection_id.clone()),
+                        content,
+                        &t,
+                        cx,
+                    ));
+                }
+                if display.accounts {
+                    for account in &host.accounts {
+                        let content = crate::pool_usage::render_trigger(account, working, &t, cx);
+                        triggers.push(self.render_trigger(
+                            Trigger::Account(AccountKey::new(host, account)),
+                            vec![content],
+                            &t,
+                            cx,
+                        ));
+                    }
+                }
+            }
+            triggers
         };
         h_flex()
             .gap(px(4.0))
@@ -1219,16 +1315,17 @@ impl Render for ClaudeUsage {
 impl ClaudeUsage {
     fn render_trigger(
         &self,
-        account: Option<AccountKey>,
+        trigger: Trigger,
         content: Vec<AnyElement>,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity();
-        let bounds_account = account.clone();
-        let id: SharedString = match &account {
-            Some(key) => format!("{}-trigger", key.element_id()).into(),
-            None => "claude-usage-trigger".into(),
+        let bounds_trigger = trigger.clone();
+        let id: SharedString = match &trigger {
+            Trigger::Login => "claude-usage-trigger".into(),
+            Trigger::Account(key) => format!("{}-trigger", key.element_id()).into(),
+            Trigger::Pool(connection_id) => format!("claude-pool-summary:{connection_id}").into(),
         };
         h_flex()
             .id(id)
@@ -1243,11 +1340,7 @@ impl ClaudeUsage {
                 canvas(
                     move |bounds, _window, app| {
                         entity.update(app, |this, _cx| {
-                            if let Some(key) = &bounds_account {
-                                this.account_bounds.insert(key.clone(), bounds);
-                            } else {
-                                this.trigger_bounds = bounds;
-                            }
+                            this.trigger_bounds.insert(bounds_trigger.clone(), bounds);
                         });
                     },
                     |_, _, _, _| {},
@@ -1257,8 +1350,8 @@ impl ClaudeUsage {
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                 if *hovered {
-                    this.show_popover(account.clone(), cx);
-                } else if this.active_account == account {
+                    this.show_popover(trigger.clone(), cx);
+                } else if this.active == trigger {
                     this.hide_popover(cx);
                 }
             }))

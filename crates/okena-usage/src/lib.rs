@@ -908,47 +908,68 @@ const MINIMAL_TRIGGER_BAR_WIDTH: Pixels = px(28.0);
 
 /// Build the inner content of the status-bar trigger with a bar below each value.
 /// The caller wraps these in a hoverable, bounds-tracking container.
-///
-/// In the minimal status bar the percentage is dropped and the label sits next
-/// to the bar — the exact figures are one hover away in the popover.
 pub fn usage_trigger_items(t: &ThemeColors, cx: &App, items: &[TriggerItem]) -> Vec<AnyElement> {
-    let minimal = status_bar_style(cx).is_minimal();
-
     items
         .iter()
         .map(|(label, pct, time_pct)| {
-            let color = headline_color(t, *pct, *time_pct);
-            let fraction = pct.clamp(0.0, 100.0) as f32 / 100.0;
-            let label_el = div()
-                .text_size(ui_text_sm(cx))
-                .text_color(rgb(t.text_muted))
-                .child(label.clone());
-
-            if minimal {
-                h_flex()
-                    .gap(px(4.0))
-                    .child(label_el)
-                    .child(
-                        div()
-                            .w(MINIMAL_TRIGGER_BAR_WIDTH)
-                            .child(metric_bar(fraction, color, t)),
-                    )
-                    .into_any_element()
-            } else {
-                v_flex()
-                    .gap(px(1.0))
-                    .child(
-                        h_flex()
-                            .gap(px(3.0))
-                            .text_size(ui_text_sm(cx))
-                            .child(label_el)
-                            .child(div().text_color(rgb(color)).child(format!("{:.0}%", pct))),
-                    )
-                    .child(metric_bar(fraction, color, t))
-                    .into_any_element()
-            }
+            usage_trigger_item(
+                t,
+                cx,
+                label.clone(),
+                format!("{:.0}%", pct),
+                Some(pct.clamp(0.0, 100.0) as f32 / 100.0),
+                headline_color(t, *pct, *time_pct),
+            )
         })
         .collect()
+}
+
+/// One status-bar value: `label value` over a bar filled to `bar` (0–1). A
+/// value without a bar keeps the bar's height so it lines up with the others.
+///
+/// In the minimal status bar the value is dropped and the label sits next to
+/// the bar — the exact figures are one hover away in the popover. A value
+/// without a bar keeps its text there, having nothing else to show.
+pub fn usage_trigger_item(
+    t: &ThemeColors,
+    cx: &App,
+    label: SharedString,
+    value: String,
+    bar: Option<f32>,
+    color: u32,
+) -> AnyElement {
+    let label_el = div()
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(t.text_muted))
+        .child(label);
+    let value_el = div()
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(color))
+        .child(value);
+
+    if status_bar_style(cx).is_minimal() {
+        h_flex()
+            .gap(px(4.0))
+            .child(label_el)
+            .map(|row| match bar {
+                Some(fraction) => row.child(
+                    div()
+                        .w(MINIMAL_TRIGGER_BAR_WIDTH)
+                        .child(metric_bar(fraction, color, t)),
+                ),
+                None => row.child(value_el),
+            })
+            .into_any_element()
+    } else {
+        v_flex()
+            .gap(px(1.0))
+            .child(h_flex().gap(px(3.0)).child(label_el).child(value_el))
+            .map(|column| match bar {
+                Some(fraction) => column.child(metric_bar(fraction, color, t)),
+                None => column.child(div().h(px(2.0))),
+            })
+            .into_any_element()
+    }
 }
 
 // ============================================================================
