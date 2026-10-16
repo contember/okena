@@ -131,10 +131,28 @@ accounts published by the daemon.
 While new terminals are routed through the proxy, the daemon reads the accounts
 from it every 15 seconds and after each management command, and sends them to
 clients with the workspace state. The Claude usage widget in the status bar then
-shows the pool instead of the `claude` login's own usage: the 5-hour and 7-day
-usage of each account in the bar. Hovering an account opens its own popover
-with its usage, plan and state (disabled, needs login, quota exhausted or
-cooling down). Remote accounts include the host name in their popover.
+shows the pool instead of the `claude` login's own usage. The Claude extension
+settings choose any combination of three items per host:
+
+- **Per-account usage** (default): the 5-hour and 7-day usage of each account.
+  Hovering an account opens its own popover with its usage, plan and state
+  (disabled, needs login, quota exhausted or cooling down). Remote accounts
+  include the host name in their popover.
+- **Runway**: how long nonstop work at the usual pace lasts before every
+  account is blocked. A simulation serves the pace from one account at a time,
+  the one whose weekly quota expires first, and returns accounts as their
+  windows reset. The pace is the 75th percentile of the last week's active
+  hours; the cost of a session point in weekly points comes from the same
+  history. Both fall back to defaults until there is enough history.
+- **Daily budget**: today's weekly usage against today's share, which is the
+  weekly quota each account had left at midnight spread over the working days
+  until its reset. A reset during today adds a day's share of the new window.
+
+The runway and the budget weigh accounts by plan size (Pro 1, Max 5x 5,
+Max 20x 20), from the `rate_limit_tier` of the OAuth profile. The proxy stores
+it at login; accounts logged in before learn it once per proxy process from the
+usage poll. Hovering either item opens the pool popover with the model's
+inputs and each account's share.
 
 Successful five-minute usage polls append quota samples to
 `<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection

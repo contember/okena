@@ -36,6 +36,10 @@ impl History {
         )
     }
 
+    pub fn samples(&self) -> &[UsageSample] {
+        &self.0
+    }
+
     pub fn points(&self, name: &str, reset_at: f64, period: f64, now: f64) -> Vec<HistoryPoint> {
         if !reset_at.is_finite() || !period.is_finite() || period <= 0.0 {
             return Vec::new();
