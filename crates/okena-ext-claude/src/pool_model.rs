@@ -1,8 +1,8 @@
 //! The account pool reduced to the user's own clock. Every account has a 5-hour
 //! and a 7-day window with its own reset, so their percentages cannot be added
-//! up. Instead the pool answers two questions that share one timeline: how long
-//! work can go on before every account is blocked (runway), and how much of the
-//! remaining weekly quota today may use (daily budget).
+//! up. Instead the pool answers two questions on one timeline: how long nonstop
+//! work can go on before every account is blocked (runway), and how much today
+//! may still use without the pool running short later in the week (today).
 //!
 //! Quantities are weighted by plan size, so 1% of a Max 20x account counts four
 //! times as much as 1% of a Max 5x account.
@@ -304,26 +304,6 @@ pub(crate) fn runway(accounts: &[&AiAccount], pace: Pace, now: i64) -> Runway {
     Runway::BeyondHorizon
 }
 
-/// Weighted weekly points: what today has used and what it may use.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct DailyBudget {
-    pub used: f64,
-    pub allowance: f64,
-}
-
-impl DailyBudget {
-    pub fn percent(&self) -> Option<f64> {
-        (self.allowance > 0.0).then(|| self.used / self.allowance * 100.0)
-    }
-}
-
-impl std::ops::AddAssign for DailyBudget {
-    fn add_assign(&mut self, other: Self) {
-        self.used += other.used;
-        self.allowance += other.allowance;
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct WeeklyPoint {
     at_secs: f64,
@@ -331,21 +311,16 @@ struct WeeklyPoint {
     reset_secs: Option<f64>,
 }
 
-/// The account's share of today's budget: the weekly quota left at midnight,
-/// spread evenly over the working days until it resets. Today always counts as
-/// one of them. A reset during today adds the new window's first day.
-pub(crate) fn daily_budget(
+/// Weekly points the account used between `from` and `to` (Unix seconds),
+/// measured from its history and the live window at `now`; increments across a
+/// reset count from zero.
+pub(crate) fn weekly_used_between(
     account: &AiAccount,
     history: &History,
-    working: WorkingDays,
+    from: f64,
+    to: f64,
     now: Timestamp,
-    tz: &TimeZone,
-) -> DailyBudget {
-    let today = now.to_zoned(tz.clone()).date();
-    let Ok(day_start) = today.to_zoned(tz.clone()) else {
-        return DailyBudget::default();
-    };
-    let day_start = day_start.timestamp().as_millisecond() as f64 / 1000.0;
+) -> f64 {
     let now_secs = now.as_millisecond() as f64 / 1000.0;
     let mut points: Vec<WeeklyPoint> = history
         .samples()
@@ -368,75 +343,295 @@ pub(crate) fn daily_budget(
         });
     }
     points.sort_by(|a, b| a.at_secs.total_cmp(&b.at_secs));
-    let baseline_index = points
+    points.retain(|point| point.at_secs <= to);
+    let baseline = points
         .iter()
-        .rposition(|point| point.at_secs <= day_start)
+        .rposition(|point| point.at_secs <= from)
         .unwrap_or(0);
-    let Some(baseline) = points.get(baseline_index).copied() else {
-        return DailyBudget::default();
-    };
+    points
+        .get(baseline..)
+        .unwrap_or_default()
+        .windows(2)
+        .map(|pair| {
+            let (before, after) = (pair[0], pair[1]);
+            let same_window = match (before.reset_secs, after.reset_secs) {
+                (Some(a), Some(b)) => (a - b).abs() < RESET_TOLERANCE_SECS,
+                _ => true,
+            };
+            if same_window {
+                (after.used - before.used).max(0.0)
+            } else {
+                after.used
+            }
+        })
+        .sum()
+}
 
-    let mut used = 0.0;
-    for pair in points[baseline_index..].windows(2) {
-        let (before, after) = (pair[0], pair[1]);
-        let same_window = match (before.reset_secs, after.reset_secs) {
-            (Some(a), Some(b)) => (a - b).abs() < RESET_TOLERANCE_SECS,
-            _ => true,
-        };
-        used += if same_window {
-            (after.used - before.used).max(0.0)
-        } else {
-            after.used
-        };
-    }
+/// What today may still use without the pool running short within the next
+/// week. All quantities are weighted weekly points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Today {
+    /// Used since local midnight.
+    pub used: f64,
+    /// The most each working day may use, today included, so that no shortage
+    /// occurs within the [`HORIZON_DAYS`] starting today. At most the pool's
+    /// long-run share.
+    pub safe_per_day: f64,
+    /// Where a working day using more than `safe_per_day` runs short; `None`
+    /// when the long-run share is the limit, not a moment.
+    pub bottleneck_ms: Option<i64>,
+    /// Used in the last 24 hours.
+    pub recent_per_day: f64,
+    /// When the pool runs short if every working day uses `recent_per_day`;
+    /// `None` when that pace lasts the horizon.
+    pub wall_at_recent_pace_ms: Option<i64>,
+    /// What a non-working day uses, from the history of the last week.
+    pub off_day: f64,
+}
 
-    let live_reset = account
-        .seven_day
-        .as_ref()
-        .and_then(|usage| usage.resets_at_ms)
-        .map(|ms| ms as f64 / 1000.0);
-    let (left_at_midnight, reset) = match baseline.reset_secs {
-        Some(reset) if reset <= day_start => (100.0, live_reset),
-        reset => (100.0 - baseline.used, reset.or(live_reset)),
-    };
-    let tomorrow = today.tomorrow().ok();
-    let week_days = days_to_spread(today, today.checked_add(6.days()).unwrap_or(today), working);
-    let allowance = match reset.and_then(date_of_last_moment(tz)) {
-        Some(last_day) if Some(last_day) < tomorrow => left_at_midnight + 100.0 / week_days as f64,
-        Some(last_day) => left_at_midnight / days_to_spread(today, last_day, working) as f64,
-        None => left_at_midnight / week_days as f64,
-    };
-    let weight = plan_weight(account);
-    DailyBudget {
-        used: used * weight,
-        allowance: allowance * weight,
+impl Today {
+    pub fn left(&self) -> f64 {
+        self.safe_per_day - self.used
     }
 }
 
-/// The local date of the last moment before `reset`.
-fn date_of_last_moment(tz: &TimeZone) -> impl Fn(f64) -> Option<Date> + '_ {
-    move |reset| {
-        Timestamp::from_millisecond((reset * 1000.0) as i64 - 1)
-            .ok()
-            .map(|at| at.to_zoned(tz.clone()).date())
+/// Local days the day plan looks ahead, today included.
+pub(crate) const HORIZON_DAYS: usize = 7;
+
+/// One account's weekly window in weighted points.
+#[derive(Clone, Copy, Debug)]
+struct WeeklyQuota {
+    weight: f64,
+    used: f64,
+    reset_ms: Option<i64>,
+}
+
+/// One local day of the horizon.
+#[derive(Clone, Copy, Debug)]
+struct Day {
+    start_ms: i64,
+    end_ms: i64,
+    working: bool,
+}
+
+pub(crate) fn today(
+    accounts: &[(&AiAccount, &History)],
+    working: WorkingDays,
+    now: Timestamp,
+    tz: &TimeZone,
+) -> Today {
+    let now_ms = now.as_millisecond();
+    let now_secs = now_ms as f64 / 1000.0;
+    let days = local_days(now, working, tz);
+    let day_start = days.first().map_or(now_ms, |day| day.start_ms) as f64 / 1000.0;
+    let weighted_between = |from: f64, to: f64| -> f64 {
+        accounts
+            .iter()
+            .map(|(account, history)| {
+                weekly_used_between(account, history, from, to, now) * plan_weight(account)
+            })
+            .sum()
+    };
+    let used = weighted_between(day_start, now_secs);
+    let recent_per_day = weighted_between(now_secs - 86400.0, now_secs);
+    let off_day = off_day_usage(accounts, working, now, tz, &weighted_between);
+    let quotas: Vec<WeeklyQuota> = accounts
+        .iter()
+        .map(|(account, _)| {
+            let (used, reset_ms) = match &account.seven_day {
+                Some(usage) if usage.resets_at_ms.is_none_or(|reset| reset > now_ms) => {
+                    (usage.utilization, usage.resets_at_ms)
+                }
+                _ => (0.0, None),
+            };
+            WeeklyQuota {
+                weight: plan_weight(account),
+                used,
+                reset_ms,
+            }
+        })
+        .collect();
+    let plan = DayPlan {
+        quotas: &quotas,
+        days: &days,
+        now_ms,
+        used_today: used,
+        off_day,
+    };
+
+    let weekly_capacity: f64 = quotas.iter().map(|quota| 100.0 * quota.weight).sum();
+    let off_days = 7 - working.count();
+    let long_run =
+        ((weekly_capacity - off_day * off_days as f64) / working.count().max(1) as f64).max(0.0);
+    let (safe_per_day, bottleneck_ms) = match plan.shortage(long_run) {
+        None => (long_run, None),
+        Some(_) => {
+            let (mut low, mut high) = (0.0, long_run);
+            for _ in 0..40 {
+                let middle = (low + high) / 2.0;
+                match plan.shortage(middle) {
+                    None => low = middle,
+                    Some(_) => high = middle,
+                }
+            }
+            (low, plan.shortage(high))
+        }
+    };
+    Today {
+        used,
+        safe_per_day,
+        bottleneck_ms,
+        recent_per_day,
+        wall_at_recent_pace_ms: plan.shortage(recent_per_day),
+        off_day,
     }
 }
 
-/// Working days from `today` to `last` inclusive; today counts even when it is
-/// not a working day, since usage is happening on it.
-fn days_to_spread(today: Date, last: Date, working: WorkingDays) -> usize {
-    let mut count = 1;
-    let mut day = today;
-    while let Ok(next) = day.tomorrow() {
-        if next > last {
+/// Average use of the non-working days of the last week that the history
+/// covers whole.
+fn off_day_usage(
+    accounts: &[(&AiAccount, &History)],
+    working: WorkingDays,
+    now: Timestamp,
+    tz: &TimeZone,
+    weighted_between: &dyn Fn(f64, f64) -> f64,
+) -> f64 {
+    let first_sample = accounts
+        .iter()
+        .flat_map(|(_, history)| history.samples())
+        .map(|sample| sample.recorded_at)
+        .min_by(f64::total_cmp);
+    let Some(first_sample) = first_sample else {
+        return 0.0;
+    };
+    let today = now.to_zoned(tz.clone()).date();
+    let mut total = 0.0;
+    let mut counted = 0;
+    for back in 1..=7 {
+        let Ok(date) = today.checked_sub(back.days()) else {
+            continue;
+        };
+        if working.days[date.weekday().to_monday_zero_offset() as usize] {
+            continue;
+        }
+        let (Some(start), Some(end)) = (
+            local_midnight(date, tz),
+            date.tomorrow()
+                .ok()
+                .and_then(|next| local_midnight(next, tz)),
+        ) else {
+            continue;
+        };
+        let (start, end) = (start as f64 / 1000.0, end as f64 / 1000.0);
+        if first_sample > start {
+            continue;
+        }
+        total += weighted_between(start, end);
+        counted += 1;
+    }
+    if counted == 0 {
+        0.0
+    } else {
+        total / counted as f64
+    }
+}
+
+fn local_midnight(date: Date, tz: &TimeZone) -> Option<i64> {
+    Some(date.to_zoned(tz.clone()).ok()?.timestamp().as_millisecond())
+}
+
+/// [`HORIZON_DAYS`] local days from today on.
+fn local_days(now: Timestamp, working: WorkingDays, tz: &TimeZone) -> Vec<Day> {
+    let mut days = Vec::new();
+    let mut date = now.to_zoned(tz.clone()).date();
+    while days.len() < HORIZON_DAYS {
+        let (Some(start_ms), Some(end_ms)) = (
+            local_midnight(date, tz),
+            date.tomorrow()
+                .ok()
+                .and_then(|next| local_midnight(next, tz)),
+        ) else {
             break;
-        }
-        if working.days[next.weekday().to_monday_zero_offset() as usize] {
-            count += 1;
-        }
-        day = next;
+        };
+        days.push(Day {
+            start_ms,
+            end_ms,
+            working: working.days[date.weekday().to_monday_zero_offset() as usize],
+        });
+        let Ok(next) = date.tomorrow() else {
+            break;
+        };
+        date = next;
     }
-    count
+    days
+}
+
+struct DayPlan<'a> {
+    quotas: &'a [WeeklyQuota],
+    days: &'a [Day],
+    now_ms: i64,
+    used_today: f64,
+    off_day: f64,
+}
+
+impl DayPlan<'_> {
+    /// When the pool first cannot serve `per_day` on every working day (and
+    /// the usual use of the others), drawing the quota that resets first.
+    /// Today's remainder spreads over the rest of today.
+    fn shortage(&self, per_day: f64) -> Option<i64> {
+        let mut quotas = self.quotas.to_vec();
+        for (index, day) in self.days.iter().enumerate() {
+            let budget = if day.working { per_day } else { self.off_day };
+            let (start, amount) = if index == 0 {
+                (self.now_ms, (budget - self.used_today).max(0.0))
+            } else {
+                (day.start_ms, budget)
+            };
+            let end = day.end_ms;
+            if end <= start {
+                continue;
+            }
+            let per_ms = amount / (end - start) as f64;
+            let mut t = start;
+            while t < end {
+                for quota in &mut quotas {
+                    if let Some(reset) = quota.reset_ms.filter(|reset| *reset <= t) {
+                        quota.used = 0.0;
+                        quota.reset_ms = Some(reset + WEEK_MS);
+                    }
+                }
+                let next = quotas
+                    .iter()
+                    .filter_map(|quota| quota.reset_ms)
+                    .filter(|reset| *reset > t)
+                    .min()
+                    .unwrap_or(end)
+                    .min(end);
+                let mut need = per_ms * (next - t) as f64;
+                let available: f64 = quotas
+                    .iter()
+                    .map(|quota| (100.0 - quota.used).max(0.0) * quota.weight)
+                    .sum();
+                if need > available + 1e-9 {
+                    return Some(t + (available / per_ms) as i64);
+                }
+                quotas.sort_by_key(|quota| quota.reset_ms.unwrap_or(i64::MAX));
+                for quota in &mut quotas {
+                    if need <= 0.0 {
+                        break;
+                    }
+                    let take = need.min((100.0 - quota.used).max(0.0) * quota.weight);
+                    if take > 0.0 {
+                        quota.used += take / quota.weight;
+                        quota.reset_ms.get_or_insert(t + WEEK_MS);
+                        need -= take;
+                    }
+                }
+                t = next;
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -630,40 +825,8 @@ mod tests {
     }
 
     #[test]
-    fn daily_budget_spreads_what_was_left_at_midnight() {
-        // Wednesday; the weekly window resets Friday noon.
-        let today = jiff::civil::date(2026, 10, 14);
-        let now = noon(today);
-        let reset = secs(noon(jiff::civil::date(2026, 10, 16)));
-        let history = History::from_samples(vec![
-            sample(secs(now) - 13.0 * 3600.0, None, Some((40.0, reset))),
-            sample(secs(now) - 2.0 * 3600.0, None, Some((46.0, reset))),
-        ]);
-        let live = AiAccount {
-            seven_day: usage(49.0, Some((reset * 1000.0) as i64)),
-            ..account(Some("default_claude_max_5x"))
-        };
-        let budget = daily_budget(&live, &history, WorkingDays::all(), now, &TimeZone::UTC);
-        // 60 left at midnight over Wed, Thu, Fri; 9 used since; weight 5.
-        assert_eq!(
-            budget,
-            DailyBudget {
-                used: 45.0,
-                allowance: 100.0
-            }
-        );
-        let weekdays = WorkingDays {
-            days: [true, true, true, false, true, false, false],
-        };
-        // Thursday is off: the 60 spreads over Wed and Fri only.
-        let budget = daily_budget(&live, &history, weekdays, now, &TimeZone::UTC);
-        assert_eq!(budget.allowance, 150.0);
-    }
-
-    #[test]
-    fn daily_budget_follows_a_reset_during_the_day() {
-        let today = jiff::civil::date(2026, 10, 14);
-        let now = noon(today);
+    fn weekly_use_counts_across_a_reset() {
+        let now = noon(jiff::civil::date(2026, 10, 14));
         let old_reset = secs(now) - 3600.0;
         let new_reset = old_reset + 7.0 * 86400.0;
         let history = History::from_samples(vec![
@@ -673,39 +836,89 @@ mod tests {
         ]);
         let live = AiAccount {
             seven_day: usage(5.0, Some((new_reset * 1000.0) as i64)),
-            ..account(Some("default_claude_max_5x"))
+            ..account(None)
         };
-        let budget = daily_budget(&live, &history, WorkingDays::all(), now, &TimeZone::UTC);
-        // Used 6 before the reset and 5 after; the expiring 10 plus a seventh
-        // of the new window are today's.
-        assert!((budget.used - 11.0 * 5.0).abs() < 1e-9);
-        assert!((budget.allowance - (10.0 + 100.0 / 7.0) * 5.0).abs() < 1e-9);
+        let midnight = secs(now) - 12.0 * 3600.0;
+        // 6 before the reset, 5 after it.
+        assert_eq!(
+            weekly_used_between(&live, &history, midnight, secs(now), now),
+            11.0
+        );
+        assert_eq!(
+            weekly_used_between(&live, &history, midnight, secs(now) - 3.0 * 3600.0, now),
+            0.0
+        );
     }
 
     #[test]
-    fn daily_budget_without_history_uses_the_live_window() {
-        let today = jiff::civil::date(2026, 10, 14);
-        let now = noon(today);
-        let live = AiAccount {
-            seven_day: usage(
-                30.0,
-                Some(noon(jiff::civil::date(2026, 10, 20)).as_millisecond()),
-            ),
-            ..account(Some("default_claude_max_5x"))
+    fn safe_use_is_limited_by_the_quota_left_before_the_next_reset() {
+        // Wednesday noon. A has 20 left until Friday noon, B is out until
+        // Saturday noon; both are Max 5x.
+        let now = noon(jiff::civil::date(2026, 10, 14));
+        let a = AiAccount {
+            seven_day: usage(80.0, Some(now.as_millisecond() + 2 * 24 * HOUR_MS)),
+            ..account(None)
         };
-        let budget = daily_budget(
-            &live,
-            &History::default(),
+        let b = AiAccount {
+            seven_day: usage(100.0, Some(now.as_millisecond() + 3 * 24 * HOUR_MS)),
+            ..account(None)
+        };
+        let empty = History::default();
+        let today = today(
+            &[(&a, &empty), (&b, &empty)],
             WorkingDays::all(),
             now,
             &TimeZone::UTC,
         );
-        assert_eq!(
-            budget,
-            DailyBudget {
-                used: 0.0,
-                allowance: 70.0 / 7.0 * 5.0
-            }
-        );
+        // The rest of Wednesday, Thursday and half of Friday share A's 100
+        // weighted points: 2.5 days of 40.
+        assert!((today.safe_per_day - 40.0).abs() < 0.01);
+        let bottleneck = today.bottleneck_ms.unwrap();
+        assert!((bottleneck - (now.as_millisecond() + 2 * 24 * HOUR_MS)).abs() < HOUR_MS);
+        assert_eq!(today.used, 0.0);
+        assert_eq!(today.wall_at_recent_pace_ms, None);
+    }
+
+    #[test]
+    fn a_full_pool_is_limited_by_its_long_run_share() {
+        let now = noon(jiff::civil::date(2026, 10, 14));
+        let fresh = account(None);
+        let empty = History::default();
+        let weekdays = WorkingDays {
+            days: [true, true, true, true, true, false, false],
+        };
+        let today = today(&[(&fresh, &empty)], weekdays, now, &TimeZone::UTC);
+        // 500 weighted points a week over 5 working days.
+        assert_eq!(today.safe_per_day, 100.0);
+        assert_eq!(today.bottleneck_ms, None);
+    }
+
+    #[test]
+    fn recent_use_finds_the_wall_and_off_days_count() {
+        // Wednesday noon; Sunday used 10 weekly points, the last day 30.
+        let now = noon(jiff::civil::date(2026, 10, 14));
+        let reset = secs(now) + 5.0 * 86400.0;
+        let at = |days_back: f64| secs(now) - days_back * 86400.0;
+        let history = History::from_samples(vec![
+            sample(at(4.0), None, Some((5.0, reset))),
+            sample(at(3.5), None, Some((10.0, reset))),
+            sample(at(3.0), None, Some((15.0, reset))),
+            sample(at(2.5), None, Some((20.0, reset))),
+            sample(at(1.0), None, Some((40.0, reset))),
+        ]);
+        let live = AiAccount {
+            seven_day: usage(70.0, Some((reset * 1000.0) as i64)),
+            ..account(None)
+        };
+        let weekdays = WorkingDays {
+            days: [true, true, true, true, true, false, false],
+        };
+        let today = today(&[(&live, &history)], weekdays, now, &TimeZone::UTC);
+        assert_eq!(today.off_day, 50.0);
+        assert_eq!(today.recent_per_day, 150.0);
+        // Today has used its 150 already and Thursday takes the 150 left, so
+        // Friday runs short at once.
+        let wall = today.wall_at_recent_pace_ms.unwrap();
+        assert!((wall - (now.as_millisecond() + 36 * HOUR_MS)).abs() < HOUR_MS);
     }
 }

@@ -1,8 +1,8 @@
-//! Status-bar summary of one host's account pool: runway and daily budget
-//! (see [`crate::pool_model`]), with a popover that shows the model's inputs and
-//! each account's share.
+//! Status-bar summary of one host's account pool: runway and what today may
+//! still use (see [`crate::pool_model`]), with a popover that explains both and
+//! opens each account's detail.
 
-use crate::pool_model::{self, DailyBudget, Pace, PlanSize, RUNWAY_HORIZON_MS, Runway};
+use crate::pool_model::{self, Pace, PlanSize, RUNWAY_HORIZON_MS, Runway, Today};
 use crate::pool_usage::{AccountKey, PoolHistory};
 use crate::settings::PoolDisplay;
 use gpui::prelude::FluentBuilder;
@@ -18,17 +18,23 @@ use okena_usage::{
     usage_divider, usage_kv_row, usage_trigger_item,
 };
 use okena_workspace::remote_sync::HostAiAccounts;
+use std::rc::Rc;
 
 const MINUTE_MS: i64 = 60 * 1000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 
+pub(crate) type OpenAccount = Rc<dyn Fn(&AccountKey, &mut Window, &mut App)>;
+pub(crate) type GoBack = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub(crate) struct AccountShare {
+    key: AccountKey,
     label: String,
     tier: Option<&'static str>,
     five_hour: Option<f64>,
     seven_day: Option<f64>,
-    weight: f64,
-    budget: DailyBudget,
+    weekly_reset_ms: Option<i64>,
+    /// Weekly percent of this account used since midnight.
+    used_today: f64,
     blocked: Option<String>,
 }
 
@@ -36,10 +42,28 @@ pub(crate) struct HostSummary {
     /// `None` for the local daemon.
     pub host_name: Option<String>,
     runway: Runway,
-    today: DailyBudget,
+    today: Today,
     pace: Pace,
+    working: WorkingDays,
     mean_weight: f64,
     accounts: Vec<AccountShare>,
+}
+
+impl HostSummary {
+    /// Weighted weekly points as work at the pool's pace.
+    fn work_ms(&self, points: f64) -> i64 {
+        let per_hour = self.pace.session_points_per_hour * self.pace.weekly_per_session_point;
+        if per_hour > 0.0 {
+            (points / per_hour * HOUR_MS as f64) as i64
+        } else {
+            0
+        }
+    }
+
+    /// Weighted weekly points as percent of one average account's week.
+    fn account_weeks(&self, points: f64) -> f64 {
+        points / self.mean_weight
+    }
 }
 
 pub(crate) fn summarize(
@@ -50,8 +74,13 @@ pub(crate) fn summarize(
     let now = jiff::Timestamp::now();
     let now_ms = now.as_millisecond();
     let tz = jiff::tz::TimeZone::system();
+    let midnight = now
+        .to_zoned(tz.clone())
+        .date()
+        .to_zoned(tz.clone())
+        .map_or(now_ms, |midnight| midnight.timestamp().as_millisecond());
     let empty = History::default();
-    let accounts: Vec<(&AiAccount, &History)> = host
+    let accounts: Vec<(&AiAccount, &History, AccountKey)> = host
         .accounts
         .iter()
         .filter(|account| pool_model::in_service(account))
@@ -61,39 +90,52 @@ pub(crate) fn summarize(
                 .entries
                 .get(&key)
                 .map_or(&empty, |entry| &entry.history);
-            (account, history)
+            (account, history, key)
         })
         .collect();
-    let pace = pool_model::pace(&accounts);
-    let pool: Vec<&AiAccount> = accounts.iter().map(|(account, _)| *account).collect();
-    let mut today = DailyBudget::default();
-    let shares = accounts
+    let pairs: Vec<(&AiAccount, &History)> = accounts
         .iter()
-        .map(|(account, history)| {
-            let budget = pool_model::daily_budget(account, history, working, now, &tz);
-            today += budget;
-            AccountShare {
-                label: account.label.clone(),
-                tier: tier_label(account),
-                five_hour: account.five_hour.as_ref().map(|usage| usage.utilization),
-                seven_day: account.seven_day.as_ref().map(|usage| usage.utilization),
-                weight: pool_model::plan_weight(account),
-                budget,
-                blocked: blocked_reason(account, now_ms),
-            }
+        .map(|(account, history, _)| (*account, *history))
+        .collect();
+    let pace = pool_model::pace(&pairs);
+    let pool: Vec<&AiAccount> = pairs.iter().map(|(account, _)| *account).collect();
+    let shares: Vec<AccountShare> = accounts
+        .iter()
+        .map(|(account, history, key)| AccountShare {
+            key: key.clone(),
+            label: account.label.clone(),
+            tier: tier_label(account),
+            five_hour: account.five_hour.as_ref().map(|usage| usage.utilization),
+            seven_day: account.seven_day.as_ref().map(|usage| usage.utilization),
+            weekly_reset_ms: account
+                .seven_day
+                .as_ref()
+                .and_then(|usage| usage.resets_at_ms),
+            used_today: pool_model::weekly_used_between(
+                account,
+                history,
+                midnight as f64 / 1000.0,
+                now_ms as f64 / 1000.0,
+                now,
+            ),
+            blocked: blocked_reason(account, now_ms),
         })
-        .collect::<Vec<_>>();
-    let mean_weight = if shares.is_empty() {
+        .collect();
+    let mean_weight = if pool.is_empty() {
         1.0
     } else {
-        shares.iter().map(|share| share.weight).sum::<f64>() / shares.len() as f64
+        pool.iter()
+            .map(|account| pool_model::plan_weight(account))
+            .sum::<f64>()
+            / pool.len() as f64
     };
     HostSummary {
         host_name: (host.connection_id != LOCAL_DAEMON_CONNECTION_ID)
             .then(|| host.host_name.clone()),
         runway: pool_model::runway(&pool, pace, now_ms),
-        today,
+        today: pool_model::today(&pairs, working, now, &tz),
         pace,
+        working,
         mean_weight,
         accounts: shares,
     }
@@ -126,10 +168,11 @@ fn runway_severity(runway: Runway) -> Severity {
     }
 }
 
-fn budget_severity(percent: f64) -> Severity {
-    if percent > 100.0 {
+fn today_severity(summary: &HostSummary) -> Severity {
+    let left = summary.work_ms(summary.today.left());
+    if left < 0 {
         Severity::Critical
-    } else if percent > 85.0 {
+    } else if left < HOUR_MS {
         Severity::Warning
     } else {
         Severity::Normal
@@ -161,6 +204,20 @@ fn runway_value(runway: Runway, now_ms: i64) -> String {
     }
 }
 
+/// "3h left" or "45m over".
+fn today_value(summary: &HostSummary) -> String {
+    let left = summary.work_ms(summary.today.left());
+    if left >= 0 {
+        format!("{} left", short_duration(left))
+    } else {
+        format!("{} over", short_duration(-left))
+    }
+}
+
+fn moment(ms: i64) -> String {
+    format_reset_time_epoch(ms as f64 / 1000.0, true)
+}
+
 pub(crate) fn render_trigger(
     summary: &HostSummary,
     display: PoolDisplay,
@@ -189,49 +246,71 @@ pub(crate) fn render_trigger(
         ));
     }
     if display.today {
-        let item = match summary.today.percent() {
-            Some(percent) => usage_trigger_item(
-                t,
-                cx,
-                "Today".into(),
-                format!("{percent:.0}%"),
-                Some((percent / 100.0).clamp(0.0, 1.0) as f32),
-                severity_color(t, budget_severity(percent)),
-            ),
-            None => usage_trigger_item(
-                t,
-                cx,
-                "Today".into(),
-                "no quota".into(),
-                None,
-                severity_color(t, Severity::Critical),
-            ),
+        let today = summary.today;
+        let fraction = if today.safe_per_day > 0.0 {
+            (today.used / today.safe_per_day).clamp(0.0, 1.0) as f32
+        } else {
+            1.0
         };
-        items.push(item);
+        items.push(usage_trigger_item(
+            t,
+            cx,
+            "Today".into(),
+            today_value(summary),
+            Some(fraction),
+            severity_color(t, today_severity(summary)),
+        ));
     }
     items
 }
 
-pub(crate) fn render_body(summary: &HostSummary, t: &ThemeColors, cx: &App) -> Div {
+pub(crate) fn render_body(
+    summary: &HostSummary,
+    open_account: OpenAccount,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    let today = summary.today;
     let runway_text = match summary.runway {
         Runway::Lasts { ms } => format!("{} of nonstop work", short_duration(ms)),
         Runway::BeyondHorizon => "a week or more".into(),
         Runway::Blocked {
             until_ms: Some(until),
-        } => format!(
-            "all blocked, first back {}",
-            format_reset_time_epoch(until as f64 / 1000.0, true)
-        ),
+        } => format!("all blocked, first back {}", moment(until)),
         Runway::Blocked { until_ms: None } => "all blocked".into(),
     };
-    let today_text = match summary.today.percent() {
-        Some(percent) => format!("{percent:.0}% of today's budget"),
-        None => "no weekly quota left".into(),
+    let work = |points: f64| {
+        format!(
+            "{} ({:.0}%)",
+            short_duration(summary.work_ms(points)),
+            summary.account_weeks(points)
+        )
     };
-    let session_hours = 100.0 * summary.mean_weight / summary.pace.session_points_per_hour;
+    let recent_text = match today.wall_at_recent_pace_ms {
+        Some(wall) => format!("runs out {}", moment(wall)),
+        None => "lasts the week".into(),
+    };
+    let now_ms = jiff::Timestamp::now().as_millisecond();
+    let mut refills: Vec<(i64, &AccountShare)> = summary
+        .accounts
+        .iter()
+        .filter(|share| share.seven_day.is_some_and(|used| used > 0.0))
+        .filter_map(|share| Some((share.weekly_reset_ms.filter(|at| *at > now_ms)?, share)))
+        .collect();
+    refills.sort_by_key(|(at, _)| *at);
+    let muted = |text: String| {
+        div()
+            .text_size(ui_text_xs(cx))
+            .text_color(rgb(t.text_muted))
+            .child(text)
+    };
     let pace_note = format!(
-        "Your pace fills a 5h window in {}; a full 5h window costs {:.0}% of a week. {}",
-        short_duration((session_hours * HOUR_MS as f64) as i64),
+        "Times are work at your pace: a 5h window fills in {} and costs {:.0}% of a week. \
+         Percentages are of one account's week. {}",
+        short_duration(
+            (100.0 * summary.mean_weight / summary.pace.session_points_per_hour * HOUR_MS as f64)
+                as i64
+        ),
         summary.pace.weekly_per_session_point * 100.0,
         if summary.pace.from_history {
             "Measured over the last 7 days."
@@ -254,80 +333,167 @@ pub(crate) fn render_body(summary: &HostSummary, t: &ThemeColors, cx: &App) -> D
                 t,
                 cx,
                 "Today",
-                today_text,
-                severity_color(
-                    t,
-                    summary
-                        .today
-                        .percent()
-                        .map_or(Severity::Critical, budget_severity),
-                ),
+                today_value(summary),
+                severity_color(t, today_severity(summary)),
             ))
             .child(
-                div()
-                    .text_size(ui_text_xs(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(pace_note),
+                v_flex()
+                    .gap(px(3.0))
+                    .child(usage_kv_row(
+                        t,
+                        cx,
+                        "Used today",
+                        work(today.used),
+                        t.text_secondary,
+                    ))
+                    .child(usage_kv_row(
+                        t,
+                        cx,
+                        "Safe per working day",
+                        work(today.safe_per_day),
+                        t.text_secondary,
+                    ))
+                    .when_some(today.bottleneck_ms, |el, at| {
+                        el.child(muted(format!(
+                            "More than that runs short {}, before the next reset.",
+                            moment(at)
+                        )))
+                    })
+                    .child(usage_kv_row(
+                        t,
+                        cx,
+                        "At the last 24h's pace",
+                        recent_text,
+                        if today.wall_at_recent_pace_ms.is_some() {
+                            t.warning
+                        } else {
+                            t.text_secondary
+                        },
+                    ))
+                    .when(!summary.working.is_all() && today.off_day > 0.0, |el| {
+                        el.child(muted(format!(
+                            "Days off use {} each, as last week.",
+                            work(today.off_day)
+                        )))
+                    }),
             )
+            .when(!refills.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child("Next refills"),
+                        )
+                        .children(refills.into_iter().take(3).map(|(at, share)| {
+                            muted(format!(
+                                "{}  {}  +{:.0}%",
+                                moment(at),
+                                share.label,
+                                share.seven_day.unwrap_or_default()
+                            ))
+                        })),
+                )
+            })
+            .child(muted(pace_note))
             .child(usage_divider(t))
             .children(
                 summary
                     .accounts
                     .iter()
-                    .map(|share| render_share(share, t, cx)),
+                    .map(|share| render_share(share, open_account.clone(), t, cx)),
             ),
     )
 }
 
-fn render_share(share: &AccountShare, t: &ThemeColors, cx: &App) -> AnyElement {
+fn render_share(share: &AccountShare, open: OpenAccount, t: &ThemeColors, cx: &App) -> AnyElement {
     let percent = |value: Option<f64>| value.map_or("–".into(), |value| format!("{value:.0}%"));
-    // The budget is weighted by plan; the row reads in the account's own percent.
-    let today = format!(
-        "today {:.0} / {:.0}%",
-        share.budget.used / share.weight,
-        share.budget.allowance / share.weight
-    );
     let cell = |text: String| {
         div()
             .text_size(ui_text_xs(cx))
             .text_color(rgb(t.text_secondary))
             .child(text)
     };
-    v_flex()
-        .gap(px(1.0))
+    let key = share.key.clone();
+    h_flex()
+        .id(SharedString::from(format!(
+            "{}-share",
+            share.key.element_id()
+        )))
+        .cursor_pointer()
+        .rounded(px(4.0))
+        .mx(px(-6.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .hover(|style| style.bg(rgb(t.bg_hover)))
+        .on_click(move |_, window, cx| open(&key, window, cx))
         .child(
-            h_flex()
-                .gap(px(6.0))
-                .items_baseline()
+            v_flex()
+                .flex_1()
+                .gap(px(1.0))
                 .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_primary))
-                        .child(share.label.clone()),
+                    h_flex()
+                        .gap(px(6.0))
+                        .items_baseline()
+                        .child(
+                            div()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_primary))
+                                .child(share.label.clone()),
+                        )
+                        .when_some(share.tier, |row, tier| {
+                            row.child(
+                                div()
+                                    .text_size(ui_text_xs(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(tier),
+                            )
+                        })
+                        .when_some(share.blocked.clone(), |row, blocked| {
+                            row.child(
+                                div()
+                                    .text_size(ui_text_xs(cx))
+                                    .text_color(rgb(t.warning))
+                                    .child(blocked),
+                            )
+                        }),
                 )
-                .when_some(share.tier, |row, tier| {
-                    row.child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(tier),
-                    )
-                })
-                .when_some(share.blocked.clone(), |row, blocked| {
-                    row.child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .text_color(rgb(t.warning))
-                            .child(blocked),
-                    )
-                }),
+                .child(
+                    h_flex()
+                        .gap(px(10.0))
+                        .child(cell(format!("5h {}", percent(share.five_hour))))
+                        .child(cell(format!("7d {}", percent(share.seven_day))))
+                        .child(cell(format!("today +{:.0}%", share.used_today)))
+                        .when_some(share.weekly_reset_ms, |row, at| {
+                            row.child(cell(format!("resets {}", moment(at))))
+                        }),
+                ),
         )
         .child(
-            h_flex()
-                .gap(px(10.0))
-                .child(cell(format!("5h {}", percent(share.five_hour))))
-                .child(cell(format!("7d {}", percent(share.seven_day))))
-                .child(cell(today)),
+            div()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child("›"),
+        )
+        .into_any_element()
+}
+
+/// The way back from an account's detail to the pool.
+pub(crate) fn render_back(on_back: GoBack, t: &ThemeColors, cx: &App) -> AnyElement {
+    div()
+        .px(px(12.0))
+        .pt(px(8.0))
+        .child(
+            div()
+                .id("claude-pool-back")
+                .cursor_pointer()
+                .text_size(ui_text_xs(cx))
+                .text_color(rgb(t.text_muted))
+                .hover(|style| style.text_color(rgb(t.text_primary)))
+                .on_click(move |_, window, cx| on_back(window, cx))
+                .child("‹ All accounts"),
         )
         .into_any_element()
 }
