@@ -14,8 +14,8 @@ the binary) to the first usable of:
 3. `$TMPDIR/okena-<profile id>/claude-remote/preload.js`
 
 Bun splits `BUN_OPTIONS` on whitespace without quoting, so a path with
-whitespace is skipped. Directories 2 and 3 must be owned by the user and not
-writable by others. The daemon rewrites the file every 10 minutes if it was
+whitespace is skipped. Every directory Okena creates or reuses there must be
+owned by the user and not writable by others. The daemon rewrites the file every 10 minutes if it was
 removed or changed. It then gives every new pane:
 
 | Variable | Value |
