@@ -1,6 +1,7 @@
-//! Status-bar summary of one host's account pool: runway and what today may
-//! still use (see [`crate::pool_model`]), with a popover that explains both and
-//! opens each account's detail.
+//! Status-bar summary of one host's account pool (see [`crate::pool_model`]):
+//! "Today", the soft limit that keeps quota for the rest of the week, and
+//! "Nonstop", the hard limit when every account is blocked. The popover
+//! explains both and opens each account's detail.
 
 use crate::pool_model::{self, Pace, PlanSize, RUNWAY_HORIZON_MS, Runway, Today};
 use crate::pool_usage::{AccountKey, PoolHistory};
@@ -235,16 +236,6 @@ pub(crate) fn render_trigger(
                 .into_any_element(),
         );
     }
-    if display.runway {
-        items.push(usage_trigger_item(
-            t,
-            cx,
-            "Runway".into(),
-            runway_value(summary.runway, now_ms),
-            None,
-            severity_color(t, runway_severity(summary.runway)),
-        ));
-    }
     if display.today {
         let today = summary.today;
         let fraction = if today.safe_per_day > 0.0 {
@@ -261,6 +252,16 @@ pub(crate) fn render_trigger(
             severity_color(t, today_severity(summary)),
         ));
     }
+    if display.runway {
+        items.push(usage_trigger_item(
+            t,
+            cx,
+            "Nonstop".into(),
+            runway_value(summary.runway, now_ms),
+            None,
+            severity_color(t, runway_severity(summary.runway)),
+        ));
+    }
     items
 }
 
@@ -271,14 +272,7 @@ pub(crate) fn render_body(
     cx: &App,
 ) -> Div {
     let today = summary.today;
-    let runway_text = match summary.runway {
-        Runway::Lasts { ms } => format!("{} of nonstop work", short_duration(ms)),
-        Runway::BeyondHorizon => "a week or more".into(),
-        Runway::Blocked {
-            until_ms: Some(until),
-        } => format!("all blocked, first back {}", moment(until)),
-        Runway::Blocked { until_ms: None } => "all blocked".into(),
-    };
+    let now_ms = jiff::Timestamp::now().as_millisecond();
     let work = |points: f64| {
         format!(
             "{} ({:.0}%)",
@@ -286,11 +280,47 @@ pub(crate) fn render_body(
             summary.account_weeks(points)
         )
     };
+    let muted = |text: String| {
+        div()
+            .text_size(ui_text_xs(cx))
+            .text_color(rgb(t.text_muted))
+            .child(text)
+    };
+    let section = |title: &'static str| {
+        div()
+            .text_size(ui_text_xs(cx))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(t.text_muted))
+            .child(title)
+    };
+
+    let beyond_safe = match today.bottleneck_ms {
+        Some(at) => {
+            let refill = summary
+                .accounts
+                .iter()
+                .find(|share| {
+                    share
+                        .weekly_reset_ms
+                        .is_some_and(|reset| (reset - at).abs() < 30 * MINUTE_MS)
+                })
+                .map_or(String::new(), |share| {
+                    format!(", before {} resets", share.label)
+                });
+            format!(
+                "Work up to this and every working day until the resets still has quota. \
+                 More is possible, but the pool then runs short {}{refill}.",
+                moment(at)
+            )
+        }
+        None => "Work up to this and every working day until the resets still has quota. \
+                 More takes from what the pool refills for later weeks."
+            .into(),
+    };
     let recent_text = match today.wall_at_recent_pace_ms {
         Some(wall) => format!("runs out {}", moment(wall)),
         None => "lasts the week".into(),
     };
-    let now_ms = jiff::Timestamp::now().as_millisecond();
     let mut refills: Vec<(i64, &AccountShare)> = summary
         .accounts
         .iter()
@@ -298,11 +328,27 @@ pub(crate) fn render_body(
         .filter_map(|share| Some((share.weekly_reset_ms.filter(|at| *at > now_ms)?, share)))
         .collect();
     refills.sort_by_key(|(at, _)| *at);
-    let muted = |text: String| {
-        div()
-            .text_size(ui_text_xs(cx))
-            .text_color(rgb(t.text_muted))
-            .child(text)
+
+    let nonstop_text = match summary.runway {
+        Runway::Lasts { ms } => short_duration(ms),
+        Runway::BeyondHorizon => "a week or more".into(),
+        Runway::Blocked { .. } => "blocked".into(),
+    };
+    let nonstop_note = match summary.runway {
+        Runway::Lasts { .. } | Runway::BeyondHorizon => {
+            "Working nonstop from now, every account hits its 5h or weekly limit \
+             after this long. Accounts come back as their windows reset."
+                .to_string()
+        }
+        Runway::Blocked {
+            until_ms: Some(until),
+        } => format!(
+            "Every account has hit its 5h or weekly limit; the first is back {}.",
+            moment(until)
+        ),
+        Runway::Blocked { until_ms: None } => {
+            "Every account has hit its 5h or weekly limit.".to_string()
+        }
     };
     let pace_note = format!(
         "Times are work at your pace: a 5h window fills in {} and costs {:.0}% of a week. \
@@ -322,13 +368,7 @@ pub(crate) fn render_body(
     usage_body_container().child(
         v_flex()
             .gap(px(7.0))
-            .child(usage_kv_row(
-                t,
-                cx,
-                "Runway",
-                runway_text,
-                severity_color(t, runway_severity(summary.runway)),
-            ))
+            .child(section("THIS WEEK · SOFT LIMIT"))
             .child(usage_kv_row(
                 t,
                 cx,
@@ -336,6 +376,7 @@ pub(crate) fn render_body(
                 today_value(summary),
                 severity_color(t, today_severity(summary)),
             ))
+            .child(muted(beyond_safe))
             .child(
                 v_flex()
                     .gap(px(3.0))
@@ -353,12 +394,6 @@ pub(crate) fn render_body(
                         work(today.safe_per_day),
                         t.text_secondary,
                     ))
-                    .when_some(today.bottleneck_ms, |el, at| {
-                        el.child(muted(format!(
-                            "More than that runs short {}, before the next reset.",
-                            moment(at)
-                        )))
-                    })
                     .child(usage_kv_row(
                         t,
                         cx,
@@ -397,6 +432,16 @@ pub(crate) fn render_body(
                         })),
                 )
             })
+            .child(usage_divider(t))
+            .child(section("RIGHT NOW · HARD LIMIT"))
+            .child(usage_kv_row(
+                t,
+                cx,
+                "Nonstop",
+                nonstop_text,
+                severity_color(t, runway_severity(summary.runway)),
+            ))
+            .child(muted(nonstop_note))
             .child(muted(pace_note))
             .child(usage_divider(t))
             .children(
