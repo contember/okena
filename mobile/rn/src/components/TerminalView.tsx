@@ -117,7 +117,9 @@ interface CellMetrics {
  * `_computeCellSize()` in terminal_view.dart (`width` of 'M', height * lineHeightFactor).
  */
 function measureCell(font: SkFont): CellMetrics {
-  const advance = font.measureText('M').width;
+  // Use the glyph advance that drawText uses; measureText returns ink bounds,
+  // which do not match the advance on every platform.
+  const [advance] = font.getGlyphWidths(font.getGlyphIDs('M'));
   const m = font.getMetrics();
   // ascent is negative (above baseline), descent positive (below).
   const textHeight = -m.ascent + m.descent;
