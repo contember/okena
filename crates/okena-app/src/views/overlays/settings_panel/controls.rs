@@ -86,8 +86,35 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
+        let row = settings_row(id.to_string(), label, &t, cx, has_border);
+        Self::with_toggle(row, id, enabled, update_fn, cx)
+    }
 
-        settings_row(id.to_string(), label, &t, cx, has_border).child(
+    /// [`Self::render_toggle`] with a description line under the label.
+    pub(super) fn render_toggle_with_desc(
+        id: &str,
+        label: &str,
+        desc: &str,
+        enabled: bool,
+        has_border: bool,
+        update_fn: impl Fn(&mut SettingsState, bool, &mut Context<SettingsState>) + 'static + Clone,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+        let row = settings_row_with_desc(id.to_string(), label, desc, &t, cx, has_border);
+        Self::with_toggle(row, id, enabled, update_fn, cx)
+    }
+
+    fn with_toggle(
+        row: Stateful<Div>,
+        id: &str,
+        enabled: bool,
+        update_fn: impl Fn(&mut SettingsState, bool, &mut Context<SettingsState>) + 'static + Clone,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+
+        row.child(
             toggle_switch(format!("{}-toggle", id), enabled, &t).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, _, _, cx| {

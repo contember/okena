@@ -175,6 +175,8 @@ impl SettingsState {
         auto_resume_agent_sessions,
         bool
     );
+    setting_setter!(set_claude_remote, claude_remote, bool);
+    setting_setter!(set_claude_remote_channel, claude_remote_channel, bool);
     setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,

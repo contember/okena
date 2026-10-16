@@ -38,7 +38,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 /// Shortest gap between two clone-progress publishes. Each one takes the
@@ -61,8 +61,10 @@ use okena_app_core::workspace::actions::execute::{
     spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
+use okena_core::claude_remote::ClaudeTerminalInfo;
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
+use okena_remote_server::claude_remote::ClaudeRemoteHub;
 use okena_services::config::{PreparedProjectConfig, prepare_project_config};
 use okena_services::manager::{
     ComposeProjectIdentity, ServiceKind, ServiceLoadStatus, ServiceManager,
@@ -84,6 +86,7 @@ use okena_workspace::state::{
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, oneshot, watch};
 
+use crate::claude_remote::PaneEnv as ClaudePaneEnv;
 use crate::daemon_config::{DaemonConfig, get_settings_schema};
 use crate::service_cx::ServiceReactorRef;
 use crate::soft_close::SoftCloseDeadlines;
@@ -199,11 +202,10 @@ fn refresh_claude_pty_env_after_committed_settings_change(
     outcome: &SettingsUpdateOutcome,
     settings: &Arc<Mutex<AppSettings>>,
     backend: &dyn TerminalBackend,
+    claude_pane_env: &ClaudePaneEnv,
 ) {
     if outcome.committed {
-        backend.set_extra_env(okena_workspace::claude_env::claude_pty_env_for_settings(
-            &settings.lock(),
-        ));
+        backend.set_extra_env(claude_pane_env.pty_env(&settings.lock()));
     }
 }
 
@@ -2842,6 +2844,8 @@ pub async fn daemon_command_loop(
     mut daemon_config: DaemonConfig,
     deadlines: SoftCloseDeadlines,
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
+    claude_pane_env: Arc<ClaudePaneEnv>,
+    claude_hub: Weak<ClaudeRemoteHub>,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -3063,6 +3067,7 @@ pub async fn daemon_command_loop(
                             &outcome,
                             &settings,
                             backend.as_ref(),
+                            &claude_pane_env,
                         );
                         apply_scrollback_after_committed_settings_change(
                             &outcome, &settings, &terminals,
@@ -4212,6 +4217,11 @@ pub async fn daemon_command_loop(
 
             // ── GetState: full workspace snapshot ────────────────────────────
             RemoteCommand::GetState => {
+                // Taken before the state locks: the hub has its own lock.
+                let claude_dialogs = claude_hub
+                    .upgrade()
+                    .map(|hub| hub.dialog_counts())
+                    .unwrap_or_default();
                 // Lock order: workspace first, then service manager (kept
                 // consistent across the loop). The whole arm is synchronous, so
                 // both guards drop before the next `recv().await`.
@@ -4298,7 +4308,7 @@ pub async fn daemon_command_loop(
 
                 // Shared projection: ordered projects + folders + flat back-compat
                 // fields → `StateResponse` (identical to the GUI loop).
-                let resp = build_state_response(
+                let mut resp = build_state_response(
                     sv,
                     data,
                     &git_statuses,
@@ -4309,6 +4319,7 @@ pub async fn daemon_command_loop(
                     windows,
                     hooks,
                 );
+                resp.claude_dialogs = claude_dialogs;
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize
@@ -4363,8 +4374,22 @@ pub async fn daemon_command_loop(
 
             // ── ClaudeTerminalInfo ───────────────────────────────────────────
             RemoteCommand::ClaudeTerminalInfo { terminal_id } => {
-                let _ = terminal_id;
-                CommandResult::Err("U2: ClaudeTerminalInfo not implemented".to_string())
+                let terminal = terminals.lock().get(&terminal_id).cloned();
+                match terminal {
+                    Some(terminal) => {
+                        let info = ClaudeTerminalInfo {
+                            session: terminal.agent_session(),
+                            lifecycle: terminal.agent_status().map(|status| status.lifecycle),
+                        };
+                        match serde_json::to_value(info) {
+                            Ok(v) => CommandResult::Ok(Some(v)),
+                            Err(e) => CommandResult::Err(format!(
+                                "failed to serialize terminal info: {e}"
+                            )),
+                        }
+                    }
+                    None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
+                }
             }
         };
 
@@ -4891,6 +4916,8 @@ mod tests {
                 self.daemon_config,
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
+                Arc::new(ClaudePaneEnv::resolve()),
+                Weak::new(),
             ))
         }
     }
@@ -5281,6 +5308,8 @@ mod tests {
             RecordingMigrationBackend::new(events.clone(), SessionBackend::None, false, false);
         let settings = Arc::new(Mutex::new(default_settings()));
 
+        let claude_pane_env = ClaudePaneEnv::resolve();
+
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome {
                 result: CommandResult::Ok(None),
@@ -5288,11 +5317,13 @@ mod tests {
             },
             &settings,
             &backend,
+            &claude_pane_env,
         );
         refresh_claude_pty_env_after_committed_settings_change(
             &SettingsUpdateOutcome::uncommitted(CommandResult::Err("rejected".to_string())),
             &settings,
             &backend,
+            &claude_pane_env,
         );
 
         assert_eq!(&*events.lock(), &["env".to_string()]);
@@ -6257,6 +6288,71 @@ mod tests {
                 assert!(resp.windows[0].active);
 
                 // Drop the sender so `recv` errors and the loop task joins.
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_terminal_info_reports_the_registry_agent_state() {
+        let h = harness();
+        let terminal = Arc::new(Terminal::new(
+            "claude-pane".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        terminal.hydrate_agent_status(Some(okena_core::agent_status::AgentStatus::new_clamped(
+            okena_core::agent_status::AgentLifecycle::Working,
+            None,
+            Default::default(),
+        )));
+        h.terminals
+            .lock()
+            .insert("claude-pane".to_string(), terminal);
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+
+                let known = request(
+                    &bridge_tx,
+                    RemoteCommand::ClaudeTerminalInfo {
+                        terminal_id: "claude-pane".to_string(),
+                    },
+                    "ClaudeTerminalInfo",
+                )
+                .await;
+                let value = match known {
+                    CommandResult::Ok(Some(v)) => v,
+                    other => panic!("expected Ok(Some), got {other:?}"),
+                };
+                let info: ClaudeTerminalInfo =
+                    serde_json::from_value(value).expect("deserialize ClaudeTerminalInfo");
+                assert_eq!(
+                    info,
+                    ClaudeTerminalInfo {
+                        session: None,
+                        lifecycle: Some(okena_core::agent_status::AgentLifecycle::Working),
+                    }
+                );
+
+                let unknown = request(
+                    &bridge_tx,
+                    RemoteCommand::ClaudeTerminalInfo {
+                        terminal_id: "missing".to_string(),
+                    },
+                    "ClaudeTerminalInfo unknown",
+                )
+                .await;
+                assert!(matches!(
+                    unknown,
+                    CommandResult::Err(ref error) if error == "terminal not found: missing"
+                ));
+
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
             })

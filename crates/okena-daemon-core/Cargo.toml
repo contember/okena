@@ -38,3 +38,7 @@ uuid = { version = "1.10", features = ["v4"] }
 # `RemoteServer::start` (which returns `anyhow::Result`) + the tokio runtime
 # builder (`io::Result`) coalesce through it.
 anyhow = "1.0"
+
+# `geteuid` for the ownership check on the Claude remote preload directories.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

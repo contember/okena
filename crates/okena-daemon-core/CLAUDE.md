@@ -49,6 +49,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | File | Purpose |
 |------|---------|
 | `daemon.rs` | `DaemonCore::{new,run}` — assembles managers, git watcher, bridge, `RemoteServer`; drives the reactor on a `LocalSet` until shutdown. |
+| `claude_remote.rs` | Claude remote pane env: resolves the `okena` binary, writes the embedded `preload.js` to the first private whitespace-free location (profile dir, `$XDG_RUNTIME_DIR`, `$TMPDIR`) and re-ensures it every 10 min, composes the PTY env with the Claude account env. |
 | `command_loop.rs` | `daemon_command_loop` — the gpui-free port of `remote_command_loop`. Handles `GetState` (builds `StateResponse`) and every action arm. Largest file in the crate. |
 | `reactor.rs` | `DaemonReactor` shared state + `spawn_observers`. |
 | `observers.rs` | The observer tasks: autosave, state snapshot, service sync. Re-entrancy guards live here. |
