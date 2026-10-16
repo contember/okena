@@ -144,15 +144,21 @@ settings choose any combination of three items per host:
   windows reset. The pace is the 75th percentile of the last week's active
   hours; the cost of a session point in weekly points comes from the same
   history. Both fall back to defaults until there is enough history.
-- **Daily budget**: today's weekly usage against today's share, which is the
-  weekly quota each account had left at midnight spread over the working days
-  until its reset. A reset during today adds a day's share of the new window.
+- **Today**: how much more work today leaves enough weekly quota for every
+  working day until the next resets. A simulation over the next seven local
+  days draws each day's use from the quota that resets first and finds the
+  most a working day may use without running short, at most the pool's
+  long-run share (all weekly quota over the working days). Non-working days
+  use what they used last week. The value is that maximum minus today's use,
+  shown as work at the usual pace ("3h left", "45m over").
 
-The runway and the budget weigh accounts by plan size (Pro 1, Max 5x 5,
-Max 20x 20), from the `rate_limit_tier` of the OAuth profile. The proxy stores
+Runway and Today weigh accounts by plan size (Pro 1, Max 5x 5, Max 20x 20),
+from the `rate_limit_tier` of the OAuth profile. The proxy stores
 it at login; accounts logged in before learn it once per proxy process from the
-usage poll. Hovering either item opens the pool popover with the model's
-inputs and each account's share.
+usage poll. Hovering either item opens the pool popover: today's use, the
+safe daily use and its tightest point, where the last 24 hours' pace runs
+short, the next weekly refills, and one row per account. Clicking a row shows
+that account's usage and history chart in the same popover.
 
 Successful five-minute usage polls append quota samples to
 `<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection
@@ -160,6 +166,8 @@ continues while the proxy runs, even with the desktop closed. Samples survive
 proxy restarts; history begins with the first successful poll after upgrading.
 The popup loads the selected account's last seven days through the authenticated
 `usage_history` management command, at most once a minute across desktop windows.
+While Runway or Today is shown, every pool account's history is loaded the same
+way.
 History is omitted from ordinary status and workspace snapshots. The shared
 storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
 them without owning proxy persistence.

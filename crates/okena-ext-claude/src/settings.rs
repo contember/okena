@@ -190,8 +190,8 @@ impl ClaudeSettingsView {
                 display.runway,
             ),
             (
-                "Daily budget",
-                "Today's usage against the weekly quota left, spread over the working days until each account resets.",
+                "Today",
+                "How much more work today leaves enough weekly quota for every working day until the next resets.",
                 display.today,
             ),
         ];

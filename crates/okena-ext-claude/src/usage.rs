@@ -25,6 +25,7 @@ use okena_usage::{
 use okena_workspace::remote_sync::HostAiAccounts;
 use okena_workspace::state::{GlobalWorkspace, Workspace};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -66,6 +67,8 @@ pub struct ClaudeUsage {
     hover_token: Arc<AtomicU64>,
     history_refresh_task: Option<Task<()>>,
     _summary_history_task: Task<()>,
+    /// The account opened from the pool popover, shown in place of the pool.
+    pool_detail: Option<AccountKey>,
 }
 
 impl ClaudeUsage {
@@ -111,6 +114,7 @@ impl ClaudeUsage {
             hover_token: Arc::new(AtomicU64::new(0)),
             history_refresh_task: None,
             _summary_history_task: summary_history_task,
+            pool_detail: None,
         };
         this.bind_workspace(cx);
         this
@@ -210,6 +214,7 @@ impl ClaudeUsage {
         self.active = trigger;
         self.popover_visible = false;
         self.history_refresh_task = None;
+        self.pool_detail = None;
         cx.notify();
 
         let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
@@ -287,59 +292,10 @@ impl ClaudeUsage {
         };
         let (title, plan, body) = match &self.active {
             Trigger::Account(key) => {
-                let Some(host) = self
-                    .pool
-                    .iter()
-                    .find(|host| host.connection_id == key.connection_id)
-                else {
+                let Some(detail) = self.render_account_detail(key, working, t, cx) else {
                     return div().size_0().into_any_element();
                 };
-                let Some(account) = host
-                    .accounts
-                    .iter()
-                    .find(|account| account.id == key.account_id)
-                else {
-                    return div().size_0().into_any_element();
-                };
-                let history = self
-                    .pool_history
-                    .read(cx)
-                    .entries
-                    .get(key)
-                    .map(|entry| entry.history.clone())
-                    .unwrap_or_default();
-                (
-                    "CLAUDE ACCOUNT",
-                    None,
-                    div()
-                        .child(crate::pool_usage::render_body(
-                            host,
-                            account,
-                            &history,
-                            working,
-                            &self.chart_state,
-                            t,
-                            cx,
-                        ))
-                        .when_some(
-                            self.pool_history
-                                .read(cx)
-                                .entries
-                                .get(key)
-                                .and_then(|entry| entry.error.as_ref()),
-                            |el, error| {
-                                el.child(
-                                    div()
-                                        .px(px(12.0))
-                                        .pb(px(10.0))
-                                        .text_size(okena_ui::tokens::ui_text_xs(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format!("History unavailable: {error}")),
-                                )
-                            },
-                        )
-                        .into_any_element(),
-                )
+                ("CLAUDE ACCOUNT", None, detail)
             }
             Trigger::Pool(connection_id) => {
                 let Some(host) = self
@@ -351,11 +307,37 @@ impl ClaudeUsage {
                 };
                 let summary =
                     crate::pool_summary::summarize(host, self.pool_history.read(cx), working);
-                (
-                    "CLAUDE POOL",
-                    summary.host_name.clone(),
-                    crate::pool_summary::render_body(&summary, t, cx).into_any_element(),
-                )
+                let detail = self
+                    .pool_detail
+                    .as_ref()
+                    .and_then(|key| self.render_account_detail(key, working, t, cx));
+                let body = match detail {
+                    Some(detail) => {
+                        let entity = cx.entity().downgrade();
+                        let back = Rc::new(move |_: &mut Window, cx: &mut App| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.pool_detail = None;
+                                cx.notify();
+                            });
+                        });
+                        div()
+                            .child(crate::pool_summary::render_back(back, t, cx))
+                            .child(detail)
+                            .into_any_element()
+                    }
+                    None => {
+                        let entity = cx.entity().downgrade();
+                        let open =
+                            Rc::new(move |key: &AccountKey, _: &mut Window, cx: &mut App| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.pool_detail = Some(key.clone());
+                                    cx.notify();
+                                });
+                            });
+                        crate::pool_summary::render_body(&summary, open, t, cx).into_any_element()
+                    }
+                };
+                ("CLAUDE POOL", summary.host_name.clone(), body)
             }
             Trigger::Login => {
                 if !self.pool.is_empty() {
@@ -409,6 +391,51 @@ impl ClaudeUsage {
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    /// One pool account's usage with its history chart, or `None` when the
+    /// account is gone.
+    fn render_account_detail(
+        &self,
+        key: &AccountKey,
+        working: WorkingDays,
+        t: &ThemeColors,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let host = self
+            .pool
+            .iter()
+            .find(|host| host.connection_id == key.connection_id)?;
+        let account = host
+            .accounts
+            .iter()
+            .find(|account| account.id == key.account_id)?;
+        let entry = self.pool_history.read(cx).entries.get(key);
+        let history = entry.map(|entry| entry.history.clone()).unwrap_or_default();
+        let error = entry.and_then(|entry| entry.error.clone());
+        Some(
+            div()
+                .child(crate::pool_usage::render_body(
+                    host,
+                    account,
+                    &history,
+                    working,
+                    &self.chart_state,
+                    t,
+                    cx,
+                ))
+                .when_some(error, |el, error| {
+                    el.child(
+                        div()
+                            .px(px(12.0))
+                            .pb(px(10.0))
+                            .text_size(okena_ui::tokens::ui_text_xs(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("History unavailable: {error}")),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_usage_body(
