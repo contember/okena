@@ -87,6 +87,12 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   // MARK: Commands
 
   @objc public func scrollToBottom() {
+    // JS calls this after input. Input makes this client the daemon's resize
+    // owner ("last to interact wins"), so a size denied before can apply now.
+    if gridMismatch {
+      reassertCount = 0
+      scheduleReassert()
+    }
     following = true
     scrollView.setContentOffset(scrollView.contentOffset, animated: false)  // stop a fling
     setOffset(liveOffset)
@@ -107,6 +113,10 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private static let minFontSize: CGFloat = 8
   private static let maxFontSize: CGFloat = 20
   private static let resizeDebounce: TimeInterval = 0.2
+  private static let reassertDelay: TimeInterval = 0.3
+  private static let maxReasserts = 2
+  /// How long a double-tapped word stays highlighted (Android: WORD_FLASH_MS).
+  private static let wordFlash: TimeInterval = 0.25
 
   // MARK: State
 
@@ -161,6 +171,10 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private var grid: Grid?
   private var initialResizeSent = false
   private var resizeWork: DispatchWorkItem?
+  /// Re-sends of the current size after the daemon kept another client's
+  /// size (one resize owner per daemon), at most `maxReasserts` per size.
+  private var reassertWork: DispatchWorkItem?
+  private var reassertCount = 0
 
   // Frame loop.
   private var displayLink: CADisplayLink?
@@ -270,6 +284,9 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     // The (new) terminal gets its size from this view.
     grid = nil
     initialResizeSent = false
+    reassertWork?.cancel()
+    reassertWork = nil
+    reassertCount = 0
     setNeedsLayout()
   }
 
@@ -411,6 +428,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     let c = UInt16(cols)
     let r = UInt16(rows)
     okena_rv_resize_local(handle, c, r)
+    reassertCount = 0
     resizeWork?.cancel()
     if !initialResizeSent {
       initialResizeSent = true
@@ -423,6 +441,28 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       resizeWork = work
       DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeDebounce, execute: work)
     }
+  }
+
+  /// The terminal's grid differs from this view's size.
+  private var gridMismatch: Bool {
+    guard let grid, haveFrame else { return false }
+    return frameCols != grid.cols || screenLines != grid.rows
+  }
+
+  /// Send this view's size again shortly, if the grid still differs then.
+  /// Same rule as the Android view.
+  private func scheduleReassert() {
+    guard reassertCount < Self.maxReasserts, reassertWork == nil else { return }
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.reassertWork = nil
+      guard let handle = self.handle, let grid = self.grid, self.gridMismatch else { return }
+      self.reassertCount += 1
+      okena_rv_resize_local(handle, UInt16(grid.cols), UInt16(grid.rows))
+      okena_rv_resize_terminal(handle, UInt16(grid.cols), UInt16(grid.rows))
+    }
+    reassertWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.reassertDelay, execute: work)
   }
 
   // MARK: Scroll geometry
@@ -624,6 +664,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       || (newAlt && f.mode & UInt32(OKENA_RV_MODE_ALTERNATE_SCROLL) != 0)
     screenLines = Int(f.screen_lines)
     frameCols = Int(f.cols)
+    if gridMismatch { scheduleReassert() }
 
     if wheelMode != consumesWheel {
       consumesWheel = wheelMode
@@ -834,7 +875,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       self.clearSelection()
     }
     clearSelectionWork = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.wordFlash, execute: work)
   }
 
   @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
