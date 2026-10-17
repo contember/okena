@@ -529,3 +529,44 @@ Android linking in WU0 and font fallback parity.
     previous flow (e.g. `qclear`). Not investigated; `softInput.ts` is outside this WU.
   - After session restore, text with SGR 8 (hidden) showed up (both renderers): the restored
     screen seems to lose the attribute.
+
+- **WU5/WU6 Android (2026-10-17, branch `wip/ntv-android`).** `TerminalRendererView.kt` plus
+  `RowPainter`, `ScrollModel`, `RvFrame`, `TerminalFonts`, `TerminalAccessibility` and
+  `RustBridge` in `modules/okena-terminal-view/android`. Verified on the emulator (HN_Local,
+  arm64) against the isolated daemon with the native renderer on. Maestro flows and
+  screenshots stay in the session scratchpad.
+  - **Works.** 16/256/truecolor, bold/italic/dim/underline/double underline/strike/inverse/
+    hidden; CJK, emoji, combining marks; box drawing and `⎿`; Claude Code symbols without
+    tofu; cursor block/beam/underline; fling through `seq 1 20000` with edge effects;
+    anchoring while streaming scrolled up; long-press selection with edge auto-scroll and
+    copy across scrollback; double-tap word; font setting; chips; session restore; soft
+    keyboard and key toolbar typing snap to the bottom; `less` (alt screen, 1007) and vim
+    `mouse=a` scroll through `wheel`; TalkBack reads one node per row.
+  - **Not verified.** Pinch: the emulator image has no root, so two-finger input could not
+    be injected. The font-size path it ends in is verified through Settings.
+  - **Deviations from Skia, on purpose.** Cell width is the font's real advance (0.6 em,
+    16.5 px at 10.5 dp); Skia hints the advance to a whole dp (18.4 px), so native fits 67
+    columns where Skia fits 58 (Settings already estimates 65). Inverse, hidden and combining
+    marks render correctly (Skia double-swapped inverse, showed hidden text and dropped
+    combining marks). An underline continues across spaces. Ligatures are off, as in Skia.
+    Like Skia, the grid cells use the Rust default bg (#1e1e1e) and the margins the theme bg.
+  - **Resize authority.** The daemon has one resize owner for all its terminals ("last to
+    interact wins", claimed by input), so a second client's resize is denied and the server
+    puts the grid back. The view re-sends its size (at most twice per size) and again after
+    `scrollToBottom`, which JS sends after input. When the grid stays taller than the view,
+    the live tail shows the grid's bottom rows.
+  - **Measurements (EMULATOR, software GPU: SwANGLE + llvmpipe; `-gpu host` does not boot
+    headless).** `dumpsys gfxinfo framestats`, last 120 frames, ms p50/p90/p95 (max).
+    UI thread = input + traversal + `onDraw` recording; render thread = rasterisation.
+
+    | Scenario | UI thread | onDraw record | Render thread |
+    |---|---|---|---|
+    | fling through 20k lines (12 swipes) | 0.75 / 4.4 / 7.0 (25) | 0.09 / 0.27 / 0.50 | 63 / 99 / 113 |
+    | sustained stream (`printf` + sleep 5 ms) | 0.66 / 2.9 / 7.0 (12) | 0.34 / 1.8 / 3.4 | 39 / 52 / 65 |
+    | idle, 5 s | 5 frames | | |
+
+    Against the Skia baseline above (11 ms p50 of JS-thread paint per frame), the UI-thread
+    cost per frame is about 15× lower. Janky-frame percentages are meaningless here: every
+    frame misses the deadline in software rasterisation, whatever draws it. The WU5 targets
+    (< 1 % janky fling, UI thread < 8 ms p90 while streaming) need a device run in WU7; the
+    UI-thread half already holds on the emulator.
