@@ -36,7 +36,16 @@ export function normalizeFontSize(size: number): number {
  */
 export type TerminalRenderer = 'native' | 'skia';
 
-export const DEFAULT_RENDERER: TerminalRenderer = 'skia';
+export const DEFAULT_RENDERER: TerminalRenderer = 'native';
+
+/**
+ * Version of the persisted settings object. Version 1 (no field) wrote the
+ * renderer on every font-size change, so a stored 'skia' did not mean the user
+ * picked Skia: it was the old default. Version 2 moved the default to 'native',
+ * and a renderer is only read back from objects written at version 2 or later,
+ * which moves every existing install to the native renderer once.
+ */
+export const SETTINGS_VERSION = 2;
 
 function isTerminalRenderer(value: unknown): value is TerminalRenderer {
   return value === 'native' || value === 'skia';
@@ -77,6 +86,7 @@ export function configureSettingsStore(overrides: Partial<SettingsDeps>): void {
 }
 
 interface PersistedSettings {
+  version?: unknown;
   terminalFontSize?: unknown;
   renderer?: unknown;
 }
@@ -85,6 +95,7 @@ type PersistedFields = Pick<SettingsState, 'terminalFontSize' | 'renderer'>;
 
 function persist(state: PersistedFields): void {
   const payload: PersistedSettings = {
+    version: SETTINGS_VERSION,
     terminalFontSize: state.terminalFontSize,
     renderer: state.renderer,
   };
@@ -110,7 +121,10 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
           if (typeof parsed.terminalFontSize === 'number') {
             terminalFontSize = normalizeFontSize(parsed.terminalFontSize);
           }
-          if (isTerminalRenderer(parsed.renderer)) renderer = parsed.renderer;
+          const version = typeof parsed.version === 'number' ? parsed.version : 1;
+          if (version >= SETTINGS_VERSION && isTerminalRenderer(parsed.renderer)) {
+            renderer = parsed.renderer;
+          }
         }
       } catch {
         // Corrupt or unreadable settings fall back to defaults.

@@ -17,7 +17,7 @@ import { KeyModifiers } from './KeyToolbar';
 import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 import type { OkenaNative } from '../native/okena';
 import { createMemoryPersistence } from '../state/persistence';
-import { configureSettingsStore, useSettingsStore } from '../state/settingsStore';
+import { configureSettingsStore, DEFAULT_RENDERER, useSettingsStore } from '../state/settingsStore';
 
 // The Skia renderer needs a GPU surface and the clipboard a native module;
 // the input chrome under test needs neither.
@@ -132,6 +132,12 @@ function spyOnInputFocus(renderer: TestRenderer.ReactTestRenderer) {
   spy.mockClear();
   return spy;
 }
+
+// Selection, focus, drag and pinch below exercise the Skia renderer's JS
+// gesture surface; the native view handles those gestures itself.
+beforeEach(() => {
+  useSettingsStore.setState({ renderer: 'skia' });
+});
 
 describe('TerminalPane selection', () => {
   afterEach(() => {
@@ -372,7 +378,16 @@ describe('TerminalPane renderer', () => {
     act(() => (handler as (e: { nativeEvent: T }) => void)({ nativeEvent }));
   }
 
-  it('uses the Skia renderer and its gesture surface by default', () => {
+  it('uses the native view by default', () => {
+    useSettingsStore.setState({ renderer: DEFAULT_RENDERER });
+    const renderer = renderPane('t1');
+    expect(mockNativeViewProps.current).toBeDefined();
+    expect(mockTerminalViewProps.current).toBeUndefined();
+    expect(gestureSurfaces(renderer)).toHaveLength(0);
+    act(() => renderer.unmount());
+  });
+
+  it('uses the Skia renderer and its gesture surface when chosen', () => {
     const renderer = renderPane('t1');
     expect(mockTerminalViewProps.current).toBeDefined();
     expect(mockNativeViewProps.current).toBeUndefined();

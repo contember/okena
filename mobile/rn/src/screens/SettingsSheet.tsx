@@ -9,8 +9,8 @@
  * Changes apply immediately to every open pane (they re-measure and resize
  * the remote PTY).
  *
- * Advanced: the terminal renderer toggle (native view or Skia) for the native
- * renderer rollout.
+ * Advanced: the terminal renderer toggle (native view, the default, or the
+ * Skia fallback) for the native renderer rollout.
  */
 
 import React from 'react';
@@ -169,7 +169,8 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
             </View>
           </View>
           <Text style={styles.footnote}>
-            Experimental. Draws terminals with the platform's own text renderer instead of Skia.
+            On by default. Draws terminals with the platform's own text renderer. Turn it off to
+            fall back to the older Skia renderer.
           </Text>
         </ScrollView>
       </View>
