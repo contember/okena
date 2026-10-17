@@ -51,6 +51,7 @@ import { LayoutRenderer } from '../components/LayoutRenderer';
 import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPane';
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
+import { Icon } from '../components/Icon';
 import type { TerminalFonts } from '../components/TerminalView';
 
 const native: OkenaNative = (() => {
@@ -245,7 +246,7 @@ export const WorkspaceScreen: React.FC = () => {
       {/* App bar */}
       <View style={styles.appBar}>
         <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setDrawerOpen(true)}>
-          <Text style={styles.appBarIcon}>{'☰'}</Text>
+          <Icon name="menu" size={22} color={OkenaColors.textPrimary} />
         </Pressable>
         <Pressable
           style={styles.titleWrap}
@@ -255,18 +256,24 @@ export const WorkspaceScreen: React.FC = () => {
           <Text style={styles.title} numberOfLines={1}>
             {projectName}
           </Text>
-          {projects.length > 1 ? <Text style={styles.titleCaret}>{' ▾'}</Text> : null}
+          {projects.length > 1 ? (
+            <Icon name="caretDown" size={14} color={OkenaColors.textSecondary} style={styles.titleCaret} />
+          ) : null}
         </Pressable>
         <View style={styles.flexSpacer} />
         {connId ? <View style={[styles.dot, { backgroundColor: dotColor }]} /> : null}
         {connId && project && selectedTerminalId ? (
           <Pressable hitSlop={8} style={styles.appBarBtn} onPress={onToggleFullscreen}>
-            <Text style={styles.appBarIcon}>{fullscreenTerminal ? '🗗' : '⛶'}</Text>
+            <Icon
+              name={fullscreenTerminal ? 'minimize' : 'maximize'}
+              size={20}
+              color={OkenaColors.textPrimary}
+            />
           </Pressable>
         ) : null}
         {connId && project ? (
           <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setActionsOpen(true)}>
-            <Text style={styles.appBarIcon}>{'＋'}</Text>
+            <Icon name="plus" size={22} color={OkenaColors.textPrimary} />
           </Pressable>
         ) : null}
       </View>
@@ -348,9 +355,12 @@ export const WorkspaceScreen: React.FC = () => {
                       {projectDisplayName(p)}
                     </Text>
                     {p.gitBranch && !p.parentProjectId ? (
-                      <Text style={styles.menuBranch} numberOfLines={1}>
-                        {`⎇ ${p.gitBranch}`}
-                      </Text>
+                      <View style={styles.menuBranchRow}>
+                        <Icon name="gitBranch" size={11} color={OkenaColors.textTertiary} />
+                        <Text style={styles.menuBranch} numberOfLines={1}>
+                          {p.gitBranch}
+                        </Text>
+                      </View>
                     ) : null}
                   </Pressable>
                 );
@@ -431,10 +441,9 @@ const styles = StyleSheet.create({
     borderBottomColor: OkenaColors.border,
   },
   appBarBtn: { padding: 8 },
-  appBarIcon: { color: OkenaColors.textPrimary, fontSize: 18 },
   titleWrap: { flexDirection: 'row', alignItems: 'center', flexShrink: 1 },
   title: { color: OkenaColors.textPrimary, fontSize: 17, fontWeight: '600', flexShrink: 1 },
-  titleCaret: { color: OkenaColors.textSecondary, fontSize: 14 },
+  titleCaret: { marginLeft: 4 },
   dot: { width: 8, height: 8, borderRadius: 4, marginHorizontal: 6 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   dim: { color: OkenaColors.textTertiary, fontSize: 14 },
@@ -477,7 +486,8 @@ const styles = StyleSheet.create({
   },
   menuItemText: { color: OkenaColors.textPrimary, fontSize: 14 },
   menuItemSelected: { color: OkenaColors.accent, fontWeight: '700' },
-  menuBranch: { color: OkenaColors.textTertiary, fontSize: 11, marginTop: 2 },
+  menuBranchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  menuBranch: { color: OkenaColors.textTertiary, fontSize: 11, marginLeft: 4, flexShrink: 1 },
   // action sheet
   sheetBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   sheet: {
