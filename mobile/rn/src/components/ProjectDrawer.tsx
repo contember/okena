@@ -48,6 +48,8 @@ import {
   type ProjectNode,
 } from '../models';
 import { OkenaColors } from '../theme';
+import { SettingsSheet } from '../screens/SettingsSheet';
+import { SettingsIcon } from './KeyIcons';
 
 // ── Folder colors (mirror _folderColorToColor in project_drawer.dart) ────────
 
@@ -131,6 +133,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   const disconnect = useConnectionStore((s) => s.disconnect);
 
   const [addOpen, setAddOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [colorPicker, setColorPicker] = useState<{
     current: string;
     onSelect: (color: string) => void;
@@ -293,6 +296,20 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
         ) : null}
         <Pressable
           style={styles.footerItem}
+          onPress={() => setSettingsOpen(true)}
+          accessibilityRole="button"
+        >
+          <View style={styles.footerIconBox}>
+            <SettingsIcon
+              color={OkenaColors.textSecondary}
+              background={OkenaColors.surface}
+              size={16}
+            />
+          </View>
+          <Text style={styles.footerText}>Settings</Text>
+        </Pressable>
+        <Pressable
+          style={styles.footerItem}
           onPress={() => {
             onClose();
             disconnect();
@@ -302,6 +319,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           <Text style={styles.footerText}>Disconnect</Text>
         </Pressable>
       </Animated.View>
+
+      <SettingsSheet visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {/* Add Project dialog */}
       <AddProjectDialog
@@ -764,6 +783,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
+  footerIconBox: { width: 28 },
   footerIcon: { color: OkenaColors.textSecondary, fontSize: 16, width: 28 },
   footerText: { color: OkenaColors.textPrimary, fontSize: 15 },
   // dialog

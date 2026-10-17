@@ -31,6 +31,7 @@ import {
   type ConnectionState,
 } from './state/connectionStore';
 import { workspaceStore } from './state/workspaceStore';
+import { settingsStore } from './state/settingsStore';
 import { OkenaColors } from './theme';
 
 import { ServerListScreen } from './screens/ServerListScreen';
@@ -69,6 +70,7 @@ export const App: React.FC = () => {
     const conn = connectionStore().getState();
     conn.initApp();
     void conn.loadServers();
+    void settingsStore().getState().load();
 
     const unbindNav = bindConnectionToNavigation();
     const unbindWs = bindConnectionToWorkspace();

@@ -73,9 +73,11 @@ export const TerminalTheme = {
   fontFamily: Platform.select({ ios: 'JetBrains Mono', default: 'JetBrainsMono' }),
   fontFamilyFallback: ['Menlo', 'Consolas', 'DejaVu Sans Mono', 'monospace'] as const,
 
-  defaultFontSize: 13,
-  minFontSize: 6,
-  maxFontSize: 24,
+  /** Default terminal font size (pt); user-adjustable in Settings. */
+  defaultFontSize: 10.5,
+  minFontSize: 8,
+  maxFontSize: 20,
+  fontSizeStep: 0.5,
   defaultColumns: 80,
   lineHeightFactor: 1.2,
 
