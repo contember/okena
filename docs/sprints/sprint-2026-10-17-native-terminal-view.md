@@ -570,3 +570,110 @@ Android linking in WU0 and font fallback parity.
     frame misses the deadline in software rasterisation, whatever draws it. The WU5 targets
     (< 1 % janky fling, UI thread < 8 ms p90 while streaming) need a device run in WU7; the
     UI-thread half already holds on the emulator.
+
+### 2026-10-17 — WU7 parity, measurement and rollout prep (merged branch)
+
+- **Builds.** From `feat/native-terminal-view` after the Android merge: Rust bindings
+  regenerated (`ubrn:ios`, `ubrn:android`; `render.rs` was newer than the libraries),
+  `pod install`, iOS Debug on the 26.5 sim with Metro, Android release-style APK re-signed
+  with the debug keystore (scratchpad `and-build.sh`/`and-install.sh`, now pointing at this
+  worktree). Both apps were paired with the isolated daemon and ran at the same time, one
+  project each.
+- **Default renderer.** `settingsStore` defaults to `native`. Version 1 settings wrote the
+  old `skia` default on every font-size change, so a stored renderer could not mean an
+  explicit choice. The object now carries `version: 2`, and a renderer is only read back
+  from version 2 on: every existing install moves to native once, later choices stick. The
+  Settings toggle stays as the Skia fallback. Witness on the sim: a seeded
+  `{"terminalFontSize":10.5,"renderer":"skia"}` loads as "Native view". Jest 194 pass.
+- **Parity fixes (both platforms now alike).**
+  - Selection: baked into the row under the text and over cell backgrounds, as Skia's
+    pass 1 drew it (both platforms drew it over the text before). The row's selected span is
+    part of the row cache key (iOS row layers, Android RenderNodes); the iOS overlay layers
+    are gone.
+  - Underline and strike: a separate pass over every cell that carries them, so they cover
+    spaces on both (iOS skipped blank cells, Android only covered spaces inside a glyph run).
+    iOS now draws the double underline Android drew.
+  - iOS re-sends its size when the daemon kept another client's size, at most twice per size
+    and again after input, as Android did (the daemon has one resize owner).
+  - iOS double-tap word highlight 0.25 s, as on Android.
+  - iOS draws `█` as a pixel-snapped rect over the glyph's vertical extent: runs of it showed
+    faint vertical seams (Claude Code progress bars, logo). Android had none.
+- **Verified on both (iOS 26.5 sim and Android emulator, native renderer as default).**
+  16/256/truecolor, bold/italic/dim/underline/double/strike/inverse/hidden; CJK, emoji,
+  combining accents; box drawing and Claude Code glyphs (`⎿ ● ✻ ⏺`, braille spinner);
+  beam/underline/block cursors; fling through `seq 1 20000`; anchoring while streaming (two
+  screenshots 3 s apart identical while scrolled up); long-press drag selection with copy
+  ("Copied", Android clipboard preview); font size from Settings; chip switching; session
+  restore after killing the app; soft keyboard typing including Czech diacritics
+  (`příliš žluťoučký kůň ĚŠČŘŽ`, Maestro `inputText`); key toolbar Arrow up + Return;
+  `less` and vim `mouse=a` scroll through `wheel`; Skia ↔ native toggled 6 times on each
+  (8 on Android) with no crash and no leak (iOS `heap`: one `OkenaTerminalRendererView`;
+  Android `dumpsys meminfo`: Views stays at 96 across further toggles); background and
+  foreground during a stream (output keeps coming); disconnect from the drawer and reconnect
+  to the server (terminal content back, native view).
+- **Claude Code-like TUI** (`$S/dhome/cc.py`: redraws a 6-line region with spinner, star,
+  progress bar and box at 30 Hz, cursor-up + clear like ink, while appending coloured
+  transcript lines with diff backgrounds, CJK, emoji and Czech). Output correct on both;
+  scrolled up during it the view stays anchored; a selection made during it stays on its
+  text while new lines push it up.
+- **Measurements (simulator / emulator, NOT devices).** Before = Skia (WU0); WU3/WU5 = the
+  platform agents' native runs; WU7 = this merged build, same methods (iOS: opt-in perf log,
+  `update` = snapshot + row redraws, `busy` = one main run-loop pass; Android:
+  `dumpsys gfxinfo framestats`, UI thread = input + traversal + `onDraw` recording).
+  ms p50 / p95 (max), Android p50 / p90 / p95 (max).
+
+  | Platform | Scenario | Before (Skia, JS thread paint) | WU3/WU5 native | WU7 merged native |
+  |---|---|---|---|---|
+  | iOS sim | fling / drag through scrollback | 11.3 / 12 (17) | update 0.23–0.31 / 0.43–0.67 | busy 0.64–0.87 / 1.25–2.6; 0 long frames |
+  | iOS sim | sustained stream | 11.1 / 12 (22) | update 0.45–0.54 / 0.6–1.2; busy 0.7–1.6 / 1.9–2.3 | update 0.52–1.08 / 1.18–1.64 (2.0); busy 0.74–1.34 / 1.7–2.5; 0 long frames |
+  | iOS sim | Claude-like TUI | — | — | update 0.69–1.57 / 1.2–2.4 (3.0); busy 0.7–2.1 / 1.3–5.3 |
+  | Android emu | fling | 9.7 / 20–24 (drag) | UI 0.75 / 4.4 / 7.0 (25) | UI 0.47 / 1.46 / 1.86 (4.9); record 0.15 / 0.37 / 0.43 |
+  | Android emu | sustained stream | 11.4 / 22–35 (81) | UI 0.66 / 2.9 / 7.0 (12) | UI 0.49 / 1.08 / 1.68 (7.9); record 0.25 / 0.51 / 0.70 |
+  | Android emu | Claude-like TUI | — | — | UI 0.50 / 0.62 / 0.78 (1.4); record 0.26 / 0.32 / 0.37 |
+  | Android emu | idle 5 s | — | 5 frames | 5 frames |
+
+  The terminal's history was at the 10k limit during the iOS stream runs (WU3 measured
+  1.0–1.2 ms p50 for `update` in that state). iOS windows that contained a `simctl`
+  screenshot or a running Maestro flow show 20–30 ms passes; they are excluded. Android render
+  thread time is software rasterisation (31 / 42 / 46 ms in the fling), so janky-frame
+  percentages stay meaningless on this emulator.
+- **Release paths (nothing uploaded).** iOS Release for `generic/platform=iOS` with
+  `CODE_SIGNING_ALLOWED=NO` builds (47 MB app with the fonts and `main.jsbundle`; signing
+  config untouched). Android `bundleRelease` builds (66 MB AAB, arm64-v8a + x86_64, JNI
+  exports present in the release `.so`). Outputs deleted. After the Release build
+  `Pods/React-Core-prebuilt` holds the Release core again, which is the state the next Debug
+  build expects (see the WU1 gotcha).
+- **Not verified here.** Pinch (no two-finger input on either), double tap on Android in this
+  pass (verified by WU6), the MISSING-terminal state, hitches and jank on real hardware,
+  VoiceOver/TalkBack by ear.
+- **Divergences left on purpose or logged.** Cell width differs per platform font metrics
+  (iOS 69 columns, Android 53 at 10.5 on these screens). Bigger gaps → backlog 04: resize
+  ownership with two clients (a non-owner's resize is denied and the grid stops fitting until
+  the user types; once the Android view looked blank apart from the cursor), split emoji
+  clusters (skin tone, flags, ZWJ), single-line curly/dotted/dashed underlines, unfocused
+  cursor style, different wheel/auto-scroll constants, SGR 8 lost after restore.
+- **Tooling notes.** Maestro `swipe` does not trigger the long press on Android; `adb shell
+  input motionevent DOWN/MOVE/UP` does. Maestro's iOS `takeScreenshot` once failed with
+  `NSPOSIXErrorDomain 64` and left the app in the background; `simctl io screenshot` is more
+  reliable. Starting a swipe at the left edge on Android triggers the system back gesture.
+
+## Rollout checklist
+
+Needs a real device before the TestFlight / Play internal build goes to users (WU7 did not
+upload anything):
+
+- [ ] iPhone with ProMotion: Instruments Animation Hitches during a 5k-line fling, target 0
+      hitches over 5 ms; main thread under 4 ms per frame while Claude Code streams.
+- [ ] Mid-range Android: `dumpsys gfxinfo` during a 5k-line fling, under 1 % janky frames;
+      UI thread under 8 ms p90 while Claude Code streams (hardware GPU, not SwANGLE).
+- [ ] Pinch to zoom on both (live scale, snaps to 0.5 pt, persists).
+- [ ] Double tap selects and copies a word on Android with a real finger.
+- [ ] VoiceOver and TalkBack by ear: rows read, no focus traps.
+- [ ] Claude Code session end to end on both: scroll during streaming, select a code block,
+      paste it elsewhere.
+- [ ] Two clients on one daemon (desktop + phone): change the phone's font or rotate while
+      the desktop owns the resize; the grid must recover after typing (backlog 04).
+- [ ] Font fallback on device: no tofu with the glyph test script (system font cascades on
+      device can differ from the simulator).
+- [ ] Upgrade path from a build with a stored `skia` setting lands on the native renderer.
+- [ ] Then: TestFlight (team 3T3Q9PBUAH, `cz.mangoweb.okena`) and Play internal track.
