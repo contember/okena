@@ -21,6 +21,8 @@ import UIKit
 /// - **Anchoring.** At the live tail the view follows new output. Scrolled up,
 ///   it keeps the absolute line at its top (shifting when old lines are
 ///   dropped). A reflow (`reflow_epoch`) keeps the distance from the bottom.
+///   When the grid is taller than the view, the live tail is the window that
+///   shows the cursor (see `liveOffset`).
 /// - **Selection.** Baked into the row bitmaps under the text, as the Skia
 ///   painter drew it; a row's selected column span is part of its cache key.
 /// - **Overlays.** The cursor and the scroll indicator are separate layers,
@@ -144,6 +146,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private var firstLine: Int64 = 0
   private var totalLines: Int = 0
   private var screenLines: Int = 0
+  private var cursorLine: Int64 = 0
   private var frameCols: Int = 0
   private var reflowEpoch: UInt32 = 0
   private var altScreen = false
@@ -300,6 +303,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     firstLine = 0
     totalLines = 0
     screenLines = 0
+    cursorLine = 0
     frameCols = 0
     reflowEpoch = 0
     altScreen = false
@@ -477,13 +481,21 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     return max(CGFloat(totalLines) * fonts.cellHeight + bottomInset - bounds.height, 0)
   }
 
-  /// The live-tail offset: the screen's top row at the top edge, as the Skia
-  /// view draws it. Normally this is `maxOffset`; when another client made
-  /// the PTY taller than this view, the rest of the screen is reachable by
-  /// scrolling further down.
+  /// The live-tail offset. Normally this is `maxOffset`: the screen fills the
+  /// view. When the grid has more rows than the view (another client owns the
+  /// PTY size, so ours was denied, or the keyboard just shrank the view), it is
+  /// the window that shows the cursor, preferring the screen's top: a short
+  /// prompt sits at the top of a tall, mostly blank grid, and a full screen
+  /// has its prompt at the bottom. The other rows stay reachable by scrolling.
+  /// Same rule as `ScrollModel` on Android.
   private var liveOffset: CGFloat {
     guard let fonts else { return 0 }
-    return min(CGFloat(max(totalLines - screenLines, 0)) * fonts.cellHeight, maxOffset)
+    let screenTop = max(totalLines - screenLines, 0)
+    let viewRows = grid?.rows ?? screenLines
+    let extra = max(screenLines - viewRows, 0)
+    let cursorRow = min(max(Int(cursorLine - firstLine) - screenTop, 0), max(screenLines - 1, 0))
+    let rowsDown = min(max(cursorRow - viewRows + 1, 0), extra)
+    return min(CGFloat(screenTop + rowsDown) * fonts.cellHeight, maxOffset)
   }
 
   private func updateContentGeometry() {
@@ -664,6 +676,9 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       || (newAlt && f.mode & UInt32(OKENA_RV_MODE_ALTERNATE_SCROLL) != 0)
     screenLines = Int(f.screen_lines)
     frameCols = Int(f.cols)
+    // The cursor only moves the live tail when the grid is taller than the view.
+    let cursorMoved = f.cursor_line != cursorLine && screenLines > (grid?.rows ?? .max)
+    cursorLine = f.cursor_line
     if gridMismatch { scheduleReassert() }
 
     if wheelMode != consumesWheel {
@@ -674,7 +689,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
 
     let changed =
       !haveFrame || newFirst != firstLine || newTotal != totalLines || f.reflow_epoch != reflowEpoch
-      || newAlt != altScreen
+      || newAlt != altScreen || cursorMoved
     guard changed else { return false }
 
     let oldOffset = scrollView.contentOffset.y
