@@ -111,6 +111,20 @@ WS "state_changed" / initial connect → RemoteClient fetches GET /v1/state
   → RN stores poll getProjects()/getFolders()/getProjectLayoutJson() (1s)
 ```
 
+### Agent usage (Claude Code / Codex)
+
+```
+WS "usage_changed" → ConnectionManager stores ApiUsage per connection, bumps a revision
+  → workspace store poll (1s) calls getUsageRevision(); getUsage() only when it moved
+```
+
+The app bar shows one small ring per enabled, signed-in provider (`UsageIndicator`), colored by the
+desktop's `max(abs, pace)` severity. Tapping it, or Usage in the drawer footer, opens `UsageSheet`,
+which calls `requestUsageRefresh` on open (the daemon throttles to once a minute per provider).
+`src/models/usage.ts` ports the pace math of `okena-agent-usage::pace`, including the working-day
+reshaping of weekly windows, and the desktop popover's display rules, so both clients show the same
+numbers. Times use the phone's clock and zone; clock skew against the daemon is not corrected.
+
 ### Presentation: one terminal at a time
 
 The phone does not reproduce the desktop split layout. `WorkspaceScreen` shows only the selected
