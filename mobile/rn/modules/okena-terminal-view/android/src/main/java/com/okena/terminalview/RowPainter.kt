@@ -18,20 +18,21 @@ internal data class CellMetrics(
 )
 
 /**
- * Draws one terminal row (backgrounds, glyphs, underline, strike) from a frame into a canvas
+ * Draws one terminal row (backgrounds, selection, glyphs, underline, strike) from a frame into a canvas
  * whose origin is the row's top-left corner. The rules mirror `paintTerminal` in
  * `src/components/TerminalView.tsx`:
  *
  *   - a background rect wherever the cell bg differs from the default bg (no anti-aliasing);
+ *   - the selection tint over the backgrounds and under the text;
  *   - glyphs batched into runs of the same fg and style; dim halves the fg alpha;
  *   - glyphs outside the primary font drawn one cell at a time, shrunk to fit their cell (two
  *     for WIDE cells) and centered;
  *   - underline 1 dp above the row bottom, strike through the middle, both
  *     `max(1, fontSize / 14)` dp thick.
  *
- * Differences on purpose: a run continues across spaces of the same style (so an underline
- * covers them, as on desktop), and JetBrains Mono ligatures are disabled because Skia never
- * shaped text.
+ * Differences on purpose: underline and strike cover spaces that carry them (as on desktop and
+ * in other terminals; Skia skipped blank cells), and JetBrains Mono ligatures are disabled
+ * because Skia never shaped text. The iOS painter follows the same rules.
  *
  * Inverse and hidden are already resolved in Rust (fg/bg swapped, hidden fg == bg).
  */
@@ -67,7 +68,8 @@ internal class RowPainter(private val fonts: TerminalFonts) {
 
   fun fontMetrics(): Paint.FontMetrics = textPaints[0].fontMetrics
 
-  fun drawRow(canvas: Canvas, f: RvFrame, r: Int, m: CellMetrics) {
+  /** `selection` is the row's selected span from `TerminalRendererView.selectionKey`. */
+  fun drawRow(canvas: Canvas, f: RvFrame, r: Int, m: CellMetrics, selection: Long, selectionArgb: Int) {
     val cols = f.cols
     if (cols <= 0) return
     val cw = m.cellWidth
@@ -87,6 +89,12 @@ internal class RowPainter(private val fonts: TerminalFonts) {
       while (c < cols && f.bg(f.cellAt(r, c)) == bg) c++
       bgPaint.color = bg
       canvas.drawRect(start * cw, 0f, c * cw, ch, bgPaint)
+    }
+    if (selection != NO_SELECTION) {
+      val s0 = (selection ushr 32).toInt()
+      val s1 = (selection and 0xffffffffL).toInt()
+      bgPaint.color = selectionArgb
+      canvas.drawRect(s0 * cw, 0f, (s1 + 1) * cw, ch, bgPaint)
     }
 
     // ── Pass 2: glyphs ──────────────────────────────────────────────────────
@@ -122,7 +130,6 @@ internal class RowPainter(private val fonts: TerminalFonts) {
         }
         paint.color = effectiveFg(fg, style)
         drawFitted(canvas, paint, text, c * cw, span * cw, m)
-        decorate(canvas, style, paint.color, c * cw, span * cw, m)
         c += span
         continue
       }
@@ -152,8 +159,39 @@ internal class RowPainter(private val fonts: TerminalFonts) {
       val paint = textPaints[variant(style)]
       paint.color = effectiveFg(fg, style)
       canvas.drawText(chars, 0, trimmed, start * cw, m.baseline, paint)
-      decorate(canvas, style, paint.color, start * cw, (c - start) * cw, m)
     }
+
+    // ── Pass 3: underline / strike, merged over cells of the same colour and style ──
+    c = 0
+    var runStart = -1
+    var runEnd = 0
+    var runColor = 0
+    var runDeco = 0
+    while (c < cols) {
+      val cell = f.cellAt(r, c)
+      val flags = f.flags(cell)
+      val deco = flags and DECORATIONS
+      if (deco == 0 || flags and SKIP_FLAGS != 0) {
+        if (runStart >= 0) decorate(canvas, runDeco, runColor, runStart * cw, (runEnd - runStart) * cw, m)
+        runStart = -1
+        c++
+        continue
+      }
+      val color = effectiveFg(f.fg(cell), flags)
+      if (runStart >= 0 && (color != runColor || deco != runDeco)) {
+        decorate(canvas, runDeco, runColor, runStart * cw, (runEnd - runStart) * cw, m)
+        runStart = -1
+      }
+      if (runStart < 0) {
+        runStart = c
+        runColor = color
+        runDeco = deco
+      }
+      val span = if (flags and RvFrame.CELL_WIDE != 0 && c + 1 < cols) 2 else 1
+      runEnd = c + span
+      c += span
+    }
+    if (runStart >= 0) decorate(canvas, runDeco, runColor, runStart * cw, (runEnd - runStart) * cw, m)
   }
 
   /** The row's text for accessibility: graphemes in column order, spacers skipped. */
@@ -226,6 +264,8 @@ internal class RowPainter(private val fonts: TerminalFonts) {
     private const val UNDERLINES =
       RvFrame.CELL_UNDERLINE or RvFrame.CELL_DOUBLE_UNDERLINE or RvFrame.CELL_UNDERCURL or
         RvFrame.CELL_DOTTED_UNDERLINE or RvFrame.CELL_DASHED_UNDERLINE
+    private const val DECORATIONS = UNDERLINES or RvFrame.CELL_STRIKE
+    const val NO_SELECTION = -1L
     private const val STYLE_MASK =
       RvFrame.CELL_BOLD or RvFrame.CELL_ITALIC or RvFrame.CELL_STRIKE or RvFrame.CELL_DIM or UNDERLINES
 

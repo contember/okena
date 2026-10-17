@@ -177,8 +177,9 @@ final class TerminalFonts {
 ///
 /// Same passes as `paintTerminal` in TerminalView.tsx, per row: cell
 /// backgrounds, glyph runs batched by colour and style, fallback glyphs
-/// fitted into their cell(s), then underline / strikethrough. Cursor,
-/// selection and the scroll indicator are overlays and never baked in.
+/// fitted into their cell(s), then underline / strikethrough. The selection
+/// tint goes over the cell backgrounds and under the text, as in Skia's pass 1.
+/// The cursor and the scroll indicator are overlays and never baked in.
 final class TerminalRowPainter {
   let fonts: TerminalFonts
   let widthPt: CGFloat
@@ -258,8 +259,12 @@ final class TerminalRowPainter {
       | OKENA_RV_CELL_DIM)
   private static let spacerMask = UInt16(OKENA_RV_CELL_WIDE_SPACER | OKENA_RV_CELL_LEADING_WIDE_SPACER)
 
-  /// Draw row `row` of `frame` and return the bitmap.
-  func paint(frame: UnsafePointer<OkenaRvFrame>, row: UInt16, background: UInt32) -> CGImage? {
+  /// Draw row `row` of `frame` and return the bitmap. `selection` is the
+  /// row's selected column span, tinted with `selectionColor`.
+  func paint(
+    frame: UnsafePointer<OkenaRvFrame>, row: UInt16, background: UInt32,
+    selection: ClosedRange<Int>? = nil, selectionColor: UInt32 = 0
+  ) -> CGImage? {
     let f = frame.pointee
     let cols = Int(f.cols)
     let cells = okena_rv_frame_row_cells(frame, row)!
@@ -284,6 +289,15 @@ final class TerminalRowPainter {
       let x1 = min(Int((CGFloat(e) * pxPerCell).rounded()), pixelWidth)
       fillPixels(from: x0, to: x1, color: Self.over(bg, opaqueBackground))
       c = e
+    }
+    if let selection {
+      for c in selection where c < cols {
+        let x0 = Int((CGFloat(c) * pxPerCell).rounded())
+        let x1 = min(Int((CGFloat(c + 1) * pxPerCell).rounded()), pixelWidth)
+        fillPixels(
+          from: x0, to: x1,
+          color: Self.over(selectionColor, Self.over(cells[c].bg, opaqueBackground)))
+      }
     }
 
     // Pass 2: text.
@@ -344,13 +358,15 @@ final class TerminalRowPainter {
     flush()
 
     // Pass 3: underline / strikethrough, merged over same-colour cells. Blank
-    // cells break a run, as in the Skia painter.
+    // cells keep their decoration (as in other terminals and on Android); the
+    // Skia painter skipped them.
     let thickness = max(1, fonts.size / 14)
     var lineStart = -1
     var lineEnd = 0
     var lineFg: UInt32 = 0
     var lineFlags: UInt16 = 0
-    let decoMask = UInt16(OKENA_RV_CELL_UNDERLINE | OKENA_RV_CELL_STRIKE)
+    let decoMask = UInt16(
+      OKENA_RV_CELL_UNDERLINE | OKENA_RV_CELL_DOUBLE_UNDERLINE | OKENA_RV_CELL_STRIKE)
 
     func flushLine() {
       guard lineStart >= 0 else { return }
@@ -359,6 +375,9 @@ final class TerminalRowPainter {
       let w = CGFloat(lineEnd - lineStart) * cw
       if lineFlags & UInt16(OKENA_RV_CELL_UNDERLINE) != 0 {
         ctx.fill(CGRect(x: x0, y: ch - 1 - thickness / 2, width: w, height: thickness))
+        if lineFlags & UInt16(OKENA_RV_CELL_DOUBLE_UNDERLINE) != 0 {
+          ctx.fill(CGRect(x: x0, y: ch - 1 - thickness * 2.5, width: w, height: thickness))
+        }
       }
       if lineFlags & UInt16(OKENA_RV_CELL_STRIKE) != 0 {
         ctx.fill(CGRect(x: x0, y: ch / 2 - thickness / 2, width: w, height: thickness))
@@ -370,11 +389,9 @@ final class TerminalRowPainter {
     while col < cols {
       let cell = cells[col]
       let flags = cell.flags
-      let blank =
-        flags & Self.spacerMask != 0 || (cell.extra == 0 && (cell.codepoint == 0x20 || cell.codepoint == 0))
       let span = flags & UInt16(OKENA_RV_CELL_WIDE) != 0 && col + 1 < cols ? 2 : 1
       let deco = flags & decoMask
-      if blank || deco == 0 {
+      if flags & Self.spacerMask != 0 || deco == 0 {
         flushLine()
         col += 1
         continue

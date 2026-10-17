@@ -21,8 +21,10 @@ import UIKit
 /// - **Anchoring.** At the live tail the view follows new output. Scrolled up,
 ///   it keeps the absolute line at its top (shifting when old lines are
 ///   dropped). A reflow (`reflow_epoch`) keeps the distance from the bottom.
-/// - **Overlays.** Cursor, selection and the scroll indicator are separate
-///   layers, never baked into row bitmaps.
+/// - **Selection.** Baked into the row bitmaps under the text, as the Skia
+///   painter drew it; a row's selected column span is part of its cache key.
+/// - **Overlays.** The cursor and the scroll indicator are separate layers,
+///   never baked into row bitmaps.
 ///
 /// The Fabric wrapper (`OkenaTerminalViewComponentView.mm`) owns this view,
 /// copies props onto it and forwards the `on*` closures to the C++ event
@@ -62,7 +64,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     didSet { if cursorArgb != oldValue { needsUpdate = true } }
   }
   @objc public var selectionArgb: UInt32 = 0x4026_4f78 {
-    didSet { if selectionArgb != oldValue { needsUpdate = true } }
+    didSet { if selectionArgb != oldValue { invalidateRows() } }
   }
 
   /// Whether this pane is the keyboard / toolbar target. The Skia view draws
@@ -115,12 +117,13 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private let scrollView = TerminalScrollView()
   private let contentView = UIView()
   private let cursorLayer = TerminalLayer()
-  private let selectionLayers = [TerminalLayer(), TerminalLayer(), TerminalLayer()]
   private let indicatorLayer = TerminalLayer()
 
   private struct RowSlot {
     let layer: TerminalLayer
     var hash: UInt64
+    /// The selected column span baked into the bitmap, packed; -1 for none.
+    var selection: Int64
   }
   /// Row layers by absolute line.
   private var rows: [Int64: RowSlot] = [:]
@@ -204,11 +207,6 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     scrollView.addSubview(contentView)
     contentView.isUserInteractionEnabled = false
 
-    for layer in selectionLayers {
-      layer.isHidden = true
-      layer.zPosition = 1
-      contentView.layer.addSublayer(layer)
-    }
     cursorLayer.isHidden = true
     cursorLayer.zPosition = 2
     contentView.layer.addSublayer(cursorLayer)
@@ -298,7 +296,6 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     needsUpdate = true
     accessibilityCache = nil
     cursorLayer.isHidden = true
-    selectionLayers.forEach { $0.isHidden = true }
     indicatorLayer.isHidden = true
     scrollView.isScrollEnabled = true
     updateContentGeometry()
@@ -578,20 +575,27 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       keep.insert(line)
       let y = CGFloat(line - firstLine) * fonts.cellHeight
       let rowFrame = CGRect(x: 0, y: y, width: painter.widthPt, height: fonts.cellHeight)
+      let span = Self.selectionSpan(f, line: line)
+      let selKey = span.map { Int64($0.lowerBound) << 32 | Int64($0.upperBound) } ?? -1
       if var slot = rows[line] {
-        if slot.hash != meta.hash {
-          slot.layer.contents = painter.paint(frame: frame, row: UInt16(r), background: backgroundArgb)
+        if slot.hash != meta.hash || slot.selection != selKey {
+          slot.layer.contents = painter.paint(
+            frame: frame, row: UInt16(r), background: backgroundArgb, selection: span,
+            selectionColor: selectionArgb)
           slot.hash = meta.hash
+          slot.selection = selKey
           rows[line] = slot
           redrawn += 1
         }
         if slot.layer.frame != rowFrame { slot.layer.frame = rowFrame }
       } else {
         let layer = dequeueLayer()
-        layer.contents = painter.paint(frame: frame, row: UInt16(r), background: backgroundArgb)
+        layer.contents = painter.paint(
+          frame: frame, row: UInt16(r), background: backgroundArgb, selection: span,
+          selectionColor: selectionArgb)
         layer.frame = rowFrame
         layer.isHidden = false
-        rows[line] = RowSlot(layer: layer, hash: meta.hash)
+        rows[line] = RowSlot(layer: layer, hash: meta.hash, selection: selKey)
         redrawn += 1
       }
     }
@@ -600,7 +604,6 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       rows[line] = nil
     }
     updateCursor(f, fonts: fonts)
-    updateSelection(f, fonts: fonts)
     updateIndicator()
     CATransaction.commit()
 
@@ -683,7 +686,6 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     for (_, slot) in rows { recycle(slot.layer) }
     rows.removeAll()
     cursorLayer.isHidden = true
-    selectionLayers.forEach { $0.isHidden = true }
     indicatorLayer.isHidden = true
     CATransaction.commit()
     updateContentGeometry()
@@ -741,43 +743,23 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     cursorLayer.isHidden = false
   }
 
-  private func updateSelection(_ f: OkenaRvFrame, fonts: TerminalFonts) {
+  /// The selected columns of absolute `line` (inclusive), or nil.
+  private static func selectionSpan(_ f: OkenaRvFrame, line: Int64) -> ClosedRange<Int>? {
     let kind = UInt32(f.sel_kind)
-    guard kind != OKENA_RV_SEL_NONE else {
-      selectionLayers.forEach { $0.isHidden = true }
-      return
+    guard kind != OKENA_RV_SEL_NONE, line >= f.sel_start_line, line <= f.sel_end_line else {
+      return nil
     }
-    let cw = fonts.cellWidth
-    let ch = fonts.cellHeight
-    let cols = CGFloat(f.cols)
-    let sl = CGFloat(f.sel_start_line - firstLine)
-    let el = CGFloat(f.sel_end_line - firstLine)
-    let sc = CGFloat(f.sel_start_col)
-    let ec = CGFloat(f.sel_end_col)
-    var rects: [CGRect] = []
+    let c0: Int
+    let c1: Int
     if kind == OKENA_RV_SEL_BLOCK {
-      let c0 = min(sc, ec)
-      let c1 = max(sc, ec)
-      rects.append(CGRect(x: c0 * cw, y: sl * ch, width: (c1 - c0 + 1) * cw, height: (el - sl + 1) * ch))
-    } else if sl == el {
-      rects.append(CGRect(x: sc * cw, y: sl * ch, width: (ec - sc + 1) * cw, height: ch))
+      c0 = Int(min(f.sel_start_col, f.sel_end_col))
+      c1 = Int(max(f.sel_start_col, f.sel_end_col))
     } else {
-      rects.append(CGRect(x: sc * cw, y: sl * ch, width: (cols - sc) * cw, height: ch))
-      if el - sl > 1 {
-        rects.append(CGRect(x: 0, y: (sl + 1) * ch, width: cols * cw, height: (el - sl - 1) * ch))
-      }
-      rects.append(CGRect(x: 0, y: el * ch, width: (ec + 1) * cw, height: ch))
+      c0 = line == f.sel_start_line ? Int(f.sel_start_col) : 0
+      c1 = line == f.sel_end_line ? Int(f.sel_end_col) : Int(f.cols) - 1
     }
-    let color = Self.color(argb: selectionArgb).cgColor
-    for (i, layer) in selectionLayers.enumerated() {
-      if i < rects.count, rects[i].width > 0, rects[i].height > 0 {
-        layer.frame = rects[i]
-        layer.backgroundColor = color
-        layer.isHidden = false
-      } else {
-        layer.isHidden = true
-      }
-    }
+    let last = min(c1, Int(f.cols) - 1)
+    return c0 <= last ? c0...last : nil
   }
 
   /// The scrollback thumb: 3 pt wide, 4 pt from the right edge, at least 20 pt

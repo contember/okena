@@ -108,7 +108,9 @@ class TerminalRendererView(context: Context) : View(context) {
     }
   var selectionArgb: Int = 0x40264f78
     set(value) {
+      if (field == value) return
       field = value
+      discardRows() // the tint is baked into the cached rows
       invalidate()
     }
 
@@ -165,7 +167,8 @@ class TerminalRendererView(context: Context) : View(context) {
   private var reportedAtBottom = true
 
   // Per-row cache (API 29+): absolute line → recorded row. `node` is a RenderNode.
-  private class CachedRow(val node: Any, var hash: Long, var version: Int)
+  /** `sel` is the row's selected column span baked into the node (`selectionKey`). */
+  private class CachedRow(val node: Any, var hash: Long, var sel: Long, var version: Int)
   private val rowCache = HashMap<Long, CachedRow>()
   private var layoutVersion = 0
   private val useRenderNodes = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -452,7 +455,6 @@ class TerminalRendererView(context: Context) : View(context) {
     }
 
     drawRows(canvas, m, sub)
-    drawSelection(canvas, m, top, sub)
     drawCursor(canvas, m, top, sub)
 
     if (pinching) canvas.restore()
@@ -491,7 +493,7 @@ class TerminalRendererView(context: Context) : View(context) {
       if (hw) {
         drawCachedRow(canvas, r, m, rowHeight)
       } else {
-        painter.drawRow(canvas, frame, r, m)
+        painter.drawRow(canvas, frame, r, m, selectionKey(frame.rowLine(r)), selectionArgb)
       }
       canvas.restore()
     }
@@ -502,21 +504,23 @@ class TerminalRendererView(context: Context) : View(context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
     val line = frame.rowLine(r)
     val hash = frame.rowHash(r)
+    val sel = selectionKey(line)
     var entry = rowCache[line]
-    if (entry == null || entry.hash != hash || entry.version != layoutVersion) {
+    if (entry == null || entry.hash != hash || entry.sel != sel || entry.version != layoutVersion) {
       val node = (entry?.node as RenderNode?) ?: RenderNode("okena-row").apply { setClipToBounds(false) }
       node.setPosition(0, 0, width, rowHeight)
       val rc = node.beginRecording(width, rowHeight)
       try {
-        painter.drawRow(rc, frame, r, m)
+        painter.drawRow(rc, frame, r, m, sel, selectionArgb)
       } finally {
         node.endRecording()
       }
       if (entry == null) {
-        entry = CachedRow(node, hash, layoutVersion)
+        entry = CachedRow(node, hash, sel, layoutVersion)
         rowCache[line] = entry
       } else {
         entry.hash = hash
+        entry.sel = sel
         entry.version = layoutVersion
       }
     }
@@ -547,28 +551,27 @@ class TerminalRendererView(context: Context) : View(context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) (node as RenderNode).discardDisplayList()
   }
 
-  private fun drawSelection(canvas: Canvas, m: CellMetrics, top: Long, sub: Float) {
+  /**
+   * The selected columns of absolute `line`, packed as `first shl 32 or last` (inclusive), or
+   * [RowPainter.NO_SELECTION]. The selection is baked into the row under the text, as the Skia
+   * painter drew it, so the span is part of a cached row's key.
+   */
+  private fun selectionKey(line: Long): Long {
     val kind = frame.selKind
-    if (kind == RvFrame.SEL_NONE) return
-    overlayPaint.color = selectionArgb
-    val sl = frame.selStartLine
-    val el = frame.selEndLine
-    for (r in 0 until frame.rows) {
-      val line = top + r
-      if (line < sl || line > el) continue
-      val c0: Int
-      val c1: Int
-      if (kind == RvFrame.SEL_BLOCK) {
-        c0 = minOf(frame.selStartCol, frame.selEndCol)
-        c1 = maxOf(frame.selStartCol, frame.selEndCol)
-      } else {
-        c0 = if (line == sl) frame.selStartCol else 0
-        c1 = if (line == el) frame.selEndCol else frame.cols - 1
-      }
-      if (c1 < c0) continue
-      val y = r * m.cellHeight - sub
-      canvas.drawRect(c0 * m.cellWidth, y, (c1 + 1) * m.cellWidth, y + m.cellHeight, overlayPaint)
+    if (kind == RvFrame.SEL_NONE || line < frame.selStartLine || line > frame.selEndLine) {
+      return RowPainter.NO_SELECTION
     }
+    val c0: Int
+    val c1: Int
+    if (kind == RvFrame.SEL_BLOCK) {
+      c0 = minOf(frame.selStartCol, frame.selEndCol)
+      c1 = maxOf(frame.selStartCol, frame.selEndCol)
+    } else {
+      c0 = if (line == frame.selStartLine) frame.selStartCol else 0
+      c1 = if (line == frame.selEndLine) frame.selEndCol else frame.cols - 1
+    }
+    val last = minOf(c1, frame.cols - 1)
+    return if (c0 <= last) (c0.toLong() shl 32) or last.toLong() else RowPainter.NO_SELECTION
   }
 
   private fun drawCursor(canvas: Canvas, m: CellMetrics, top: Long, sub: Float) {
