@@ -63,7 +63,8 @@ android {
 }
 
 tasks.register("copyTerminalFonts", Sync) {
-    from("../../assets") { include "*.ttf" }
+    // Only the <Text> fonts; Skia loads the symbol fallback font from the JS bundle.
+    from("../../assets") { include "JetBrainsMono-*.ttf" }
     into(layout.buildDirectory.dir("generated/okenaAssets/fonts"))
     // ReactFontManager resolves fontFamily + the Android style suffix.
     rename { name ->
