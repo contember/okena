@@ -15,6 +15,8 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena whoami` — which terminal/project YOU are in (reads `$OKENA_TERMINAL_ID`,
   set inside every Okena terminal). Use it to find your own terminal id.
 - `okena term ls [project]` — terminals as `id<TAB>name<TAB>project`.
+- `okena usage` — Claude Code / Codex rate-limit usage on the daemon's machine
+  (`provider<TAB>status<TAB>window<TAB>percent<TAB>reset_epoch`; `--json` for raw).
 
 ## Addressing (how to name things)
 

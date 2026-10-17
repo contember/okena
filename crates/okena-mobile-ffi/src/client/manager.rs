@@ -1,13 +1,16 @@
 use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::{TerminalActivity, TerminalHolder};
 
-use okena_core::api::{ActionRequest, ApiFullscreen, ApiLayoutNode, StateResponse};
+use okena_core::api::{
+    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiUsage, ApiUsageProvider, StateResponse,
+};
 use okena_transport::client::{
     ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, WsClientMessage,
     make_prefixed_id,
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
@@ -22,7 +25,46 @@ struct MobileConnection {
     handler: Arc<MobileConnectionHandler>,
     status: RwLock<ConnectionStatus>,
     state_cache: RwLock<Option<StateResponse>>,
+    /// Bumped on every stored usage change so pollers can skip unchanged
+    /// snapshots cheaply (`usage_revision`).
+    usage_revision: AtomicU32,
     _event_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MobileConnection {
+    fn store_usage(&self, usage: Option<ApiUsage>) {
+        let mut client = self.client.write();
+        if client.usage() == usage.as_ref() {
+            return;
+        }
+        client.set_usage(usage);
+        self.usage_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Store a snapshot that arrived outside the WS stream (the refresh POST
+    /// response). It only replaces a snapshot the stream already delivered and
+    /// never an even newer one, so it can neither resurrect usage after a
+    /// disconnect nor overwrite a `usage_changed` push that overtook it.
+    fn store_usage_if_newer(&self, usage: ApiUsage) {
+        let mut client = self.client.write();
+        let Some(current) = client.usage() else {
+            return;
+        };
+        if current == &usage || current.generated_at > usage.generated_at {
+            return;
+        }
+        client.set_usage(Some(usage));
+        self.usage_revision.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether `usage` shows a fetch running for `provider` (any provider when
+/// `None`).
+fn usage_fetch_running(usage: &ApiUsage, provider: Option<ApiUsageProvider>) -> bool {
+    usage
+        .providers
+        .iter()
+        .any(|entry| entry.fetching && provider.is_none_or(|wanted| entry.provider == wanted))
 }
 
 fn merge_layout_presentation(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiLayoutNode {
@@ -476,6 +518,7 @@ impl ConnectionManager {
             handler,
             status,
             state_cache,
+            usage_revision: AtomicU32::new(0),
             _event_task: None,
         };
 
@@ -522,6 +565,9 @@ impl ConnectionManager {
             conn.client.write().disconnect();
             *conn.status.write() = ConnectionStatus::Disconnected;
             *conn.state_cache.write() = None;
+            // `RemoteClient::disconnect` already dropped the usage snapshot;
+            // bump the revision so pollers notice it is gone.
+            conn.usage_revision.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -549,6 +595,66 @@ impl ConnectionManager {
         connections
             .get(conn_id)
             .and_then(|conn| conn.client.read().config().pinned_cert_sha256.clone())
+    }
+
+    /// Latest agent usage snapshot pushed by the server, if any.
+    pub fn get_usage(&self, conn_id: &str) -> Option<ApiUsage> {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .and_then(|conn| conn.client.read().usage().cloned())
+    }
+
+    /// Changes whenever the stored usage snapshot changes (0 = never set).
+    pub fn usage_revision(&self, conn_id: &str) -> u32 {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .map(|conn| conn.usage_revision.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Store a usage snapshot for a connection, as `usage_changed` does.
+    #[cfg(test)]
+    pub fn set_usage(&self, conn_id: &str, usage: Option<ApiUsage>) {
+        let connections = self.connections.read();
+        if let Some(conn) = connections.get(conn_id) {
+            conn.store_usage(usage);
+        }
+    }
+
+    /// Ask the daemon to refetch usage (`POST /v1/usage/refresh`). The daemon
+    /// throttles per provider; the fresh result arrives as `usage_changed`.
+    /// Returns whether a fetch is running for the requested provider(s) per the
+    /// snapshot the POST answers with (`false` when the request was throttled),
+    /// and stores that snapshot when it is newer than the cached one.
+    pub async fn request_usage_refresh(
+        &self,
+        conn_id: &str,
+        provider: Option<ApiUsageProvider>,
+    ) -> anyhow::Result<bool> {
+        let (config, token) = self.config_and_token(conn_id)?;
+        let usage =
+            okena_transport::remote_action::request_usage_refresh_async(&config, &token, provider)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        let running = usage_fetch_running(&usage, provider);
+        if let Some(conn) = self.connections.read().get(conn_id) {
+            conn.store_usage_if_newer(usage);
+        }
+        Ok(running)
+    }
+
+    fn config_and_token(&self, conn_id: &str) -> anyhow::Result<(RemoteConnectionConfig, String)> {
+        let connections = self.connections.read();
+        let conn = connections
+            .get(conn_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
+        let config = conn.client.read().config().clone();
+        let token = config
+            .effective_auth_token()
+            .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
+        Ok((config, token))
     }
 
     /// Get the cached remote state.
@@ -731,17 +837,7 @@ impl ConnectionManager {
         conn_id: &str,
         action: ActionRequest,
     ) -> anyhow::Result<String> {
-        let (config, token) = {
-            let connections = self.connections.read();
-            let conn = connections
-                .get(conn_id)
-                .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
-            let config = conn.client.read().config().clone();
-            let token = config
-                .effective_auth_token()
-                .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
-            (config, token)
-        };
+        let (config, token) = self.config_and_token(conn_id)?;
 
         let response = okena_transport::remote_action::post_action_async(&config, &token, action)
             .await
@@ -823,6 +919,9 @@ impl ConnectionManager {
                             project.git_status = statuses.get(&project.id).cloned();
                         }
                     }
+                }
+                ConnectionEvent::UsageChanged { usage, .. } => {
+                    conn.store_usage(Some(usage));
                 }
                 ConnectionEvent::SystemStatsChanged { .. }
                 | ConnectionEvent::PresentationRequested { .. } => {}
@@ -1055,6 +1154,85 @@ mod tests {
             mgr.get_status(&conn_id),
             ConnectionStatus::Connecting
         ));
+
+        mgr.remove_connection(&conn_id);
+    }
+
+    #[test]
+    fn usage_is_stored_per_connection_with_a_revision() {
+        ConnectionManager::init();
+        let mgr = ConnectionManager::get();
+        let first = mgr.add_connection(UNREACHABLE_HOST, 19103, None, true, None);
+        let second = mgr.add_connection(UNREACHABLE_HOST, 19104, None, true, None);
+        assert_eq!(mgr.get_usage(&first), None);
+        assert_eq!(mgr.usage_revision(&first), 0);
+
+        let usage = ApiUsage {
+            generated_at: 42.0,
+            ..ApiUsage::default()
+        };
+        mgr.set_usage(&first, Some(usage.clone()));
+        assert_eq!(mgr.get_usage(&first), Some(usage.clone()));
+        assert_eq!(mgr.usage_revision(&first), 1);
+        assert_eq!(mgr.get_usage(&second), None, "usage is per connection");
+
+        mgr.set_usage(&first, Some(usage));
+        assert_eq!(mgr.usage_revision(&first), 1, "identical snapshot keeps the revision");
+
+        mgr.disconnect(&first);
+        assert_eq!(mgr.get_usage(&first), None, "disconnect drops the snapshot");
+        assert_eq!(mgr.usage_revision(&first), 2);
+        assert_eq!(mgr.usage_revision("missing"), 0);
+
+        mgr.remove_connection(&first);
+        mgr.remove_connection(&second);
+    }
+
+    fn usage_with(generated_at: f64, fetching: &[(&str, bool)]) -> ApiUsage {
+        let providers: Vec<serde_json::Value> = fetching
+            .iter()
+            .map(|(provider, fetching)| {
+                serde_json::json!({ "provider": provider, "status": "ok", "fetching": fetching })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "providers": providers,
+            "generated_at": generated_at,
+        }))
+        .expect("valid usage snapshot")
+    }
+
+    #[test]
+    fn usage_fetch_running_honours_the_requested_provider() {
+        let usage = usage_with(1.0, &[("claude", false), ("codex", true)]);
+        assert!(usage_fetch_running(&usage, None));
+        assert!(usage_fetch_running(&usage, Some(ApiUsageProvider::Codex)));
+        assert!(!usage_fetch_running(&usage, Some(ApiUsageProvider::Claude)));
+
+        let idle = usage_with(1.0, &[("claude", false), ("codex", false)]);
+        assert!(!usage_fetch_running(&idle, None));
+        assert!(!usage_fetch_running(&ApiUsage::default(), None));
+    }
+
+    #[test]
+    fn refresh_snapshot_only_replaces_an_older_streamed_one() {
+        ConnectionManager::init();
+        let mgr = ConnectionManager::get();
+        let conn_id = mgr.add_connection(UNREACHABLE_HOST, 19105, None, true, None);
+        let store = |usage: ApiUsage| {
+            mgr.connections.read()[&conn_id].store_usage_if_newer(usage);
+        };
+
+        store(usage_with(10.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id), None, "nothing streamed yet");
+
+        mgr.set_usage(&conn_id, Some(usage_with(10.0, &[("claude", false)])));
+        store(usage_with(5.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id).map(|u| u.generated_at), Some(10.0));
+
+        store(usage_with(11.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id).map(|u| u.generated_at), Some(11.0));
+        assert_eq!(mgr.usage_revision(&conn_id), 2);
 
         mgr.remove_connection(&conn_id);
     }

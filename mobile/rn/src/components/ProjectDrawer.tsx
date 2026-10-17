@@ -60,6 +60,7 @@ import { ActivityDot, TierHeader, useActivityRows } from './projectActivity';
 import { OkenaColors } from '../theme';
 import { Icon } from './Icon';
 import { SettingsSheet } from '../screens/SettingsSheet';
+import { ConnectedUsageSheet } from '../screens/UsageSheet';
 import { SettingsIcon } from './KeyIcons';
 
 // ── Folder colors (mirror _folderColorToColor in project_drawer.dart) ────────
@@ -147,6 +148,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
 
   const [addOpen, setAddOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [colorPicker, setColorPicker] = useState<{
     current: string;
     onSelect: (color: string) => void;
@@ -354,6 +356,18 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           </View>
           <Text style={styles.footerText}>Settings</Text>
         </Pressable>
+        {connId ? (
+          <Pressable
+            style={styles.footerItem}
+            onPress={() => setUsageOpen(true)}
+            accessibilityRole="button"
+          >
+            <View style={styles.footerIcon}>
+              <Icon name="gauge" size={18} color={OkenaColors.textSecondary} />
+            </View>
+            <Text style={styles.footerText}>Usage</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           style={styles.footerItem}
           onPress={() => {
@@ -369,6 +383,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
       </Animated.View>
 
       <SettingsSheet visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <ConnectedUsageSheet visible={usageOpen} onClose={() => setUsageOpen(false)} />
 
       {/* Add Project dialog */}
       <AddProjectDialog

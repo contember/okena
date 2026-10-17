@@ -6,7 +6,7 @@ use crate::client::state::{
 use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, TOKEN_REFRESH_AGE_SECS, WsClientMessage,
 };
-use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
+use okena_core::api::{ActionRequest, ApiSystemStats, ApiUsage, StateResponse};
 use okena_core::ws::ClientPresentationRequest;
 
 use futures::{Sink, Stream};
@@ -292,6 +292,7 @@ pub struct RemoteClient<H: ConnectionHandler> {
     ws_tx: Option<async_channel::Sender<WsClientMessage>>,
     remote_state: Option<StateResponse>,
     system_stats: Option<ApiSystemStats>,
+    usage: Option<ApiUsage>,
     stream_map: HashMap<String, u32>,
     reverse_stream_map: HashMap<u32, String>,
     handler: Arc<H>,
@@ -321,6 +322,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             ws_tx: None,
             remote_state: None,
             system_stats: None,
+            usage: None,
             stream_map: HashMap::new(),
             reverse_stream_map: HashMap::new(),
             handler,
@@ -385,6 +387,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
     pub fn set_system_stats(&mut self, stats: Option<ApiSystemStats>) {
         self.system_stats = stats;
+    }
+
+    /// Latest agent usage snapshot pushed by the server (`usage_changed`).
+    pub fn usage(&self) -> Option<&ApiUsage> {
+        self.usage.as_ref()
+    }
+
+    pub fn set_usage(&mut self, usage: Option<ApiUsage>) {
+        self.usage = usage;
     }
 
     /// Update the shared token so WS reconnect loop uses the latest token.
@@ -838,6 +849,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.reverse_stream_map.clear();
         self.remote_state = None;
         self.system_stats = None;
+        self.usage = None;
         self.status = ConnectionStatus::Disconnected;
     }
 
@@ -1564,6 +1576,26 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 stats,
                                             })
                                             .await;
+                                    }
+                                }
+                                "usage_changed" => {
+                                    match value
+                                        .get("usage")
+                                        .cloned()
+                                        .map(serde_json::from_value::<ApiUsage>)
+                                    {
+                                        Some(Ok(usage)) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::UsageChanged {
+                                                    connection_id: config_id.clone(),
+                                                    usage,
+                                                })
+                                                .await;
+                                        }
+                                        Some(Err(e)) => {
+                                            log::warn!("Failed to parse usage message: {}", e);
+                                        }
+                                        None => {}
                                     }
                                 }
                                 "terminal_focus_requested" => {

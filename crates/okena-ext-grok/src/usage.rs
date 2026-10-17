@@ -671,8 +671,11 @@ impl GrokUsage {
                                         cx,
                                         &window_row("Credits", window, "grok-marker-included"),
                                         working,
-                                        &data.history,
-                                        "included",
+                                        okena_usage::history_points(
+                                            &data.history,
+                                            "included",
+                                            &window_row("Credits", window, "grok-marker-included"),
+                                        ),
                                         &self.chart_state,
                                     ))
                                 })
@@ -682,8 +685,15 @@ impl GrokUsage {
                                         cx,
                                         &window_row("On-demand", window, "grok-marker-on-demand"),
                                         working,
-                                        &data.history,
-                                        "on_demand",
+                                        okena_usage::history_points(
+                                            &data.history,
+                                            "on_demand",
+                                            &window_row(
+                                                "On-demand",
+                                                window,
+                                                "grok-marker-on-demand",
+                                            ),
+                                        ),
                                         &self.chart_state,
                                     ))
                                 })

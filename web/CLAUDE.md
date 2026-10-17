@@ -27,6 +27,6 @@ Vite dev server proxies `/v1/*` and `/health` to `http://localhost:19100`. Befor
 ## Architecture
 
 - **Auth:** 4-letter pairing code → JWT token in localStorage, auto-refresh at 75% TTL
-- **REST API:** `/v1/pair`, `/v1/state`, `/v1/actions`, `/v1/refresh`
+- **REST API:** `/v1/pair`, `/v1/state`, `/v1/actions`, `/v1/refresh`, `/v1/usage` (+ `/v1/usage/refresh`)
 - **WebSocket** (`/v1/stream`): binary frame protocol for PTY I/O, JSON for control messages, auto-reconnect with exponential backoff
 - **Layout:** recursive tree of splits/tabs/terminals, mirroring desktop's `LayoutNode`

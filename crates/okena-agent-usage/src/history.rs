@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Samples older than this are dropped when the file is pruned. Longer than
+/// the longest window we chart (7 days) plus slack.
+const RETAIN_SECS: f64 = 8.0 * 86400.0;
+/// Prune once the oldest sample is this much older than [`RETAIN_SECS`], so a
+/// rewrite happens about once a day rather than on every append.
+const PRUNE_SLACK_SECS: f64 = 86400.0;
 
 // Claude reset timestamps jitter by fractions of a second between fetches.
 const RESET_TIME_TOLERANCE_SECS: f64 = 1.0;
@@ -77,6 +84,61 @@ impl History {
     }
 }
 
+impl From<Vec<UsageSample>> for History {
+    fn from(samples: Vec<UsageSample>) -> Self {
+        History(samples.into())
+    }
+}
+
+/// Collapse plateaus to their first and last sample, then cap the count by
+/// keeping the newest sample per time bucket. Lossless for a line chart until
+/// the cap kicks in; used to keep the wire payload small.
+pub fn compact_points(points: &[HistoryPoint], max: usize) -> Vec<HistoryPoint> {
+    let n = points.len();
+    let mut kept: Vec<HistoryPoint> = points
+        .iter()
+        .enumerate()
+        .filter(|&(i, point)| {
+            i == 0
+                || i + 1 == n
+                || points[i - 1].used_percent != point.used_percent
+                || points[i + 1].used_percent != point.used_percent
+        })
+        .map(|(_, point)| *point)
+        .collect();
+    if max == 0 {
+        return Vec::new();
+    }
+    if kept.len() <= max {
+        return kept;
+    }
+    let (Some(first), Some(last)) = (kept.first().copied(), kept.last().copied()) else {
+        return kept;
+    };
+    let span = last.recorded_at - first.recorded_at;
+    if span <= 0.0 || max < 2 {
+        kept.truncate(max);
+        return kept;
+    }
+    // Bucket 0 holds only the first point; the rest share max - 1 buckets.
+    let buckets = (max - 1) as f64;
+    let mut out: Vec<HistoryPoint> = vec![first];
+    let mut last_bucket = 0usize;
+    for point in kept.into_iter().skip(1) {
+        let bucket = (((point.recorded_at - first.recorded_at) / span * buckets).ceil() as usize)
+            .clamp(1, max - 1);
+        if bucket == last_bucket {
+            if let Some(slot) = out.last_mut() {
+                *slot = point;
+            }
+        } else {
+            out.push(point);
+            last_bucket = bucket;
+        }
+    }
+    out
+}
+
 /// Call from the fetch worker: persistence failures must not hide fresh usage.
 pub fn record_and_load(
     provider: Provider,
@@ -115,6 +177,52 @@ pub fn record_and_load(
             log::warn!("[usage-history] could not load {provider:?} usage: {error}");
             History(Arc::from([sample]))
         }
+    }
+}
+
+/// Record one sample per window and attach each window's in-window history
+/// (compacted for the wire). The window `id` is the history series name.
+pub fn record_windows(
+    provider: Provider,
+    source: String,
+    plan: Option<String>,
+    windows: &mut [okena_core::api::ApiUsageWindow],
+) {
+    let limits = windows
+        .iter()
+        .map(|window| LimitSample {
+            name: window.id.clone(),
+            used_percent: window.used_percent,
+            window_seconds: window.window_seconds,
+            reset_at: window.reset_at,
+        })
+        .collect();
+    let history = record_and_load(provider, source, plan, limits);
+    attach_history(
+        &history,
+        windows,
+        jiff::Timestamp::now().as_millisecond() as f64 / 1000.0,
+    );
+}
+
+/// Fill `window.history` from `history` for every window with a reset time.
+pub fn attach_history(
+    history: &History,
+    windows: &mut [okena_core::api::ApiUsageWindow],
+    now: f64,
+) {
+    for window in windows {
+        let Some(reset) = window.reset_at else {
+            continue;
+        };
+        let points = history.points(&window.id, reset, window.window_seconds, now);
+        window.history = compact_points(&points, okena_core::api::USAGE_HISTORY_MAX_POINTS)
+            .into_iter()
+            .map(|point| okena_core::api::ApiUsagePoint {
+                recorded_at: point.recorded_at,
+                used_percent: point.used_percent,
+            })
+            .collect();
     }
 }
 
@@ -172,7 +280,60 @@ fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
         .open(directory.join(filename(sample.provider)))?;
     // Multiple Okena profiles/processes share this history directory.
     file.lock()?;
+    if let Err(error) = prune_if_stale(&mut file, sample.recorded_at) {
+        log::warn!("[usage-history] could not prune {:?} history: {error}", sample.provider);
+    }
     file.write_all(&line)
+}
+
+/// Only the timestamp, so pruning keeps records of any schema version.
+#[derive(Deserialize)]
+struct RecordedAt {
+    recorded_at: f64,
+}
+
+fn recorded_at(line: &str) -> Option<f64> {
+    serde_json::from_str::<RecordedAt>(line)
+        .ok()
+        .map(|record| record.recorded_at)
+        .filter(|at| at.is_finite())
+}
+
+/// Drop samples older than [`RETAIN_SECS`] when the file's first (oldest)
+/// record is past the retention plus a day of slack. Normally reads just the
+/// first line. Call with the exclusive lock held; rewrites in place (not via
+/// rename) so other processes blocked on the lock keep a valid handle.
+fn prune_if_stale(file: &mut fs::File, now: f64) -> io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut first = String::new();
+    BufReader::new(&*file).read_line(&mut first)?;
+    if first.is_empty() {
+        return Ok(());
+    }
+    let stale = match recorded_at(first.trim_end()) {
+        Some(at) => at < now - RETAIN_SECS - PRUNE_SLACK_SECS,
+        // A truncated or garbage first line: rewrite once to drop it.
+        None => true,
+    };
+    if !stale {
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    let cutoff = now - RETAIN_SECS;
+    let mut kept = String::with_capacity(content.len());
+    for line in content.lines() {
+        if recorded_at(line).is_some_and(|at| at >= cutoff) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(kept.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -193,6 +354,42 @@ mod tests {
                 reset_at: Some(reset_at),
             }],
         }
+    }
+
+    fn pt(recorded_at: f64, used_percent: f64) -> HistoryPoint {
+        HistoryPoint {
+            recorded_at,
+            used_percent,
+        }
+    }
+
+    #[test]
+    fn compact_collapses_plateaus() {
+        let points = vec![
+            pt(0.0, 1.0),
+            pt(1.0, 1.0),
+            pt(2.0, 1.0),
+            pt(3.0, 2.0),
+            pt(4.0, 2.0),
+            pt(5.0, 2.0),
+        ];
+        assert_eq!(
+            compact_points(&points, 100),
+            vec![pt(0.0, 1.0), pt(2.0, 1.0), pt(3.0, 2.0), pt(5.0, 2.0)]
+        );
+    }
+
+    #[test]
+    fn compact_caps_count_and_keeps_ends() {
+        let points: Vec<_> = (0..2000)
+            .map(|i| pt(i as f64 * 300.0, i as f64 / 20.0))
+            .collect();
+        let out = compact_points(&points, 400);
+        assert!(out.len() <= 400, "got {}", out.len());
+        assert!(out.len() > 300, "too aggressive: {}", out.len());
+        assert_eq!(out.first(), points.first());
+        assert_eq!(out.last(), points.last());
+        assert!(out.windows(2).all(|w| w[0].recorded_at < w[1].recorded_at));
     }
 
     #[test]
@@ -336,5 +533,44 @@ mod tests {
         };
         assert!(append(&path, &sample).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "existing data");
+    }
+
+    #[test]
+    fn append_prunes_samples_older_than_retention_about_daily() {
+        let temp = tempfile::tempdir().unwrap();
+        let day = 86400.0;
+        let now = 100.0 * day;
+        let path = temp.path().join("claude.jsonl");
+
+        // Oldest record within retention + slack: nothing is rewritten, even
+        // an out-of-order old record further down survives.
+        append(temp.path(), &sample_at(now - 8.5 * day, now, 1.0)).unwrap();
+        append(temp.path(), &sample_at(now - 30.0 * day, now, 2.0)).unwrap();
+        append(temp.path(), &sample_at(now, now + day, 3.0)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+
+        // Once the first record is past retention + slack, old samples go,
+        // newer ones (and records of unknown schema versions) stay.
+        let mut future = sample_at(now - day, now, 4.0);
+        future.version = 2;
+        append(temp.path(), &future).unwrap();
+        append(temp.path(), &sample_at(now + 1.0 * day, now + 2.0 * day, 5.0)).unwrap();
+        let later = now + 1.0 * day;
+        append(temp.path(), &sample_at(later, later + day, 6.0)).unwrap();
+        let kept: Vec<f64> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| recorded_at(line).unwrap())
+            .collect();
+        assert_eq!(kept.len(), 4);
+        assert!(kept.iter().all(|&at| at >= later - RETAIN_SECS));
+
+        // Garbage at the head is dropped by one rewrite.
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{{trunc\n{content}")).unwrap();
+        append(temp.path(), &sample_at(later, later + day, 7.0)).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), 5);
+        assert!(content.lines().all(|line| recorded_at(line).is_some()));
     }
 }

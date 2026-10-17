@@ -1,4 +1,9 @@
-use crate::usage::parse_iso8601_to_local;
+/// Parse an ISO 8601 timestamp to a local Zoned datetime.
+/// Returns `None` if parsing fails.
+fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
+    let timestamp: jiff::Timestamp = ts.parse().ok()?;
+    Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
+}
 
 /// Format an ISO 8601 timestamp to "Mon DD, YYYY - HH:MM TZ" in local timezone.
 /// Falls back to UTC if local timezone is unavailable, or returns `ts` as-is if unparseable.

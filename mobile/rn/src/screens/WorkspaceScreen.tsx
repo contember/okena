@@ -3,7 +3,8 @@
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
  *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
- *     when there are several), a small connection-quality dot, and a "＋"
+ *     when there are several), the agent usage rings (tap for the
+ *     {@link UsageSheet}), a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
@@ -70,6 +71,8 @@ import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPan
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
 import { Icon } from '../components/Icon';
+import { ConnectedUsageIndicator } from '../components/UsageIndicator';
+import { ConnectedUsageSheet } from './UsageSheet';
 import type { TerminalFonts } from '../components/TerminalView';
 
 const native: OkenaNative = (() => {
@@ -135,6 +138,7 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
+  const [usageOpen, setUsageOpen] = useState(false);
 
   // The remembered project is gone: show the project list instead.
   useEffect(() => {
@@ -255,7 +259,7 @@ export const WorkspaceScreen: React.FC = () => {
         modifiers={modifiers}
         onSelect={selectTerminal}
         selected
-        focusBlocked={drawerOpen || switcherOpen || actionsOpen}
+        focusBlocked={drawerOpen || switcherOpen || actionsOpen || usageOpen}
         native={native}
       />
     );
@@ -283,6 +287,7 @@ export const WorkspaceScreen: React.FC = () => {
           ) : null}
         </Pressable>
         <View style={styles.flexSpacer} />
+        {connId ? <ConnectedUsageIndicator onPress={() => setUsageOpen(true)} /> : null}
         {connId ? <View style={[styles.dot, { backgroundColor: dotColor }]} /> : null}
         {connId && project ? (
           <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setActionsOpen(true)}>
@@ -326,6 +331,8 @@ export const WorkspaceScreen: React.FC = () => {
 
       {/* Drawer */}
       <ProjectDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} native={native} />
+
+      <ConnectedUsageSheet visible={usageOpen} onClose={() => setUsageOpen(false)} />
 
       {/* Project switcher */}
       <Modal

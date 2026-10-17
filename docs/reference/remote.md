@@ -188,6 +188,62 @@ Get the visible terminal viewport as text.
 { "content": "user@host:~$ ls\nfile1  file2\nuser@host:~$ " }
 ```
 
+### `GET /v1/usage`
+
+Claude Code / Codex rate-limit usage measured on the daemon's machine. Bearer
+auth like the other `/v1` routes. Returns `ApiUsage`
+(`crates/okena-core/src/usage.rs` is the schema, with field docs):
+
+```json
+{
+  "providers": [
+    {
+      "provider": "claude", "status": "ok", "plan": "max",
+      "fetched_at": 1792260185.0, "last_attempt_at": 1792260184.2,
+      "next_attempt_at": 1792260485.0, "fetching": false,
+      "error": null, "consecutive_failures": 0, "rate_limited_until": null,
+      "windows": [
+        {
+          "id": "five_hour", "label": "Session", "kind": {"type": "five_hour"},
+          "used_percent": 20.0, "window_seconds": 18000.0,
+          "reset_at": 1792264800.0, "active": true,
+          "history": [{"recorded_at": 1792259000.0, "used_percent": 18.0}]
+        }
+      ],
+      "extra_usage": {"is_enabled": false, "monthly_limit_cents": 10000.0,
+                      "used_credits_cents": 0.0, "utilization": 0.0},
+      "credits": null, "reset_credits": null
+    },
+    { "provider": "codex", "status": "disabled", "windows": [] }
+  ],
+  "working_days": [0, 1, 2, 3, 4],
+  "generated_at": 1792260190.0
+}
+```
+
+- `status`: `disabled` (extension off in settings) · `no_credentials` ·
+  `pending` · `ok` · `error` (windows are then the last good data, see
+  `fetched_at`).
+- Window `kind`: `five_hour`, `weekly`, `weekly_scoped` (+ `model`),
+  `code_review`, `other`. Window ids double as history series names.
+- Timestamps are epoch seconds. Time elapsed in a window is
+  `(now - (reset_at - window_seconds)) / window_seconds`.
+- `working_days`: `0 = Monday`; the desktop's weekly pace marker only advances
+  on these days.
+- Polling: every 5 min per enabled provider (`enabled_extensions` contains
+  `claude-code` / `codex`), backoff 30 s → 1 h on errors, `retry-after` on 429.
+
+### `POST /v1/usage/refresh`
+
+Body `{"provider": "claude"}`, `{"provider": "codex"}`, or empty / `{}` for
+all. Returns the `ApiUsage` snapshot as soon as the daemon has applied the
+request (at most ~2 s): a requested provider with `fetching: true` is being
+refetched, otherwise the request was ignored. The fetch result arrives as
+`usage_changed`. Ignored per provider when its last attempt is under 60 s old,
+it is fetching, rate limited, disabled, or in an error backoff after two or
+more consecutive failures whose next attempt is over 60 s away (a single
+failure can be retried). Unknown fields or providers → `400`.
+
 ### `WS /v1/stream`
 
 Real-time PTY output and state change notifications.
@@ -217,6 +273,7 @@ Real-time PTY output and state change notifications.
 | `auth_failed` | `error` | Authentication failed |
 | `subscribed` | `mappings: {terminal_id: stream_id}` | Subscription confirmed with numeric stream IDs |
 | `state_changed` | `state_version: u64` | Workspace state changed — refetch via `GET /v1/state` |
+| `usage_changed` | `usage: ApiUsage` | Full agent usage snapshot (same as `GET /v1/usage`); sent right after `auth_ok` and on every change |
 | `dropped` | `count: u64` | Subscriber fell behind, N events were dropped |
 | `pong` | — | Keepalive response |
 

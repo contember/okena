@@ -409,6 +409,24 @@ impl Okena {
             .detach();
         }
 
+        // Agent usage: the daemon polls Claude Code / Codex. Mirror its
+        // snapshot into the global the usage widgets read, and route their
+        // refresh requests (popover opened) back to the daemon.
+        {
+            let store = okena_usage::GlobalDaemonUsage::entity(cx);
+            let weak_manager = remote_manager.downgrade();
+            store.update(cx, |store, _| {
+                store.set_refresh(std::rc::Rc::new(move |provider, cx: &mut App| {
+                    weak_manager.upgrade().is_some_and(|manager| {
+                        manager.read(cx).request_usage_refresh(
+                            okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                            Some(provider),
+                        )
+                    })
+                }));
+            });
+        }
+
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
@@ -457,6 +475,15 @@ impl Okena {
             RemoteManagerEvent::LocalConnectionFailed => {
                 this.recover_local_daemon(cx);
             }
+            RemoteManagerEvent::UsageChanged { connection_id }
+                if connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID =>
+            {
+                this.sync_daemon_usage(cx);
+            }
+            // Usage of user-managed remote daemons stays on their connection
+            // (`RemoteConnectionManager::usage`); the status bar shows the
+            // desktop's own daemon.
+            RemoteManagerEvent::UsageChanged { .. } => {}
             RemoteManagerEvent::SettingsChanged(settings) => {
                 // Initial/reconnected daemon snapshots also restore the
                 // transient appearance after a daemon restart.
@@ -999,6 +1026,36 @@ impl Okena {
         // should hold just did — clear the memo so the sync actually runs.
         self.scrollback_visible_projects.lock().take();
         self.publish_visible_projects(cx);
+    }
+
+    /// Copy the local daemon's usage snapshot into the widgets' global. When
+    /// that daemon is reached over the network rather than this machine's
+    /// socket/loopback, label the numbers with its name.
+    fn sync_daemon_usage(&self, cx: &mut Context<Self>) {
+        let (usage, source_label) = {
+            let manager = self.remote_manager.read(cx);
+            let id = okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
+            let usage = manager.usage(id).cloned();
+            let source_label = manager
+                .connections()
+                .into_iter()
+                .find(|(config, _, _)| config.id == id)
+                .and_then(|(config, _, _)| {
+                    let on_this_machine = config.local_endpoint.is_some()
+                        || config
+                            .host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                        || config.host.eq_ignore_ascii_case("localhost");
+                    (!on_this_machine).then(|| SharedString::from(config.name.clone()))
+                });
+            (usage, source_label)
+        };
+        let store = okena_usage::GlobalDaemonUsage::entity(cx);
+        store.update(cx, |store, cx| {
+            store.set_source_label(source_label, cx);
+            store.set_usage(usage, cx);
+        });
     }
 
     fn sync_system_appearance(&self, cx: &mut Context<Self>) {

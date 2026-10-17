@@ -252,6 +252,12 @@ pub enum RemoteManagerEvent {
 
     /// The local daemon published a new authoritative settings snapshot.
     SettingsChanged(Box<AppSettings>),
+
+    /// A connection's agent usage snapshot changed: the server pushed a new
+    /// one, or it was dropped because the connection was removed or ended in
+    /// `Disconnected` / `Error` (a transient `Reconnecting` keeps it). Read it
+    /// with [`RemoteConnectionManager::usage`], which is then `None`.
+    UsageChanged { connection_id: String },
 }
 
 /// GPUI Entity managing all remote connections.
@@ -484,7 +490,13 @@ impl RemoteConnectionManager {
     /// Remove a connection (disconnects first).
     pub fn remove_connection(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         if let Some(mut conn) = self.connections.remove(connection_id) {
+            let had_usage = conn.usage().is_some();
             conn.disconnect();
+            if had_usage {
+                cx.emit(RemoteManagerEvent::UsageChanged {
+                    connection_id: connection_id.to_string(),
+                });
+            }
         }
         // Remove from saved settings (off GPUI thread)
         let id = connection_id.to_string();
@@ -654,6 +666,42 @@ impl RemoteConnectionManager {
                 result_tx: None,
             },
         );
+    }
+
+    /// Latest agent usage snapshot pushed by `connection_id`'s server.
+    pub fn usage(&self, connection_id: &str) -> Option<&okena_core::api::ApiUsage> {
+        self.connections.get(connection_id)?.usage()
+    }
+
+    /// Ask `connection_id`'s server to refetch agent usage
+    /// (`POST /v1/usage/refresh`). Fire-and-forget: the fetched result arrives
+    /// as a `usage_changed` push. Returns whether a request was sent (false
+    /// when the connection is unknown, not connected, or has no token).
+    pub fn request_usage_refresh(
+        &self,
+        connection_id: &str,
+        provider: Option<okena_core::api::ApiUsageProvider>,
+    ) -> bool {
+        let Some(connection) = self.connections.get(connection_id) else {
+            return false;
+        };
+        if !matches!(connection.status(), ConnectionStatus::Connected) {
+            return false;
+        }
+        let config = connection.config().clone();
+        let Some(token) = config.effective_auth_token() else {
+            return false;
+        };
+        self.runtime.spawn(async move {
+            if let Err(error) = okena_transport::remote_action::request_usage_refresh_async(
+                &config, &token, provider,
+            )
+            .await
+            {
+                log::debug!("usage refresh for {} failed: {error}", config.name);
+            }
+        });
+        true
     }
 
     /// Send through the same FIFO as `send_action` and return the API response.
@@ -846,6 +894,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
             ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
+            ConnectionEvent::UsageChanged { .. } => "UsageChanged",
             ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::PresentationRequested { .. } => "PresentationRequested",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
@@ -879,6 +928,18 @@ impl RemoteConnectionManager {
                             ToastManager::info(format!("{}: Reconnected", name), cx);
                         }
                         _ => {}
+                    }
+                    // A dead connection's usage is stale; drop it so the
+                    // widgets stop showing old numbers. Reconnects re-push.
+                    if matches!(
+                        status,
+                        ConnectionStatus::Disconnected | ConnectionStatus::Error(_)
+                    ) && conn.usage().is_some()
+                    {
+                        conn.set_usage(None);
+                        cx.emit(RemoteManagerEvent::UsageChanged {
+                            connection_id: connection_id.clone(),
+                        });
                     }
                 }
                 // The local daemon backs the whole GUI; when its connection
@@ -994,6 +1055,15 @@ impl RemoteConnectionManager {
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.set_system_stats(Some(stats));
+                }
+            }
+            ConnectionEvent::UsageChanged {
+                connection_id,
+                usage,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    conn.set_usage(Some(usage));
+                    cx.emit(RemoteManagerEvent::UsageChanged { connection_id });
                 }
             }
             ConnectionEvent::PresentationRequested {
@@ -1649,6 +1719,50 @@ mod tests {
             assert!(result.is_err(), "duplicate host:port should be rejected");
             assert!(result.unwrap_err().contains("Already connected"));
         });
+    }
+
+    #[gpui::test]
+    fn dead_connection_drops_usage_and_emits_usage_changed(cx: &mut gpui::TestAppContext) {
+        let manager = cx.new(|cx| RemoteConnectionManager::new(make_terminals(), cx));
+        let config = make_config("127.0.0.1", 1);
+        let id = config.id.clone();
+        manager.update(cx, |rm, _cx| {
+            let mut connection = crate::connection::RemoteConnection::new(
+                config,
+                rm.runtime.clone(),
+                rm.terminals.clone(),
+                rm.event_tx.clone(),
+                rm.activity_tx.clone(),
+            );
+            connection.set_usage(Some(okena_core::api::ApiUsage::default()));
+            rm.connections.insert(id.clone(), connection);
+        });
+        let events = Arc::new(PMutex::new(Vec::new()));
+        let _subscription = cx.update({
+            let events = events.clone();
+            |cx| {
+                cx.subscribe(&manager, move |_, event: &RemoteManagerEvent, _| {
+                    if let RemoteManagerEvent::UsageChanged { connection_id } = event {
+                        events.lock().push(connection_id.clone());
+                    }
+                })
+            }
+        });
+
+        let status = |status| okena_transport::client::ConnectionEvent::StatusChanged {
+            connection_id: id.clone(),
+            status,
+        };
+        manager.update(cx, |rm, cx| {
+            rm.handle_event(status(ConnectionStatus::Reconnecting { attempt: 2 }), cx);
+            assert!(rm.usage(&id).is_some(), "a transient drop keeps usage");
+            rm.handle_event(status(ConnectionStatus::Error("gone".into())), cx);
+            assert!(rm.usage(&id).is_none());
+            // Already empty: no second event.
+            rm.handle_event(status(ConnectionStatus::Disconnected), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*events.lock(), vec![id.clone()]);
     }
 
     #[gpui::test]
