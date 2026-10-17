@@ -21,7 +21,9 @@ use crate::{
 };
 
 /// Asks the daemon to refetch one provider now. Installed by the app layer.
-pub type UsageRefreshFn = Rc<dyn Fn(ApiUsageProvider, &mut App)>;
+/// Returns whether the request was actually sent (no daemon connection, no
+/// request).
+pub type UsageRefreshFn = Rc<dyn Fn(ApiUsageProvider, &mut App) -> bool>;
 
 /// Client-side spacing between refresh requests for one provider. The daemon
 /// throttles too (60 s); this only saves the round trip on hover jitter.
@@ -88,7 +90,8 @@ impl GlobalDaemonUsage {
     }
 
     /// Ask the daemon to refetch `provider` (popover opened). Throttled per
-    /// provider; a no-op until the app layer installed a refresh function.
+    /// provider, counting only requests that were actually sent; a no-op
+    /// until the app layer installed a refresh function.
     pub fn request_refresh(provider: ApiUsageProvider, cx: &mut App) {
         let entity = Self::entity(cx);
         let refresh = entity.update(cx, |store, _| {
@@ -100,12 +103,15 @@ impl GlobalDaemonUsage {
             if recent {
                 return None;
             }
-            let refresh = store.refresh.clone()?;
-            store.last_refresh_request.insert(provider, now);
-            Some(refresh)
+            store.refresh.clone()
         });
-        if let Some(refresh) = refresh {
-            refresh(provider, cx);
+        let Some(refresh) = refresh else {
+            return;
+        };
+        if refresh(provider, cx) {
+            entity.update(cx, |store, _| {
+                store.last_refresh_request.insert(provider, Instant::now());
+            });
         }
     }
 }
@@ -170,4 +176,49 @@ pub fn window_trigger_item(
         linear,
     );
     (label.into(), window.used_percent, effective)
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: it re-exports `gpui::*`, whose `test` macro shadows
+    // the built-in `#[test]` that `#[gpui::test]` expands to.
+    use super::{ApiUsageProvider, GlobalDaemonUsage};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    #[gpui::test]
+    fn refresh_throttle_only_counts_sent_requests(cx: &mut gpui::TestAppContext) {
+        let connected = Rc::new(Cell::new(false));
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let entity = GlobalDaemonUsage::entity(cx);
+            let (connected, sent) = (connected.clone(), sent.clone());
+            entity.update(cx, |store, _| {
+                store.set_refresh(Rc::new(move |provider, _| {
+                    if connected.get() {
+                        sent.borrow_mut().push(provider);
+                    }
+                    connected.get()
+                }));
+            });
+        });
+
+        // No connection: nothing sent, and the throttle is not burned.
+        cx.update(|cx| GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx));
+        assert!(sent.borrow().is_empty());
+
+        connected.set(true);
+        cx.update(|cx| GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx));
+        assert_eq!(*sent.borrow(), vec![ApiUsageProvider::Claude]);
+
+        // Sent once: the next hover within 60 s is throttled per provider.
+        cx.update(|cx| {
+            GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx);
+            GlobalDaemonUsage::request_refresh(ApiUsageProvider::Codex, cx);
+        });
+        assert_eq!(
+            *sent.borrow(),
+            vec![ApiUsageProvider::Claude, ApiUsageProvider::Codex]
+        );
+    }
 }
