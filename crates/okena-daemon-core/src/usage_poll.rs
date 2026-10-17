@@ -14,11 +14,20 @@
 //! waits for `retry-after` (at least the backoff). Missing credentials are not
 //! a failure — they are re-checked every 5 min without any HTTP request.
 //! Client refreshes (`POST /v1/usage/refresh`) start a fetch only when the
-//! provider's last attempt is ≥ 60 s old and it is not rate limited.
+//! provider's last attempt is ≥ 60 s old, it is not rate limited, and it is
+//! not deep in an error backoff (see `ProviderTracker::refresh_allowed`). The
+//! request is acked after the resulting snapshot is published, so the POST
+//! answers with an accurate `fetching` flag.
 //!
 //! Fetches are blocking HTTP (`okena-transport`) and Keychain subprocesses,
 //! so they run on tokio's blocking pool; nothing here can take the daemon
-//! down — every failure becomes provider state.
+//! down — every failure becomes provider state. At most one fetch per
+//! provider runs at a time, also across config changes (a Codex token refresh
+//! rotates the refresh token, and two concurrent rotations can sign the user
+//! out). Every step of a fetch has its own timeout (HTTP 10 s, Keychain 5 s),
+//! which also bounds how long the runtime's drop waits for a fetch at daemon
+//! shutdown; [`FETCH_DEADLINE`] is a watchdog on top that turns a fetch stuck
+//! anyway into an error instead of `fetching` forever.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,6 +119,19 @@ pub fn initial_usage(settings: &AppSettings) -> ApiUsage {
     )
 }
 
+/// A fetch running on the blocking pool. Outlives config changes: a new fetch
+/// for the slot only starts once this one has landed (its result discarded
+/// when the config changed meanwhile), so two Codex refresh-token rotations
+/// can never race each other.
+struct RunningFetch {
+    id: u64,
+    /// Slot generation the fetch was started under.
+    generation: u64,
+    started: Instant,
+    /// The watchdog already turned this fetch into a failure.
+    timed_out: bool,
+}
+
 struct Slot {
     tracker: ProviderTracker,
     config: ProviderConfig,
@@ -117,8 +139,48 @@ struct Slot {
     /// is discarded when it lands.
     generation: u64,
     next_due: Option<Instant>,
-    in_flight: bool,
+    running: Option<RunningFetch>,
 }
+
+impl Slot {
+    /// Whether an outstanding fetch still blocks starting a new one. A fetch
+    /// stuck past [`ABANDON_AFTER`] is given up on so the provider recovers.
+    fn blocked(&mut self, now: Instant, abandon_after: Duration) -> bool {
+        let Some(running) = &self.running else {
+            return false;
+        };
+        if now.saturating_duration_since(running.started) < abandon_after {
+            return true;
+        }
+        log::warn!(
+            "[usage] {} fetch still running after {:?}; abandoning it",
+            self.tracker.entry().provider.as_str(),
+            abandon_after
+        );
+        self.running = None;
+        false
+    }
+}
+
+/// Events from the per-fetch supervisor task.
+enum FetchEvent {
+    /// The fetch passed its deadline and is still running.
+    TimedOut { index: usize, id: u64 },
+    /// The blocking fetch returned (or panicked).
+    Landed {
+        index: usize,
+        id: u64,
+        outcome: FetchOutcome,
+    },
+}
+
+/// Overall deadline for one fetch. Every step inside is bounded already
+/// (HTTP requests 10 s each, Keychain lookups 5 s each; Codex can chain up to
+/// four requests), so this only catches something unexpectedly stuck: the
+/// provider then shows an error and backs off instead of `fetching` forever.
+const FETCH_DEADLINE: Duration = Duration::from_secs(90);
+/// After this long a stuck fetch no longer blocks new ones.
+const ABANDON_AFTER: Duration = Duration::from_secs(600);
 
 /// Run the poller forever (cancelled with the daemon's runtime).
 pub async fn run_usage_poll(
@@ -133,10 +195,43 @@ pub async fn run_usage_poll(
 pub async fn run_usage_poll_with(
     settings: Arc<Mutex<AppSettings>>,
     hub: UsageHub,
-    mut refresh_rx: mpsc::UnboundedReceiver<UsageRefresh>,
+    refresh_rx: mpsc::UnboundedReceiver<UsageRefresh>,
     fetcher: UsageFetcher,
 ) {
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<(usize, u64, FetchOutcome)>();
+    run_usage_poll_inner(
+        settings,
+        hub,
+        refresh_rx,
+        fetcher,
+        FETCH_DEADLINE,
+        ABANDON_AFTER,
+    )
+    .await;
+}
+
+/// Resolve the Claude config dir for a fetch (settings dir →
+/// `CLAUDE_CONFIG_DIR` → `~/.claude`, exactly like the PTY env override).
+/// Called on the blocking pool: it touches the filesystem.
+fn resolve_claude_dir(config_dir: Option<String>) -> PathBuf {
+    let mut settings = AppSettings::default();
+    if let Some(dir) = config_dir {
+        settings.extension_settings.insert(
+            CLAUDE_EXTENSION_ID.to_string(),
+            serde_json::json!({ "config_dir": dir }),
+        );
+    }
+    okena_workspace::claude_env::resolve_claude_dir(&settings)
+}
+
+async fn run_usage_poll_inner(
+    settings: Arc<Mutex<AppSettings>>,
+    hub: UsageHub,
+    mut refresh_rx: mpsc::UnboundedReceiver<UsageRefresh>,
+    fetcher: UsageFetcher,
+    fetch_deadline: Duration,
+    abandon_after: Duration,
+) {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<FetchEvent>();
     let mut slots: Vec<Slot> = PROVIDERS
         .iter()
         .map(|&provider| Slot {
@@ -147,16 +242,20 @@ pub async fn run_usage_poll_with(
             },
             generation: 0,
             next_due: None,
-            in_flight: false,
+            running: None,
         })
         .collect();
     let mut refresh_open = true;
+    let mut next_fetch_id: u64 = 0;
+    // Refresh requests applied since the last publish; acked after it.
+    let mut pending_acks: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
 
     loop {
         let now = Instant::now();
         let now_epoch = okena_agent_usage::now_epoch();
 
-        // 1. Apply settings changes.
+        // 1. Apply settings changes. A running fetch is left alone: it keeps
+        //    blocking new fetches until it lands, then its result is dropped.
         let (configs, days) = {
             let settings = settings.lock();
             let configs: Vec<ProviderConfig> = PROVIDERS
@@ -170,10 +269,9 @@ pub async fn run_usage_poll_with(
                 continue;
             }
             slot.generation = slot.generation.wrapping_add(1);
-            slot.in_flight = false;
             if config.enabled {
                 slot.tracker.reset_pending();
-                slot.next_due = Some(now);
+                slot.next_due = Some(slot.tracker.earliest_start(now));
             } else {
                 slot.tracker.set_disabled();
                 slot.next_due = None;
@@ -184,73 +282,118 @@ pub async fn run_usage_poll_with(
         // 2. Start due fetches.
         for (index, slot) in slots.iter_mut().enumerate() {
             let due = slot.next_due.is_some_and(|due| due <= now);
-            if !slot.config.enabled || slot.in_flight || !due {
+            if !slot.config.enabled || !due || slot.blocked(now, abandon_after) {
                 continue;
             }
             let provider = slot.tracker.entry().provider;
             slot.tracker.begin_attempt(now, now_epoch);
-            slot.in_flight = true;
             slot.next_due = None;
-            let generation = slot.generation;
+            next_fetch_id = next_fetch_id.wrapping_add(1);
+            let id = next_fetch_id;
+            slot.running = Some(RunningFetch {
+                id,
+                generation: slot.generation,
+                started: now,
+                timed_out: false,
+            });
             let fetcher = fetcher.clone();
-            let result_tx = result_tx.clone();
-            // Resolved per fetch (settings dir → CLAUDE_CONFIG_DIR → ~/.claude),
-            // exactly like the PTY env override.
-            let dir = match provider {
-                ApiUsageProvider::Claude => Some(okena_workspace::claude_env::resolve_claude_dir(
-                    &settings.lock(),
-                )),
-                _ => None,
-            };
+            let event_tx = event_tx.clone();
+            let config_dir = slot.config.key.clone();
             tokio::spawn(async move {
-                let outcome = tokio::task::spawn_blocking(move || fetcher(provider, dir))
-                    .await
-                    .unwrap_or_else(|error| {
-                        log::warn!("[usage] {} fetch task failed: {error}", provider.as_str());
-                        FetchOutcome::Failed("Usage fetch crashed".into())
-                    });
-                let _ = result_tx.send((index, generation, outcome));
+                let mut join = tokio::task::spawn_blocking(move || {
+                    let dir = match provider {
+                        ApiUsageProvider::Claude => Some(resolve_claude_dir(config_dir)),
+                        _ => None,
+                    };
+                    fetcher(provider, dir)
+                });
+                let joined = match tokio::time::timeout(fetch_deadline, &mut join).await {
+                    Ok(joined) => joined,
+                    Err(_) => {
+                        let _ = event_tx.send(FetchEvent::TimedOut { index, id });
+                        join.await
+                    }
+                };
+                let outcome = joined.unwrap_or_else(|error| {
+                    log::warn!("[usage] {} fetch task failed: {error}", provider.as_str());
+                    FetchOutcome::Failed("Usage fetch crashed".into())
+                });
+                let _ = event_tx.send(FetchEvent::Landed { index, id, outcome });
             });
         }
 
-        // 3. Publish (no-op for subscribers when nothing changed).
+        // 3. Publish (no-op for subscribers when nothing changed), then tell
+        //    refresh callers their request is reflected.
         hub.publish(okena_agent_usage::snapshot(
             slots.iter().map(|slot| &slot.tracker),
             days,
             now_epoch,
         ));
+        for ack in pending_acks.drain(..) {
+            let _ = ack.send(());
+        }
 
         // 4. Sleep until the next due fetch, a settings re-check, a refresh
-        //    request, or a finished fetch.
+        //    request, or a fetch event.
         let wake = slots
             .iter()
-            .filter(|slot| slot.config.enabled && !slot.in_flight)
+            .filter(|slot| slot.config.enabled && slot.running.is_none())
             .filter_map(|slot| slot.next_due)
             .fold(now + SETTINGS_POLL, Instant::min);
         tokio::select! {
             _ = tokio::time::sleep_until(wake.into()) => {}
             request = refresh_rx.recv(), if refresh_open => match request {
-                Some(target) => {
+                Some(UsageRefresh { provider: target, applied }) => {
                     let now = Instant::now();
                     for slot in &mut slots {
                         let provider = slot.tracker.entry().provider;
                         if target.is_some_and(|target| target != provider) {
                             continue;
                         }
-                        if slot.tracker.refresh_allowed(now) {
+                        if slot.tracker.refresh_allowed(now) && !slot.blocked(now, abandon_after) {
                             log::debug!("[usage] refresh requested for {}", provider.as_str());
                             slot.next_due = Some(now);
                         }
                     }
+                    pending_acks.extend(applied);
                 }
                 None => refresh_open = false,
             },
-            Some((index, generation, outcome)) = result_rx.recv() => {
-                if let Some(slot) = slots.get_mut(index)
-                    && slot.generation == generation
-                    && slot.in_flight
-                {
+            Some(event) = event_rx.recv() => match event {
+                FetchEvent::TimedOut { index, id } => {
+                    if let Some(slot) = slots.get_mut(index)
+                        && let Some(running) = slot.running.as_mut()
+                        && running.id == id
+                        && running.generation == slot.generation
+                    {
+                        running.timed_out = true;
+                        let provider = slot.tracker.entry().provider;
+                        log::warn!(
+                            "[usage] {} fetch exceeded {:?}; marking it failed",
+                            provider.as_str(),
+                            fetch_deadline
+                        );
+                        let now = Instant::now();
+                        let delay = slot.tracker.complete(
+                            FetchOutcome::Failed("Usage fetch timed out".into()),
+                            now,
+                            okena_agent_usage::now_epoch(),
+                        );
+                        slot.next_due = Some(now + delay);
+                    }
+                }
+                FetchEvent::Landed { index, id, outcome } => {
+                    let Some(slot) = slots.get_mut(index) else { continue };
+                    if slot.running.as_ref().is_none_or(|running| running.id != id) {
+                        // Abandoned earlier; a newer fetch owns the slot.
+                        continue;
+                    }
+                    let Some(running) = slot.running.take() else { continue };
                     let provider = slot.tracker.entry().provider;
+                    if running.generation != slot.generation || running.timed_out {
+                        log::debug!("[usage] discarding stale {} fetch result", provider.as_str());
+                        continue;
+                    }
                     match &outcome {
                         FetchOutcome::Ok(_) => log::debug!("[usage] {} fetched", provider.as_str()),
                         FetchOutcome::NoCredentials(reason) => {
@@ -267,7 +410,6 @@ pub async fn run_usage_poll_with(
                     }
                     let now = Instant::now();
                     let delay = slot.tracker.complete(outcome, now, okena_agent_usage::now_epoch());
-                    slot.in_flight = false;
                     slot.next_due = Some(now + delay);
                 }
             }
@@ -363,8 +505,10 @@ mod tests {
         assert_eq!(usage.providers[1].status, ApiUsageStatus::Disabled);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        // A refresh right after a fetch is throttled (60 s).
-        hub.request_refresh(None);
+        // A refresh right after a fetch is throttled (60 s), and the answer
+        // says so: nothing is fetching.
+        let answer = hub.refresh(None).await;
+        assert!(answer.providers.iter().all(|p| !p.fetching));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -395,6 +539,119 @@ mod tests {
         );
         assert!(codex.next_attempt_at.is_some());
         assert!(!codex.fetching);
+        task.abort();
+    }
+
+    /// A fetcher whose calls block until released; records the peak number
+    /// of concurrent calls.
+    struct GatedFetcher {
+        calls: AtomicUsize,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        gate: std::sync::Mutex<std::sync::mpsc::Receiver<FetchOutcome>>,
+    }
+
+    fn gated() -> (Arc<GatedFetcher>, std::sync::mpsc::Sender<FetchOutcome>, UsageFetcher) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = Arc::new(GatedFetcher {
+            calls: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            gate: std::sync::Mutex::new(rx),
+        });
+        let fetcher: UsageFetcher = {
+            let state = state.clone();
+            Arc::new(move |_, _| {
+                state.calls.fetch_add(1, Ordering::SeqCst);
+                let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+                state.peak.fetch_max(active, Ordering::SeqCst);
+                let outcome = state
+                    .gate
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap_or_else(|_| FetchOutcome::Failed("gate closed".into()));
+                state.active.fetch_sub(1, Ordering::SeqCst);
+                outcome
+            })
+        };
+        (state, tx, fetcher)
+    }
+
+    async fn wait_until(mut pred: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if pred() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("condition not reached");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_change_waits_for_the_running_fetch_and_discards_it() {
+        let settings = settings_with(&["codex"]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (state, release, fetcher) = gated();
+        let task = tokio::spawn(run_usage_poll_with(
+            settings.clone(),
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+        ));
+        wait_until(|| state.calls.load(Ordering::SeqCst) == 1).await;
+
+        // Toggle Codex off and on while the first fetch is still running.
+        settings.lock().enabled_extensions.clear();
+        wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Disabled).await;
+        settings
+            .lock()
+            .enabled_extensions
+            .insert(CODEX_EXTENSION_ID.to_string());
+        let usage = wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Pending).await;
+        assert!(!usage.providers[1].fetching);
+        // Neither a refresh nor the new config starts a second fetch yet.
+        let answer = hub.refresh(Some(ApiUsageProvider::Codex)).await;
+        assert!(!answer.providers[1].fetching);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+
+        // The old fetch lands: its result is dropped, then the new one runs.
+        release
+            .send(FetchOutcome::Failed("stale result".into()))
+            .unwrap();
+        wait_until(|| state.calls.load(Ordering::SeqCst) == 2).await;
+        release.send(ok_outcome()).unwrap();
+        let usage = wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Ok).await;
+        assert_eq!(usage.providers[1].consecutive_failures, 0);
+        assert_eq!(state.peak.load(Ordering::SeqCst), 1, "fetches overlapped");
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hung_fetch_becomes_an_error_without_overlapping() {
+        let settings = settings_with(&["codex"]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (state, release, fetcher) = gated();
+        let task = tokio::spawn(run_usage_poll_inner(
+            settings,
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+            Duration::from_millis(200),
+            ABANDON_AFTER,
+        ));
+        let usage = wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Error).await;
+        let codex = &usage.providers[1];
+        assert!(!codex.fetching);
+        assert_eq!(codex.error.as_deref(), Some("Usage fetch timed out"));
+        assert_eq!(codex.consecutive_failures, 1);
+
+        // The late result is discarded and no second fetch overlapped it.
+        release.send(ok_outcome()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hub.snapshot().providers[1].status, ApiUsageStatus::Error);
+        assert_eq!(state.peak.load(Ordering::SeqCst), 1);
         task.abort();
     }
 }

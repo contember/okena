@@ -17,6 +17,9 @@ use crate::provider::{FetchOutcome, ProviderData};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 /// Period durations for each tier.
+/// Upper bound for one macOS Keychain lookup (`security find-generic-password`).
+#[cfg(target_os = "macos")]
+const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
 const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
 
@@ -153,8 +156,21 @@ pub fn read_credentials(claude_dir: &Path) -> Result<ClaudeCredentials, String> 
                 command.args(["-a", user]);
             }
             command.arg("-w");
-            let output = match okena_core::process::safe_output(&mut command) {
+            // Bounded: a locked keychain waiting on an access prompt that no
+            // one can answer must not pin the fetch (and the daemon's
+            // shutdown) on the blocking pool.
+            let output = match okena_core::process::safe_output_with_timeout(
+                &mut command,
+                KEYCHAIN_TIMEOUT,
+            ) {
                 Ok(output) => output,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    keychain_failure = Some(
+                        "macOS Keychain lookup timed out (locked keychain or pending access prompt)"
+                            .to_string(),
+                    );
+                    break;
+                }
                 Err(error) => {
                     keychain_failure = Some(format!("could not run `security`: {error}"));
                     break;

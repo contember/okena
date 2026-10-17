@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Samples older than this are dropped when the file is pruned. Longer than
+/// the longest window we chart (7 days) plus slack.
+const RETAIN_SECS: f64 = 8.0 * 86400.0;
+/// Prune once the oldest sample is this much older than [`RETAIN_SECS`], so a
+/// rewrite happens about once a day rather than on every append.
+const PRUNE_SLACK_SECS: f64 = 86400.0;
 
 // Claude reset timestamps jitter by fractions of a second between fetches.
 const RESET_TIME_TOLERANCE_SECS: f64 = 1.0;
@@ -273,7 +280,60 @@ fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
         .open(directory.join(filename(sample.provider)))?;
     // Multiple Okena profiles/processes share this history directory.
     file.lock()?;
+    if let Err(error) = prune_if_stale(&mut file, sample.recorded_at) {
+        log::warn!("[usage-history] could not prune {:?} history: {error}", sample.provider);
+    }
     file.write_all(&line)
+}
+
+/// Only the timestamp, so pruning keeps records of any schema version.
+#[derive(Deserialize)]
+struct RecordedAt {
+    recorded_at: f64,
+}
+
+fn recorded_at(line: &str) -> Option<f64> {
+    serde_json::from_str::<RecordedAt>(line)
+        .ok()
+        .map(|record| record.recorded_at)
+        .filter(|at| at.is_finite())
+}
+
+/// Drop samples older than [`RETAIN_SECS`] when the file's first (oldest)
+/// record is past the retention plus a day of slack. Normally reads just the
+/// first line. Call with the exclusive lock held; rewrites in place (not via
+/// rename) so other processes blocked on the lock keep a valid handle.
+fn prune_if_stale(file: &mut fs::File, now: f64) -> io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut first = String::new();
+    BufReader::new(&*file).read_line(&mut first)?;
+    if first.is_empty() {
+        return Ok(());
+    }
+    let stale = match recorded_at(first.trim_end()) {
+        Some(at) => at < now - RETAIN_SECS - PRUNE_SLACK_SECS,
+        // A truncated or garbage first line: rewrite once to drop it.
+        None => true,
+    };
+    if !stale {
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    let cutoff = now - RETAIN_SECS;
+    let mut kept = String::with_capacity(content.len());
+    for line in content.lines() {
+        if recorded_at(line).is_some_and(|at| at >= cutoff) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(kept.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -473,5 +533,44 @@ mod tests {
         };
         assert!(append(&path, &sample).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "existing data");
+    }
+
+    #[test]
+    fn append_prunes_samples_older_than_retention_about_daily() {
+        let temp = tempfile::tempdir().unwrap();
+        let day = 86400.0;
+        let now = 100.0 * day;
+        let path = temp.path().join("claude.jsonl");
+
+        // Oldest record within retention + slack: nothing is rewritten, even
+        // an out-of-order old record further down survives.
+        append(temp.path(), &sample_at(now - 8.5 * day, now, 1.0)).unwrap();
+        append(temp.path(), &sample_at(now - 30.0 * day, now, 2.0)).unwrap();
+        append(temp.path(), &sample_at(now, now + day, 3.0)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+
+        // Once the first record is past retention + slack, old samples go,
+        // newer ones (and records of unknown schema versions) stay.
+        let mut future = sample_at(now - day, now, 4.0);
+        future.version = 2;
+        append(temp.path(), &future).unwrap();
+        append(temp.path(), &sample_at(now + 1.0 * day, now + 2.0 * day, 5.0)).unwrap();
+        let later = now + 1.0 * day;
+        append(temp.path(), &sample_at(later, later + day, 6.0)).unwrap();
+        let kept: Vec<f64> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| recorded_at(line).unwrap())
+            .collect();
+        assert_eq!(kept.len(), 4);
+        assert!(kept.iter().all(|&at| at >= later - RETAIN_SECS));
+
+        // Garbage at the head is dropped by one rewrite.
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{{trunc\n{content}")).unwrap();
+        append(temp.path(), &sample_at(later, later + day, 7.0)).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), 5);
+        assert!(content.lines().all(|line| recorded_at(line).is_some()));
     }
 }

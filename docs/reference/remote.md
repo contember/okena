@@ -236,10 +236,13 @@ auth like the other `/v1` routes. Returns `ApiUsage`
 ### `POST /v1/usage/refresh`
 
 Body `{"provider": "claude"}`, `{"provider": "codex"}`, or empty / `{}` for
-all. Returns the current `ApiUsage` immediately; the fetch runs in the
-background and its result arrives as `usage_changed`. Ignored per provider
-when its last attempt is under 60 s old, it is fetching, rate limited, or
-disabled. Unknown fields or providers → `400`.
+all. Returns the `ApiUsage` snapshot as soon as the daemon has applied the
+request (at most ~2 s): a requested provider with `fetching: true` is being
+refetched, otherwise the request was ignored. The fetch result arrives as
+`usage_changed`. Ignored per provider when its last attempt is under 60 s old,
+it is fetching, rate limited, disabled, or in an error backoff after two or
+more consecutive failures whose next attempt is over 60 s away (a single
+failure can be retried). Unknown fields or providers → `400`.
 
 ### `WS /v1/stream`
 

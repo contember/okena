@@ -19,6 +19,10 @@ pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(3600);
 pub const DEFAULT_RATE_LIMIT_DELAY: Duration = Duration::from_secs(600);
 /// Minimum spacing between client-requested refreshes of one provider.
 pub const REFRESH_THROTTLE: Duration = Duration::from_secs(60);
+/// During an error backoff, a client refresh may still pull the next attempt
+/// forward when it was planned at most this far ahead (see
+/// [`ProviderTracker::refresh_allowed`]).
+pub const REFRESH_BACKOFF_SLACK: Duration = Duration::from_secs(60);
 
 /// Parsed usage of one provider, before history is attached.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -73,6 +77,8 @@ pub fn rate_limit_delay(retry_after: Option<Duration>, failures: u32) -> Duratio
 pub struct ProviderTracker {
     entry: ApiProviderUsage,
     last_attempt: Option<Instant>,
+    /// When the next scheduled attempt is due after the last completion.
+    next_attempt: Option<Instant>,
     rate_limited_until: Option<Instant>,
 }
 
@@ -81,6 +87,7 @@ impl ProviderTracker {
         Self {
             entry: ApiProviderUsage::empty(provider, ApiUsageStatus::Disabled),
             last_attempt: None,
+            next_attempt: None,
             rate_limited_until: None,
         }
     }
@@ -93,16 +100,34 @@ impl ProviderTracker {
         self.entry.status == ApiUsageStatus::Disabled
     }
 
-    /// Turn the provider off: drop all data and scheduling state.
+    /// Turn the provider off: drop all data and scheduling state except a
+    /// running 429 backoff, which still applies when it is turned back on.
     pub fn set_disabled(&mut self) {
+        let rate_limited_until = self.rate_limited_until;
         *self = Self::new(self.entry.provider);
+        self.rate_limited_until = rate_limited_until;
     }
 
     /// Turn the provider on (or re-point it, e.g. a new Claude config dir):
-    /// start over from `pending`.
+    /// start over from `pending`. A 429 backoff survives: it is the same
+    /// provider API, so toggling the setting must not bypass it.
     pub fn reset_pending(&mut self) {
+        let rate_limited_until = self.rate_limited_until;
+        let rate_limited_until_epoch = self.entry.rate_limited_until;
         *self = Self::new(self.entry.provider);
         self.entry.status = ApiUsageStatus::Pending;
+        self.rate_limited_until = rate_limited_until;
+        if rate_limited_until.is_some() {
+            self.entry.rate_limited_until = rate_limited_until_epoch;
+        }
+    }
+
+    /// The earliest time a new fetch may start: `now`, or the end of a
+    /// running 429 backoff.
+    pub fn earliest_start(&self, now: Instant) -> Instant {
+        self.rate_limited_until
+            .filter(|&until| until > now)
+            .unwrap_or(now)
     }
 
     /// Record the planned next attempt (`None` = nothing planned).
@@ -119,13 +144,27 @@ impl ProviderTracker {
     }
 
     /// Whether a client-requested refresh should start a fetch now: the
-    /// provider is enabled, idle, not rate limited, and its last attempt is at
-    /// least [`REFRESH_THROTTLE`] old.
+    /// provider is enabled, idle, not rate limited, its last attempt is at
+    /// least [`REFRESH_THROTTLE`] old, and it is not deep in an error backoff.
+    ///
+    /// Error backoff rule: after a single failure (30 s backoff) a refresh may
+    /// retry right away. From the second consecutive failure on, a refresh
+    /// only pulls the attempt forward when it was due within
+    /// [`REFRESH_BACKOFF_SLACK`] anyway, so hovering a widget cannot turn a
+    /// long backoff into one request a minute.
     pub fn refresh_allowed(&self, now: Instant) -> bool {
         if self.is_disabled() || self.entry.fetching {
             return false;
         }
         if self.rate_limited_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        if self.entry.status == ApiUsageStatus::Error
+            && self.entry.consecutive_failures >= 2
+            && self
+                .next_attempt
+                .is_some_and(|next| next > now + REFRESH_BACKOFF_SLACK)
+        {
             return false;
         }
         self.last_attempt
@@ -178,6 +217,7 @@ impl ProviderTracker {
             }
         };
         self.entry.next_attempt_at = Some(now_epoch + delay.as_secs_f64());
+        self.next_attempt = Some(now + delay);
         delay
     }
 }
@@ -308,5 +348,67 @@ mod tests {
         assert!(entry.fetched_at.is_none());
         assert_eq!(entry.consecutive_failures, 0);
         assert_eq!(entry.error.as_deref(), Some("signed out"));
+    }
+
+    #[test]
+    fn refresh_respects_long_error_backoff_but_retries_a_first_failure() {
+        let now = Instant::now();
+        let mut tracker = ProviderTracker::new(ApiUsageProvider::Codex);
+        tracker.reset_pending();
+        let failed = |tracker: &mut ProviderTracker, at: Instant| {
+            tracker.begin_attempt(at, 0.0);
+            tracker.complete(FetchOutcome::Failed("HTTP 500".into()), at, 0.0)
+        };
+
+        // First failure: 30 s backoff, a refresh after the 60 s throttle works.
+        failed(&mut tracker, now);
+        assert!(tracker.refresh_allowed(now + REFRESH_THROTTLE));
+
+        // Several failures in a row: the next attempt is far away, refreshes
+        // wait until it is within the slack.
+        let mut at = now;
+        for _ in 0..5 {
+            at += REFRESH_THROTTLE;
+            failed(&mut tracker, at);
+        }
+        let backoff = failure_backoff(tracker.entry().consecutive_failures);
+        assert!(backoff > REFRESH_THROTTLE + REFRESH_BACKOFF_SLACK);
+        assert!(!tracker.refresh_allowed(at + REFRESH_THROTTLE));
+        assert!(tracker.refresh_allowed(at + backoff - REFRESH_BACKOFF_SLACK));
+    }
+
+    #[test]
+    fn rate_limit_survives_reset_and_disable() {
+        let now = Instant::now();
+        let mut tracker = ProviderTracker::new(ApiUsageProvider::Codex);
+        tracker.reset_pending();
+        tracker.begin_attempt(now, 100.0);
+        tracker.complete(
+            FetchOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(900)),
+            },
+            now,
+            100.0,
+        );
+        tracker.reset_pending();
+        assert_eq!(tracker.entry().status, ApiUsageStatus::Pending);
+        assert_eq!(tracker.entry().rate_limited_until, Some(1000.0));
+        assert!(!tracker.refresh_allowed(now + Duration::from_secs(60)));
+        assert_eq!(
+            tracker.earliest_start(now),
+            now + Duration::from_secs(900)
+        );
+
+        tracker.set_disabled();
+        assert!(tracker.entry().rate_limited_until.is_none());
+        tracker.reset_pending();
+        assert_eq!(
+            tracker.earliest_start(now + Duration::from_secs(10)),
+            now + Duration::from_secs(900)
+        );
+        assert_eq!(
+            tracker.earliest_start(now + Duration::from_secs(901)),
+            now + Duration::from_secs(901)
+        );
     }
 }

@@ -548,6 +548,16 @@ mod tests {
         let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
         let token = paired_token(&store);
         let (hub, mut refresh_rx) = crate::usage::UsageHub::new(Default::default());
+        // Stand-in poller: ack each request and forward its provider.
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(request) = refresh_rx.recv().await {
+                let _ = seen_tx.send(request.provider);
+                if let Some(applied) = request.applied {
+                    let _ = applied.send(());
+                }
+            }
+        });
         let mut router = router_with_usage(store, true, hub);
         let mut post = async |body: &'static str| {
             let mut req = axum::http::Request::builder()
@@ -560,12 +570,9 @@ mod tests {
             router.call(req).await.expect("infallible").status()
         };
         assert_eq!(post(r#"{"provider":"codex"}"#).await, StatusCode::OK);
-        assert_eq!(
-            refresh_rx.try_recv().unwrap(),
-            Some(ApiUsageProvider::Codex)
-        );
+        assert_eq!(seen_rx.try_recv().unwrap(), Some(ApiUsageProvider::Codex));
         assert_eq!(post("").await, StatusCode::OK);
-        assert_eq!(refresh_rx.try_recv().unwrap(), None);
+        assert_eq!(seen_rx.try_recv().unwrap(), None);
         assert_eq!(
             post(r#"{"providr":"codex"}"#).await,
             StatusCode::BAD_REQUEST
@@ -574,7 +581,7 @@ mod tests {
             post(r#"{"provider":"gemini"}"#).await,
             StatusCode::BAD_REQUEST
         );
-        assert!(refresh_rx.try_recv().is_err());
+        assert!(seen_rx.try_recv().is_err());
     }
 
     #[tokio::test]
