@@ -89,6 +89,13 @@ The hot path uses `get_visible_cells_packed` (a compact `cols,rows` header + 13-
 of marshalling thousands of records per frame across JSI — the key perf lever (Decision C in the
 migration plan). The record form `get_visible_cells` is kept for non-hot callers.
 
+Glyphs JetBrains Mono lacks (Claude Code's `⏺ ✻ ✔ ⏵`, braille spinners, emoji, CJK) go through a
+per-codepoint fallback (`components/terminalGlyphs.ts`, Skia glue in `terminalFonts.ts`): a few
+primary-font aliases (`⎿` → `└`), then the bundled `assets/NotoSansSymbols2-Subset.ttf` (OFL,
+loaded by Skia from the JS bundle, not registered for `<Text>`), then the platform fallback
+resolved once through SkParagraph. Fallback glyphs are fitted into their cell, or two cells for
+wide characters, and the lookups are cached.
+
 ### Keyboard input (mobile → server)
 
 ```
@@ -103,6 +110,24 @@ WS "state_changed" / initial connect → RemoteClient fetches GET /v1/state
   → diff against cached state → create/remove TerminalHolders → state_cache updated
   → RN stores poll getProjects()/getFolders()/getProjectLayoutJson() (1s)
 ```
+
+### Presentation: one terminal at a time
+
+The phone does not reproduce the desktop split layout. `WorkspaceScreen` shows only the selected
+terminal, full size; when the project has several, a `TerminalTabs` chip row under the app bar
+switches between them (layout order, custom name or `Terminal N`). This is client-only: the server
+layout, focus and fullscreen state are not changed by switching. Split actions still go to the
+server at the path of the terminal on screen (`findTerminalPath`), and the new terminal is
+auto-selected. Selection helpers live in `src/models/terminalSelection.ts`.
+
+### Session restore
+
+`src/state/sessionStore.ts` persists (AsyncStorage key `session_memory`) the server to reconnect to
+and, per server, the last project plus the selected terminal of every visited project. On launch
+`loadAndRestore` (`src/state/sessionRestore.ts`) reconnects to that server if it is still saved and
+paired; the workspace store then reopens the remembered project and terminal, falling back to the
+project's first terminal, or opens the project drawer when the project is gone. An explicit
+disconnect clears the reconnect target; a dropped connection keeps it.
 
 ## Shared Core: okena-core
 

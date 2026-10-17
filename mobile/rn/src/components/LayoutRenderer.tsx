@@ -39,6 +39,7 @@ import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
+import { Icon } from './Icon';
 import type { TerminalFonts } from './TerminalView';
 import type { KeyModifiers } from './KeyToolbar';
 
@@ -151,10 +152,10 @@ const TerminalLeaf: React.FC<NodeViewProps & { node: Extract<LayoutNode, { type:
           void native.toggleMinimized(connId, projectId, terminalId);
         }}
       >
-        <Text style={styles.minimizedIcon}>{'▸'}</Text>
+        <Icon name="caretRight" size={12} color={OkenaColors.textSecondary} style={styles.minimizedIcon} />
         <Text style={styles.minimizedText}>{short}</Text>
         <View style={styles.flexSpacer} />
-        <Text style={styles.minimizedChevron}>{'⌄'}</Text>
+        <Icon name="chevronDown" size={14} color={OkenaColors.textTertiary} />
       </Pressable>
     );
   }
@@ -303,13 +304,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     backgroundColor: OkenaColors.surfaceElevated,
   },
-  minimizedIcon: { color: OkenaColors.textSecondary, fontSize: 12, marginRight: 8 },
+  minimizedIcon: { marginRight: 8 },
   minimizedText: {
     color: OkenaColors.textSecondary,
     fontSize: 12,
     fontFamily: TerminalTheme.fontFamily,
   },
-  minimizedChevron: { color: OkenaColors.textTertiary, fontSize: 14 },
   tabBar: {
     height: 32,
     flexDirection: 'row',

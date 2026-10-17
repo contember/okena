@@ -1,209 +1,68 @@
 /**
  * KeyToolbar.tsx — the key toolbar pinned above the soft keyboard.
  *
- * Port of `mobile/lib/src/widgets/key_toolbar.dart`:
- *   - ESC / TAB one-shot keys,
- *   - CTRL / ALT / META modifiers (tap for one-shot, hold to lock),
- *   - a handful of punctuation keys (`~ | / -`),
- *   - an arrow pad with hold-to-repeat,
- *   - clipboard paste, a reviewed compose flow, and an extended key deck for
- *     signals, navigation, and raw characters.
+ * Layout (see `PRIMARY_KEYS` / `MORE_ROWS` in `keyInput.ts`):
+ *   - one always-visible row of eight equal keys tuned for driving Claude Code:
+ *     esc · ^C · tab · shift+tab · up · down · return · more,
+ *   - "more" expands a three-row panel above it (same 8-column grid) with
+ *     paste/compose, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^L ^Z ^R, paging,
+ *     home/end, `- _`, left/right, forward delete and the keyboard toggle.
+ *     The panel stays open until "more" is tapped again, so repeated keys
+ *     (arrows) don't need reopening.
+ *   - swiping down on the toolbar hides the soft keyboard.
  *
- * Modifier semantics (the heart of the port):
- *   - CTRL + a-z/A-Z → the control character (a→0x01 … z→0x1A). Other chars
- *     pass through verbatim. After the next key the one-shot (active) modifiers
- *     reset; locked ones persist.
- *   - OPTION/CMD + char → ESC-prefixed (`\x1b` + char), the xterm meta encoding.
- *   - Arrows with modifiers → `\x1b[1;<mod><A-D>` (mod = 1 + 4·ctrl + 2·option);
- *     CMD-only arrows map to Home/End/PageUp/PageDown.
+ * Every key fits the screen width (no horizontal scrolling, nothing clipped)
+ * and is 44pt tall. Labels are plain ASCII text or View-drawn icons
+ * (`KeyIcons.tsx`), never font-dependent glyphs.
  *
- * The {@link KeyModifiers} store is SHARED with {@link TerminalPane} (the soft
- * keyboard input also consults it), exactly like the Dart `KeyModifiers`
- * `ChangeNotifier` is shared between `KeyToolbar` and `TerminalView`. It is a
- * tiny external store exposing a React hook ({@link useKeyModifiers}).
+ * Modifiers (ctrl/alt) are shared with {@link TerminalPane} through the
+ * {@link KeyModifiers} store: tap for one key, hold to lock. While a modifier
+ * is set and the panel is collapsed, the "more" key shows its name.
  *
- * Presentational + injected `native` (defaults to `getOkenaNative()`), mirroring
- * `TerminalView`'s prop pattern.
+ * Presentational + injected `native` (defaults to `getOkenaNative()`).
  */
 
-import React, {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   Pressable,
-  ScrollView,
   Modal,
   KeyboardAvoidingView,
   TextInput,
   StyleSheet,
   Platform,
-  type GestureResponderEvent,
+  Keyboard,
+  PanResponder,
 } from 'react-native';
 import Clipboard from '@react-native-clipboard/clipboard';
 
-import type { OkenaNative, SpecialKey } from '../native/okena';
+import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
+import {
+  KeyModifiers,
+  MORE_ROWS,
+  PRIMARY_KEYS,
+  resolveKeyAction,
+  useKeyModifiers,
+  type KeyInput,
+  type ModifierSnapshot,
+  type ModifierState,
+  type ToolbarKey,
+} from './keyInput';
+import { KeyIcon } from './KeyIcons';
 
-// ── Shared modifier state ──────────────────────────────────────────────────
+// Re-exported for existing importers (WorkspaceScreen, LayoutRenderer, tests).
+export {
+  KeyModifiers,
+  applyModifiersToText,
+  useKeyModifiers,
+  type ModifierState,
+} from './keyInput';
 
-/** Modifier state: inactive, active for one key, or locked until released. */
-export type ModifierState = 'inactive' | 'active' | 'locked';
-
-interface ModifierSnapshot {
-  ctrl: ModifierState;
-  option: ModifierState;
-  cmd: ModifierState;
-}
-
-const INITIAL_SNAPSHOT: ModifierSnapshot = {
-  ctrl: 'inactive',
-  option: 'inactive',
-  cmd: 'inactive',
-};
-
-/**
- * Shared modifier store between {@link KeyToolbar} and {@link TerminalPane}.
- *
- * Ports the Dart `KeyModifiers extends ChangeNotifier`. It is a minimal external
- * store (subscribe + getSnapshot) so multiple components can subscribe via
- * {@link useKeyModifiers} and stay in sync. A single immutable snapshot object is
- * swapped on every change so `useSyncExternalStore` re-renders subscribers.
- */
-export class KeyModifiers {
-  private snapshot: ModifierSnapshot = INITIAL_SNAPSHOT;
-  private readonly listeners = new Set<() => void>();
-
-  subscribe = (listener: () => void): (() => void) => {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  };
-
-  /** Returns the current immutable snapshot (stable identity until a change). */
-  getSnapshot = (): ModifierSnapshot => this.snapshot;
-
-  private emit(next: ModifierSnapshot): void {
-    this.snapshot = next;
-    for (const l of this.listeners) l();
-  }
-
-  get ctrl(): boolean {
-    return this.snapshot.ctrl !== 'inactive';
-  }
-  get option(): boolean {
-    return this.snapshot.option !== 'inactive';
-  }
-  get cmd(): boolean {
-    return this.snapshot.cmd !== 'inactive';
-  }
-  get hasAny(): boolean {
-    return this.ctrl || this.option || this.cmd;
-  }
-
-  /** Tap toggles a one-shot modifier; long-press toggles its locked state. */
-  toggleCtrl(): void {
-    this.emit({
-      ...this.snapshot,
-      ctrl: this.snapshot.ctrl === 'inactive' ? 'active' : 'inactive',
-    });
-  }
-  lockCtrl(): void {
-    this.emit({
-      ...this.snapshot,
-      ctrl: this.snapshot.ctrl === 'locked' ? 'inactive' : 'locked',
-    });
-  }
-  toggleOption(): void {
-    this.emit({
-      ...this.snapshot,
-      option: this.snapshot.option === 'inactive' ? 'active' : 'inactive',
-    });
-  }
-  lockOption(): void {
-    this.emit({
-      ...this.snapshot,
-      option: this.snapshot.option === 'locked' ? 'inactive' : 'locked',
-    });
-  }
-  toggleCmd(): void {
-    this.emit({
-      ...this.snapshot,
-      cmd: this.snapshot.cmd === 'inactive' ? 'active' : 'inactive',
-    });
-  }
-  lockCmd(): void {
-    this.emit({
-      ...this.snapshot,
-      cmd: this.snapshot.cmd === 'locked' ? 'inactive' : 'locked',
-    });
-  }
-
-  /** Reset only one-shot (active) modifiers; locked ones persist. */
-  reset(): void {
-    const s = this.snapshot;
-    const changed =
-      s.ctrl === 'active' || s.option === 'active' || s.cmd === 'active';
-    if (!changed) return;
-    this.emit({
-      ctrl: s.ctrl === 'active' ? 'inactive' : s.ctrl,
-      option: s.option === 'active' ? 'inactive' : s.option,
-      cmd: s.cmd === 'active' ? 'inactive' : s.cmd,
-    });
-  }
-}
-
-/** Subscribe to a {@link KeyModifiers} store and re-render on changes. */
-export function useKeyModifiers(mod: KeyModifiers): ModifierSnapshot {
-  return useSyncExternalStore(mod.subscribe, mod.getSnapshot, mod.getSnapshot);
-}
-
-// ── Control-char / meta encoding (shared with TerminalPane) ─────────────────
-
-/**
- * Apply the active modifiers to a run of characters, returning the bytes to
- * send. Mirrors the Dart `_applyModifiers` in terminal_view.dart (used for soft
- * keyboard input) — CTRL maps a-z/A-Z to control chars and drops other chars;
- * OPTION/CMD ESC-prefixes each char.
- *
- * Does NOT reset the modifiers (the caller does, after sending).
- */
-export function applyModifiersToText(mod: KeyModifiers, chars: string): string {
-  if (!mod.hasAny) return chars;
-  let out = '';
-  for (const ch of chars) {
-    const code = ch.charCodeAt(0);
-    if (mod.ctrl) {
-      if (code >= 0x61 && code <= 0x7a) {
-        out += String.fromCharCode(code - 0x60);
-      } else if (code >= 0x41 && code <= 0x5a) {
-        out += String.fromCharCode(code - 0x40);
-      }
-      // other chars are dropped under CTRL (matches Dart)
-    } else if (mod.option || mod.cmd) {
-      out += '\x1b' + ch;
-    }
-  }
-  return out;
-}
-
-// ── Arrow encoding ───────────────────────────────────────────────────────────
-
-type ArrowKey = 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight';
-
-const ARROW_CHAR: Record<ArrowKey, string> = {
-  ArrowUp: 'A',
-  ArrowDown: 'B',
-  ArrowRight: 'C',
-  ArrowLeft: 'D',
-};
+const REPEAT_DELAY_MS = 380;
+const REPEAT_INTERVAL_MS = 70;
 
 // ── Props ─────────────────────────────────────────────────────────────────
 
@@ -214,8 +73,33 @@ export interface KeyToolbarProps {
   modifiers: KeyModifiers;
   /** Hide the soft keyboard (WorkspaceScreen wires this to blur the input). */
   onHideKeyboard?: () => void;
+  /** Show the soft keyboard (focus the selected pane's input). */
+  onShowKeyboard?: () => void;
+  /** Called after the toolbar sent input, so the pane can reset its keyboard buffer. */
+  onInputSent?: () => void;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
+}
+
+function useKeyboardVisible(): boolean {
+  const [visible, setVisible] = useState(() => Keyboard.isVisible());
+  useEffect(() => {
+    const show = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hide = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const subs = [
+      Keyboard.addListener(show, () => setVisible(true)),
+      Keyboard.addListener(hide, () => setVisible(false)),
+    ];
+    return () => subs.forEach((s) => s.remove());
+  }, []);
+  return visible;
+}
+
+function modifierLabel(mod: ModifierSnapshot): string | null {
+  const parts: string[] = [];
+  if (mod.ctrl !== 'inactive') parts.push('ctrl');
+  if (mod.option !== 'inactive' || mod.cmd !== 'inactive') parts.push('alt');
+  return parts.length > 0 ? parts.join('+') : null;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -225,21 +109,15 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
   terminalId,
   modifiers,
   onHideKeyboard,
+  onShowKeyboard,
+  onInputSent,
   native = getOkenaNative(),
 }) => {
   const mod = useKeyModifiers(modifiers);
+  const keyboardVisible = useKeyboardVisible();
+  const [moreOpen, setMoreOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeInitialText, setComposeInitialText] = useState('');
-  const [keyDeckOpen, setKeyDeckOpen] = useState(false);
-
-  const sendSpecialKey = useCallback(
-    (key: SpecialKey) => {
-      if (!terminalId) return;
-      void native.sendSpecialKey(connId, terminalId, key);
-      modifiers.reset();
-    },
-    [native, connId, terminalId, modifiers],
-  );
 
   const sendText = useCallback(
     (text: string) => {
@@ -251,8 +129,22 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
         // Input still works while the local terminal state is catching up.
       }
       void native.sendText(connId, terminalId, text);
+      onInputSent?.();
     },
-    [native, connId, terminalId],
+    [native, connId, terminalId, onInputSent],
+  );
+
+  const sendInput = useCallback(
+    (input: KeyInput) => {
+      if (!terminalId) return;
+      if (input.kind === 'special') {
+        void native.sendSpecialKey(connId, terminalId, input.key);
+        onInputSent?.();
+      } else {
+        sendText(input.text);
+      }
+    },
+    [native, connId, terminalId, sendText, onInputSent],
   );
 
   const pasteClipboard = useCallback(() => {
@@ -270,140 +162,89 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
       });
   }, [sendText]);
 
-  /** Send a character key, applying any active modifiers (Dart `_sendCharKey`). */
-  const sendCharKey = useCallback(
-    (char: string) => {
-      if (modifiers.hasAny) {
-        if (modifiers.ctrl) {
-          const code = char.charCodeAt(0);
-          if (code >= 0x61 && code <= 0x7a) {
-            sendText(String.fromCharCode(code - 0x60));
-          } else if (code >= 0x41 && code <= 0x5a) {
-            sendText(String.fromCharCode(code - 0x40));
-          } else {
-            sendText(char);
-          }
-        } else {
-          // Option/Cmd: ESC prefix.
-          sendText('\x1b' + char);
+  // Latest callbacks for the swipe responder, which is created once.
+  const hideRef = useRef(onHideKeyboard);
+  hideRef.current = onHideKeyboard;
+  const keyboardVisibleRef = useRef(keyboardVisible);
+  keyboardVisibleRef.current = keyboardVisible;
+
+  const swipe = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_e, g) =>
+        keyboardVisibleRef.current && g.dy > 14 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
+      onPanResponderGrant: () => hideRef.current?.(),
+    }),
+  ).current;
+
+  const onKey = useCallback(
+    (key: ToolbarKey, longPress = false) => {
+      const { action } = key;
+      switch (action.type) {
+        case 'modifier': {
+          const which = action.modifier;
+          if (longPress) modifiers.lock(which);
+          else modifiers.toggle(which);
+          return;
         }
-        modifiers.reset();
-      } else {
-        sendText(char);
+        case 'paste':
+          pasteClipboard();
+          return;
+        case 'compose':
+          setComposeInitialText('');
+          setComposeOpen(true);
+          return;
+        case 'keyboard':
+          if (keyboardVisible) onHideKeyboard?.();
+          else onShowKeyboard?.();
+          return;
+        case 'more':
+          setMoreOpen((open) => !open);
+          return;
+        default: {
+          const input = resolveKeyAction(action, modifiers);
+          if (input) sendInput(input);
+          modifiers.reset();
+        }
       }
     },
-    [modifiers, sendText],
+    [modifiers, pasteClipboard, keyboardVisible, onHideKeyboard, onShowKeyboard, sendInput],
   );
 
-  /** Handle arrow from joystick, respecting modifier state (Dart `_handleArrow`). */
-  const handleArrow = useCallback(
-    (key: ArrowKey) => {
-      const arrow = ARROW_CHAR[key];
-      if (modifiers.hasAny) {
-        if (modifiers.cmd && !modifiers.ctrl && !modifiers.option) {
-          switch (key) {
-            case 'ArrowLeft':
-              sendSpecialKey('Home');
-              break;
-            case 'ArrowRight':
-              sendSpecialKey('End');
-              break;
-            case 'ArrowUp':
-              sendSpecialKey('PageUp');
-              break;
-            case 'ArrowDown':
-              sendSpecialKey('PageDown');
-              break;
-          }
-        } else {
-          let m = 1;
-          if (modifiers.ctrl) m += 4;
-          if (modifiers.option) m += 2;
-          sendText(`\x1b[1;${m}${arrow}`);
+  const renderRow = (keys: readonly ToolbarKey[], rowKey: string) => (
+    <View key={rowKey} style={styles.row}>
+      {keys.map((key) => {
+        let state: ModifierState = 'inactive';
+        let label = key.label;
+        if (key.action.type === 'modifier') {
+          state = mod[key.action.modifier];
+        } else if (key.action.type === 'more') {
+          const active = modifierLabel(mod);
+          if (moreOpen) state = 'active';
+          else if (active) label = active;
+        } else if (key.action.type === 'keyboard' && keyboardVisible) {
+          state = 'active';
         }
-        modifiers.reset();
-      } else {
-        sendSpecialKey(key);
-        if (modifiers.hasAny) modifiers.reset();
-      }
-    },
-    [modifiers, sendSpecialKey, sendText],
+        return (
+          <KeyCap
+            key={key.id}
+            def={key}
+            label={label}
+            state={state}
+            onKey={onKey}
+          />
+        );
+      })}
+    </View>
   );
 
   return (
-    <View style={styles.root}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        keyboardShouldPersistTaps="always"
-        contentContainerStyle={styles.scrollContent}
-        style={styles.scroll}
-      >
-        <KeyButton
-          label="esc"
-          accessibilityLabel="Escape"
-          onPress={() => sendSpecialKey('Escape')}
-        />
-        <ToggleKey
-          label="ctrl"
-          state={mod.ctrl}
-          onPress={() => modifiers.toggleCtrl()}
-          onLongPress={() => modifiers.lockCtrl()}
-        />
-        <ToggleKey
-          label="alt"
-          state={mod.option}
-          onPress={() => modifiers.toggleOption()}
-          onLongPress={() => modifiers.lockOption()}
-        />
-        <ToggleKey
-          label="meta"
-          state={mod.cmd}
-          onPress={() => modifiers.toggleCmd()}
-          onLongPress={() => modifiers.lockCmd()}
-        />
-        <KeyButton label="tab" onPress={() => sendSpecialKey('Tab')} />
-        <KeyButton
-          label="^C"
-          accessibilityLabel="Control C"
-          onPress={() => sendSpecialKey('CtrlC')}
-        />
-        <View style={styles.gap} />
-        <KeyButton label="~" onPress={() => sendCharKey('~')} />
-        <KeyButton label="|" onPress={() => sendCharKey('|')} />
-        <KeyButton label="/" onPress={() => sendCharKey('/')} />
-        <KeyButton label="-" onPress={() => sendCharKey('-')} />
-        <View style={styles.gap} />
-        <KeyButton
-          label="paste"
-          accessibilityLabel="Paste clipboard"
-          onPress={pasteClipboard}
-        />
-        <KeyButton
-          label="edit"
-          accessibilityLabel="Compose input"
-          onPress={() => {
-            setComposeInitialText('');
-            setComposeOpen(true);
-          }}
-        />
-        <KeyButton
-          label="more"
-          accessibilityLabel="More terminal keys"
-          onPress={() => {
-            onHideKeyboard?.();
-            setKeyDeckOpen(true);
-          }}
-        />
-        <KeyButton
-          label={'⌄'}
-          accessibilityLabel="Hide keyboard"
-          onPress={() => onHideKeyboard?.()}
-        />
-      </ScrollView>
-      <View style={styles.arrowSlot}>
-        <ArrowJoystick onArrow={handleArrow} />
-      </View>
+    <View style={styles.root} {...swipe.panHandlers}>
+      {moreOpen ? (
+        <View style={styles.panel}>
+          {MORE_ROWS.map((row, i) => renderRow(row, `more-${i}`))}
+        </View>
+      ) : null}
+      {renderRow(PRIMARY_KEYS, 'primary')}
 
       <ComposeSheet
         visible={composeOpen}
@@ -414,389 +255,111 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
         }}
         onSubmit={(text, sendEnter) => {
           sendText(text);
-          if (sendEnter) sendSpecialKey('Enter');
-        }}
-      />
-      <KeyDeck
-        visible={keyDeckOpen}
-        onClose={() => setKeyDeckOpen(false)}
-        onSpecialKey={sendSpecialKey}
-        onCharacter={sendCharKey}
-        onPaste={() => {
-          setKeyDeckOpen(false);
-          pasteClipboard();
-        }}
-        onCompose={() => {
-          setKeyDeckOpen(false);
-          setComposeInitialText('');
-          setComposeOpen(true);
+          if (sendEnter) sendInput({ kind: 'special', key: 'Enter' });
         }}
       />
     </View>
   );
 };
 
-// ── Key widgets ─────────────────────────────────────────────────────────────
+// ── Key cap ───────────────────────────────────────────────────────────────
 
-const KeyButton: React.FC<{
-  label: string;
-  onPress: () => void;
-  accessibilityLabel?: string;
-}> = ({ label, onPress, accessibilityLabel }) => (
-  <Pressable
-    style={({ pressed }) => [styles.key, pressed && styles.keyPressed]}
-    onPress={onPress}
-    accessibilityRole="button"
-    accessibilityLabel={accessibilityLabel ?? label}
-  >
-    <Text style={styles.keyText}>{label}</Text>
-  </Pressable>
-);
-
-const ToggleKey: React.FC<{
-  label: string;
+const KeyCap: React.FC<{
+  def: ToolbarKey;
+  /** Overrides `def.label` (the "more" key shows active modifiers). */
+  label?: string;
   state: ModifierState;
-  onPress: () => void;
-  onLongPress: () => void;
-}> = ({ label, state, onPress, onLongPress }) => {
-  const handledLongPress = useRef(false);
-  const active = state !== 'inactive';
-  const locked = state === 'locked';
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.key,
-        styles.toggleKey,
-        active && styles.toggleKeyActive,
-        locked && styles.toggleKeyLocked,
-        pressed && styles.keyPressed,
-      ]}
-      onPressIn={() => {
-        handledLongPress.current = false;
-      }}
-      onLongPress={() => {
-        handledLongPress.current = true;
-        onLongPress();
-      }}
-      onPress={() => {
-        if (!handledLongPress.current) onPress();
-      }}
-      delayLongPress={350}
-      accessibilityRole="button"
-      accessibilityLabel={`${label} modifier`}
-      accessibilityHint="Tap for the next key, hold to lock"
-      accessibilityState={{ selected: active }}
-    >
-      <Text
-        style={[
-          styles.keyText,
-          styles.toggleKeyText,
-          active && styles.toggleKeyTextActive,
-          locked && styles.toggleKeyTextLocked,
-        ]}
-      >
-        {label}
-      </Text>
-      <View
-        style={[
-          styles.modifierState,
-          active && styles.modifierStateActive,
-          locked && styles.modifierStateLocked,
-        ]}
-      />
-    </Pressable>
-  );
-};
-
-// ── Arrow joystick ─────────────────────────────────────────────────────────
-
-const JOYSTICK_SIZE = 52;
-
-const ArrowJoystick: React.FC<{ onArrow: (key: ArrowKey) => void }> = ({
-  onArrow,
-}) => {
-  const [active, setActive] = useState<ArrowKey | null>(null);
-  const activeRef = useRef<ArrowKey | null>(null);
+  onKey: (key: ToolbarKey, longPress?: boolean) => void;
+}> = ({ def, label, state, onKey }) => {
   const repeatDelay = useRef<ReturnType<typeof setTimeout> | null>(null);
   const repeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const handledLongPress = useRef(false);
 
   const stopRepeat = useCallback(() => {
     if (repeatDelay.current) clearTimeout(repeatDelay.current);
     if (repeatTimer.current) clearInterval(repeatTimer.current);
     repeatDelay.current = null;
     repeatTimer.current = null;
-    activeRef.current = null;
-    setActive(null);
   }, []);
-
   useEffect(() => stopRepeat, [stopRepeat]);
 
-  const dirFromDelta = (dx: number, dy: number): ArrowKey =>
-    Math.abs(dx) > Math.abs(dy)
-      ? dx > 0
-        ? 'ArrowRight'
-        : 'ArrowLeft'
-      : dy > 0
-      ? 'ArrowDown'
-      : 'ArrowUp';
+  const isModifier = def.action.type === 'modifier';
+  const active = state !== 'inactive';
+  const locked = state === 'locked';
+  const color = locked ? '#ffffff' : active || def.emphasis ? OkenaColors.accent : OkenaColors.keyText;
+  const isSymbol = label !== undefined && label.length === 1;
+  const showModifierText = def.action.type === 'more' && label !== undefined;
 
-  const startRepeat = useCallback(
-    (dir: ArrowKey) => {
-      stopRepeat();
-      activeRef.current = dir;
-      setActive(dir);
-      onArrow(dir);
-      repeatDelay.current = setTimeout(() => {
-        repeatTimer.current = setInterval(() => {
-          if (activeRef.current) onArrow(activeRef.current);
-        }, 70);
-      }, 360);
-    },
-    [onArrow, stopRepeat],
-  );
-
-  const directionAt = (e: GestureResponderEvent): ArrowKey | null => {
-    const dx = e.nativeEvent.locationX - JOYSTICK_SIZE / 2;
-    const dy = e.nativeEvent.locationY - JOYSTICK_SIZE / 2;
-    if (Math.hypot(dx, dy) < 5) return null;
-    return dirFromDelta(dx, dy);
-  };
-
-  const onResponderGrant = (e: GestureResponderEvent) => {
-    const dir = directionAt(e);
-    if (dir) startRepeat(dir);
-  };
-
-  const onResponderMove = (e: GestureResponderEvent) => {
-    const dir = directionAt(e);
-    if (dir && dir !== activeRef.current) startRepeat(dir);
-  };
+  const pressHandlers = def.repeat
+    ? {
+        onPressIn: () => {
+          stopRepeat();
+          onKey(def);
+          repeatDelay.current = setTimeout(() => {
+            repeatTimer.current = setInterval(() => onKey(def), REPEAT_INTERVAL_MS);
+          }, REPEAT_DELAY_MS);
+        },
+        onPressOut: stopRepeat,
+      }
+    : isModifier
+      ? {
+          onPressIn: () => {
+            handledLongPress.current = false;
+          },
+          onLongPress: () => {
+            handledLongPress.current = true;
+            onKey(def, true);
+          },
+          onPress: () => {
+            if (!handledLongPress.current) onKey(def);
+          },
+          delayLongPress: 350,
+        }
+      : { onPress: () => onKey(def) };
 
   return (
-    <View
-      style={styles.joystick}
-      onStartShouldSetResponder={() => true}
-      onMoveShouldSetResponder={() => true}
-      onResponderGrant={onResponderGrant}
-      onResponderMove={onResponderMove}
-      onResponderRelease={stopRepeat}
-      onResponderTerminate={stopRepeat}
-      accessibilityRole="adjustable"
-      accessibilityLabel="Arrow keys"
-      accessibilityHint="Touch a direction and hold to repeat"
+    <Pressable
+      {...pressHandlers}
+      style={({ pressed }) => [
+        styles.key,
+        def.emphasis && styles.keyEmphasis,
+        active && styles.keyActive,
+        locked && styles.keyLocked,
+        pressed && !locked && styles.keyPressed,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={def.accessibilityLabel}
+      accessibilityHint={isModifier ? 'Tap for the next key, hold to lock' : undefined}
+      accessibilityState={isModifier || def.action.type === 'more' ? { selected: active } : undefined}
     >
-      <View style={styles.joystickGrid}>
-        <Text
-          style={[
-            styles.arrowGlyph,
-            active === 'ArrowUp' && styles.arrowGlyphActive,
-          ]}
-        >
-          {'▲'}
-        </Text>
-        <View style={styles.arrowRow}>
+      {def.icon && !showModifierText ? (
+        <KeyIcon name={def.icon} color={color} />
+      ) : (
+        <View style={styles.labelBox}>
+          {def.caption ? (
+            <Text style={[styles.caption, { color: active ? color : OkenaColors.keyTextMuted }]}>
+              {def.caption}
+            </Text>
+          ) : null}
           <Text
             style={[
-              styles.arrowGlyph,
-              active === 'ArrowLeft' && styles.arrowGlyphActive,
+              isSymbol ? styles.symbolText : styles.wordText,
+              { color: showModifierText ? OkenaColors.accent : color },
             ]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.75}
           >
-            {'◀'}
-          </Text>
-          <Text
-            style={[
-              styles.arrowGlyph,
-              active === 'ArrowRight' && styles.arrowGlyphActive,
-            ]}
-          >
-            {'▶'}
+            {label}
           </Text>
         </View>
-        <Text
-          style={[
-            styles.arrowGlyph,
-            active === 'ArrowDown' && styles.arrowGlyphActive,
-          ]}
-        >
-          {'▼'}
-        </Text>
-      </View>
-    </View>
+      )}
+      {isModifier ? (
+        <View style={[styles.lockBar, locked && styles.lockBarOn]} />
+      ) : null}
+    </Pressable>
   );
 };
-
-// ── Extended key deck ─────────────────────────────────────────────────────
-
-const KeyDeck: React.FC<{
-  visible: boolean;
-  onClose: () => void;
-  onSpecialKey: (key: SpecialKey) => void;
-  onCharacter: (character: string) => void;
-  onPaste: () => void;
-  onCompose: () => void;
-}> = ({ visible, onClose, onSpecialKey, onCharacter, onPaste, onCompose }) => (
-  <Modal
-    visible={visible}
-    transparent
-    animationType="slide"
-    onRequestClose={onClose}
-  >
-    <Pressable style={styles.deckBackdrop} onPress={onClose} />
-    <View style={styles.deckSheet}>
-      <View style={styles.sheetHandle} />
-      <View style={styles.deckHeader}>
-        <View>
-          <Text style={styles.deckTitle}>Terminal keys</Text>
-          <Text style={styles.deckSubtitle}>
-            Signals, navigation and raw input
-          </Text>
-        </View>
-        <Pressable
-          style={({ pressed }) => [
-            styles.deckClose,
-            pressed && styles.keyPressed,
-          ]}
-          onPress={onClose}
-          accessibilityRole="button"
-          accessibilityLabel="Close terminal keys"
-        >
-          <Text style={styles.deckCloseText}>Done</Text>
-        </Pressable>
-      </View>
-
-      <DeckSection label="Signals">
-        <DeckKey
-          label="ctrl c"
-          code="^C"
-          onPress={() => onSpecialKey('CtrlC')}
-        />
-        <DeckKey
-          label="ctrl d"
-          code="^D"
-          onPress={() => onSpecialKey('CtrlD')}
-        />
-        <DeckKey
-          label="ctrl z"
-          code="^Z"
-          onPress={() => onSpecialKey('CtrlZ')}
-        />
-        <DeckKey
-          label="escape"
-          code="esc"
-          onPress={() => onSpecialKey('Escape')}
-        />
-      </DeckSection>
-
-      <DeckSection label="Navigation">
-        <DeckKey
-          label="home"
-          code="home"
-          onPress={() => onSpecialKey('Home')}
-        />
-        <DeckKey label="end" code="end" onPress={() => onSpecialKey('End')} />
-        <DeckKey
-          label="page up"
-          code="pgup"
-          onPress={() => onSpecialKey('PageUp')}
-        />
-        <DeckKey
-          label="page down"
-          code="pgdn"
-          onPress={() => onSpecialKey('PageDown')}
-        />
-        <DeckKey
-          label="delete"
-          code="del"
-          onPress={() => onSpecialKey('Delete')}
-        />
-        <DeckKey
-          label="arrow left"
-          code="←"
-          onPress={() => onSpecialKey('ArrowLeft')}
-        />
-        <DeckKey
-          label="arrow up"
-          code="↑"
-          onPress={() => onSpecialKey('ArrowUp')}
-        />
-        <DeckKey
-          label="arrow down"
-          code="↓"
-          onPress={() => onSpecialKey('ArrowDown')}
-        />
-        <DeckKey
-          label="arrow right"
-          code="→"
-          onPress={() => onSpecialKey('ArrowRight')}
-        />
-      </DeckSection>
-
-      <DeckSection label="Characters">
-        {['~', '|', '\\', '/', '-', '_', '=', ':', ';'].map((character) => (
-          <DeckKey
-            key={character}
-            label={character}
-            code={character}
-            onPress={() => onCharacter(character)}
-            compact
-          />
-        ))}
-      </DeckSection>
-
-      <View style={styles.deckActions}>
-        <Pressable
-          style={({ pressed }) => [
-            styles.deckAction,
-            pressed && styles.keyPressed,
-          ]}
-          onPress={onPaste}
-        >
-          <Text style={styles.deckActionText}>Paste clipboard</Text>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [
-            styles.deckAction,
-            styles.deckActionPrimary,
-            pressed && styles.keyPressed,
-          ]}
-          onPress={onCompose}
-        >
-          <Text style={styles.deckActionPrimaryText}>Compose input</Text>
-        </Pressable>
-      </View>
-    </View>
-  </Modal>
-);
-
-const DeckSection: React.FC<{ label: string; children: React.ReactNode }> = ({
-  label,
-  children,
-}) => (
-  <View style={styles.deckSection}>
-    <Text style={styles.deckSectionLabel}>{label}</Text>
-    <View style={styles.deckKeys}>{children}</View>
-  </View>
-);
-
-const DeckKey: React.FC<{
-  label: string;
-  code: string;
-  onPress: () => void;
-  compact?: boolean;
-}> = ({ label, code, onPress, compact = false }) => (
-  <Pressable
-    style={({ pressed }) => [
-      styles.deckKey,
-      compact && styles.deckKeyCompact,
-      pressed && styles.deckKeyPressed,
-    ]}
-    onPress={onPress}
-    accessibilityRole="button"
-    accessibilityLabel={label}
-  >
-    <Text style={styles.deckKeyText}>{code}</Text>
-  </Pressable>
-);
 
 // ── Compose sheet ─────────────────────────────────────────────────────────
 
@@ -845,7 +408,7 @@ const ComposeSheet: React.FC<{
             <Pressable
               style={({ pressed }) => [
                 styles.composePaste,
-                pressed && styles.keyPressed,
+                pressed && styles.pressedDim,
               ]}
               onPress={() => {
                 void Clipboard.getString()
@@ -871,6 +434,7 @@ const ComposeSheet: React.FC<{
             spellCheck={false}
             autoComplete="off"
             importantForAutofill="no"
+            keyboardAppearance="dark"
             keyboardType={
               Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
             }
@@ -891,7 +455,7 @@ const ComposeSheet: React.FC<{
               style={[styles.composeBtn, styles.composeSend]}
               onPress={() => submit(true)}
             >
-              <Text style={styles.composeSendText}>Run ↵</Text>
+              <Text style={styles.composeSendText}>Run</Text>
             </Pressable>
           </View>
         </View>
@@ -902,77 +466,67 @@ const ComposeSheet: React.FC<{
 
 // ── Styles ─────────────────────────────────────────────────────────────────
 
+const KEY_GAP = 5;
+
 const styles = StyleSheet.create({
   root: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    backgroundColor: OkenaColors.glassBg,
+    paddingHorizontal: 4,
+    paddingTop: 6,
+    paddingBottom: 6,
+    backgroundColor: OkenaColors.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: OkenaColors.glassStroke,
+    borderTopColor: OkenaColors.borderLight,
   },
-  scroll: { flex: 1 },
-  scrollContent: { alignItems: 'center' },
-  gap: { width: 8 },
+  panel: {
+    paddingBottom: KEY_GAP,
+    marginBottom: KEY_GAP,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: OkenaColors.border,
+    gap: KEY_GAP,
+  },
+  row: { flexDirection: 'row', gap: KEY_GAP },
   key: {
-    minWidth: 42,
-    minHeight: 42,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginHorizontal: 2,
+    flex: 1,
+    minWidth: 0,
+    height: 44,
     borderRadius: 8,
     backgroundColor: OkenaColors.keyBg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.keyBorder,
     alignItems: 'center',
     justifyContent: 'center',
+    // Subtle bottom edge, like the iOS keyboard keys.
+    borderBottomWidth: 1,
+    borderBottomColor: '#00000099',
   },
-  keyPressed: { opacity: 0.62 },
-  keyText: {
-    color: OkenaColors.keyText,
-    fontFamily: TerminalTheme.fontFamily,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  toggleKey: { minWidth: 50, paddingVertical: 6 },
-  toggleKeyActive: {
+  keyPressed: { backgroundColor: OkenaColors.keyBgPressed },
+  keyEmphasis: { backgroundColor: OkenaColors.accentSoft },
+  keyActive: {
     backgroundColor: OkenaColors.accentSoft,
+    borderWidth: 1,
     borderColor: OkenaColors.accent,
   },
-  toggleKeyLocked: { backgroundColor: OkenaColors.accent },
-  toggleKeyText: { fontSize: 11 },
-  toggleKeyTextActive: { color: OkenaColors.accent, fontWeight: '700' },
-  toggleKeyTextLocked: { color: '#ffffff' },
-  modifierState: {
-    width: 4,
+  keyLocked: { backgroundColor: OkenaColors.accent, borderColor: OkenaColors.accent },
+  labelBox: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2 },
+  caption: {
+    fontSize: 9,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+    marginBottom: -1,
+  },
+  wordText: { fontSize: 14, fontWeight: '600', letterSpacing: 0.2 },
+  symbolText: {
+    fontFamily: TerminalTheme.fontFamily,
+    fontSize: 18,
+  },
+  lockBar: {
+    position: 'absolute',
+    bottom: 5,
+    width: 14,
     height: 2,
-    marginTop: 3,
     borderRadius: 1,
     backgroundColor: 'transparent',
   },
-  modifierStateActive: { backgroundColor: OkenaColors.accent },
-  modifierStateLocked: { width: 18, backgroundColor: '#ffffff' },
-  arrowSlot: { marginLeft: 6 },
-  joystick: {
-    width: JOYSTICK_SIZE,
-    height: JOYSTICK_SIZE,
-    borderRadius: 12,
-    backgroundColor: OkenaColors.keyBg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.keyBorder,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  joystickGrid: { alignItems: 'center', justifyContent: 'center' },
-  arrowRow: { flexDirection: 'row', alignItems: 'center' },
-  arrowGlyph: {
-    color: 'rgba(255,255,255,0.38)',
-    fontSize: 9,
-    marginHorizontal: 6,
-    marginVertical: 1,
-  },
-  arrowGlyphActive: { color: OkenaColors.accent },
+  lockBarOn: { backgroundColor: '#ffffff' },
+  pressedDim: { opacity: 0.62 },
   sheetHandle: {
     alignSelf: 'center',
     width: 36,
@@ -981,92 +535,6 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: OkenaColors.borderLight,
   },
-  // Extended key deck
-  deckBackdrop: { flex: 1, backgroundColor: OkenaColors.backdrop },
-  deckSheet: {
-    backgroundColor: OkenaColors.surface,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.borderLight,
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 24,
-  },
-  deckHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 14,
-  },
-  deckTitle: {
-    color: OkenaColors.textPrimary,
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  deckSubtitle: { color: OkenaColors.textTertiary, fontSize: 12, marginTop: 2 },
-  deckClose: {
-    minHeight: 40,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  deckCloseText: { color: OkenaColors.accent, fontSize: 14, fontWeight: '600' },
-  deckSection: { marginBottom: 14 },
-  deckSectionLabel: {
-    color: OkenaColors.textTertiary,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 7,
-  },
-  deckKeys: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -3 },
-  deckKey: {
-    minWidth: 64,
-    minHeight: 44,
-    paddingHorizontal: 10,
-    margin: 3,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: OkenaColors.surfaceElevated,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.keyBorder,
-  },
-  deckKeyCompact: { minWidth: 44, paddingHorizontal: 8 },
-  deckKeyPressed: {
-    backgroundColor: OkenaColors.accentSoft,
-    borderColor: OkenaColors.accent,
-  },
-  deckKeyText: {
-    color: OkenaColors.textPrimary,
-    fontFamily: TerminalTheme.fontFamily,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  deckActions: { flexDirection: 'row', marginHorizontal: -4, marginTop: 2 },
-  deckAction: {
-    flex: 1,
-    minHeight: 46,
-    marginHorizontal: 4,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: OkenaColors.surfaceElevated,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.borderLight,
-  },
-  deckActionPrimary: {
-    backgroundColor: OkenaColors.accent,
-    borderColor: OkenaColors.accent,
-  },
-  deckActionText: {
-    color: OkenaColors.textSecondary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  deckActionPrimaryText: { color: '#ffffff', fontSize: 13, fontWeight: '700' },
   // Compose sheet
   composeContainer: { flex: 1 },
   composeBackdrop: { flex: 1, backgroundColor: OkenaColors.backdrop },
@@ -1131,7 +599,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   composeBtn: {
-    minHeight: 42,
+    minHeight: 44,
     paddingHorizontal: 16,
     borderRadius: 8,
     marginLeft: 8,

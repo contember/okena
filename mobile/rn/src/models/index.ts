@@ -33,3 +33,12 @@ export {
   type ProjectListRow,
   type ProjectNode,
 } from './projectList';
+
+export {
+  pickTerminal,
+  terminalLabel,
+  findTerminalPath,
+  resolveRestore,
+  type SelectionMemory,
+  type RestoreOutcome,
+} from './terminalSelection';

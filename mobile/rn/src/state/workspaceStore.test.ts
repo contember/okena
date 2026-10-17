@@ -125,3 +125,99 @@ describe('workspace folder tracking', () => {
     expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual(['b', 'a']);
   });
 });
+
+describe('workspace terminal selection memory', () => {
+  const P1: ProjectInfo = { ...PROJECT, id: 'p1', terminalIds: ['a', 'b', 'c'] };
+  const P2: ProjectInfo = { ...PROJECT, id: 'p2', terminalIds: ['x', 'y'] };
+
+  function native(projects: () => ProjectInfo[], focused = 'p2'): WorkspaceNative {
+    return {
+      ...stubNative([TABS_FIRST_ACTIVE]),
+      getProjects: projects,
+      getFocusedProjectId: () => focused,
+    };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('restores the remembered project and terminal over the focused project', () => {
+    configureWorkspaceStore({ native: native(() => [P1, P2]) });
+    useWorkspaceStore
+      .getState()
+      .start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'c', p2: 'y' } });
+
+    const s = useWorkspaceStore.getState();
+    expect(s.selectedProjectId).toBe('p1');
+    expect(s.selectedTerminalId).toBe('c');
+    expect(s.restoreProjectMissing).toBe(false);
+  });
+
+  it('falls back to the first terminal when the remembered one is gone', () => {
+    configureWorkspaceStore({ native: native(() => [P1, P2]) });
+    useWorkspaceStore.getState().start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'gone' } });
+
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('a');
+  });
+
+  it('flags a missing project and falls back to the focused one', () => {
+    configureWorkspaceStore({ native: native(() => [P1, P2]) });
+    useWorkspaceStore.getState().start('conn-1', { projectId: 'deleted', terminalByProject: {} });
+
+    const s = useWorkspaceStore.getState();
+    expect(s.restoreProjectMissing).toBe(true);
+    expect(s.selectedProjectId).toBe('p2');
+    s.clearRestoreProjectMissing();
+    expect(useWorkspaceStore.getState().restoreProjectMissing).toBe(false);
+  });
+
+  it('waits for the project list before restoring', () => {
+    let projects: ProjectInfo[] = [];
+    configureWorkspaceStore({ native: native(() => projects) });
+    useWorkspaceStore.getState().start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'b' } });
+    expect(useWorkspaceStore.getState().selectedProjectId).toBeNull();
+
+    projects = [P1, P2];
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+
+    expect(useWorkspaceStore.getState().selectedProjectId).toBe('p1');
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('b');
+  });
+
+  it('reopens the last terminal of a project when switching back to it', () => {
+    configureWorkspaceStore({ native: native(() => [P1, P2], 'p1') });
+    const store = useWorkspaceStore.getState();
+    store.start('conn-1');
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('a');
+
+    useWorkspaceStore.getState().selectTerminal('c');
+    useWorkspaceStore.getState().selectProject('p2');
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('x');
+    useWorkspaceStore.getState().selectTerminal('y');
+
+    useWorkspaceStore.getState().selectProject('p1');
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('c');
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('c');
+    expect(useWorkspaceStore.getState().terminalByProject).toEqual({ p1: 'c', p2: 'y' });
+  });
+
+  it('selects the remembered terminal when the selection vanishes', () => {
+    let p1 = P1;
+    configureWorkspaceStore({ native: native(() => [p1, P2], 'p1') });
+    useWorkspaceStore.getState().start('conn-1', { projectId: null, terminalByProject: { p1: 'b' } });
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('b');
+
+    useWorkspaceStore.getState().selectTerminal('c');
+    // 'c' closed on the desktop: fall back to the first terminal.
+    p1 = { ...P1, terminalIds: ['a', 'b'] };
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBe('a');
+  });
+});

@@ -30,7 +30,33 @@ export {
 } from './workspaceStore';
 
 export {
+  useSessionStore,
+  sessionStore,
+  configureSessionStore,
+  findRestoreServer,
+  restoreForServer,
+  SESSION_MEMORY_KEY,
+  type SessionState,
+  type SessionMemory,
+  type ServerSession,
+} from './sessionStore';
+
+export {
   asyncStoragePersistence,
   createMemoryPersistence,
   type Persistence,
 } from './persistence';
+
+export {
+  useSettingsStore,
+  settingsStore,
+  configureSettingsStore,
+  normalizeFontSize,
+  SETTINGS_KEY,
+  DEFAULT_FONT_SIZE,
+  MIN_FONT_SIZE,
+  MAX_FONT_SIZE,
+  FONT_SIZE_STEP,
+  type SettingsState,
+  type SettingsDeps,
+} from './settingsStore';

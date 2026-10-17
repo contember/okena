@@ -11,11 +11,10 @@
  *     highlight overlay (when its `selecting` prop is true).
  *
  * So this container only adds the INPUT + GESTURE chrome the renderer does not:
- *   - a (near-)invisible full-bleed `TextInput` for the soft keyboard. Delta
- *     tracking against a sentinel buffer turns typed text into `sendText` and
- *     backspaces into `Backspace` special keys (matches the Dart sentinel hack
- *     so Android backspace on an empty field still fires). Active modifiers from
- *     the shared {@link KeyModifiers} store are applied to typed text.
+ *   - a (near-)invisible full-bleed `TextInput` for the soft keyboard. Each
+ *     edit is diffed against the previous text (see `softInput.ts`) into
+ *     `Backspace` special keys + `sendText`. Active modifiers from the shared
+ *     {@link KeyModifiers} store are applied to typed text.
  *   - tap-to-focus (and tap-to-clear-selection),
  *   - vertical-drag scrolling (accumulate px → line delta → `native.scrollWheel`,
  *     which moves the scrollback or, when the app enabled mouse reporting,
@@ -24,6 +23,9 @@
  *     selected text to the clipboard and clears. Double-tap selects a word.
  *   - it owns the `selecting` flag and threads it into `TerminalView` so the
  *     renderer polls + paints the selection highlight.
+ *   - two-finger pinch changes the terminal font size (the persisted setting
+ *     from the settings store, shared by every pane); TerminalView re-measures
+ *     and resizes the PTY.
  *
  * Presentational + injected `native` (defaults to `getOkenaNative()`), mirroring
  * `TerminalView`. The shared `modifiers` store is threaded down from the
@@ -55,18 +57,23 @@ import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalView, type TerminalFonts } from './TerminalView';
-import { KeyModifiers, applyModifiersToText } from './KeyToolbar';
+import { KeyModifiers, applyModifiersToText } from './keyInput';
+import { useSettingsStore } from '../state/settingsStore';
 import { accumulateScroll, exceedsTouchSlop, pointToCell } from './terminalScroll';
-
-// Sentinel buffer: keeps spaces in the TextInput so backspace always has
-// something to delete. Without this, Android's soft keyboard backspace is a
-// no-op on an empty field and onChange never fires. (Dart `_kSentinel`.)
-const SENTINEL = '        '; // 8 spaces
+import {
+  INITIAL_SOFT_INPUT,
+  applyChange,
+  requestReset,
+  shouldResetAfter,
+  type SoftInputState,
+} from './softInput';
 
 /** Imperative handle so the workspace screen can focus/blur the soft keyboard. */
 export interface TerminalPaneHandle {
   focus(): void;
   blur(): void;
+  /** Start a fresh soft-keyboard buffer (after input sent from elsewhere). */
+  resetInput(): void;
 }
 
 export interface TerminalPaneProps {
@@ -88,8 +95,18 @@ export interface TerminalPaneProps {
    * pane. Focus is never summoned when the keyboard is down.
    */
   selected?: boolean;
+  /** Font size in pt. Defaults to the persisted setting (settings store). */
+  fontSize?: number;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
+}
+
+/** Distance between the first two touches, or null for a single touch. */
+function pinchDistance(e: GestureResponderEvent): number | null {
+  // Synthetic events (tests) may omit `touches`.
+  const [a, b] = e.nativeEvent.touches ?? [];
+  if (!a || !b) return null;
+  return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
 // Internal mutable grid size, reported by TerminalView via onGridSizeChange.
@@ -109,17 +126,26 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       modifiers,
       onSelect,
       selected = false,
+      fontSize,
       native = getOkenaNative(),
     },
     ref,
   ) => {
+    const storedFontSize = useSettingsStore((s) => s.terminalFontSize);
+    const setFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+    const effectiveFontSize = fontSize ?? storedFontSize;
+    // Active pinch: start distance + font size at its start.
+    const pinch = useRef<{ distance: number; fontSize: number } | null>(null);
     const inputRef = useRef<TextInput>(null);
     const [selecting, setSelecting] = useState(false);
     const [copied, setCopied] = useState(false);
     const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Mirror of what's currently in the hidden TextInput (sentinel-padded).
-    const lastInputText = useRef<string>(SENTINEL);
+    // What the hidden TextInput holds (sentinel-padded). The field is
+    // controlled so resets go through RN's event-counted text update;
+    // `setNativeProps({ text })` is silently ignored on the new architecture.
+    const softInput = useRef<SoftInputState>(INITIAL_SOFT_INPUT);
+    const [inputValue, setInputValue] = useState(INITIAL_SOFT_INPUT.text);
 
     // Grid geometry — TerminalView measures the glyph cell and computes
     // cols/rows; we mirror it so touch coordinates can be converted to cells
@@ -135,13 +161,21 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     const scrollAccum = useRef(0);
     const dragLastPageY = useRef<number | null>(null);
 
+    const resetInput = useCallback(() => {
+      const next = requestReset(softInput.current);
+      if (next === null) return;
+      softInput.current = next;
+      setInputValue(next.text);
+    }, []);
+
     useImperativeHandle(
       ref,
       () => ({
         focus: () => inputRef.current?.focus(),
         blur: () => inputRef.current?.blur(),
+        resetInput,
       }),
-      [],
+      [resetInput],
     );
 
     const onGridSizeChange = useCallback(
@@ -153,22 +187,17 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     // ── soft keyboard input ──────────────────────────────────────────────────
 
-    const resetSentinel = useCallback(() => {
-      lastInputText.current = SENTINEL;
-      inputRef.current?.setNativeProps?.({ text: SENTINEL });
-    }, []);
-
     const onInputFocus = useCallback(() => {
-      resetSentinel();
+      resetInput();
       onSelect?.(terminalId);
-    }, [resetSentinel, onSelect, terminalId]);
+    }, [resetInput, onSelect, terminalId]);
 
     useEffect(() => {
-      resetSentinel();
+      resetInput();
       return () => {
         if (copiedTimer.current) clearTimeout(copiedTimer.current);
       };
-    }, [terminalId, resetSentinel]);
+    }, [terminalId, resetInput]);
 
     useEffect(() => {
       if (selected && Keyboard.isVisible()) inputRef.current?.focus();
@@ -176,38 +205,28 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     const onChange = useCallback(
       (e: NativeSyntheticEvent<TextInputChangeEventData>) => {
-        const newText = e.nativeEvent.text;
-        const prev = lastInputText.current;
+        const { delta, state } = applyChange(softInput.current, e.nativeEvent.text);
+        softInput.current = state;
+        setInputValue(state.text);
 
-        if (newText.length > prev.length) {
-          // Characters added — send the delta. Convert \n (soft-kbd Return) → \r.
-          let delta = newText.slice(prev.length).replace(/\n/g, '\r');
-          if (modifiers.hasAny) {
-            delta = applyModifiersToText(modifiers, delta);
-            modifiers.reset();
-          }
-          // `sendText` / `sendSpecialKey` snap the view back to the bottom
-          // natively, like every desktop input path.
-          if (delta.length > 0) {
-            void native.sendText(connId, terminalId, delta);
-          }
-        } else if (newText.length < prev.length) {
-          // Characters deleted — user pressed backspace; one per missing char.
-          const deleted = prev.length - newText.length;
-          for (let i = 0; i < deleted; i++) {
-            void native.sendSpecialKey(connId, terminalId, 'Backspace');
-          }
+        // `sendText` / `sendSpecialKey` snap the view back to the bottom
+        // natively, like every desktop input path.
+        for (let i = 0; i < delta.backspaces; i++) {
+          void native.sendSpecialKey(connId, terminalId, 'Backspace');
+        }
+        // Soft-keyboard Return arrives as \n; the terminal wants \r.
+        let text = delta.text.replace(/\n/g, '\r');
+        if (text.length > 0 && modifiers.hasAny) {
+          text = applyModifiersToText(modifiers, text);
+          modifiers.reset();
+        }
+        if (text.length > 0) {
+          void native.sendText(connId, terminalId, text);
         }
 
-        lastInputText.current = newText;
-
-        // Re-seed if the buffer ran low (backspace ate into the sentinel) or grew
-        // unbounded.
-        if (newText.length < 3 || newText.length > 200) {
-          resetSentinel();
-        }
+        if (shouldResetAfter(state, delta)) resetInput();
       },
-      [native, connId, terminalId, modifiers, resetSentinel],
+      [native, connId, terminalId, modifiers, resetInput],
     );
 
     // ── touch → cell ──────────────────────────────────────────────────────────
@@ -270,8 +289,26 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       };
     }, []);
 
+    /** Handles a two-finger move; returns true while a pinch owns the gesture. */
+    const handlePinch = useCallback(
+      (e: GestureResponderEvent): boolean => {
+        const distance = pinchDistance(e);
+        if (distance === null || selectingRef.current) return pinch.current !== null;
+        if (!pinch.current) {
+          clearLongPress();
+          moved.current = true;
+          pinch.current = { distance: Math.max(distance, 1), fontSize: effectiveFontSize };
+          return true;
+        }
+        setFontSize((pinch.current.fontSize * distance) / pinch.current.distance);
+        return true;
+      },
+      [clearLongPress, effectiveFontSize, setFontSize],
+    );
+
     const onGrant = useCallback(
       (e: GestureResponderEvent) => {
+        pinch.current = null;
         const { locationX: x, locationY: y, pageX, pageY } = e.nativeEvent;
         grantPos.current = { x, y };
         grantPage.current = { x: pageX, y: pageY };
@@ -300,6 +337,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     const onMove = useCallback(
       (e: GestureResponderEvent) => {
+        if (handlePinch(e)) return;
         const { x, y } = panePoint(e);
 
         if (selectingRef.current) {
@@ -341,10 +379,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           }
         }
       },
-      [native, connId, terminalId, touchToCell, clearLongPress, panePoint],
+      [native, connId, terminalId, touchToCell, clearLongPress, panePoint, handlePinch],
     );
 
     const endGesture = useCallback(() => {
+      pinch.current = null;
       clearLongPress();
       dragLastPageY.current = null;
       scrollAccum.current = 0;
@@ -432,6 +471,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             connId={connId}
             terminalId={terminalId}
             fonts={fonts}
+            fontSize={effectiveFontSize}
             selecting={selecting}
             onGridSizeChange={onGridSizeChange}
           />
@@ -457,7 +497,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         <TextInput
           ref={inputRef}
           style={styles.hiddenInput}
-          defaultValue={SENTINEL}
+          value={inputValue}
           onChange={onChange}
           autoCapitalize="none"
           autoCorrect={false}

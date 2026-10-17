@@ -63,6 +63,12 @@ import {
   decodeCellsView,
 } from '../native/cells';
 import { TerminalTheme } from '../theme';
+import {
+  drawFallbackGlyph,
+  useGlyphFallback,
+  type TerminalFallbackGlyph,
+  type TerminalGlyphFallback,
+} from './terminalFonts';
 
 // ── Fonts ───────────────────────────────────────────────────────────────────
 
@@ -97,7 +103,8 @@ export interface TerminalViewProps {
    */
   selecting?: boolean;
   /**
-   * Called whenever the computed grid size changes, AFTER `resizeLocal` has run.
+   * Called whenever the grid is computed (layout or font-size change), AFTER
+   * any `resizeLocal`.
    * The host typically debounces a `resizeTerminal` here, but this component
    * already does that internally; this is for the host to track cols/rows.
    */
@@ -186,6 +193,8 @@ interface PaintArgs {
   selection?: SelectionBounds;
   metrics: CellMetrics;
   fonts: TerminalFonts;
+  /** Per-codepoint font fallback (symbols, emoji, CJK). */
+  glyphs: TerminalGlyphFallback;
   fontSize: number;
   width: number;
   height: number;
@@ -215,7 +224,7 @@ function resetSynthetic(font: SkFont) {
 }
 
 function paintTerminal(args: PaintArgs): void {
-  const { canvas, cells, cursor, scroll, selection, metrics, fonts, width, height } = args;
+  const { canvas, cells, cursor, scroll, selection, metrics, fonts, glyphs, width, height } = args;
   const { cellWidth, cellHeight, baseline } = metrics;
   const cols = cells.cols;
   const rows = cells.rows;
@@ -272,19 +281,32 @@ function paintTerminal(args: PaintArgs): void {
       const style0 = flags0 & FLAG_STYLE_MASK;
 
       const startCol = col;
-      let run = cells.char(idx);
-      col++;
-
-      while (col < cols) {
-        const ci = row * cols + col;
-        if (cells.isBlank(ci)) break;
-        const f = cells.flags(ci);
-        const cFg = f & FLAG_INVERSE ? cells.bg(ci) : cells.fg(ci);
-        const cStyle = f & FLAG_STYLE_MASK;
-        if ((cFg >>> 0) !== (fg0 >>> 0) || cStyle !== style0) break;
-        run += cells.char(ci);
+      // Glyphs the primary font lacks are drawn one cell at a time from a
+      // fallback typeface; everything else is batched into a primary-font run.
+      const first = glyphs.resolve(cells.codepoint(idx));
+      let run = '';
+      let fallbackGlyph: TerminalFallbackGlyph | null = null;
+      if (first.kind === 'fallback') {
+        fallbackGlyph = first;
+        // A wide glyph spans its blank spacer cell.
+        col += first.wide && col + 1 < cols && cells.isBlank(idx + 1) ? 2 : 1;
+      } else {
+        run = first.text;
         col++;
+        while (col < cols) {
+          const ci = row * cols + col;
+          if (cells.isBlank(ci)) break;
+          const f = cells.flags(ci);
+          const cFg = f & FLAG_INVERSE ? cells.bg(ci) : cells.fg(ci);
+          const cStyle = f & FLAG_STYLE_MASK;
+          if ((cFg >>> 0) !== (fg0 >>> 0) || cStyle !== style0) break;
+          const next = glyphs.resolve(cells.codepoint(ci));
+          if (next.kind === 'fallback') break;
+          run += next.text;
+          col++;
+        }
       }
+      const runW = (col - startCol) * cellWidth;
 
       // Effective fg (dim halves alpha, matching the Dart painter).
       let fgEff = fg0 >>> 0;
@@ -300,14 +322,18 @@ function paintTerminal(args: PaintArgs): void {
 
       const x = startCol * cellWidth;
       const y = row * cellHeight + baseline;
-      canvas.drawText(run, x, y, textPaint, font);
+      if (fallbackGlyph) {
+        const box = { x, top: row * cellHeight, width: runW, cellHeight, baseline };
+        drawFallbackGlyph(canvas, glyphs, fallbackGlyph, box, args.fontSize, textPaint);
+      } else {
+        canvas.drawText(run, x, y, textPaint, font);
+      }
 
       // Underline / strikethrough as drawn lines (decoration in Dart).
       if (style0 & (FLAG_UNDERLINE | FLAG_STRIKETHROUGH)) {
         const linePaint = Skia.Paint();
         linePaint.setColor(skColor(fgEff));
         linePaint.setStrokeWidth(Math.max(1, args.fontSize / 14));
-        const runW = run.length * cellWidth;
         if (style0 & FLAG_UNDERLINE) {
           const uy = row * cellHeight + cellHeight - 1;
           canvas.drawLine(x, uy, x + runW, uy, linePaint);
@@ -404,13 +430,12 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     return measureCell(fonts.regular);
   }, [fonts, fontSize]);
 
-  // ── Layout → cols/rows → resizeLocal + debounced resizeTerminal ──────────
-  const onLayout = useCallback(
-    (e: LayoutChangeEvent) => {
-      const { width, height } = e.nativeEvent.layout;
-      if (width <= 0 || height <= 0) return;
-      setSize({ w: width, h: height });
+  const glyphFallback = useGlyphFallback(fonts.regular);
 
+  // ── Layout → cols/rows → resizeLocal + debounced resizeTerminal ──────────
+  const layoutSize = useRef<{ w: number; h: number } | null>(null);
+  const applyGrid = useCallback(
+    (width: number, height: number) => {
       const { cellWidth, cellHeight } = metrics;
       if (cellWidth <= 0 || cellHeight <= 0) return;
 
@@ -423,7 +448,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
         // Immediate local resize for responsive rendering (no WS round-trip).
         native.resizeLocal(connId, terminalId, newCols, newRows);
-        onGridSizeChange?.(newCols, newRows, cellWidth, cellHeight);
 
         if (!initialResizeSent.current) {
           // First resize fires immediately — avoids a flash of garbled content.
@@ -438,8 +462,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }, 200);
         }
       }
+      // Report even when cols/rows are unchanged: a font-size change still
+      // moves the cell size the host uses for touch → cell mapping.
+      onGridSizeChange?.(newCols, newRows, cellWidth, cellHeight);
     },
     [native, connId, terminalId, metrics, onGridSizeChange],
+  );
+
+  const onLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      if (width <= 0 || height <= 0) return;
+      setSize({ w: width, h: height });
+      layoutSize.current = { w: width, h: height };
+      applyGrid(width, height);
+    },
+    [applyGrid],
   );
 
   // Reset resize/init state when the target terminal changes.
@@ -448,6 +486,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     colsRef.current = 0;
     rowsRef.current = 0;
   }, [connId, terminalId]);
+
+  // A font-size change alters the cell metrics without a layout event:
+  // recompute cols/rows (and resize the PTY) for the current size.
+  useEffect(() => {
+    const laid = layoutSize.current;
+    if (laid) applyGrid(laid.w, laid.h);
+  }, [applyGrid]);
 
   // ── Repaint loop: rAF gated on takeDirty() (Decision C) ──────────────────
   useEffect(() => {
@@ -505,6 +550,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           selection,
           metrics,
           fonts,
+          glyphs: glyphFallback,
           fontSize,
           width: size.w,
           height: size.h,
@@ -513,7 +559,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     );
     // `frame` participates so the picture recomputes each dirty tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, frame, native, connId, terminalId, selecting, metrics, fonts, fontSize]);
+  }, [size, frame, native, connId, terminalId, selecting, metrics, fonts, glyphFallback, fontSize]);
 
   return (
     <View style={styles.root} onLayout={onLayout}>
