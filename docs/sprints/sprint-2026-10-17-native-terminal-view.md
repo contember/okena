@@ -452,3 +452,80 @@ Android linking in WU0 and font fallback parity.
     key-toolbar input (`TerminalPaneHandle.scrollToBottom`), because the native view keeps its
     own scroll offset.
   - Android sizes are in dp, the same as the Skia view.
+
+### 2026-10-17 — WU3 + WU4 iOS renderer and gestures
+
+- **Code.** `modules/okena-terminal-view/ios/TerminalRendererView.swift` (scroll model, frame
+  loop, sizing, overlays, gestures, lifecycle) and `TerminalRowPainter.swift` (fonts, glyph
+  fallback, row bitmaps). No shared files changed (header, `render.rs`, TS, codegen spec).
+  iOS-only build changes: the view podspec adds the `include` dir to its Swift and header
+  search paths; `NotoSansSymbols2-Subset.ttf` is now an app resource in `project.pbxproj`
+  (it was only a Metro asset for Skia).
+- **Deviations.**
+  - The cell height is rounded to whole device pixels (at most half a pixel off Skia's
+    `measureCell`), so cached row bitmaps stay sharp wherever a row moves. Rarely this
+    gives one row more or less than Skia.
+  - Live tail = the screen's top row at the top edge (as Skia draws it). When another
+    client made the PTY taller than the view, the rest of the screen is reached by scrolling
+    down instead of being cut off.
+  - Double tap keeps the word highlighted for 0.35 s before clearing (Skia cleared at once).
+  - VoiceOver: one element whose label is the visible lines (not one element per row). It
+    also lets Maestro match terminal text.
+  - Cell backgrounds are written straight into the bitmap: CG rect fills were the largest
+    cost in a Time Profiler run.
+- **Verified on the iPhone 17 Pro Max sim, iOS 26.5** (native renderer on, isolated daemon),
+  by screenshots and Maestro flows (kept in the scratchpad: the repo has no Maestro folder):
+  `ls --color`, 256 colours and truecolor, bold/italic/dim/underline/strike/inverse/hidden,
+  CJK, emoji, combining accents, box drawing and `⎿`, beam/underline/block cursors, fling
+  through `seq 1 20000` with momentum, anchoring while a stream runs with the view scrolled
+  up (two screenshots seconds apart are identical, toolbar Return then snaps to the live
+  line), long-press drag selection with edge auto-scroll into scrollback and copy, double
+  tap copies a word, font size from Settings, chip switching between two terminals,
+  session restore after relaunch, soft keyboard and key toolbar input, `less` on the alt
+  screen scrolls by arrows both ways while the scroll view stays put, background and
+  foreground during a stream.
+- **iOS 27.0 sim** (new device "NTV iPhone 17 Pro Max (27)"): same build, paired, style
+  test, fling and scrollback selection pass.
+- **Not verified.** Pinch (Maestro has no pinch on iOS; it shares the font-size path that
+  the Settings test covers), mouse-mode apps such as `vim` with `mouse=a` (same code path
+  as `less`), the MISSING-terminal state, VoiceOver by ear.
+- **Parity vs. Skia (side by side with the toggle).** Same layout, colours and glyphs.
+  Differences, all where Skia is wrong: Skia draws inverse text without the swapped
+  background (it swaps again what Rust already swapped), drops combining marks, and draws
+  `❤️` as a text glyph. Remaining gaps on both: every underline style is drawn as a single
+  line and underlines skip blank cells; `focused` does not change the cursor. The selection
+  tint sits over the text instead of under it (alpha 0x40, barely visible).
+- **Performance (simulator numbers, 60 Hz, NOT device numbers).** From the opt-in perf log
+  (`defaults write com.contember.okena OkenaTerminalPerfLog -bool YES`): `update` is the main
+  thread time of one snapshot plus row redraws; `busy` is one main run-loop pass including
+  layout and the Core Animation commit. p50 / p95 (max), ms.
+
+  | Sim | Scenario | update | busy | Long frames (>1.5 vsync) |
+  |---|---|---|---|---|
+  | iOS 26.5 | fling, 12 fast swipes | 0.23–0.31 / 0.43–0.67 (1.1) | — | — |
+  | iOS 26.5 | stream, ~85 coloured lines/s | 0.45–0.54 / 0.6–1.2 (4) | 0.7–1.6 / 1.9–2.3 (8) | 0 |
+  | iOS 26.5 | same, history at the 10k limit | 1.0–1.2 / 1.4 (7.6) | 1.5–1.6 / 1.9–2.3 (8) | 0 |
+  | iOS 27.0 | fling | 0.24–0.33 / 0.6–0.85 (1.5) | 0.6–0.8 / 1.2–2.0 (2.8) | 0 |
+
+  Against the Skia baseline above (11 ms of JS-thread paint per frame), the native view
+  uses about 0.5 ms of main-thread time per changed frame and nothing while idle. Windows
+  with Maestro running show 20–30 ms passes from XCTest snapshots; they are excluded.
+  A 10 s Time Profiler run of the stream: 466 ms of main-thread samples in total, 184 ms
+  in `updateViewport`, down from 726 ms and 479 ms before moving background fills out of
+  CG and keeping the content view's frame fixed. The first draw of uncommon glyphs (emoji,
+  CJK) once took 225 ms on the iOS 27 sim (font cascade lookup on first use).
+  `xctrace` Animation Hitches does not run on the simulator ("Hitches is not supported on
+  this platform"), so the WU3 hitch target needs a device (WU7).
+- **Environment.**
+  - `node_modules/okena-terminal-view` (the `file:` link) was missing; `pod install` then
+    silently dropped the pod and Metro could not resolve the module. Recreated the symlink
+    by hand.
+  - With the Android emulator connected, Maestro needs `--device <UDID>`; without it the
+    first flows here may have gone to the emulator.
+  - Maestro's iOS hierarchy loses most of the app while the drawer is open, sometimes
+    (reproduced with the Skia renderer too, mostly with the soft keyboard up). Flows tap the
+    drawer's Settings row by position instead of by text.
+  - Soft-keyboard input via Maestro sometimes lost the first character or kept one from the
+    previous flow (e.g. `qclear`). Not investigated; `softInput.ts` is outside this WU.
+  - After session restore, text with SGR 8 (hidden) showed up (both renderers): the restored
+    screen seems to lose the attribute.
