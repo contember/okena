@@ -97,6 +97,10 @@ pub struct ThemeColors {
     pub diff_removed_fg: u32,
     pub diff_hunk_header_bg: u32,
     pub diff_hunk_header_fg: u32,
+
+    // Merge queue colors (GitHub's attention emphasis / muted)
+    pub merge_queue_emphasis: u32,
+    pub merge_queue_muted: u32,
 }
 
 /// Dark theme (VSCode-like)
@@ -167,6 +171,8 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     diff_removed_fg: 0xf85149,
     diff_hunk_header_bg: 0x1d2d3e,
     diff_hunk_header_fg: 0x79b8ff,
+    merge_queue_emphasis: 0x9a6700,
+    merge_queue_muted: 0xfff8c5,
 };
 
 /// Light theme (VSCode Light-like)
@@ -237,6 +243,8 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     diff_removed_fg: 0xd73a49,
     diff_hunk_header_bg: 0xe1e4e8,
     diff_hunk_header_fg: 0x0366d6,
+    merge_queue_emphasis: 0x9a6700,
+    merge_queue_muted: 0xfff8c5,
 };
 
 /// Pastel Dark theme (Ghostty Builtin Pastel Dark)
@@ -307,6 +315,8 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     diff_removed_fg: 0xf85149,
     diff_hunk_header_bg: 0x1c2333,
     diff_hunk_header_fg: 0x79b8ff,
+    merge_queue_emphasis: 0x9a6700,
+    merge_queue_muted: 0xfff8c5,
 };
 
 /// High Contrast theme for accessibility
@@ -377,6 +387,8 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     diff_removed_fg: 0xff0000,
     diff_hunk_header_bg: 0x001133,
     diff_hunk_header_fg: 0x00aaff,
+    merge_queue_emphasis: 0x9a6700,
+    merge_queue_muted: 0xfff8c5,
 };
 
 impl ThemeColors {

@@ -443,6 +443,7 @@ The full set of customizable colors includes:
 - **Buttons:** `button_primary_bg`, `button_primary_fg`, `button_primary_hover`
 - **Folders:** `folder_default`, `folder_red`, `folder_orange`, `folder_yellow`, `folder_lime`, `folder_green`, `folder_teal`, `folder_cyan`, `folder_blue`, `folder_indigo`, `folder_purple`, `folder_pink`
 - **Diff:** `diff_added_bg`, `diff_removed_bg`, `diff_added_fg`, `diff_removed_fg`, `diff_hunk_header_bg`, `diff_hunk_header_fg`
+- **Merge queue:** `merge_queue_emphasis`, `merge_queue_muted`
 
 ---
 

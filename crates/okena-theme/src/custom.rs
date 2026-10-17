@@ -176,6 +176,10 @@ pub struct CustomThemeColors {
     pub diff_hunk_header_bg: String,
     #[serde(default = "default_diff_hunk_header_fg")]
     pub diff_hunk_header_fg: String,
+    #[serde(default = "default_merge_queue_emphasis")]
+    pub merge_queue_emphasis: String,
+    #[serde(default = "default_merge_queue_muted")]
+    pub merge_queue_muted: String,
 }
 
 // Default color functions for serde (based on dark theme)
@@ -377,6 +381,12 @@ fn default_diff_hunk_header_bg() -> String {
 fn default_diff_hunk_header_fg() -> String {
     "#569cd6".to_string()
 }
+fn default_merge_queue_emphasis() -> String {
+    "#9a6700".to_string()
+}
+fn default_merge_queue_muted() -> String {
+    "#fff8c5".to_string()
+}
 
 impl CustomThemeColors {
     /// Parse a hex color string (e.g., "#1e1e1e" or "1e1e1e") to u32
@@ -462,6 +472,8 @@ impl CustomThemeColors {
             diff_removed_fg: h(c.diff_removed_fg),
             diff_hunk_header_bg: h(c.diff_hunk_header_bg),
             diff_hunk_header_fg: h(c.diff_hunk_header_fg),
+            merge_queue_emphasis: h(c.merge_queue_emphasis),
+            merge_queue_muted: h(c.merge_queue_muted),
         }
     }
 
@@ -534,6 +546,8 @@ impl CustomThemeColors {
             diff_removed_fg: Self::parse_hex(&self.diff_removed_fg),
             diff_hunk_header_bg: Self::parse_hex(&self.diff_hunk_header_bg),
             diff_hunk_header_fg: Self::parse_hex(&self.diff_hunk_header_fg),
+            merge_queue_emphasis: Self::parse_hex(&self.merge_queue_emphasis),
+            merge_queue_muted: Self::parse_hex(&self.merge_queue_muted),
         }
     }
 }
@@ -634,6 +648,8 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 diff_removed_fg: "#ff6c60".to_string(),
                 diff_hunk_header_bg: "#282828".to_string(),
                 diff_hunk_header_fg: "#96cbfe".to_string(),
+                merge_queue_emphasis: "#9a6700".to_string(),
+                merge_queue_muted: "#fff8c5".to_string(),
             },
         };
 
