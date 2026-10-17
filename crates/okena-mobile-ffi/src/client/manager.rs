@@ -325,6 +325,31 @@ impl ConnectionManager {
         });
     }
 
+    /// The global singleton, or `None` before `init()`. The C ABI in
+    /// `crate::render` uses this so a native caller can never panic the app.
+    pub fn try_get() -> Option<&'static ConnectionManager> {
+        MANAGER.get()
+    }
+
+    /// Ids of all live connections.
+    pub fn connection_ids(&self) -> Vec<String> {
+        self.connections.read().keys().cloned().collect()
+    }
+
+    /// Unprefixed ids of the terminals a connection currently mirrors, or
+    /// `None` for an unknown connection.
+    pub fn terminal_ids(&self, conn_id: &str) -> Option<Vec<String>> {
+        let connections = self.connections.read();
+        let conn = connections.get(conn_id)?;
+        let terminals = conn.handler.terminals().read();
+        let mut ids: Vec<String> = terminals
+            .keys()
+            .map(|k| okena_transport::client::strip_prefix(k, conn_id))
+            .collect();
+        ids.sort();
+        Some(ids)
+    }
+
     /// Get the global singleton. Panics if `init()` hasn't been called.
     #[allow(
         clippy::expect_used,
