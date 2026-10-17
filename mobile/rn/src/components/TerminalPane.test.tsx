@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { Keyboard, TextInput, View } from 'react-native';
+import { Keyboard, Platform, TextInput, View } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 import type { SkFont } from '@shopify/react-native-skia';
 import type { OkenaTerminalViewProps } from 'okena-terminal-view';
@@ -549,6 +549,54 @@ describe('TerminalPane renderer', () => {
     expect(onSelect).toHaveBeenCalledWith('t2');
     expect(focus).toHaveBeenCalled();
     act(() => renderer.unmount());
+  });
+
+  describe('reopening the keyboard after the system hid it', () => {
+    const realOS = Platform.OS;
+    afterEach(() => {
+      Platform.OS = realOS;
+      jest.restoreAllMocks();
+    });
+
+    /** A focused input with the keyboard down: Android after the Back key. */
+    function focusedWithoutKeyboard(os: 'android' | 'ios') {
+      Platform.OS = os;
+      useSettingsStore.setState({ renderer: 'native' });
+      jest.spyOn(Keyboard, 'isVisible').mockReturnValue(false);
+      const renderer = renderPane('t2');
+      const input = renderer.root.findByType(TextInput).instance;
+      jest.spyOn(input, 'isFocused').mockReturnValue(true);
+      const blur = jest.spyOn(input, 'blur').mockImplementation(() => {});
+      const focus = spyOnInputFocus(renderer);
+      blur.mockClear();
+      return { renderer, blur, focus };
+    }
+
+    it('blurs and refocuses on Android so a tap shows the keyboard again', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('android');
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).toHaveBeenCalledTimes(1);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(blur.mock.invocationCallOrder[0]).toBeLessThan(focus.mock.invocationCallOrder[0]);
+      act(() => renderer.unmount());
+    });
+
+    it('keeps the focus on iOS (a hardware keyboard has no soft keyboard)', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('ios');
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).not.toHaveBeenCalled();
+      expect(focus).toHaveBeenCalledTimes(1);
+      act(() => renderer.unmount());
+    });
+
+    it('does not blur while the keyboard is up', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('android');
+      jest.spyOn(Keyboard, 'isVisible').mockReturnValue(true);
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).not.toHaveBeenCalled();
+      expect(focus).toHaveBeenCalledTimes(1);
+      act(() => renderer.unmount());
+    });
   });
 
   it('persists a font size from a native pinch', () => {

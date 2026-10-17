@@ -263,6 +263,17 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     // ── soft keyboard input ──────────────────────────────────────────────────
 
+    // A tap opens the keyboard. On Android the Back key hides it but leaves
+    // the input focused, and `focus()` on a focused input does nothing, so
+    // blur first. iOS has no such dismissal; there a focused input with no
+    // keyboard is a hardware keyboard, which must keep its focus.
+    const summonKeyboard = useCallback(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      if (Platform.OS === 'android' && input.isFocused() && !Keyboard.isVisible()) input.blur();
+      input.focus();
+    }, []);
+
     const onInputFocus = useCallback(() => {
       resetInput();
       onSelect?.(terminalId);
@@ -528,7 +539,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           } else {
             // `focus()` on an already-focused input does not re-fire `onFocus`,
             // so the `onSelect` above is what re-syncs the toolbar target.
-            inputRef.current?.focus();
+            summonKeyboard();
           }
           lastTap.current = { x, y, t: now };
         }
@@ -542,6 +553,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         copySelectionAndClear,
         endGesture,
         onSelect,
+        summonKeyboard,
       ],
     );
 
@@ -561,8 +573,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       // Same as a Skia-mode tap: make this pane the target, then summon the
       // keyboard (`focus()` on a focused input does not re-fire `onFocus`).
       onSelect?.(terminalId);
-      inputRef.current?.focus();
-    }, [onSelect, terminalId]);
+      summonKeyboard();
+    }, [onSelect, terminalId, summonKeyboard]);
 
     const onNativeGridSize = useCallback(
       (e: NativeSyntheticEvent<GridSizeEvent>) => {
