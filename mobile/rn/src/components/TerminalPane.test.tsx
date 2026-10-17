@@ -8,13 +8,13 @@
  */
 
 import React from 'react';
-import { Keyboard, TextInput, View } from 'react-native';
+import { Keyboard, Platform, TextInput, View } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 import type { SkFont } from '@shopify/react-native-skia';
 import type { OkenaTerminalViewProps } from 'okena-terminal-view';
 
 import { KeyModifiers } from './KeyToolbar';
-import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
+import { AUTO_FOCUS_DELAY_MS, TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 import type { OkenaNative } from '../native/okena';
 import { createMemoryPersistence } from '../state/persistence';
 import { configureSettingsStore, DEFAULT_RENDERER, useSettingsStore } from '../state/settingsStore';
@@ -93,6 +93,8 @@ interface PaneOptions {
   onSelect?: (id: string) => void;
   selected?: boolean;
   native?: OkenaNative;
+  autoFocus?: boolean;
+  focusBlocked?: boolean;
 }
 
 function pane(terminalId: string, options: PaneOptions) {
@@ -104,6 +106,8 @@ function pane(terminalId: string, options: PaneOptions) {
       modifiers={new KeyModifiers()}
       onSelect={options.onSelect}
       selected={options.selected}
+      autoFocus={options.autoFocus}
+      focusBlocked={options.focusBlocked}
       native={options.native}
     />
   );
@@ -168,6 +172,127 @@ describe('TerminalPane selection', () => {
       renderer.update(pane('t3', { selected: true }));
     });
 
+    expect(focus).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+});
+
+describe('TerminalPane open keyboard with terminal', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(Keyboard, 'isVisible').mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  /** The renderer laid out: what the auto-focus waits for. */
+  const reportGrid = () =>
+    act(() => mockTerminalViewProps.current?.onGridSizeChange?.(80, 24, 8, 16));
+
+  it('waits for the renderer to lay out before opening the keyboard', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true });
+    const focus = spyOnInputFocus(renderer);
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 3));
+    expect(focus).not.toHaveBeenCalled();
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('opens the keyboard when shown with the setting on', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('leaves the keyboard closed with the setting off', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: false });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 2));
+    expect(focus).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('defaults to the persisted setting, off unless chosen', () => {
+    useSettingsStore.setState({ openKeyboardWithTerminal: false });
+    let renderer = renderPane('t1', { selected: true });
+    let focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+
+    useSettingsStore.setState({ openKeyboardWithTerminal: true });
+    renderer = renderPane('t1', { selected: true });
+    focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+    useSettingsStore.setState({ openKeyboardWithTerminal: false });
+  });
+
+  it('waits while an overlay is open, then opens once it closes', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true, focusBlocked: true });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 2));
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => {
+      renderer.update(pane('t1', { selected: true, autoFocus: true, focusBlocked: false }));
+    });
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('does not reopen after an overlay that did not switch terminals', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+
+    for (const focusBlocked of [true, false]) {
+      act(() => {
+        renderer.update(pane('t1', { selected: true, autoFocus: true, focusBlocked }));
+      });
+      act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    }
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('opens again for a newly shown terminal', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    act(() => {
+      renderer.update(pane('t2', { selected: true, autoFocus: true }));
+    });
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(2);
+    act(() => renderer.unmount());
+  });
+
+  it('does not follow the selection into a pane under an overlay', () => {
+    (Keyboard.isVisible as jest.Mock).mockReturnValue(true);
+    const renderer = renderPane('t3', { selected: false, focusBlocked: true, autoFocus: false });
+    const focus = spyOnInputFocus(renderer);
+    reportGrid();
+    act(() => {
+      renderer.update(pane('t3', { selected: true, focusBlocked: true, autoFocus: false }));
+    });
     expect(focus).not.toHaveBeenCalled();
     act(() => renderer.unmount());
   });
@@ -424,6 +549,54 @@ describe('TerminalPane renderer', () => {
     expect(onSelect).toHaveBeenCalledWith('t2');
     expect(focus).toHaveBeenCalled();
     act(() => renderer.unmount());
+  });
+
+  describe('reopening the keyboard after the system hid it', () => {
+    const realOS = Platform.OS;
+    afterEach(() => {
+      Platform.OS = realOS;
+      jest.restoreAllMocks();
+    });
+
+    /** A focused input with the keyboard down: Android after the Back key. */
+    function focusedWithoutKeyboard(os: 'android' | 'ios') {
+      Platform.OS = os;
+      useSettingsStore.setState({ renderer: 'native' });
+      jest.spyOn(Keyboard, 'isVisible').mockReturnValue(false);
+      const renderer = renderPane('t2');
+      const input = renderer.root.findByType(TextInput).instance;
+      jest.spyOn(input, 'isFocused').mockReturnValue(true);
+      const blur = jest.spyOn(input, 'blur').mockImplementation(() => {});
+      const focus = spyOnInputFocus(renderer);
+      blur.mockClear();
+      return { renderer, blur, focus };
+    }
+
+    it('blurs and refocuses on Android so a tap shows the keyboard again', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('android');
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).toHaveBeenCalledTimes(1);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(blur.mock.invocationCallOrder[0]).toBeLessThan(focus.mock.invocationCallOrder[0]);
+      act(() => renderer.unmount());
+    });
+
+    it('keeps the focus on iOS (a hardware keyboard has no soft keyboard)', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('ios');
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).not.toHaveBeenCalled();
+      expect(focus).toHaveBeenCalledTimes(1);
+      act(() => renderer.unmount());
+    });
+
+    it('does not blur while the keyboard is up', () => {
+      const { renderer, blur, focus } = focusedWithoutKeyboard('android');
+      jest.spyOn(Keyboard, 'isVisible').mockReturnValue(true);
+      fire(nativeProps().onTap, { col: 0, row: 0 });
+      expect(blur).not.toHaveBeenCalled();
+      expect(focus).toHaveBeenCalledTimes(1);
+      act(() => renderer.unmount());
+    });
   });
 
   it('persists a font size from a native pinch', () => {

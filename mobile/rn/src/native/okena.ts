@@ -180,6 +180,34 @@ export interface ProjectInfo {
   parentProjectId?: ProjectId;
   /** Worktree child ids, in the order the desktop sidebar lists them. */
   worktreeIds: ProjectId[];
+  /** Per-terminal AI agent status, for terminals currently reporting one. */
+  terminalAgentStatus: Record<TerminalId, AgentStatusInfo>;
+  /** Pinned in the desktop sidebar (top tier of the activity order). */
+  pinned: boolean;
+  /**
+   * Unix millis of the project's last meaningful activity (daemon-stamped on
+   * focus, a finished command and a bell); `undefined` = never.
+   */
+  lastActivityAt?: number;
+}
+
+/** AI agent status of one terminal — mirrors FFI `AgentStatusInfo`. */
+export interface AgentStatusInfo {
+  /** `working` | `blocked` | `done` | `idle`. */
+  lifecycle: string;
+  /** Free-form text the agent set. */
+  custom?: string;
+}
+
+/** Activity signals of one mirrored terminal — mirrors FFI `TerminalActivity`. */
+export interface TerminalActivity {
+  terminalId: TerminalId;
+  /** A BEL arrived in live output since the terminal was last marked seen. */
+  bellUnseen: boolean;
+  /** An OSC 9 / OSC 777 notification arrived since the terminal was last seen. */
+  notificationUnseen: boolean;
+  /** Milliseconds since the last live output; `undefined` when there was none. */
+  lastOutputMsAgo?: number;
 }
 
 /** Folder info — mirrors FFI `FolderInfo` (`api/state.rs`). */
@@ -347,6 +375,15 @@ export interface OkenaNative {
 
   /** The server's project ordering. */
   getProjectOrder(connId: ConnId): ProjectId[];
+
+  /**
+   * Activity signals of every terminal the connection mirrors (the client
+   * subscribes to all of them). Cheap: one call per state poll.
+   */
+  getTerminalActivity(connId: ConnId): TerminalActivity[];
+
+  /** The user viewed a terminal: clear its unseen bell / notification. */
+  markTerminalSeen(connId: ConnId, terminalId: TerminalId): void;
 
   /** The fullscreen terminal, if one is active. */
   getFullscreenTerminal(connId: ConnId): FullscreenInfo | undefined;
@@ -521,18 +558,45 @@ function toCursorState(c: {col: number; row: number; shape: number; visible: boo
   return {col: c.col, row: c.row, visible: c.visible, shape: CURSOR_SHAPES[c.shape] ?? 'block'};
 }
 
-// Generated records carry `terminalNames` as a JS `Map`; the app reads it as a
-// plain `Record`. Convert and pass everything else through. Bindings generated
-// before `worktree_ids` existed omit it, so default it to an empty list.
-function toProjectInfo(
-  p: Omit<ProjectInfo, 'worktreeIds'> & {terminalNames: unknown; worktreeIds?: ProjectId[]},
-): ProjectInfo {
-  const names = p.terminalNames;
+// Generated records carry `terminalNames` / `terminalAgentStatus` as JS `Map`s
+// and u64 fields as `bigint`; the app reads plain `Record`s and numbers.
+// Convert and pass everything else through. Bindings generated before a field
+// existed omit it, so default it.
+type GenProjectInfo = Omit<
+  ProjectInfo,
+  'worktreeIds' | 'terminalNames' | 'terminalAgentStatus' | 'pinned' | 'lastActivityAt'
+> & {
+  terminalNames: unknown;
+  worktreeIds?: ProjectId[];
+  terminalAgentStatus?: unknown;
+  pinned?: boolean;
+  lastActivityAt?: bigint | number;
+};
+
+function toRecord<V>(value: unknown): Record<string, V> {
+  if (value instanceof Map) return Object.fromEntries(value) as Record<string, V>;
+  return (value as Record<string, V> | undefined) ?? {};
+}
+
+function toProjectInfo(p: GenProjectInfo): ProjectInfo {
   return {
     ...p,
-    terminalNames:
-      names instanceof Map ? Object.fromEntries(names) : (names as Record<string, string>),
+    terminalNames: toRecord<string>(p.terminalNames),
     worktreeIds: p.worktreeIds ?? [],
+    terminalAgentStatus: toRecord<AgentStatusInfo>(p.terminalAgentStatus),
+    pinned: p.pinned ?? false,
+    lastActivityAt: p.lastActivityAt === undefined ? undefined : Number(p.lastActivityAt),
+  };
+}
+
+type GenTerminalActivity = Omit<TerminalActivity, 'lastOutputMsAgo'> & {
+  lastOutputMsAgo?: bigint | number;
+};
+
+function toTerminalActivity(a: GenTerminalActivity): TerminalActivity {
+  return {
+    ...a,
+    lastOutputMsAgo: a.lastOutputMsAgo === undefined ? undefined : Number(a.lastOutputMsAgo),
   };
 }
 
@@ -567,9 +631,15 @@ export function getOkenaNative(): OkenaNative {
       getCursor: (connId: ConnId, terminalId: TerminalId) =>
         toCursorState(gen.getCursor(connId, terminalId)),
       getProjects: (connId: ConnId) =>
-        (gen.getProjects(connId) as Array<Parameters<typeof toProjectInfo>[0]>).map(
-          toProjectInfo,
-        ),
+        (gen.getProjects(connId) as GenProjectInfo[]).map(toProjectInfo),
+      // Bindings generated before the activity fns existed: no signals.
+      getTerminalActivity: (connId: ConnId) =>
+        typeof gen.getTerminalActivity === 'function'
+          ? (gen.getTerminalActivity(connId) as GenTerminalActivity[]).map(toTerminalActivity)
+          : [],
+      markTerminalSeen: (connId: ConnId, terminalId: TerminalId) => {
+        if (typeof gen.markTerminalSeen === 'function') gen.markTerminalSeen(connId, terminalId);
+      },
       // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep
       // scrolling the local scrollback and keep the always-repaint loop.
       scrollWheel:

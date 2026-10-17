@@ -34,6 +34,11 @@ pub struct ProjectInfo {
     pub parent_project_id: Option<String>,
     /// Ids of this project's worktree children, in sidebar display order.
     pub worktree_ids: Vec<String>,
+    /// Pinned in the desktop sidebar (top tier of the activity order).
+    pub pinned: bool,
+    /// Unix millis of the project's last meaningful activity, stamped by the
+    /// daemon on focus, a finished command and a bell. `None` = never.
+    pub last_activity_at: Option<u64>,
 }
 
 /// FFI-friendly agent status.
@@ -148,6 +153,8 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                     .as_ref()
                     .map(|w| w.parent_project_id.clone()),
                 worktree_ids: p.worktree_ids.clone(),
+                pinned: p.pinned,
+                last_activity_at: p.last_activity_at,
             }
         })
         .collect()

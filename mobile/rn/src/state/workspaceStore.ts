@@ -8,7 +8,13 @@
  *   - project order (`getProjectOrder`),
  *   - the server's focused project (`getFocusedProjectId`),
  *   - the fullscreen terminal (`getFullscreenTerminal`),
- *   - the selected project's layout JSON (`getProjectLayoutJson`).
+ *   - the selected project's layout JSON (`getProjectLayoutJson`),
+ *   - per-terminal activity (`getTerminalActivity`), folded into per-project
+ *     {@link ProjectSignals} for the activity-ordered project list.
+ *
+ * The terminal on screen counts as seen: each poll (and each selection)
+ * clears its unseen bell / notification and acknowledges a `done` agent. Its
+ * output does not make its project "running".
  *
  * It auto-selects the focused project when nothing is selected, and auto-selects
  * a terminal within the selected project (newly-added one, or the remembered /
@@ -29,6 +35,7 @@
  * {@link configureWorkspaceStore}, same philosophy as the connection store.
  */
 
+import { AppState } from 'react-native';
 import { create, type StoreApi, type UseBoundStore } from 'zustand';
 
 import type {
@@ -46,6 +53,12 @@ import {
   resolveRestore,
   type SelectionMemory,
 } from '../models/terminalSelection';
+import {
+  computeProjectSignals,
+  signalsEqual,
+  type ProjectSignals,
+} from '../models/activityOrder';
+import type { TerminalActivity } from '../native/okena';
 
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
@@ -63,11 +76,19 @@ export type WorkspaceNative = Pick<
   | 'getFullscreenTerminal'
   | 'getProjectLayoutJson'
   | 'secondsSinceActivity'
+  | 'getTerminalActivity'
+  | 'markTerminalSeen'
+  | 'focusTerminal'
 >;
 
 /** Dependencies the store calls out to. Overridable for tests. */
 export interface WorkspaceDeps {
   native: WorkspaceNative;
+  /**
+   * Whether the app is in the foreground. The terminal on screen only counts
+   * as seen while it is.
+   */
+  isForeground: () => boolean;
 }
 
 /**
@@ -98,6 +119,10 @@ export interface WorkspaceState {
   secondsSinceActivity: number;
   /** The terminal last selected in each project, for switching back to a project. */
   terminalByProject: Record<ProjectId, TerminalId>;
+  /** Live activity signals per project (drawer / switcher order and dots). */
+  projectSignals: Record<ProjectId, ProjectSignals>;
+  /** The project shown before the current one (switcher: one tap back). */
+  previousProjectId: ProjectId | null;
   /**
    * Set when a restore named a project the server no longer has. The screen
    * shows the project list and clears it via {@link clearRestoreProjectMissing}.
@@ -139,7 +164,10 @@ let resolvedDeps: WorkspaceDeps | null = null;
 
 function deps(): WorkspaceDeps {
   if (!resolvedDeps) {
-    resolvedDeps = { native: injectedDeps.native ?? getOkenaNative() };
+    resolvedDeps = {
+      native: injectedDeps.native ?? getOkenaNative(),
+      isForeground: injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+    };
   }
   return resolvedDeps;
 }
@@ -161,6 +189,14 @@ let activeConnId: ConnId | null = null;
 let previousTerminalIds: Set<TerminalId> | null = null;
 /** Selection to reopen once the first non-empty project list arrives. */
 let pendingRestore: SelectionMemory | null = null;
+/** Latest per-terminal activity, reused when a selection re-derives signals. */
+let lastActivity: TerminalActivity[] = [];
+/**
+ * Terminals whose current `done` agent status was seen on the phone. An entry
+ * is dropped as soon as the terminal leaves `done`, so the next transition to
+ * `done` is unseen again: the key is effectively terminal + transition.
+ */
+const doneSeen = new Set<TerminalId>();
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -170,6 +206,8 @@ function stopPolling(): void {
   activeConnId = null;
   previousTerminalIds = null;
   pendingRestore = null;
+  lastActivity = [];
+  doneSeen.clear();
 }
 
 /** `map` with `projectId → terminalId` set; the same object when unchanged. */
@@ -206,8 +244,65 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
       }
     }
     if (pa.folderColor !== pb.folderColor) return false;
+    if (pa.pinned !== pb.pinned || pa.lastActivityAt !== pb.lastActivityAt) return false;
+    if (!agentStatusEquals(pa.terminalAgentStatus, pb.terminalAgentStatus)) return false;
   }
   return true;
+}
+
+function agentStatusEquals(
+  a: ProjectInfo['terminalAgentStatus'],
+  b: ProjectInfo['terminalAgentStatus'],
+): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) {
+    const sa = a[k]!;
+    const sb = b[k];
+    if (!sb || sa.lifecycle !== sb.lifecycle || sa.custom !== sb.custom) return false;
+  }
+  return true;
+}
+
+/**
+ * Mark the terminal on screen seen (bell / notification cleared in the
+ * mirror, a `done` agent acknowledged), forget acknowledgements of terminals
+ * that left `done`, and derive per-project signals from `lastActivity`.
+ */
+function deriveSignals(
+  projects: ProjectInfo[],
+  shownTerminalId: TerminalId | null,
+  connId: ConnId,
+): Record<ProjectId, ProjectSignals> {
+  const native = deps().native;
+  const lifecycle = new Map<TerminalId, string>();
+  for (const p of projects) {
+    for (const [tid, status] of Object.entries(p.terminalAgentStatus)) {
+      lifecycle.set(tid, status.lifecycle);
+    }
+  }
+  for (const tid of [...doneSeen]) if (lifecycle.get(tid) !== 'done') doneSeen.delete(tid);
+
+  if (shownTerminalId !== null && deps().isForeground()) {
+    if (lifecycle.get(shownTerminalId) === 'done') doneSeen.add(shownTerminalId);
+    const i = lastActivity.findIndex((a) => a.terminalId === shownTerminalId);
+    const shown = i >= 0 ? lastActivity[i]! : undefined;
+    if (shown && (shown.bellUnseen || shown.notificationUnseen)) {
+      native.markTerminalSeen(connId, shownTerminalId);
+      lastActivity = [...lastActivity];
+      lastActivity[i] = { ...shown, bellUnseen: false, notificationUnseen: false };
+    }
+  }
+  // Output of the terminal on screen is not "running": the user watches it,
+  // and most of it is their own typing echo or the redraw after the phone
+  // resized the PTY on open.
+  const activity =
+    shownTerminalId === null
+      ? lastActivity
+      : lastActivity.map((a) =>
+          a.terminalId === shownTerminalId ? { ...a, lastOutputMsAgo: undefined } : a,
+        );
+  return computeProjectSignals(projects, activity, doneSeen);
 }
 
 /** Folder lists equal by id, name, color and member order (drives drawer ordering). */
@@ -340,6 +435,14 @@ function pollState(
     changed = true;
   }
 
+  // Activity signals. The shown terminal is the validated selection above.
+  lastActivity = native.getTerminalActivity(connId);
+  const signals = deriveSignals(projects, project ? selectedTerminalId : null, connId);
+  if (!signalsEqual(signals, prev.projectSignals)) {
+    patch.projectSignals = signals;
+    changed = true;
+  }
+
   // Connection health (drives the staleness indicator's 3s / 10s thresholds).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
@@ -357,6 +460,17 @@ function pollState(
     // threshold crossed (cheap, avoids a stale value).
     set({ secondsSinceActivity: newActivity });
   }
+}
+
+/** `projectSignals` patch after showing `terminalId` (empty when unchanged). */
+function signalsPatch(
+  get: StoreApi<WorkspaceState>['getState'],
+  projects: ProjectInfo[],
+  terminalId: TerminalId | null,
+  connId: ConnId,
+): Partial<WorkspaceState> {
+  const signals = deriveSignals(projects, terminalId, connId);
+  return signalsEqual(signals, get().projectSignals) ? {} : { projectSignals: signals };
 }
 
 /**
@@ -381,6 +495,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     selectedTerminalId: null,
     secondsSinceActivity: 0,
     terminalByProject: {},
+    projectSignals: {},
+    previousProjectId: null,
     restoreProjectMissing: false,
 
     start(connId, restore) {
@@ -406,36 +522,56 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         selectedProjectId: null,
         selectedTerminalId: null,
         terminalByProject: {},
+        projectSignals: {},
+        previousProjectId: null,
         restoreProjectMissing: false,
       });
     },
 
     selectProject(projectId) {
       previousTerminalIds = null;
-      const { projects, terminalByProject } = get();
+      const { projects, terminalByProject, selectedProjectId } = get();
       const project = projects.find((p) => p.id === projectId);
+      // Reopen the terminal last used in this project (else its first); the
+      // next poll re-validates it against the live terminal list.
+      const terminalId = project
+        ? pickTerminal(project.terminalIds, [terminalByProject[projectId]])
+        : null;
+      const connId = activeConnId;
       set({
         selectedProjectId: projectId,
-        // Reopen the terminal last used in this project (else its first); the
-        // next poll re-validates it against the live terminal list.
-        selectedTerminalId: project
-          ? pickTerminal(project.terminalIds, [terminalByProject[projectId]])
-          : null,
+        selectedTerminalId: terminalId,
+        previousProjectId:
+          selectedProjectId !== null && selectedProjectId !== projectId
+            ? selectedProjectId
+            : get().previousProjectId,
         // Swap the layout with the project so the old tree isn't shown until
         // the next poll.
-        projectLayoutJson: activeConnId
-          ? (deps().native.getProjectLayoutJson(activeConnId, projectId) ?? null)
+        projectLayoutJson: connId
+          ? (deps().native.getProjectLayoutJson(connId, projectId) ?? null)
           : null,
+        ...(connId ? signalsPatch(get, projects, terminalId, connId) : {}),
       });
+      // Opening a project is activity: the daemon stamps `lastActivityAt`
+      // (`RecordProjectActivity`), which the activity order sorts by.
+      if (connId && terminalId !== null && selectedProjectId !== projectId) {
+        deps()
+          .native.focusTerminal(connId, projectId, terminalId)
+          .catch(() => {
+            // Ordering only; not worth surfacing.
+          });
+      }
     },
 
     selectTerminal(terminalId) {
       const project = get().getSelectedProject();
+      const connId = activeConnId;
       set({
         selectedTerminalId: terminalId,
         terminalByProject: project
           ? rememberTerminal(get().terminalByProject, project.id, terminalId)
           : get().terminalByProject,
+        ...(connId ? signalsPatch(get, get().projects, terminalId, connId) : {}),
       });
     },
 

@@ -8,7 +8,9 @@
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
  *     to switch between them.
- *   - the terminal area: ONE {@link TerminalPane}, full size. The desktop split
+ *   - the terminal area: ONE {@link TerminalPane}, full size. With the "Open
+ *     keyboard with terminal" setting it focuses itself when shown, but never
+ *     while the drawer, the switcher or the actions sheet is open. The desktop split
  *     layout is not reproduced on the phone (it made every pane too small); the
  *     server layout is left untouched. No fullscreen toggle either: with one
  *     pane on screen it would only change the desktop's fullscreen state.
@@ -16,6 +18,12 @@
  *   - the {@link KeyToolbar} pinned above the soft keyboard (rendered inside a
  *     `KeyboardAvoidingView` so it sits on top of the keyboard).
  *   - the slide-in {@link ProjectDrawer}.
+ *   - the project switcher (tap the project name). In the Activity order the
+ *     current project comes first and the previously viewed one right under
+ *     it, so two projects toggle with one tap; the rest follow in activity
+ *     order with tier headers, frozen while the switcher is open. A search
+ *     narrows to matching projects in activity order. The Manual order keeps
+ *     the desktop's manual list with folders.
  *
  * Fonts are loaded here with Skia's `useFont` (see README) and threaded down to
  * every terminal pane; the layout area guards on fonts being loaded.
@@ -48,8 +56,14 @@ import {
   parseLayout,
   pickTerminal,
   projectDisplayName,
+  projectMatches,
+  switcherRows as splitSwitcherRows,
+  type ActivityTier,
+  type ProjectSignals,
 } from '../models';
-import { getOkenaNative, type OkenaNative } from '../native/okena';
+import { useSettingsStore } from '../state/settingsStore';
+import { ActivityDot, TierHeader, useActivityRows } from '../components/projectActivity';
+import { getOkenaNative, type OkenaNative, type ProjectInfo } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalTabs } from '../components/TerminalTabs';
 import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPane';
@@ -106,6 +120,9 @@ export const WorkspaceScreen: React.FC = () => {
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
   const restoreProjectMissing = useWorkspaceStore((s) => s.restoreProjectMissing);
   const clearRestoreProjectMissing = useWorkspaceStore((s) => s.clearRestoreProjectMissing);
+  const previousProjectId = useWorkspaceStore((s) => s.previousProjectId);
+  const signals = useWorkspaceStore((s) => s.projectSignals);
+  const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
     if (selectedProjectId === null) return projects[0] ?? null;
@@ -131,10 +148,35 @@ export const WorkspaceScreen: React.FC = () => {
     () => buildProjectList(projects, folders, projectOrder),
     [projects, folders, projectOrder],
   );
-  const switcherRows = useMemo(
+  const manualRows = useMemo(
     () => flattenProjectList(filterProjectList(projectList, switcherQuery)),
     [projectList, switcherQuery],
   );
+  const activityRows = useActivityRows(switcherOpen);
+  // Activity order as switcher rows: `tier` set on a row that starts a tier
+  // section (none for the current / previous rows on top, or while searching).
+  const activitySwitcherRows = useMemo(() => {
+    const needle = switcherQuery.trim().toLowerCase();
+    if (needle.length > 0) {
+      return activityRows
+        .filter((r) => projectMatches(r.project, needle))
+        .map((r) => ({ project: r.project, tier: undefined as ActivityTier | undefined }));
+    }
+    const { top, rest } = splitSwitcherRows(
+      activityRows,
+      project?.id ?? null,
+      previousProjectId,
+    );
+    return [
+      ...top.map((r) => ({ project: r.project, tier: undefined as ActivityTier | undefined })),
+      ...rest.map((r, i) => ({
+        project: r.project,
+        tier: i === 0 || rest[i - 1]!.tier !== r.tier ? r.tier : undefined,
+      })),
+    ];
+  }, [activityRows, switcherQuery, project?.id, previousProjectId]);
+  const isActivity = sortMode === 'activity';
+  const switcherCount = isActivity ? activitySwitcherRows.length : manualRows.length;
   const closeSwitcher = () => {
     setSwitcherOpen(false);
     setSwitcherQuery('');
@@ -213,6 +255,7 @@ export const WorkspaceScreen: React.FC = () => {
         modifiers={modifiers}
         onSelect={selectTerminal}
         selected
+        focusBlocked={drawerOpen || switcherOpen || actionsOpen}
         native={native}
       />
     );
@@ -312,42 +355,54 @@ export const WorkspaceScreen: React.FC = () => {
               keyboardDismissMode="on-drag"
               automaticallyAdjustKeyboardInsets
             >
-              {switcherRows.length === 0 ? (
+              {switcherCount === 0 ? (
                 <Text style={[styles.menuItem, styles.dim]}>No matching projects</Text>
               ) : null}
-              {switcherRows.map((row) => {
-                if (row.kind === 'folder') {
-                  return (
-                    <Text key={`folder-${row.folder.id}`} style={styles.menuFolder} numberOfLines={1}>
-                      {row.folder.name}
-                    </Text>
-                  );
-                }
-                const { project: p, depth } = row;
-                const isSel = p.id === project?.id;
-                return (
-                  <Pressable
-                    key={p.id}
-                    style={[styles.menuItem, { paddingLeft: 16 + depth * 12 }]}
-                    onPress={() => {
-                      selectProject(p.id);
-                      closeSwitcher();
-                    }}
-                  >
-                    <Text style={[styles.menuItemText, isSel && styles.menuItemSelected]} numberOfLines={1}>
-                      {projectDisplayName(p)}
-                    </Text>
-                    {p.gitBranch && !p.parentProjectId ? (
-                      <View style={styles.menuBranchRow}>
-                        <Icon name="gitBranch" size={11} color={OkenaColors.textTertiary} />
-                        <Text style={styles.menuBranch} numberOfLines={1}>
-                          {p.gitBranch}
+              {isActivity
+                ? activitySwitcherRows.map(({ project: p, tier }) => (
+                    <React.Fragment key={p.id}>
+                      {tier ? <TierHeader tier={tier} style={styles.menuTier} /> : null}
+                      <SwitcherRow
+                        project={p}
+                        depth={0}
+                        selected={p.id === project?.id}
+                        previous={p.id === previousProjectId && p.id !== project?.id}
+                        signals={signals[p.id]}
+                        onPress={() => {
+                          selectProject(p.id);
+                          closeSwitcher();
+                        }}
+                      />
+                    </React.Fragment>
+                  ))
+                : manualRows.map((row) => {
+                    if (row.kind === 'folder') {
+                      return (
+                        <Text
+                          key={`folder-${row.folder.id}`}
+                          style={styles.menuFolder}
+                          numberOfLines={1}
+                        >
+                          {row.folder.name}
                         </Text>
-                      </View>
-                    ) : null}
-                  </Pressable>
-                );
-              })}
+                      );
+                    }
+                    const { project: p, depth } = row;
+                    return (
+                      <SwitcherRow
+                        key={p.id}
+                        project={p}
+                        depth={depth}
+                        selected={p.id === project?.id}
+                        previous={false}
+                        signals={signals[p.id]}
+                        onPress={() => {
+                          selectProject(p.id);
+                          closeSwitcher();
+                        }}
+                      />
+                    );
+                  })}
             </ScrollView>
           </Pressable>
         </Pressable>
@@ -392,6 +447,37 @@ export const WorkspaceScreen: React.FC = () => {
     </View>
   );
 };
+
+const SwitcherRow: React.FC<{
+  project: ProjectInfo;
+  depth: number;
+  selected: boolean;
+  /** The previously viewed project (one tap back). */
+  previous: boolean;
+  signals?: ProjectSignals;
+  onPress: () => void;
+}> = ({ project: p, depth, selected, previous, signals, onPress }) => (
+  <Pressable style={[styles.menuItem, styles.menuRow, { paddingLeft: 16 + depth * 12 }]} onPress={onPress}>
+    <View style={styles.flexShrink}>
+      <Text style={[styles.menuItemText, selected && styles.menuItemSelected]} numberOfLines={1}>
+        {projectDisplayName(p)}
+      </Text>
+      {p.gitBranch && !p.parentProjectId ? (
+        <View style={styles.menuBranchRow}>
+          <Icon name="gitBranch" size={11} color={OkenaColors.textTertiary} />
+          <Text style={styles.menuBranch} numberOfLines={1}>
+            {p.gitBranch}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+    <View style={styles.flexSpacer} />
+    {selected || previous ? (
+      <Text style={styles.menuTag}>{selected ? 'current' : 'previous'}</Text>
+    ) : null}
+    <ActivityDot signals={signals} />
+  </Pressable>
+);
 
 const Centered: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <View style={styles.centered}>{children}</View>
@@ -461,6 +547,10 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   menuItemText: { color: OkenaColors.textPrimary, fontSize: 14 },
+  menuRow: { flexDirection: 'row', alignItems: 'center' },
+  menuTier: { paddingTop: 10, paddingBottom: 2 },
+  menuTag: { color: OkenaColors.textTertiary, fontSize: 11, marginLeft: 8 },
+  flexShrink: { flexShrink: 1 },
   menuItemSelected: { color: OkenaColors.accent, fontWeight: '700' },
   menuBranchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
   menuBranch: { color: OkenaColors.textTertiary, fontSize: 11, marginLeft: 4, flexShrink: 1 },

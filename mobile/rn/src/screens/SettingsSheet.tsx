@@ -9,6 +9,12 @@
  * Changes apply immediately to every open pane (they re-measure and resize
  * the remote PTY).
  *
+ * Open keyboard with terminal: whether showing a terminal focuses its input
+ * (off by default; a tap always opens the keyboard).
+ *
+ * Projects: the project order of the drawer and the switcher (Activity, the
+ * default, or Manual).
+ *
  * Advanced: the terminal renderer toggle (native view, the default, or the
  * Skia fallback) for the native renderer rollout.
  */
@@ -32,6 +38,7 @@ import {
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
   useSettingsStore,
+  type ProjectSortMode,
 } from '../state/settingsStore';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 
@@ -59,6 +66,10 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
   const reset = useSettingsStore((s) => s.resetTerminalFontSize);
   const renderer = useSettingsStore((s) => s.renderer);
   const setRenderer = useSettingsStore((s) => s.setRenderer);
+  const openKeyboard = useSettingsStore((s) => s.openKeyboardWithTerminal);
+  const setOpenKeyboard = useSettingsStore((s) => s.setOpenKeyboardWithTerminal);
+  const sortMode = useSettingsStore((s) => s.projectSortMode);
+  const setSortMode = useSettingsStore((s) => s.setProjectSortMode);
 
   const columns = Math.floor(width / (fontSize * MONO_ADVANCE_EM));
   const pageSheet = Platform.OS === 'ios';
@@ -151,6 +162,60 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
             {`Range ${MIN_FONT_SIZE} to ${MAX_FONT_SIZE} pt. Applies to every terminal; the remote terminal is resized to fit.`}
           </Text>
 
+          <View style={[styles.group, styles.groupSpacing]}>
+            <View style={[styles.row, styles.rowLast]}>
+              <View style={styles.rowText}>
+                <Text style={styles.rowTitle}>Open keyboard with terminal</Text>
+                <Text style={styles.rowValue}>{openKeyboard ? 'On' : 'Off'}</Text>
+              </View>
+              <Switch
+                value={openKeyboard}
+                onValueChange={setOpenKeyboard}
+                trackColor={{ true: OkenaColors.accent, false: OkenaColors.surfaceOverlay }}
+                accessibilityLabel="Open keyboard with terminal"
+              />
+            </View>
+          </View>
+          <Text style={styles.footnote}>
+            {openKeyboard
+              ? 'The keyboard opens whenever a terminal is shown: on launch, after switching project or terminal.'
+              : 'The keyboard stays closed until you tap the terminal.'}
+          </Text>
+
+          <Text style={[styles.sectionLabel, styles.sectionSpacing]}>PROJECTS</Text>
+          <View style={styles.group}>
+            <View style={[styles.row, styles.rowLast]}>
+              <View style={styles.rowText}>
+                <Text style={styles.rowTitle}>Project order</Text>
+              </View>
+              <View style={styles.segmented} accessibilityRole="radiogroup">
+                {SORT_MODES.map(({ mode, label }, i) => {
+                  const active = mode === sortMode;
+                  return (
+                    <React.Fragment key={mode}>
+                      {i > 0 ? <View style={styles.stepperDivider} /> : null}
+                      <Pressable
+                        style={[styles.segment, active && styles.segmentActive]}
+                        onPress={() => setSortMode(mode)}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: active }}
+                      >
+                        <Text style={[styles.segmentLabel, active && styles.segmentLabelActive]}>
+                          {label}
+                        </Text>
+                      </Pressable>
+                    </React.Fragment>
+                  );
+                })}
+              </View>
+            </View>
+          </View>
+          <Text style={styles.footnote}>
+            {sortMode === 'activity'
+              ? 'Pinned first, then projects that need attention, running ones and the rest by recent activity, like the desktop sidebar. Applies to the drawer and the project switcher.'
+              : "The desktop sidebar's manual order, with folders."}
+          </Text>
+
           <Text style={[styles.sectionLabel, styles.sectionSpacing]}>ADVANCED</Text>
           <View style={styles.group}>
             <View style={[styles.row, styles.rowLast]}>
@@ -177,6 +242,11 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
     </Modal>
   );
 };
+
+const SORT_MODES: ReadonlyArray<{ mode: ProjectSortMode; label: string }> = [
+  { mode: 'activity', label: 'Activity' },
+  { mode: 'manual', label: 'Manual' },
+];
 
 const StepButton: React.FC<{
   label: string;
@@ -229,6 +299,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sectionSpacing: { marginTop: 28 },
+  groupSpacing: { marginTop: 16 },
   group: {
     marginHorizontal: 16,
     borderRadius: 12,
@@ -256,6 +327,19 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   stepperDivider: { width: StyleSheet.hairlineWidth, height: 22, backgroundColor: OkenaColors.borderLight },
+  segmented: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 9,
+    backgroundColor: OkenaColors.surfaceOverlay,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+    overflow: 'hidden',
+  },
+  segment: { paddingHorizontal: 14, height: 36, alignItems: 'center', justifyContent: 'center' },
+  segmentActive: { backgroundColor: OkenaColors.accentSoft },
+  segmentLabel: { color: OkenaColors.textSecondary, fontSize: 14, fontWeight: '600' },
+  segmentLabelActive: { color: OkenaColors.accent },
   stepButton: { width: 52, height: 40, alignItems: 'center', justifyContent: 'center' },
   stepPressed: { backgroundColor: OkenaColors.keyBgPressed },
   stepLabel: { color: OkenaColors.textPrimary, fontWeight: '600' },

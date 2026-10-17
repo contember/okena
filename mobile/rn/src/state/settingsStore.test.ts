@@ -4,6 +4,7 @@ import { createMemoryPersistence, type Persistence } from './persistence';
 import {
   configureSettingsStore,
   DEFAULT_FONT_SIZE,
+  DEFAULT_PROJECT_SORT_MODE,
   DEFAULT_RENDERER,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
@@ -19,6 +20,8 @@ function setup(initial: Record<string, string> = {}): Persistence {
   useSettingsStore.setState({
     terminalFontSize: DEFAULT_FONT_SIZE,
     renderer: DEFAULT_RENDERER,
+    projectSortMode: DEFAULT_PROJECT_SORT_MODE,
+    openKeyboardWithTerminal: false,
     loaded: false,
   });
   return persistence;
@@ -81,6 +84,8 @@ describe('settings store', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 12,
       renderer: 'native',
+      projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
   });
 
@@ -106,6 +111,8 @@ describe('settings store', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: DEFAULT_FONT_SIZE,
       renderer: 'native',
+      projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
   });
 });
@@ -143,6 +150,8 @@ describe('renderer setting', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 12,
       renderer: 'skia',
+      projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
     useSettingsStore.setState({ renderer: DEFAULT_RENDERER, loaded: false });
     await useSettingsStore.getState().load();
@@ -158,6 +167,73 @@ describe('renderer setting', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 14,
       renderer: 'skia',
+      projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
+  });
+});
+
+describe('project sort mode setting', () => {
+  it('defaults to activity', async () => {
+    setup();
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe('activity');
+  });
+
+  it('persists and reloads manual, keeping the renderer migration intact', async () => {
+    const persistence = setup();
+    useSettingsStore.getState().setProjectSortMode('manual');
+    expect(await persisted(persistence)).toEqual({
+      version: SETTINGS_VERSION,
+      terminalFontSize: DEFAULT_FONT_SIZE,
+      renderer: 'native',
+      projectSortMode: 'manual',
+      openKeyboardWithTerminal: false,
+    });
+    useSettingsStore.setState({ projectSortMode: DEFAULT_PROJECT_SORT_MODE, loaded: false });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe('manual');
+  });
+
+  it('ignores unknown values and loads version 1 objects without one', async () => {
+    setup({ [SETTINGS_KEY]: JSON.stringify({ version: 2, projectSortMode: 'alpha' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe(DEFAULT_PROJECT_SORT_MODE);
+
+    setup({ [SETTINGS_KEY]: JSON.stringify({ terminalFontSize: 12, renderer: 'skia' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState()).toMatchObject({
+      terminalFontSize: 12,
+      renderer: 'native',
+      projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
+    });
+  });
+});
+
+describe('open keyboard with terminal setting', () => {
+  it('defaults to off, today\'s behaviour, also for older settings objects', async () => {
+    setup({ [SETTINGS_KEY]: JSON.stringify({ terminalFontSize: 12, renderer: 'skia' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState()).toMatchObject({
+      openKeyboardWithTerminal: false,
+      renderer: 'native',
+    });
+  });
+
+  it('persists and reloads on, ignoring non-boolean values', async () => {
+    const persistence = setup();
+    useSettingsStore.getState().setOpenKeyboardWithTerminal(true);
+    expect(await persisted(persistence)).toMatchObject({
+      version: SETTINGS_VERSION,
+      openKeyboardWithTerminal: true,
+    });
+    useSettingsStore.setState({ openKeyboardWithTerminal: false, loaded: false });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().openKeyboardWithTerminal).toBe(true);
+
+    setup({ [SETTINGS_KEY]: JSON.stringify({ version: 2, openKeyboardWithTerminal: 'yes' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().openKeyboardWithTerminal).toBe(false);
   });
 });

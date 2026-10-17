@@ -4,11 +4,15 @@ package com.okena.terminalview
  * The view's scroll position in the line-addressing model of `okena_render.h`.
  *
  * [top] is the absolute line at the view's top edge, fractional for sub-line pixel scrolling.
- * The readable range is `[minTop, maxTop]` with `minTop = first_line` and
- * `maxTop = screen_top_line` (the live tail: the screen's top row at the view's top edge), or
- * lower when the grid has more rows than the view.
+ * The readable range is `[minTop, maxTop]` with `minTop = first_line` and `maxTop` the top
+ * edge that shows the grid's bottom row (`screen_top_line` when the grid fits the view).
  *
- *   - At the live tail ([follow]) the view tracks `screen_top_line` as output streams.
+ *   - At the live tail ([follow]) the view sits at [liveTop] and tracks it as output streams.
+ *     [liveTop] equals `maxTop` unless the grid has more rows than the view (another client
+ *     owns the PTY size, so ours was denied; or the soft keyboard just shrank the view). Then
+ *     the live tail is the window that shows the cursor, preferring the screen's top: a short
+ *     shell prompt sits at the top of a tall, mostly blank grid, and showing the grid's bottom
+ *     rows would show nothing. The rows below stay reachable by scrolling down to `maxTop`.
  *   - Scrolled up, [top] stays on the same absolute line, so the text does not move while
  *     history grows; it is clamped when the oldest lines are dropped (first_line grows).
  *   - When `reflow_epoch` changes (any resize) the distance from the bottom is kept, because
@@ -22,6 +26,9 @@ internal class ScrollModel {
   var minTop = 0L
     private set
   var maxTop = 0L
+    private set
+  /** The live tail's top edge, in `[minTop, maxTop]`. */
+  var liveTop = 0L
     private set
   private var epoch = 0
   private var known = false
@@ -37,22 +44,37 @@ internal class ScrollModel {
 
   /**
    * Apply the bounds of a new frame. Returns true when [top] changed. [viewRows] is how many
-   * rows the view shows: when the grid is taller than the view (the server kept a larger PTY
-   * size), the live tail shows the bottom of the grid, where the cursor usually is.
+   * rows the view shows and [cursorLine] the cursor's absolute line: when the grid is taller
+   * than the view, the live tail is the window that shows the cursor (see the class doc).
    */
-  fun update(firstLine: Long, screenTopLine: Long, screenLines: Int, viewRows: Int, reflowEpoch: Int): Boolean {
-    val tail = screenTopLine + maxOf(0, screenLines - viewRows)
+  fun update(
+    firstLine: Long,
+    screenTopLine: Long,
+    screenLines: Int,
+    viewRows: Int,
+    reflowEpoch: Int,
+    cursorLine: Long,
+  ): Boolean {
+    val extra = maxOf(0, screenLines - viewRows)
+    val bottom = screenTopLine + extra
+    val cursorRow = (cursorLine - screenTopLine).coerceIn(0L, maxOf(0, screenLines - 1).toLong())
+    val live = screenTopLine + (cursorRow - viewRows + 1).coerceIn(0L, extra.toLong())
     val before = top
+    val liveMoved = live != liveTop
     if (!known) {
       known = true
       follow = true
     } else if (reflowEpoch != epoch && !follow) {
-      top = tail - (maxTop - top)
+      top = bottom - (maxTop - top)
     }
+    val reflowed = reflowEpoch != epoch
     epoch = reflowEpoch
-    minTop = minOf(firstLine, tail)
-    maxTop = tail
-    if (follow) top = maxTop.toDouble()
+    minTop = minOf(firstLine, live)
+    maxTop = bottom
+    liveTop = live
+    // Following, the view sits on the live tail; it may also rest below it (between the tail
+    // and the grid's bottom) until the tail moves or the grid reflows.
+    if (follow && (liveMoved || reflowed || top < live)) top = live.toDouble()
     clamp()
     return top != before
   }
@@ -73,18 +95,16 @@ internal class ScrollModel {
     clamp()
   }
 
+  /** Back to the live tail (after input: show the cursor). */
   fun toBottom() {
     follow = true
-    top = maxTop.toDouble()
+    top = liveTop.toDouble()
   }
 
+  /** Keep [top] in range; at or below the live tail the view follows. */
   private fun clamp() {
+    if (top > maxTop) top = maxTop.toDouble()
     if (top < minTop) top = minTop.toDouble()
-    if (top >= maxTop) {
-      top = maxTop.toDouble()
-      follow = true
-    } else {
-      follow = false
-    }
+    follow = top >= liveTop
   }
 }

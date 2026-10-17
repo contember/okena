@@ -409,7 +409,7 @@ class TerminalRendererView(context: Context) : View(context) {
     }
     if (!present) return
     if ((frame.screenLines != sentRows || frame.cols != sentCols) && sentCols > 0) scheduleReassert()
-    model.update(frame.firstLine, frame.screenTopLine, frame.screenLines, rows, frame.reflowEpoch)
+    model.update(frame.firstLine, frame.screenTopLine, frame.screenLines, rows, frame.reflowEpoch, frame.cursorLine)
     val wanted = floor(model.top).toLong()
     if (wanted != top) {
       top = wanted

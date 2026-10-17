@@ -8,10 +8,13 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::{Parser, Perform};
 use okena_core::theme::ThemeColors;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
 
 /// Source of render generations. Global, so a holder that replaces another
 /// under the same id never repeats a value a view has already seen.
@@ -27,19 +30,78 @@ pub const GENERATION_DEAD: u64 = 1 << 63;
 /// (capped at the limit by alacritty) can never saturate within one step.
 const MAX_OUTPUT_STEP: usize = 4096;
 
-/// No-op event listener for mobile.
+/// Event listener for the mobile mirror `Term`.
 ///
-/// On mobile, the server's Term already handles PtyWrite responses (cursor reports, DA, etc.).
-/// Forwarding them from mobile Term would cause duplicates.
-pub(crate) struct NoopEventListener;
+/// Only `Bell` is captured (into the shared unseen-bell flag). Everything else
+/// is dropped: on mobile, the server's Term already handles PtyWrite responses
+/// (cursor reports, DA, etc.), and forwarding them from the mobile Term would
+/// cause duplicates.
+pub(crate) struct MobileEventListener {
+    bell: Arc<AtomicBool>,
+}
 
-impl EventListener for NoopEventListener {
-    fn send_event(&self, _event: TermEvent) {}
+impl EventListener for MobileEventListener {
+    fn send_event(&self, event: TermEvent) {
+        if let TermEvent::Bell = event {
+            self.bell.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Process-wide monotonic origin for [`TerminalHolder`] output timestamps.
+fn monotonic_ms() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    // +1 so a stamp is never 0, which means "no live output yet".
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Activity signals of one mirrored terminal, read by the project list's
+/// activity ordering. "Unseen" flags stay set until the user views the
+/// terminal (`TerminalHolder::mark_seen`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalActivity {
+    /// A BEL arrived in live output since the terminal was last seen.
+    pub bell_unseen: bool,
+    /// An `OSC 9` / `OSC 777 ; notify` desktop notification arrived in live
+    /// output since the terminal was last seen.
+    pub notification_unseen: bool,
+    /// Milliseconds since the last live output, `None` when there was none.
+    /// Snapshots (replayed state on (re)subscribe) do not count.
+    pub last_output_ms_ago: Option<u64>,
+}
+
+/// Spots desktop-notification OSCs in the raw byte stream, mirroring the
+/// desktop's `OscSidecar` (`okena-terminal`): `OSC 9 ; <message>` (except the
+/// `OSC 9 ; 4` progress subtype) and `OSC 777 ; notify ; ...`. alacritty
+/// ignores both, so a second, minimal parser runs next to it.
+#[derive(Default)]
+struct NotificationScanner {
+    seen: bool,
+}
+
+impl Perform for NotificationScanner {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.len() < 2 {
+            return;
+        }
+        match params[0] {
+            b"9" => {
+                if params[1] == b"4" {
+                    return;
+                }
+                if params[1..].iter().any(|p| !p.trim_ascii().is_empty()) {
+                    self.seen = true;
+                }
+            }
+            b"777" if params[1] == b"notify" => self.seen = true,
+            _ => {}
+        }
+    }
 }
 
 /// Wraps `alacritty_terminal::Term` for processing PTY output on mobile.
 pub struct TerminalHolder {
-    term: Mutex<Term<NoopEventListener>>,
+    term: Mutex<Term<MobileEventListener>>,
     processor: Mutex<Processor>,
     dirty: AtomicBool,
     cols: Mutex<u16>,
@@ -51,6 +113,15 @@ pub struct TerminalHolder {
     track: RenderTrack,
     /// Bytes per parser step, see [`MAX_OUTPUT_STEP`].
     output_step: usize,
+    /// Unseen BEL, set by [`MobileEventListener`].
+    bell: Arc<AtomicBool>,
+    /// Unseen desktop notification (OSC 9 / 777).
+    notification: AtomicBool,
+    /// Parser for [`NotificationScanner`], kept across chunks so a sequence
+    /// split between two frames is still recognized.
+    notify_parser: Mutex<Parser>,
+    /// [`monotonic_ms`] of the last live output; 0 = none yet.
+    last_output_at: AtomicU64,
 }
 
 /// Bookkeeping behind the native views' absolute line numbers.
@@ -112,7 +183,12 @@ impl TerminalHolder {
             .scrolling_history
             .saturating_sub(1)
             .clamp(1, MAX_OUTPUT_STEP);
-        let term = Term::new(config, &term_size, NoopEventListener);
+        let bell = Arc::new(AtomicBool::new(false));
+        let term = Term::new(
+            config,
+            &term_size,
+            MobileEventListener { bell: bell.clone() },
+        );
 
         Self {
             term: Mutex::new(term),
@@ -123,6 +199,10 @@ impl TerminalHolder {
             generation: Arc::new(AtomicU64::new(next_generation())),
             track: RenderTrack::default(),
             output_step,
+            bell,
+            notification: AtomicBool::new(false),
+            notify_parser: Mutex::new(Parser::new()),
+            last_output_at: AtomicU64::new(0),
         }
     }
 
@@ -143,7 +223,45 @@ impl TerminalHolder {
     /// expects (its scrolled-up view stays anchored exactly as before). With
     /// an empty history the offset cannot be parked; history growth is then
     /// the exact count, since nothing has been dropped yet.
+    ///
+    /// Live output also feeds the activity signals: a BEL or desktop
+    /// notification sets its unseen flag and the output timestamp moves.
     pub fn process_output(&self, data: &[u8]) {
+        let mut scanner = NotificationScanner::default();
+        self.notify_parser.lock().advance(&mut scanner, data);
+        if scanner.seen {
+            self.notification.store(true, Ordering::Relaxed);
+        }
+        self.last_output_at.store(monotonic_ms(), Ordering::Relaxed);
+        self.feed(data);
+    }
+
+    /// Feed a snapshot: the server's rendered grid, replayed on every
+    /// (re)subscribe. It is state, not activity, so it touches neither the
+    /// unseen flags nor the output timestamp.
+    pub fn process_snapshot(&self, data: &[u8]) {
+        let bell = self.bell.load(Ordering::Relaxed);
+        self.feed(data);
+        self.bell.store(bell, Ordering::Relaxed);
+    }
+
+    /// The current activity signals.
+    pub fn activity(&self) -> TerminalActivity {
+        let at = self.last_output_at.load(Ordering::Relaxed);
+        TerminalActivity {
+            bell_unseen: self.bell.load(Ordering::Relaxed),
+            notification_unseen: self.notification.load(Ordering::Relaxed),
+            last_output_ms_ago: (at != 0).then(|| monotonic_ms().saturating_sub(at)),
+        }
+    }
+
+    /// The user viewed the terminal: clear the unseen bell and notification.
+    pub fn mark_seen(&self) {
+        self.bell.store(false, Ordering::Relaxed);
+        self.notification.store(false, Ordering::Relaxed);
+    }
+
+    fn feed(&self, data: &[u8]) {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         for step in data.chunks(self.output_step) {
@@ -156,7 +274,7 @@ impl TerminalHolder {
 
     fn advance_counting(
         &self,
-        term: &mut Term<NoopEventListener>,
+        term: &mut Term<MobileEventListener>,
         processor: &mut Processor,
         bytes: &[u8],
     ) {
@@ -218,7 +336,7 @@ impl TerminalHolder {
     /// Run `f` with the locked terminal and a consistent render-track read.
     pub(crate) fn with_term<R>(
         &self,
-        f: impl FnOnce(&Term<NoopEventListener>, RenderTrackSnapshot) -> R,
+        f: impl FnOnce(&Term<MobileEventListener>, RenderTrackSnapshot) -> R,
     ) -> R {
         let term = self.term.lock();
         let snap = RenderTrackSnapshot {
@@ -232,7 +350,7 @@ impl TerminalHolder {
     /// terminal changed when `f` returns true.
     pub(crate) fn with_term_mut(
         &self,
-        f: impl FnOnce(&mut Term<NoopEventListener>, RenderTrackSnapshot) -> bool,
+        f: impl FnOnce(&mut Term<MobileEventListener>, RenderTrackSnapshot) -> bool,
     ) {
         let mut term = self.term.lock();
         let snap = RenderTrackSnapshot {
@@ -567,6 +685,80 @@ pub(crate) fn mouse_wheel_bytes(up: bool, col: u16, row: u16, count: u32, sgr: b
 mod tests {
     use super::*;
     use okena_core::theme::DARK_THEME;
+
+    #[test]
+    fn bell_sets_unseen_until_marked_seen() {
+        let holder = TerminalHolder::new(20, 5);
+        assert_eq!(holder.activity(), TerminalActivity::default());
+        holder.process_output(b"done\x07");
+        assert!(holder.activity().bell_unseen);
+        holder.mark_seen();
+        assert!(!holder.activity().bell_unseen);
+        // A bell while (or after) the terminal is seen raises it again.
+        holder.process_output(b"\x07");
+        assert!(holder.activity().bell_unseen);
+    }
+
+    #[test]
+    fn a_bell_terminating_an_osc_is_not_a_bell() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x1b]0;title\x07");
+        assert!(!holder.activity().bell_unseen);
+    }
+
+    #[test]
+    fn osc9_and_osc777_notify_are_notifications() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x1b]9;Build finished\x1b\\");
+        let a = holder.activity();
+        assert!(a.notification_unseen);
+        assert!(!a.bell_unseen, "a BEL-free OSC is not a bell");
+        holder.mark_seen();
+        assert!(!holder.activity().notification_unseen);
+
+        holder.process_output(b"\x1b]777;notify;Claude;Waiting for input\x07");
+        assert!(holder.activity().notification_unseen);
+    }
+
+    #[test]
+    fn progress_and_other_oscs_are_not_notifications() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x1b]9;4;1;42\x07");
+        holder.process_output(b"\x1b]777;precmd\x07");
+        holder.process_output(b"\x1b]9001;working\x07");
+        holder.process_output(b"\x1b]9;   \x07");
+        assert!(!holder.activity().notification_unseen);
+    }
+
+    #[test]
+    fn notification_split_across_chunks_is_recognized() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x1b]9;hel");
+        assert!(!holder.activity().notification_unseen);
+        holder.process_output(b"lo\x07");
+        assert!(holder.activity().notification_unseen);
+    }
+
+    #[test]
+    fn live_output_stamps_the_output_time_but_snapshots_do_not() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_snapshot(b"$ \x07");
+        let a = holder.activity();
+        assert_eq!(a.last_output_ms_ago, None);
+        assert!(!a.bell_unseen, "a replayed snapshot never rings");
+
+        holder.process_output(b"x");
+        let ago = holder.activity().last_output_ms_ago.expect("stamped");
+        assert!(ago < 1_000);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_an_earlier_unseen_bell() {
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x07");
+        holder.process_snapshot(b"redraw");
+        assert!(holder.activity().bell_unseen);
+    }
 
     #[test]
     fn process_simple_text() {
