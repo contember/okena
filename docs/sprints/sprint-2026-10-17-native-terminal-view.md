@@ -358,3 +358,84 @@ Android linking in WU0 and font fallback parity.
      changed the *why* → ../decisions/NNNN ; new future work → ../backlog/NN ;
      transient → leave it (dies with the sprint on archive). After graduating,
      trim to a one-line pointer ("→ ADR-0007"). -->
+
+### 2026-10-17 — WU0 linking spike (gate passed) and WU1
+
+- **Verify first.** Before the change, the xcframework exported all uniffi
+  symbols. The Android `.so` exported the uniffi C symbols dynamically only
+  because the generated C++ references them. A Rust `#[no_mangle]` function
+  that no C++ code references is dropped from the static archive at link
+  time.
+- **Contract location.** `crates/okena-mobile-ffi/include/okena_render.h` plus
+  `module.modulemap` (Clang module `OkenaRender`). The JNI shim is
+  `crates/okena-mobile-ffi/jni/okena_render_jni.cpp`. The plan said "header
+  checked into the native view module". It lives in the crate instead,
+  because the Android shim must compile into `libokena-mobile-ffi.so` and the
+  view package did not exist yet. The view pod points `SWIFT_INCLUDE_PATHS`
+  at that directory.
+- **Android linking.** `scripts/fix-android-bindings.cjs` adds the shim to the
+  generated `CMakeLists.txt` with absolute paths (the generated module is
+  reached through a `node_modules` symlink, so relative paths break), adds
+  the include dir, and adds `-Wl,--undefined-glob=okena_rv_*` so every entry
+  point is kept and exported. JNI class: `com.okena.terminalview.RustBridge`.
+- **Witness.**
+  - iOS sim (iPhone 17 Pro Max, 26.5): a temporary Swift pod imported
+    `OkenaRender` the way the view pod will. It logged
+    `conn=<JS conn id> terminal_count=1`, and after WU1 it logged a snapshot:
+    `cols=69 screen=28 top=20001 first=10001 hist=10000` after `seq 1 20000`,
+    so the counter keeps counting past the 10k limit.
+  - Android emulator (HN_Local, arm64): Kotlin `RustBridge` logged
+    `terminal_count=1` and a snapshot read from a direct `ByteBuffer`.
+  - The spike code was removed and is not committed.
+- **Baseline (simulator/emulator numbers, NOT devices).** Physical devices
+  were offline. JS-thread time per painted frame of today's Skia path, from
+  temporary timing in `TerminalView.tsx` (removed). `ffi` is
+  `getVisibleCellsPacked` plus decode. `paint` is `createPicture` with
+  `paintTerminal`. The grid was 69×45 on iOS without the keyboard and 69×28
+  with it. Times in ms, as p50 / p95 (max):
+
+  | Platform | Scenario | ffi | paint | Painted frames (per 3 s window) |
+  |---|---|---|---|---|
+  | iOS sim | `seq 1 100000` burst | 0.16 / 0.4–5 | 10.5 / 11 (19) | 2–17 (output coalesced) |
+  | iOS sim | sustained stream (`echo`, sleep 5 ms) | 0.14 / 0.2 (4.5) | 11.1 / 12 (22) | ≥ 60 |
+  | iOS sim | drag-scroll, 16 swipes | 0.16 / 0.2 | 11.3 / 12 (17) | 31–47 |
+  | Android emu | `seq 1 100000` burst | 0.17 / 1–26 | 11.6 / 29–32 | 3–16 |
+  | Android emu | sustained stream | 0.17 / 0.5–2.8 (13.6) | 11.4 / 22–35 (81) | ≥ 60 |
+  | Android emu | drag-scroll | 0.16 / 0.3–0.8 (11) | 9.7 / 20–24 | 43–59 |
+
+  The sampler flushed every 60 frames or every 3 s, so "≥ 60" means a full
+  window filled within 3 s. `paint` alone takes about 11 ms per frame on the
+  JS thread, which leaves little of a 16.7 ms (or 8.3 ms ProMotion) budget. The FFI copy is small next to it. Repeat on devices in WU7.
+- **WU1 decisions.**
+  - **Damage vs. row hash.** We use row hashes. `Term::damage()` is
+    viewport-relative, needs `&mut` plus a reset (one consumer only), and
+    reports full damage on every scroll, which is every line of streaming
+    output. The hash is computed while the row is copied anyway.
+  - **Absolute lines.** alacritty has no scrolled-off counter. While the
+    display offset is non-zero, `Grid::scroll_up` raises it by each scrolled
+    line (alacritty's own `clear_viewport` reads it that way). So
+    `process_output` parks the offset at 1 around each parser step of at most
+    4096 bytes, and below the scrollback limit, reads the delta and restores
+    the old API's offset. With an empty history it uses history growth.
+    Alt-screen switches inside a step are settled when the primary grid is
+    active again. Resize adjusts by the history delta and bumps
+    `reflow_epoch`. Known limit: a scroll region that does not start at row
+    0 on the primary screen while the history is full over-counts (rare;
+    alt-screen TUIs are unaffected).
+  - **Memory.** One reused, Rust-owned frame blob per handle, a single
+    allocation in 8-byte words. The native side reads it in place (Swift
+    through pointers, Kotlin through one cached direct `ByteBuffer`).
+    Nothing is freed by the caller except `okena_rv_close`.
+  - **Benchmark.** `snapshot` of 60×50 takes 19.5 µs on desktop (release,
+    M-series), against the 200 µs target. Run it with `cargo test -p
+    okena-mobile-ffi --release -- --ignored snapshot_bench --nocapture`.
+- **Environment gotcha.** After the disk crash, `Pods/React-Core-prebuilt`
+  held the Release React core while the Debug "replace" phase assumed Debug
+  ("No previous build detected"). The Debug link then failed on missing
+  `facebook::react::Sealable`/`Props` symbols. Fix: write `Release` into
+  `Pods/React-Core-prebuilt/.last_build_configuration` (and the same for
+  `ReactNativeDependencies`) so the next Debug build swaps the right
+  framework in.
+- **JS logs.** In this setup `console.log` did not reach `log stream` at all,
+  so the timing went out by `fetch` to a local HTTP sink instead (with
+  `adb reverse` on Android).

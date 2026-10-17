@@ -10,13 +10,28 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use okena_core::theme::ThemeColors;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+
+/// Source of render generations. Global, so a holder that replaces another
+/// under the same id never repeats a value a view has already seen.
+static GENERATION_SOURCE: AtomicU64 = AtomicU64::new(1);
+
+/// Set in a holder's generation once the holder is dropped, so a native view
+/// polling a cached counter knows to look the terminal up again.
+pub const GENERATION_DEAD: u64 = 1 << 63;
+
+/// Upper bound on bytes fed to the parser per step while counting lines that
+/// scroll into history. The step is also kept below the scrollback limit:
+/// each scrolled line needs at least one byte, so the parked display offset
+/// (capped at the limit by alacritty) can never saturate within one step.
+const MAX_OUTPUT_STEP: usize = 4096;
 
 /// No-op event listener for mobile.
 ///
 /// On mobile, the server's Term already handles PtyWrite responses (cursor reports, DA, etc.).
 /// Forwarding them from mobile Term would cause duplicates.
-struct NoopEventListener;
+pub(crate) struct NoopEventListener;
 
 impl EventListener for NoopEventListener {
     fn send_event(&self, _event: TermEvent) {}
@@ -29,12 +44,74 @@ pub struct TerminalHolder {
     dirty: AtomicBool,
     cols: Mutex<u16>,
     rows: Mutex<u16>,
+    /// Render generation for the native views (`crate::render`), bumped with
+    /// every change a view could draw. Shared so a view polls it lock-free.
+    generation: Arc<AtomicU64>,
+    /// Render line bookkeeping; only written while `term` is locked.
+    track: RenderTrack,
+    /// Bytes per parser step, see [`MAX_OUTPUT_STEP`].
+    output_step: usize,
+}
+
+/// Bookkeeping behind the native views' absolute line numbers.
+///
+/// alacritty addresses lines relative to the live screen (`Line(0)` is the
+/// top screen row, history is negative), so a line's address changes every
+/// time output scrolls. The views need addresses that stay put, so we count
+/// every line that ever scrolled from the primary screen into history:
+/// `screen_top = lines_scrolled_off`, and a line's absolute number is
+/// `screen_top + alacritty_line`. Old lines dropped by the scrollback limit
+/// simply fall below the oldest available number.
+#[derive(Default)]
+pub(crate) struct RenderTrack {
+    /// Absolute number of the primary screen's top row.
+    lines_scrolled_off: AtomicI64,
+    /// Bumped on resize: reflow rewraps lines, so views must re-anchor.
+    reflow_epoch: AtomicU32,
+    /// History size of the primary grid when it was last active.
+    last_primary_history: AtomicU64,
+    /// While the primary grid is parked (see `process_output`) but inactive
+    /// because the alt screen is up: the old-API display offset to restore,
+    /// plus one so 0 means "not parked".
+    parked_saved_offset: AtomicU64,
+}
+
+/// A consistent read of the render bookkeeping, taken under the term lock.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RenderTrackSnapshot {
+    pub screen_top: i64,
+    pub reflow_epoch: u32,
+}
+
+impl Drop for TerminalHolder {
+    fn drop(&mut self) {
+        self.generation.fetch_or(GENERATION_DEAD, Ordering::Release);
+    }
 }
 
 impl TerminalHolder {
     pub fn new(cols: u16, rows: u16) -> Self {
-        let config = TermConfig::default();
+        Self::with_config(cols, rows, TermConfig::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_history(cols: u16, rows: u16, scrolling_history: usize) -> Self {
+        Self::with_config(
+            cols,
+            rows,
+            TermConfig {
+                scrolling_history,
+                ..TermConfig::default()
+            },
+        )
+    }
+
+    fn with_config(cols: u16, rows: u16, config: TermConfig) -> Self {
         let term_size = TermSize::new(cols as usize, rows as usize);
+        let output_step = config
+            .scrolling_history
+            .saturating_sub(1)
+            .clamp(1, MAX_OUTPUT_STEP);
         let term = Term::new(config, &term_size, NoopEventListener);
 
         Self {
@@ -43,15 +120,130 @@ impl TerminalHolder {
             dirty: AtomicBool::new(false),
             cols: Mutex::new(cols),
             rows: Mutex::new(rows),
+            generation: Arc::new(AtomicU64::new(next_generation())),
+            track: RenderTrack::default(),
+            output_step,
         }
     }
 
+    /// Mark a visible change: old-API dirty flag plus render generation.
+    fn changed(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+        self.generation.store(next_generation(), Ordering::Release);
+    }
+
     /// Feed raw PTY output data into the terminal emulator.
+    ///
+    /// Also counts the lines that scroll from the primary screen into history
+    /// (see [`RenderTrack`]). alacritty exposes no such counter, but while the
+    /// display offset is non-zero its `Grid::scroll_up` raises the offset by
+    /// every line that scrolls (alacritty's own `clear_viewport` reads the
+    /// count the same way). So around each parser step we "park" the offset at
+    /// 1, read how far it moved, and put back the offset the old uniffi API
+    /// expects (its scrolled-up view stays anchored exactly as before). With
+    /// an empty history the offset cannot be parked; history growth is then
+    /// the exact count, since nothing has been dropped yet.
     pub fn process_output(&self, data: &[u8]) {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
-        processor.advance(&mut *term, data);
-        self.dirty.store(true, Ordering::Relaxed);
+        for step in data.chunks(self.output_step) {
+            self.advance_counting(&mut term, &mut processor, step);
+        }
+        drop(processor);
+        drop(term);
+        self.changed();
+    }
+
+    fn advance_counting(
+        &self,
+        term: &mut Term<NoopEventListener>,
+        processor: &mut Processor,
+        bytes: &[u8],
+    ) {
+        let track = &self.track;
+        if !term.mode().contains(TermMode::ALT_SCREEN) {
+            let grid = term.grid_mut();
+            track
+                .last_primary_history
+                .store(grid.history_size() as u64, Ordering::Relaxed);
+            if track.parked_saved_offset.load(Ordering::Relaxed) == 0 && grid.history_size() > 0 {
+                let saved = grid.display_offset();
+                track
+                    .parked_saved_offset
+                    .store(saved as u64 + 1, Ordering::Relaxed);
+                set_display_offset(grid, 1);
+            }
+        }
+
+        processor.advance(term, bytes);
+
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            // The primary grid (parked or not) is inactive; settle it once it
+            // is back.
+            return;
+        }
+        let grid = term.grid_mut();
+        let history = grid.history_size();
+        let parked = track.parked_saved_offset.swap(0, Ordering::Relaxed);
+        let scrolled = if parked != 0 {
+            let offset = grid.display_offset();
+            let scrolled = offset.saturating_sub(1);
+            let saved = (parked - 1) as usize;
+            // The old API's view: live (0) stays live, a scrolled-up view
+            // moves with its content, as alacritty does on its own.
+            let restore = if saved == 0 {
+                0
+            } else {
+                (saved + scrolled).min(history)
+            };
+            set_display_offset(grid, restore);
+            scrolled
+        } else {
+            let before = track.last_primary_history.load(Ordering::Relaxed) as usize;
+            history.saturating_sub(before)
+        };
+        track
+            .lines_scrolled_off
+            .fetch_add(scrolled as i64, Ordering::Relaxed);
+        track
+            .last_primary_history
+            .store(history as u64, Ordering::Relaxed);
+    }
+
+    /// Lock-free generation counter shared with native views.
+    pub(crate) fn generation_counter(&self) -> Arc<AtomicU64> {
+        self.generation.clone()
+    }
+
+    /// Run `f` with the locked terminal and a consistent render-track read.
+    pub(crate) fn with_term<R>(
+        &self,
+        f: impl FnOnce(&Term<NoopEventListener>, RenderTrackSnapshot) -> R,
+    ) -> R {
+        let term = self.term.lock();
+        let snap = RenderTrackSnapshot {
+            screen_top: self.track.lines_scrolled_off.load(Ordering::Relaxed),
+            reflow_epoch: self.track.reflow_epoch.load(Ordering::Relaxed),
+        };
+        f(&term, snap)
+    }
+
+    /// Run `f` with the locked terminal for mutation (selection). Marks the
+    /// terminal changed when `f` returns true.
+    pub(crate) fn with_term_mut(
+        &self,
+        f: impl FnOnce(&mut Term<NoopEventListener>, RenderTrackSnapshot) -> bool,
+    ) {
+        let mut term = self.term.lock();
+        let snap = RenderTrackSnapshot {
+            screen_top: self.track.lines_scrolled_off.load(Ordering::Relaxed),
+            reflow_epoch: self.track.reflow_epoch.load(Ordering::Relaxed),
+        };
+        let changed = f(&mut term, snap);
+        drop(term);
+        if changed {
+            self.changed();
+        }
     }
 
     /// Extract all visible cells from the terminal grid for FFI transfer.
@@ -167,13 +359,31 @@ impl TerminalHolder {
     }
 
     /// Resize the terminal grid.
+    ///
+    /// Reflow moves lines between the screen and history. On the primary
+    /// screen the screen top's absolute number follows the history size, so
+    /// the oldest line keeps its number; the reflow epoch tells native views
+    /// that other lines may have moved.
     pub fn resize(&self, cols: u16, rows: u16) {
         let mut term = self.term.lock();
+        let alt = term.mode().contains(TermMode::ALT_SCREEN);
+        let before = term.grid().history_size() as i64;
         let size = TermSize::new(cols as usize, rows as usize);
         term.resize(size);
+        if !alt {
+            let after = term.grid().history_size();
+            self.track
+                .lines_scrolled_off
+                .fetch_add(after as i64 - before, Ordering::Relaxed);
+            self.track
+                .last_primary_history
+                .store(after as u64, Ordering::Relaxed);
+        }
+        self.track.reflow_epoch.fetch_add(1, Ordering::Relaxed);
+        drop(term);
         *self.cols.lock() = cols;
         *self.rows.lock() = rows;
-        self.dirty.store(true, Ordering::Relaxed);
+        self.changed();
     }
 
     /// Scroll the terminal display by delta lines (positive = up, negative = down).
@@ -181,7 +391,7 @@ impl TerminalHolder {
         let mut term = self.term.lock();
         term.scroll_display(Scroll::Delta(delta));
         drop(term);
-        self.dirty.store(true, Ordering::Relaxed);
+        self.changed();
     }
 
     /// Snap the display back to the live screen (display_offset = 0). Mirrors
@@ -193,7 +403,7 @@ impl TerminalHolder {
         }
         term.scroll_display(Scroll::Bottom);
         drop(term);
-        self.dirty.store(true, Ordering::Relaxed);
+        self.changed();
     }
 
     /// Wheel-event bytes for `count` notches at visual cell `col`/`row`, or
@@ -234,7 +444,8 @@ impl TerminalHolder {
         let point = Point::new(Line(buffer_row), Column(col));
         let selection = Selection::new(SelectionType::Simple, point, Side::Left);
         term.selection = Some(selection);
-        self.dirty.store(true, Ordering::Relaxed);
+        drop(term);
+        self.changed();
     }
 
     /// Start a word (semantic) selection at the given visual col/row.
@@ -245,7 +456,8 @@ impl TerminalHolder {
         let point = Point::new(Line(buffer_row), Column(col));
         let selection = Selection::new(SelectionType::Semantic, point, Side::Left);
         term.selection = Some(selection);
-        self.dirty.store(true, Ordering::Relaxed);
+        drop(term);
+        self.changed();
     }
 
     /// Extend the current selection to the given visual col/row.
@@ -256,7 +468,8 @@ impl TerminalHolder {
         if let Some(ref mut selection) = term.selection {
             let point = Point::new(Line(buffer_row), Column(col));
             selection.update(point, Side::Right);
-            self.dirty.store(true, Ordering::Relaxed);
+            drop(term);
+            self.changed();
         }
     }
 
@@ -264,7 +477,8 @@ impl TerminalHolder {
     pub fn clear_selection(&self) {
         let mut term = self.term.lock();
         if term.selection.take().is_some() {
-            self.dirty.store(true, Ordering::Relaxed);
+            drop(term);
+            self.changed();
         }
     }
 
@@ -302,16 +516,37 @@ impl TerminalHolder {
     }
 }
 
+fn next_generation() -> u64 {
+    GENERATION_SOURCE.fetch_add(1, Ordering::Relaxed) & !GENERATION_DEAD
+}
+
+/// Set alacritty's display offset without `Term::scroll_display` side effects
+/// (damage, events).
+fn set_display_offset(
+    grid: &mut alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+    offset: usize,
+) {
+    let delta = offset as i64 - grid.display_offset() as i64;
+    if delta != 0 {
+        grid.scroll_display(Scroll::Delta(delta as i32));
+    }
+}
+
 /// Encode `count` wheel notches (button 64 = up, 65 = down) at 0-based cell
 /// `col`/`row`. Byte-for-byte the desktop `Terminal::send_mouse_scroll`.
-fn mouse_wheel_bytes(up: bool, col: u16, row: u16, count: u32, sgr: bool) -> Vec<u8> {
+pub(crate) fn mouse_wheel_bytes(up: bool, col: u16, row: u16, count: u32, sgr: bool) -> Vec<u8> {
     let button: u8 = if up { 64 } else { 65 };
     let mut buf = Vec::new();
     for _ in 0..count {
         if sgr {
             buf.extend_from_slice(
-                format!("\x1b[<{};{};{}M", button, u32::from(col) + 1, u32::from(row) + 1)
-                    .as_bytes(),
+                format!(
+                    "\x1b[<{};{};{}M",
+                    button,
+                    u32::from(col) + 1,
+                    u32::from(row) + 1
+                )
+                .as_bytes(),
             );
         } else {
             let clamp = |v: u16| u8::try_from(v).unwrap_or(u8::MAX).saturating_add(33);

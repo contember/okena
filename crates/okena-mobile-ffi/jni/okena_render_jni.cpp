@@ -14,7 +14,29 @@
 //       @JvmStatic external fun abiVersion(): Int
 //       @JvmStatic external fun terminalCount(connId: String): Int
 //       @JvmStatic external fun debugConnections(): String
+//
+//       // View handle (a jlong owning a C++ Bridge around OkenaRvHandle).
+//       @JvmStatic external fun open(connId: String, terminalId: String): Long   // 0 on bad ids
+//       @JvmStatic external fun close(handle: Long)
+//       @JvmStatic external fun generation(handle: Long): Long
+//       // Direct, read-only-by-contract ByteBuffer over the whole frame blob
+//       // (see okena_render.h "Frame layout"); set .order(LITTLE_ENDIAN).
+//       // Valid until the next snapshot/close on the same handle: the same
+//       // ByteBuffer object is reused while the Rust buffer does not move.
+//       @JvmStatic external fun snapshot(handle: Long, topLine: Long, rows: Int): java.nio.ByteBuffer?
+//       @JvmStatic external fun selectionStart(handle: Long, line: Long, col: Int, side: Int, kind: Int)
+//       @JvmStatic external fun selectionUpdate(handle: Long, line: Long, col: Int, side: Int)
+//       @JvmStatic external fun selectWord(handle: Long, line: Long, col: Int)
+//       @JvmStatic external fun selectionText(handle: Long): String?
+//       @JvmStatic external fun selectionClear(handle: Long)
+//       @JvmStatic external fun wheel(handle: Long, lines: Int, col: Int, row: Int): Boolean
+//       @JvmStatic external fun resizeLocal(handle: Long, cols: Int, rows: Int)
+//       @JvmStatic external fun resizeTerminal(handle: Long, cols: Int, rows: Int)
 //   }
+//
+// R8: keep `com.okena.terminalview.RustBridge` and its native methods
+// (`-keepclasseswithmembernames class * { native <methods>; }` is in the
+// default Android rules; add an explicit -keep if the class gets renamed).
 //
 // `@JvmStatic` on an `object` member makes the JNI function receive a jclass.
 // The library is normally already loaded by the OkenaMobileFfi module;
@@ -89,6 +111,25 @@ class JStringUtf {
   const char *chars_;
 };
 
+// Owns the Rust handle plus the cached direct ByteBuffer over its frame.
+struct Bridge {
+  OkenaRvHandle *handle;
+  jobject buffer;     // global ref or null
+  const void *ptr;    // base address the buffer wraps
+  jlong capacity;     // its capacity in bytes
+};
+
+Bridge *bridge(jlong h) { return reinterpret_cast<Bridge *>(static_cast<intptr_t>(h)); }
+
+OkenaRvHandle *rv(jlong h) {
+  Bridge *b = bridge(h);
+  return b ? b->handle : nullptr;
+}
+
+uint16_t u16(jint v) {
+  return static_cast<uint16_t>(v < 0 ? 0 : (v > 0xFFFF ? 0xFFFF : v));
+}
+
 }  // namespace
 
 #define RB(name) Java_com_okena_terminalview_RustBridge_##name
@@ -112,6 +153,82 @@ JNIEXPORT jstring JNICALL RB(debugConnections)(JNIEnv *env, jclass) {
     len = okena_rv_debug_connections(buf.data(), buf.size());
   }
   return utf8_to_jstring(env, buf.data(), len < buf.size() ? len : buf.size() - 1);
+}
+
+JNIEXPORT jlong JNICALL RB(open)(JNIEnv *env, jclass, jstring conn_id, jstring terminal_id) {
+  JStringUtf conn(env, conn_id);
+  JStringUtf term(env, terminal_id);
+  OkenaRvHandle *h = okena_rv_open(conn.c_str(), term.c_str());
+  if (!h) return 0;
+  auto *b = new Bridge{h, nullptr, nullptr, 0};
+  return static_cast<jlong>(reinterpret_cast<intptr_t>(b));
+}
+
+JNIEXPORT void JNICALL RB(close)(JNIEnv *env, jclass, jlong h) {
+  Bridge *b = bridge(h);
+  if (!b) return;
+  if (b->buffer) env->DeleteGlobalRef(b->buffer);
+  okena_rv_close(b->handle);
+  delete b;
+}
+
+JNIEXPORT jlong JNICALL RB(generation)(JNIEnv *, jclass, jlong h) {
+  return static_cast<jlong>(okena_rv_generation(rv(h)));
+}
+
+JNIEXPORT jobject JNICALL RB(snapshot)(JNIEnv *env, jclass, jlong h, jlong top_line, jint rows) {
+  Bridge *b = bridge(h);
+  if (!b) return nullptr;
+  const OkenaRvFrame *f = okena_rv_snapshot(b->handle, static_cast<int64_t>(top_line), u16(rows));
+  if (!f) return nullptr;
+  jlong size = static_cast<jlong>(f->total_size);
+  if (!b->buffer || b->ptr != f || b->capacity < size) {
+    if (b->buffer) env->DeleteGlobalRef(b->buffer);
+    jobject local = env->NewDirectByteBuffer(const_cast<OkenaRvFrame *>(f), size);
+    b->buffer = local ? env->NewGlobalRef(local) : nullptr;
+    if (local) env->DeleteLocalRef(local);
+    b->ptr = f;
+    b->capacity = size;
+  }
+  return b->buffer ? env->NewLocalRef(b->buffer) : nullptr;
+}
+
+JNIEXPORT void JNICALL RB(selectionStart)(JNIEnv *, jclass, jlong h, jlong line, jint col,
+                                          jint side, jint kind) {
+  okena_rv_selection_start(rv(h), static_cast<int64_t>(line), u16(col),
+                           static_cast<uint8_t>(side), static_cast<uint8_t>(kind));
+}
+
+JNIEXPORT void JNICALL RB(selectionUpdate)(JNIEnv *, jclass, jlong h, jlong line, jint col,
+                                           jint side) {
+  okena_rv_selection_update(rv(h), static_cast<int64_t>(line), u16(col),
+                            static_cast<uint8_t>(side));
+}
+
+JNIEXPORT void JNICALL RB(selectWord)(JNIEnv *, jclass, jlong h, jlong line, jint col) {
+  okena_rv_select_word(rv(h), static_cast<int64_t>(line), u16(col));
+}
+
+JNIEXPORT jstring JNICALL RB(selectionText)(JNIEnv *env, jclass, jlong h) {
+  size_t len = 0;
+  const char *text = okena_rv_selection_text(rv(h), &len);
+  return text ? utf8_to_jstring(env, text, len) : nullptr;
+}
+
+JNIEXPORT void JNICALL RB(selectionClear)(JNIEnv *, jclass, jlong h) {
+  okena_rv_selection_clear(rv(h));
+}
+
+JNIEXPORT jboolean JNICALL RB(wheel)(JNIEnv *, jclass, jlong h, jint lines, jint col, jint row) {
+  return okena_rv_wheel(rv(h), lines, u16(col), u16(row)) != 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL RB(resizeLocal)(JNIEnv *, jclass, jlong h, jint cols, jint rows) {
+  okena_rv_resize_local(rv(h), u16(cols), u16(rows));
+}
+
+JNIEXPORT void JNICALL RB(resizeTerminal)(JNIEnv *, jclass, jlong h, jint cols, jint rows) {
+  okena_rv_resize_terminal(rv(h), u16(cols), u16(rows));
 }
 
 }  // extern "C"
