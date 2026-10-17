@@ -3,9 +3,7 @@
 mod settings;
 mod status;
 mod ui_helpers;
-pub mod usage;
-
-pub use usage::resolve_claude_dir;
+mod usage;
 
 use gpui::{AnyView, AppContext as _};
 use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};
