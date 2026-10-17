@@ -1,6 +1,17 @@
 /**
- * TerminalPane.tsx — the per-terminal container that drives the Skia renderer.
+ * TerminalPane.tsx — the per-terminal container that drives the terminal renderer.
  *
+ * Two renderers, picked by the `renderer` setting (settings store):
+ *   - `native`: the platform view from `okena-terminal-view`. It owns scrolling,
+ *     pinch, selection and PTY sizing itself and reports back through events
+ *     (`onTap`, `onGridSize`, `onFontSizeChange`, `onSelectionCopied`). This
+ *     container then only keeps the soft-keyboard input below, turns a tap
+ *     into keyboard focus and sends `scrollToBottom` after input. JS does
+ *     not resize the PTY in this mode. Nothing consumes `onScrollStateChange`
+ *     yet.
+ *   - `skia`: the JS + Skia renderer, with the gesture chrome described below.
+ *
+ * Skia mode:
  * Port of the chrome around the terminal canvas in
  * `mobile/lib/src/widgets/terminal_view.dart`. The existing
  * {@link import('./TerminalView').TerminalView} already owns:
@@ -57,6 +68,13 @@ import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalView, type TerminalFonts } from './TerminalView';
+import {
+  OkenaTerminalView,
+  OkenaTerminalViewCommands,
+  type FontSizeChangeEvent,
+  type GridSizeEvent,
+  type TerminalViewTheme,
+} from 'okena-terminal-view';
 import { KeyModifiers, applyModifiersToText } from './keyInput';
 import { useSettingsStore } from '../state/settingsStore';
 import { accumulateScroll, exceedsTouchSlop, pointToCell } from './terminalScroll';
@@ -74,6 +92,12 @@ export interface TerminalPaneHandle {
   blur(): void;
   /** Start a fresh soft-keyboard buffer (after input sent from elsewhere). */
   resetInput(): void;
+  /**
+   * Bring the native renderer back to the live bottom after input sent from
+   * elsewhere (the key toolbar). A no-op with the Skia renderer, which follows
+   * the Rust-side scroll position.
+   */
+  scrollToBottom(): void;
 }
 
 export interface TerminalPaneProps {
@@ -109,7 +133,16 @@ function pinchDistance(e: GestureResponderEvent): number | null {
   return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
-// Internal mutable grid size, reported by TerminalView via onGridSizeChange.
+/** Colors for the native renderer, as packed ARGB like the Rust cell colors. */
+const NATIVE_THEME: TerminalViewTheme = {
+  background: TerminalTheme.bgColorArgb,
+  foreground: TerminalTheme.fgColorArgb,
+  cursor: TerminalTheme.cursorColorArgb,
+  selection: TerminalTheme.selectionOverlayArgb,
+};
+
+// Internal mutable grid size, reported by the renderer (onGridSizeChange /
+// onGridSize).
 interface Grid {
   cols: number;
   rows: number;
@@ -133,6 +166,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
   ) => {
     const storedFontSize = useSettingsStore((s) => s.terminalFontSize);
     const setFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+    const renderer = useSettingsStore((s) => s.renderer);
+    const nativeRenderer = renderer === 'native';
+    const nativeViewRef = useRef<React.ComponentRef<typeof OkenaTerminalView>>(null);
     const effectiveFontSize = fontSize ?? storedFontSize;
     // Active pinch: start distance + font size at its start.
     const pinch = useRef<{ distance: number; fontSize: number } | null>(null);
@@ -168,14 +204,23 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       setInputValue(next.text);
     }, []);
 
+    // The native view keeps its own scroll offset, so the Rust-side snap to the
+    // bottom on input does not move it: send it there explicitly.
+    const scrollToBottom = useCallback(() => {
+      if (nativeRenderer && nativeViewRef.current) {
+        OkenaTerminalViewCommands.scrollToBottom(nativeViewRef.current);
+      }
+    }, [nativeRenderer]);
+
     useImperativeHandle(
       ref,
       () => ({
         focus: () => inputRef.current?.focus(),
         blur: () => inputRef.current?.blur(),
         resetInput,
+        scrollToBottom,
       }),
-      [resetInput],
+      [resetInput, scrollToBottom],
     );
 
     const onGridSizeChange = useCallback(
@@ -184,6 +229,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       },
       [],
     );
+
+    const flashCopied = useCallback(() => {
+      setCopied(true);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 1200);
+    }, []);
 
     // ── soft keyboard input ──────────────────────────────────────────────────
 
@@ -223,10 +274,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         if (text.length > 0) {
           void native.sendText(connId, terminalId, text);
         }
+        if (delta.backspaces > 0 || text.length > 0) scrollToBottom();
 
         if (shouldResetAfter(state, delta)) resetInput();
       },
-      [native, connId, terminalId, modifiers, resetInput],
+      [native, connId, terminalId, modifiers, resetInput, scrollToBottom],
     );
 
     // ── touch → cell ──────────────────────────────────────────────────────────
@@ -244,9 +296,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         const selectedText = native.getSelectedText(connId, terminalId);
         if (selectedText !== undefined && selectedText.length > 0) {
           Clipboard.setString(selectedText);
-          setCopied(true);
-          if (copiedTimer.current) clearTimeout(copiedTimer.current);
-          copiedTimer.current = setTimeout(() => setCopied(false), 1200);
+          flashCopied();
         }
       } catch {
         // ignore
@@ -257,7 +307,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         // ignore
       }
       setSelecting(false);
-    }, [native, connId, terminalId]);
+    }, [native, connId, terminalId, flashCopied]);
 
     // ── gesture responder (tap / drag-scroll / long-press select) ───────────────
     //
@@ -461,35 +511,79 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       }
     }, [endGesture, copySelectionAndClear]);
 
+    // ── native renderer events ────────────────────────────────────────────────
+
+    const onNativeTap = useCallback(() => {
+      // Same as a Skia-mode tap: make this pane the target, then summon the
+      // keyboard (`focus()` on a focused input does not re-fire `onFocus`).
+      onSelect?.(terminalId);
+      inputRef.current?.focus();
+    }, [onSelect, terminalId]);
+
+    const onNativeGridSize = useCallback(
+      (e: NativeSyntheticEvent<GridSizeEvent>) => {
+        const { cols, rows, cellWidth, cellHeight } = e.nativeEvent;
+        // Tracking only: the native view resizes the PTY itself.
+        onGridSizeChange(cols, rows, cellWidth, cellHeight);
+      },
+      [onGridSizeChange],
+    );
+
+    const onNativeFontSizeChange = useCallback(
+      (e: NativeSyntheticEvent<FontSizeChangeEvent>) => setFontSize(e.nativeEvent.size),
+      [setFontSize],
+    );
+
     return (
       <View style={styles.root}>
-        {/* The Skia renderer. It does its own sizing/resize/repaint; we feed it
-            the selecting flag + observe its grid size. */}
-        <View style={StyleSheet.absoluteFill}>
-          <TerminalView
-            native={native}
+        {nativeRenderer ? (
+          // The native renderer: draws, scrolls, pinches, selects and sizes the
+          // PTY on its own. Text input stays in JS (the TextInput below).
+          <OkenaTerminalView
+            ref={nativeViewRef}
+            style={StyleSheet.absoluteFill}
             connId={connId}
             terminalId={terminalId}
-            fonts={fonts}
             fontSize={effectiveFontSize}
-            selecting={selecting}
-            onGridSizeChange={onGridSizeChange}
+            theme={NATIVE_THEME}
+            focused={selected}
+            onTap={onNativeTap}
+            onGridSize={onNativeGridSize}
+            onFontSizeChange={onNativeFontSizeChange}
+            // The view already copied to the clipboard; just confirm it.
+            onSelectionCopied={flashCopied}
           />
-        </View>
+        ) : (
+          <>
+            {/* The Skia renderer. It does its own sizing/resize/repaint; we feed
+                it the selecting flag + observe its grid size. */}
+            <View style={StyleSheet.absoluteFill}>
+              <TerminalView
+                native={native}
+                connId={connId}
+                terminalId={terminalId}
+                fonts={fonts}
+                fontSize={effectiveFontSize}
+                selecting={selecting}
+                onGridSizeChange={onGridSizeChange}
+              />
+            </View>
 
-        {/* Gesture surface — tap to focus, drag to scroll, long-press to select. */}
-        <View
-          style={StyleSheet.absoluteFill}
-          onStartShouldSetResponder={() => true}
-          onMoveShouldSetResponder={() => true}
-          onResponderGrant={onGrant}
-          onResponderMove={onMove}
-          // Once a pane owns a touch it keeps it: a scroll or selection drag
-          // must not be stolen by an ancestor mid-gesture.
-          onResponderTerminationRequest={() => false}
-          onResponderRelease={onRelease}
-          onResponderTerminate={onTerminate}
-        />
+            {/* Gesture surface — tap to focus, drag to scroll, long-press to select. */}
+            <View
+              style={StyleSheet.absoluteFill}
+              onStartShouldSetResponder={() => true}
+              onMoveShouldSetResponder={() => true}
+              onResponderGrant={onGrant}
+              onResponderMove={onMove}
+              // Once a pane owns a touch it keeps it: a scroll or selection drag
+              // must not be stolen by an ancestor mid-gesture.
+              onResponderTerminationRequest={() => false}
+              onResponderRelease={onRelease}
+              onResponderTerminate={onTerminate}
+            />
+          </>
+        )}
 
         {/* Hidden soft-keyboard input. Near-invisible (opacity keeps the IME
             connected on iOS) and pinned so it doesn't intercept touches that the

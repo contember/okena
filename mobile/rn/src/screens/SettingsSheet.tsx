@@ -8,6 +8,9 @@
  * the terminal font and an estimate of how many columns fit this screen.
  * Changes apply immediately to every open pane (they re-measure and resize
  * the remote PTY).
+ *
+ * Advanced: the terminal renderer toggle (native view or Skia) for the native
+ * renderer rollout.
  */
 
 import React from 'react';
@@ -17,6 +20,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   useWindowDimensions,
   View,
@@ -53,6 +57,8 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
   const fontSize = useSettingsStore((s) => s.terminalFontSize);
   const step = useSettingsStore((s) => s.stepTerminalFontSize);
   const reset = useSettingsStore((s) => s.resetTerminalFontSize);
+  const renderer = useSettingsStore((s) => s.renderer);
+  const setRenderer = useSettingsStore((s) => s.setRenderer);
 
   const columns = Math.floor(width / (fontSize * MONO_ADVANCE_EM));
   const pageSheet = Platform.OS === 'ios';
@@ -144,6 +150,27 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
           <Text style={styles.footnote}>
             {`Range ${MIN_FONT_SIZE} to ${MAX_FONT_SIZE} pt. Applies to every terminal; the remote terminal is resized to fit.`}
           </Text>
+
+          <Text style={[styles.sectionLabel, styles.sectionSpacing]}>ADVANCED</Text>
+          <View style={styles.group}>
+            <View style={[styles.row, styles.rowLast]}>
+              <View style={styles.rowText}>
+                <Text style={styles.rowTitle}>Native renderer</Text>
+                <Text style={styles.rowValue}>
+                  {renderer === 'native' ? 'Native view' : 'Skia'}
+                </Text>
+              </View>
+              <Switch
+                value={renderer === 'native'}
+                onValueChange={(on) => setRenderer(on ? 'native' : 'skia')}
+                trackColor={{ true: OkenaColors.accent, false: OkenaColors.surfaceOverlay }}
+                accessibilityLabel="Native terminal renderer"
+              />
+            </View>
+          </View>
+          <Text style={styles.footnote}>
+            Experimental. Draws terminals with the platform's own text renderer instead of Skia.
+          </Text>
         </ScrollView>
       </View>
     </Modal>
@@ -200,6 +227,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
     marginBottom: 6,
   },
+  sectionSpacing: { marginTop: 28 },
   group: {
     marginHorizontal: 16,
     borderRadius: 12,

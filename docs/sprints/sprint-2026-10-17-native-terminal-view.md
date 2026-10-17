@@ -358,3 +358,16 @@ Android linking in WU0 and font fallback parity.
      changed the *why* → ../decisions/NNNN ; new future work → ../backlog/NN ;
      transient → leave it (dies with the sprint on archive). After graduating,
      trim to a one-line pointer ("→ ADR-0007"). -->
+
+- **WU2 (2026-10-17).** Package `mobile/rn/modules/okena-terminal-view` with placeholder
+  native views. Deviations from the plan:
+  - `onGridSize` uses `cellWidth`/`cellHeight`, not `cellW`/`cellH`.
+  - `theme` is `{background, foreground, cursor, selection}` as packed unsigned ARGB doubles
+    (Int32 cannot hold opaque ARGB). The ANSI palette is not passed because Rust resolves cell
+    colors.
+  - The native `focused` prop is named `focusedPane` on the Swift/Kotlin view classes, because
+    `UIView.focused` already exists.
+  - JS never resizes the PTY in native mode. It sends `scrollToBottom` after soft-keyboard and
+    key-toolbar input (`TerminalPaneHandle.scrollToBottom`), because the native view keeps its
+    own scroll offset.
+  - Android sizes are in dp, the same as the Skia view.

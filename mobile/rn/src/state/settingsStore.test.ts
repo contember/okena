@@ -4,6 +4,7 @@ import { createMemoryPersistence, type Persistence } from './persistence';
 import {
   configureSettingsStore,
   DEFAULT_FONT_SIZE,
+  DEFAULT_RENDERER,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
   normalizeFontSize,
@@ -14,7 +15,11 @@ import {
 function setup(initial: Record<string, string> = {}): Persistence {
   const persistence = createMemoryPersistence(initial);
   configureSettingsStore({ persistence });
-  useSettingsStore.setState({ terminalFontSize: DEFAULT_FONT_SIZE, loaded: false });
+  useSettingsStore.setState({
+    terminalFontSize: DEFAULT_FONT_SIZE,
+    renderer: DEFAULT_RENDERER,
+    loaded: false,
+  });
   return persistence;
 }
 
@@ -71,7 +76,7 @@ describe('settings store', () => {
     const persistence = setup();
     useSettingsStore.getState().setTerminalFontSize(12);
     expect(useSettingsStore.getState().terminalFontSize).toBe(12);
-    expect(await persisted(persistence)).toEqual({ terminalFontSize: 12 });
+    expect(await persisted(persistence)).toEqual({ terminalFontSize: 12, renderer: 'skia' });
   });
 
   it('steps by half a point and stops at the limits', () => {
@@ -92,6 +97,35 @@ describe('settings store', () => {
     useSettingsStore.getState().setTerminalFontSize(16);
     useSettingsStore.getState().resetTerminalFontSize();
     expect(useSettingsStore.getState().terminalFontSize).toBe(DEFAULT_FONT_SIZE);
-    expect(await persisted(persistence)).toEqual({ terminalFontSize: DEFAULT_FONT_SIZE });
+    expect(await persisted(persistence)).toEqual({
+      terminalFontSize: DEFAULT_FONT_SIZE,
+      renderer: 'skia',
+    });
+  });
+});
+
+describe('renderer setting', () => {
+  it('defaults to the Skia renderer', async () => {
+    setup();
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().renderer).toBe('skia');
+  });
+
+  it('loads the persisted renderer and ignores unknown values', async () => {
+    setup({ [SETTINGS_KEY]: JSON.stringify({ terminalFontSize: 12, renderer: 'native' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState()).toMatchObject({ terminalFontSize: 12, renderer: 'native' });
+
+    setup({ [SETTINGS_KEY]: JSON.stringify({ renderer: 'webgl' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().renderer).toBe(DEFAULT_RENDERER);
+  });
+
+  it('persists the renderer next to the font size', async () => {
+    const persistence = setup();
+    useSettingsStore.getState().setTerminalFontSize(14);
+    useSettingsStore.getState().setRenderer('native');
+    expect(useSettingsStore.getState().renderer).toBe('native');
+    expect(await persisted(persistence)).toEqual({ terminalFontSize: 14, renderer: 'native' });
   });
 });
