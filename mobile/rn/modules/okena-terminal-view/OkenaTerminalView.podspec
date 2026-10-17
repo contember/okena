@@ -19,7 +19,10 @@ Pod::Spec.new do |s|
   # The Rust render ABI (okena_render.h + module.modulemap, Clang module
   # `OkenaRender`). Only headers: the symbols resolve at app link time from
   # the one Rust copy in the OkenaMobileFfi pod.
-  okena_render_include = File.realpath(File.join(__dir__, '..', '..', '..', '..', 'crates', 'okena-mobile-ffi', 'include'))
+  # Relative to the pod root (node_modules/okena-terminal-view or
+  # modules/okena-terminal-view, both four levels below the repo root). An
+  # absolute path here would make the Podfile.lock checksum machine-specific.
+  okena_render_include = '$(PODS_TARGET_SRCROOT)/../../../../crates/okena-mobile-ffi/include'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SWIFT_INCLUDE_PATHS' => "\"#{okena_render_include}\"",
