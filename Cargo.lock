@@ -6277,6 +6277,7 @@ dependencies = [
  "okena-theme",
  "okena-transport",
  "okena-ui",
+ "okena-usage",
  "okena-views-git",
  "okena-views-remote",
  "okena-views-services",
@@ -6395,7 +6396,6 @@ dependencies = [
 name = "okena-ext-claude"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "jiff",
@@ -6407,16 +6407,13 @@ dependencies = [
  "okena-usage",
  "parking_lot",
  "serde_json",
- "sha2",
  "smol",
- "tempfile",
 ]
 
 [[package]]
 name = "okena-ext-codex"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "jiff",
@@ -6814,12 +6811,12 @@ dependencies = [
  "gpui-component",
  "jiff",
  "log",
+ "okena-agent-usage",
  "okena-core",
  "okena-extensions",
  "okena-ui",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
