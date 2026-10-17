@@ -9,6 +9,9 @@
  * Changes apply immediately to every open pane (they re-measure and resize
  * the remote PTY).
  *
+ * Open keyboard with terminal: whether showing a terminal focuses its input
+ * (off by default; a tap always opens the keyboard).
+ *
  * Projects: the project order of the drawer and the switcher (Activity, the
  * default, or Manual).
  *
@@ -63,6 +66,8 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
   const reset = useSettingsStore((s) => s.resetTerminalFontSize);
   const renderer = useSettingsStore((s) => s.renderer);
   const setRenderer = useSettingsStore((s) => s.setRenderer);
+  const openKeyboard = useSettingsStore((s) => s.openKeyboardWithTerminal);
+  const setOpenKeyboard = useSettingsStore((s) => s.setOpenKeyboardWithTerminal);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   const setSortMode = useSettingsStore((s) => s.setProjectSortMode);
 
@@ -155,6 +160,26 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
           </View>
           <Text style={styles.footnote}>
             {`Range ${MIN_FONT_SIZE} to ${MAX_FONT_SIZE} pt. Applies to every terminal; the remote terminal is resized to fit.`}
+          </Text>
+
+          <View style={[styles.group, styles.groupSpacing]}>
+            <View style={[styles.row, styles.rowLast]}>
+              <View style={styles.rowText}>
+                <Text style={styles.rowTitle}>Open keyboard with terminal</Text>
+                <Text style={styles.rowValue}>{openKeyboard ? 'On' : 'Off'}</Text>
+              </View>
+              <Switch
+                value={openKeyboard}
+                onValueChange={setOpenKeyboard}
+                trackColor={{ true: OkenaColors.accent, false: OkenaColors.surfaceOverlay }}
+                accessibilityLabel="Open keyboard with terminal"
+              />
+            </View>
+          </View>
+          <Text style={styles.footnote}>
+            {openKeyboard
+              ? 'The keyboard opens whenever a terminal is shown: on launch, after switching project or terminal.'
+              : 'The keyboard stays closed until you tap the terminal.'}
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionSpacing]}>PROJECTS</Text>
@@ -274,6 +299,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sectionSpacing: { marginTop: 28 },
+  groupSpacing: { marginTop: 16 },
   group: {
     marginHorizontal: 16,
     borderRadius: 12,

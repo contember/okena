@@ -21,6 +21,7 @@ function setup(initial: Record<string, string> = {}): Persistence {
     terminalFontSize: DEFAULT_FONT_SIZE,
     renderer: DEFAULT_RENDERER,
     projectSortMode: DEFAULT_PROJECT_SORT_MODE,
+    openKeyboardWithTerminal: false,
     loaded: false,
   });
   return persistence;
@@ -84,6 +85,7 @@ describe('settings store', () => {
       terminalFontSize: 12,
       renderer: 'native',
       projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
   });
 
@@ -110,6 +112,7 @@ describe('settings store', () => {
       terminalFontSize: DEFAULT_FONT_SIZE,
       renderer: 'native',
       projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
   });
 });
@@ -148,6 +151,7 @@ describe('renderer setting', () => {
       terminalFontSize: 12,
       renderer: 'skia',
       projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
     useSettingsStore.setState({ renderer: DEFAULT_RENDERER, loaded: false });
     await useSettingsStore.getState().load();
@@ -164,6 +168,7 @@ describe('renderer setting', () => {
       terminalFontSize: 14,
       renderer: 'skia',
       projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
   });
 });
@@ -183,6 +188,7 @@ describe('project sort mode setting', () => {
       terminalFontSize: DEFAULT_FONT_SIZE,
       renderer: 'native',
       projectSortMode: 'manual',
+      openKeyboardWithTerminal: false,
     });
     useSettingsStore.setState({ projectSortMode: DEFAULT_PROJECT_SORT_MODE, loaded: false });
     await useSettingsStore.getState().load();
@@ -200,6 +206,34 @@ describe('project sort mode setting', () => {
       terminalFontSize: 12,
       renderer: 'native',
       projectSortMode: 'activity',
+      openKeyboardWithTerminal: false,
     });
+  });
+});
+
+describe('open keyboard with terminal setting', () => {
+  it('defaults to off, today\'s behaviour, also for older settings objects', async () => {
+    setup({ [SETTINGS_KEY]: JSON.stringify({ terminalFontSize: 12, renderer: 'skia' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState()).toMatchObject({
+      openKeyboardWithTerminal: false,
+      renderer: 'native',
+    });
+  });
+
+  it('persists and reloads on, ignoring non-boolean values', async () => {
+    const persistence = setup();
+    useSettingsStore.getState().setOpenKeyboardWithTerminal(true);
+    expect(await persisted(persistence)).toMatchObject({
+      version: SETTINGS_VERSION,
+      openKeyboardWithTerminal: true,
+    });
+    useSettingsStore.setState({ openKeyboardWithTerminal: false, loaded: false });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().openKeyboardWithTerminal).toBe(true);
+
+    setup({ [SETTINGS_KEY]: JSON.stringify({ version: 2, openKeyboardWithTerminal: 'yes' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().openKeyboardWithTerminal).toBe(false);
   });
 });

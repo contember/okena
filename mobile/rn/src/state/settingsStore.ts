@@ -1,7 +1,8 @@
 /**
  * settingsStore.ts — persisted app preferences (zustand).
  *
- * The terminal font size, the terminal renderer and the project list order.
+ * The terminal font size, the terminal renderer, the project list order and
+ * whether showing a terminal opens the keyboard.
  * Stored as one JSON object
  * under {@link SETTINGS_KEY} so new preferences don't need new storage keys.
  *
@@ -65,6 +66,13 @@ function isProjectSortMode(value: unknown): value is ProjectSortMode {
   return value === 'activity' || value === 'manual';
 }
 
+/**
+ * Whether showing a terminal opens the soft keyboard. Off matches the
+ * behaviour before the setting existed: the keyboard opens on a tap (and stays
+ * up across a switch when it already was).
+ */
+export const DEFAULT_OPEN_KEYBOARD_WITH_TERMINAL = false;
+
 export interface SettingsDeps {
   persistence: Persistence;
 }
@@ -76,6 +84,8 @@ export interface SettingsState {
   renderer: TerminalRenderer;
   /** Project list order in the drawer and the switcher. */
   projectSortMode: ProjectSortMode;
+  /** Open the soft keyboard whenever a terminal is shown. */
+  openKeyboardWithTerminal: boolean;
   /** True once persisted settings have been read (or found absent). */
   loaded: boolean;
   /** Read persisted settings. Safe to call more than once. */
@@ -90,6 +100,8 @@ export interface SettingsState {
   setRenderer(renderer: TerminalRenderer): void;
   /** Set and persist the project list order. */
   setProjectSortMode(mode: ProjectSortMode): void;
+  /** Set and persist whether showing a terminal opens the keyboard. */
+  setOpenKeyboardWithTerminal(on: boolean): void;
 }
 
 let injectedDeps: Partial<SettingsDeps> = {};
@@ -108,9 +120,13 @@ interface PersistedSettings {
   terminalFontSize?: unknown;
   renderer?: unknown;
   projectSortMode?: unknown;
+  openKeyboardWithTerminal?: unknown;
 }
 
-type PersistedFields = Pick<SettingsState, 'terminalFontSize' | 'renderer' | 'projectSortMode'>;
+type PersistedFields = Pick<
+  SettingsState,
+  'terminalFontSize' | 'renderer' | 'projectSortMode' | 'openKeyboardWithTerminal'
+>;
 
 function persist(state: PersistedFields): void {
   const payload: PersistedSettings = {
@@ -118,6 +134,7 @@ function persist(state: PersistedFields): void {
     terminalFontSize: state.terminalFontSize,
     renderer: state.renderer,
     projectSortMode: state.projectSortMode,
+    openKeyboardWithTerminal: state.openKeyboardWithTerminal,
   };
   void deps()
     .persistence.setItem(SETTINGS_KEY, JSON.stringify(payload))
@@ -131,10 +148,11 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
     terminalFontSize: DEFAULT_FONT_SIZE,
     renderer: DEFAULT_RENDERER,
     projectSortMode: DEFAULT_PROJECT_SORT_MODE,
+    openKeyboardWithTerminal: DEFAULT_OPEN_KEYBOARD_WITH_TERMINAL,
     loaded: false,
 
     async load() {
-      let { terminalFontSize, renderer, projectSortMode } = get();
+      let { terminalFontSize, renderer, projectSortMode, openKeyboardWithTerminal } = get();
       try {
         const json = await deps().persistence.getItem(SETTINGS_KEY);
         if (json) {
@@ -146,16 +164,19 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
           if (version >= SETTINGS_VERSION && isTerminalRenderer(parsed.renderer)) {
             renderer = parsed.renderer;
           }
-          // Introduced at version 2 and only ever written by an explicit
-          // choice, so no version gate.
+          // Introduced at version 2, so every stored value was written by a
+          // build that knew the field: no version gate.
           if (isProjectSortMode(parsed.projectSortMode)) {
             projectSortMode = parsed.projectSortMode;
+          }
+          if (typeof parsed.openKeyboardWithTerminal === 'boolean') {
+            openKeyboardWithTerminal = parsed.openKeyboardWithTerminal;
           }
         }
       } catch {
         // Corrupt or unreadable settings fall back to defaults.
       }
-      set({ terminalFontSize, renderer, projectSortMode, loaded: true });
+      set({ terminalFontSize, renderer, projectSortMode, openKeyboardWithTerminal, loaded: true });
     },
 
     setTerminalFontSize(size) {
@@ -182,6 +203,12 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
     setProjectSortMode(projectSortMode) {
       if (projectSortMode === get().projectSortMode) return;
       set({ projectSortMode });
+      persist(get());
+    },
+
+    setOpenKeyboardWithTerminal(openKeyboardWithTerminal) {
+      if (openKeyboardWithTerminal === get().openKeyboardWithTerminal) return;
+      set({ openKeyboardWithTerminal });
       persist(get());
     },
   }),

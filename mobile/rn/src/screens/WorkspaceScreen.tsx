@@ -8,7 +8,9 @@
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
  *     to switch between them.
- *   - the terminal area: ONE {@link TerminalPane}, full size. The desktop split
+ *   - the terminal area: ONE {@link TerminalPane}, full size. With the "Open
+ *     keyboard with terminal" setting it focuses itself when shown, but never
+ *     while the drawer, the switcher or the actions sheet is open. The desktop split
  *     layout is not reproduced on the phone (it made every pane too small); the
  *     server layout is left untouched. No fullscreen toggle either: with one
  *     pane on screen it would only change the desktop's fullscreen state.
@@ -253,6 +255,7 @@ export const WorkspaceScreen: React.FC = () => {
         modifiers={modifiers}
         onSelect={selectTerminal}
         selected
+        focusBlocked={drawerOpen || switcherOpen || actionsOpen}
         native={native}
       />
     );

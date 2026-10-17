@@ -119,11 +119,29 @@ export interface TerminalPaneProps {
    * pane. Focus is never summoned when the keyboard is down.
    */
   selected?: boolean;
+  /**
+   * Open the soft keyboard when the pane is shown (the "Open keyboard with
+   * terminal" setting). Defaults to the persisted setting. The pane is keyed
+   * by terminal, so "shown" covers launch / restore, a project switch and a
+   * terminal chip switch.
+   */
+  autoFocus?: boolean;
+  /**
+   * An overlay (drawer, switcher, settings, a sheet) is on top: never take
+   * keyboard focus. A pending auto-focus waits until the overlay closes.
+   */
+  focusBlocked?: boolean;
   /** Font size in pt. Defaults to the persisted setting (settings store). */
   fontSize?: number;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
 }
+
+/**
+ * Delay before an automatic keyboard focus: long enough for a closing modal
+ * (drawer slide-out is 220 ms) to leave, short enough to feel immediate.
+ */
+export const AUTO_FOCUS_DELAY_MS = 300;
 
 /** Distance between the first two touches, or null for a single touch. */
 function pinchDistance(e: GestureResponderEvent): number | null {
@@ -159,11 +177,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       modifiers,
       onSelect,
       selected = false,
+      autoFocus,
+      focusBlocked = false,
       fontSize,
       native = getOkenaNative(),
     },
     ref,
   ) => {
+    const storedAutoFocus = useSettingsStore((s) => s.openKeyboardWithTerminal);
+    const effectiveAutoFocus = autoFocus ?? storedAutoFocus;
     const storedFontSize = useSettingsStore((s) => s.terminalFontSize);
     const setFontSize = useSettingsStore((s) => s.setTerminalFontSize);
     const renderer = useSettingsStore((s) => s.renderer);
@@ -251,8 +273,25 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     }, [terminalId, resetInput]);
 
     useEffect(() => {
-      if (selected && Keyboard.isVisible()) inputRef.current?.focus();
+      if (selected && !focusBlocked && Keyboard.isVisible()) inputRef.current?.focus();
+      // Only a selection change moves focus; an overlay closing does not.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selected]);
+
+    // Auto-open the keyboard once per shown terminal. Deferred so the input is
+    // laid out (and, after an overlay, the modal is gone) before it focuses.
+    const autoFocusPending = useRef(true);
+    useEffect(() => {
+      autoFocusPending.current = true;
+    }, [terminalId]);
+    useEffect(() => {
+      if (!effectiveAutoFocus || focusBlocked || !autoFocusPending.current) return;
+      const timer = setTimeout(() => {
+        autoFocusPending.current = false;
+        inputRef.current?.focus();
+      }, AUTO_FOCUS_DELAY_MS);
+      return () => clearTimeout(timer);
+    }, [effectiveAutoFocus, focusBlocked, terminalId]);
 
     const onChange = useCallback(
       (e: NativeSyntheticEvent<TextInputChangeEventData>) => {
