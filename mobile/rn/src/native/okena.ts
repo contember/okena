@@ -225,6 +225,87 @@ export interface FullscreenInfo {
   terminalId: TerminalId;
 }
 
+// ── Agent usage (mirrors `crates/okena-mobile-ffi/src/usage.rs`) ─────────
+
+/** One history sample of a usage window. Epoch seconds, percent 0–100. */
+export interface UsagePointInfo {
+  recordedAt: number;
+  usedPercent: number;
+}
+
+/** One rate-limit window. Timestamps are epoch seconds on the daemon's clock. */
+export interface UsageWindowInfo {
+  /** Stable key: Claude `five_hour` / `seven_day` / `seven_day_<model>`; Codex `primary` / `secondary` / `code_review`. */
+  id: string;
+  /** Label the desktop uses (`Session`, `Weekly`, `Rate Limit`, …). */
+  label: string;
+  /** `five_hour` | `weekly` | `weekly_scoped` | `code_review` | `other`. */
+  kind: string;
+  /** Model of a `weekly_scoped` window. */
+  scopedModel?: string;
+  usedPercent: number;
+  windowSeconds: number;
+  resetAt?: number;
+  /** Scoped Claude limits: currently binding. Always true for unscoped windows. */
+  active: boolean;
+  /** Samples in the current window, oldest first. */
+  history: UsagePointInfo[];
+}
+
+/** Claude paid usage beyond the plan (cents). */
+export interface ExtraUsageInfo {
+  isEnabled: boolean;
+  monthlyLimitCents: number;
+  usedCreditsCents: number;
+  utilization: number;
+}
+
+/** Codex credit balance (USD). */
+export interface UsageCreditsInfo {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: number;
+}
+
+export interface ResetCreditInfo {
+  title: string;
+  expiresAt?: number;
+}
+
+/** Codex rate-limit reset credits. */
+export interface ResetCreditsInfo {
+  availableCount: number;
+  credits: ResetCreditInfo[];
+}
+
+/** Usage of one provider on the daemon's machine. */
+export interface ProviderUsageInfo {
+  /** `claude` | `codex` | `unknown`. */
+  provider: string;
+  /** `disabled` | `no_credentials` | `pending` | `ok` | `error` | `unknown`. */
+  status: string;
+  plan?: string;
+  fetchedAt?: number;
+  lastAttemptAt?: number;
+  nextAttemptAt?: number;
+  fetching: boolean;
+  error?: string;
+  consecutiveFailures: number;
+  rateLimitedUntil?: number;
+  windows: UsageWindowInfo[];
+  extraUsage?: ExtraUsageInfo;
+  credits?: UsageCreditsInfo;
+  resetCredits?: ResetCreditsInfo;
+}
+
+/** Agent usage snapshot of one server (`usage_changed`). */
+export interface UsageInfo {
+  providers: ProviderUsageInfo[];
+  /** `0 = Monday .. 6 = Sunday`; never empty. */
+  workingDays: number[];
+  generatedAt: number;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // The binding contract
 // ─────────────────────────────────────────────────────────────────────────
@@ -402,6 +483,19 @@ export interface OkenaNative {
 
   /** Flat list of every terminal id across all projects. */
   getAllTerminalIds(connId: ConnId): TerminalId[];
+
+  // ── agent usage (usage.rs) ───────────────────────────────────────────────
+
+  /** Latest Claude / Codex usage snapshot the server pushed; `undefined` before the first. */
+  getUsage(connId: ConnId): UsageInfo | undefined;
+  /** Changes whenever the stored snapshot changes (`0` before the first). Poll this, then `getUsage`. */
+  getUsageRevision(connId: ConnId): number;
+  /**
+   * Ask the daemon to refetch (`provider` `claude` / `codex`, or all when
+   * `undefined`). Throttled to 60 s per provider; the result arrives as a new
+   * snapshot.
+   */
+  requestUsageRefresh(connId: ConnId, provider: string | undefined): Promise<void>;
 
   // ── terminal actions (state.rs, async) ───────────────────────────────────
 
@@ -648,6 +742,15 @@ export function getOkenaNative(): OkenaNative {
           : (connId: ConnId, terminalId: TerminalId, lines: number) =>
               gen.scroll(connId, terminalId, lines),
       takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
+      // Bindings generated before the usage API: no usage, refresh is a no-op.
+      getUsage: (connId: ConnId) =>
+        typeof gen.getUsage === 'function' ? (gen.getUsage(connId) as UsageInfo | undefined) : undefined,
+      getUsageRevision: (connId: ConnId) =>
+        typeof gen.getUsageRevision === 'function' ? (gen.getUsageRevision(connId) as number) : 0,
+      requestUsageRefresh: (connId: ConnId, provider: string | undefined) =>
+        typeof gen.requestUsageRefresh === 'function'
+          ? (gen.requestUsageRefresh(connId, provider) as Promise<void>)
+          : Promise.resolve(),
       canReportCertFingerprint: () => pinsReadable,
       getCertFingerprint: (connId: ConnId) =>
         pinsReadable ? gen.getCertFingerprint(connId) : undefined,

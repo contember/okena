@@ -29,6 +29,7 @@ mod api;
 mod client;
 pub mod render;
 mod types;
+mod usage;
 
 use okena_core::api::ActionRequest;
 use okena_core::keys::SpecialKey;
@@ -41,6 +42,10 @@ use crate::client::manager::ConnectionManager;
 pub use types::{
     CellData, ConnectionStatus, CursorShape, CursorState, FolderInfo, FullscreenInfo, ProjectInfo,
     ScrollInfo, SelectionBounds, ServiceInfo, TerminalActivity,
+};
+pub use usage::{
+    ExtraUsageInfo, ProviderUsageInfo, ResetCreditInfo, ResetCreditsInfo, UsageCreditsInfo,
+    UsageInfo, UsagePointInfo, UsageWindowInfo,
 };
 
 uniffi::setup_scaffolding!();
@@ -449,6 +454,45 @@ pub fn take_dirty(conn_id: String, terminal_id: String) -> bool {
     let mgr = ConnectionManager::get();
     mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.take_dirty())
         .unwrap_or(false)
+}
+
+// ── Agent usage ─────────────────────────────────────────────────────
+
+/// Latest Claude Code / Codex usage snapshot the server pushed
+/// (`usage_changed`). `None` until the first push (or for a daemon that
+/// predates the usage API).
+#[uniffi::export]
+pub fn get_usage(conn_id: String) -> Option<UsageInfo> {
+    ConnectionManager::get()
+        .get_usage(&conn_id)
+        .map(|usage| UsageInfo::from(&usage))
+}
+
+/// Changes whenever the stored usage snapshot changes; `0` before the first
+/// one. Lets the state poll call [`get_usage`] (history-heavy) only on change.
+#[uniffi::export]
+pub fn get_usage_revision(conn_id: String) -> u32 {
+    ConnectionManager::get().usage_revision(&conn_id)
+}
+
+/// Ask the daemon to refetch usage now. `provider` is `"claude"`, `"codex"`
+/// or `None` for every enabled provider. The daemon throttles to one attempt
+/// per provider per 60 s; the fresh snapshot arrives via `usage_changed`.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn request_usage_refresh(
+    conn_id: String,
+    provider: Option<String>,
+) -> Result<(), MobileFfiError> {
+    let provider = match provider.as_deref() {
+        None => None,
+        Some(name) => Some(usage::parse_provider(name).ok_or_else(|| MobileFfiError::Action {
+            message: format!("Unknown usage provider: {name}"),
+        })?),
+    };
+    ConnectionManager::get()
+        .request_usage_refresh(&conn_id, provider)
+        .await?;
+    Ok(())
 }
 
 /// Get all terminal IDs from the cached remote state (flat list).
