@@ -3,14 +3,16 @@
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
  *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
- *     when there are several), a small connection-quality dot, a fullscreen
- *     toggle, and a "＋" terminal-actions menu (new / split V / split H /
- *     minimize). StatusIndicator is NOT imported (owned by another agent) — the
- *     dot is inline.
- *   - the layout area: the parsed project layout tree rendered by
- *     {@link LayoutRenderer}; when fullscreen, only the fullscreen terminal is
- *     shown via a single {@link TerminalPane}. Empty/no-terminal states match
- *     the Dart screen.
+ *     when there are several), a small connection-quality dot, and a "＋"
+ *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
+ *     imported (owned by another agent) — the dot is inline.
+ *   - when the project has several terminals, a {@link TerminalTabs} chip row
+ *     to switch between them.
+ *   - the terminal area: ONE {@link TerminalPane}, full size. The desktop split
+ *     layout is not reproduced on the phone (it made every pane too small); the
+ *     server layout is left untouched. No fullscreen toggle either: with one
+ *     pane on screen it would only change the desktop's fullscreen state.
+ *     Empty/no-terminal states match the Dart screen.
  *   - the {@link KeyToolbar} pinned above the soft keyboard (rendered inside a
  *     `KeyboardAvoidingView` so it sits on top of the keyboard).
  *   - the slide-in {@link ProjectDrawer}.
@@ -22,7 +24,7 @@
  * screen only reads + dispatches actions).
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -41,13 +43,15 @@ import { useWorkspaceStore, useConnectionStore } from '../state';
 import {
   buildProjectList,
   filterProjectList,
+  findTerminalPath,
   flattenProjectList,
   parseLayout,
+  pickTerminal,
   projectDisplayName,
 } from '../models';
 import { getOkenaNative, type OkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
-import { LayoutRenderer } from '../components/LayoutRenderer';
+import { TerminalTabs } from '../components/TerminalTabs';
 import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPane';
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
@@ -95,11 +99,12 @@ export const WorkspaceScreen: React.FC = () => {
   const projectOrder = useWorkspaceStore((s) => s.projectOrder);
   const selectedProjectId = useWorkspaceStore((s) => s.selectedProjectId);
   const selectedTerminalId = useWorkspaceStore((s) => s.selectedTerminalId);
-  const fullscreenTerminal = useWorkspaceStore((s) => s.fullscreenTerminal);
   const layoutJson = useWorkspaceStore((s) => s.projectLayoutJson);
   const secondsSinceActivity = useWorkspaceStore((s) => s.secondsSinceActivity);
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
+  const restoreProjectMissing = useWorkspaceStore((s) => s.restoreProjectMissing);
+  const clearRestoreProjectMissing = useWorkspaceStore((s) => s.clearRestoreProjectMissing);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
     if (selectedProjectId === null) return projects[0] ?? null;
@@ -112,6 +117,13 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
+
+  // The remembered project is gone: show the project list instead.
+  useEffect(() => {
+    if (!restoreProjectMissing) return;
+    setDrawerOpen(true);
+    clearRestoreProjectMissing();
+  }, [restoreProjectMissing, clearRestoreProjectMissing]);
 
   // Switcher rows in desktop sidebar order, filtered by the search field.
   const projectList = useMemo(
@@ -135,6 +147,12 @@ export const WorkspaceScreen: React.FC = () => {
     [layoutJson],
   );
 
+  // The one terminal on screen. The store keeps the selection valid; this only
+  // covers the frame before its next poll.
+  const activeTerminalId = project
+    ? pickTerminal(project.terminalIds, [selectedTerminalId])
+    : null;
+
   const dotColor =
     secondsSinceActivity < 3
       ? OkenaColors.success
@@ -148,21 +166,12 @@ export const WorkspaceScreen: React.FC = () => {
   const onNewTerminal = () => {
     if (connId && project) void native?.createTerminal(connId, project.id);
   };
+  // Split next to the terminal on screen; the store auto-selects the new one.
   const onSplit = (direction: 'vertical' | 'horizontal') => {
-    if (connId && project) void native?.splitTerminal(connId, project.id, [], direction);
-  };
-  const onMinimize = () => {
-    if (connId && project && selectedTerminalId) {
-      void native?.toggleMinimized(connId, project.id, selectedTerminalId);
-    }
-  };
-  const onToggleFullscreen = () => {
     if (!connId || !project) return;
-    if (fullscreenTerminal) {
-      void native?.setFullscreen(connId, project.id, undefined);
-    } else if (selectedTerminalId) {
-      void native?.setFullscreen(connId, project.id, selectedTerminalId);
-    }
+    const path =
+      layoutNode && activeTerminalId ? (findTerminalPath(layoutNode, activeTerminalId) ?? []) : [];
+    void native?.splitTerminal(connId, project.id, path, direction);
   };
 
   // ── body ──────────────────────────────────────────────────────────────────
@@ -181,22 +190,7 @@ export const WorkspaceScreen: React.FC = () => {
         </Centered>
       );
     }
-    // Fullscreen: just the one terminal.
-    if (fullscreenTerminal && fullscreenTerminal.projectId === project.id) {
-      return (
-        <TerminalPane
-          ref={paneRef}
-          connId={connId}
-          terminalId={fullscreenTerminal.terminalId}
-          fonts={fonts}
-          modifiers={modifiers}
-          onSelect={selectTerminal}
-          selected={selectedTerminalId === fullscreenTerminal.terminalId}
-          native={native}
-        />
-      );
-    }
-    if (project.terminalIds.length === 0) {
+    if (!activeTerminalId) {
       return (
         <Centered>
           <Text style={styles.dim}>No terminals</Text>
@@ -206,39 +200,24 @@ export const WorkspaceScreen: React.FC = () => {
         </Centered>
       );
     }
-    if (layoutNode) {
-      return (
-        <LayoutRenderer
-          connId={connId}
-          projectId={project.id}
-          node={layoutNode}
-          fonts={fonts}
-          modifiers={modifiers}
-          terminalIds={project.terminalIds}
-          paneRef={paneRef}
-          focusTerminalId={selectedTerminalId}
-          onSelectTerminal={selectTerminal}
-          native={native}
-        />
-      );
-    }
-    // Fallback: render the selected (or first) terminal directly.
-    const tid = selectedTerminalId ?? project.terminalIds[0]!;
+    // Keyed on the terminal: a fresh pane measures itself and sends the PTY
+    // resize for the newly shown terminal (an in-place id swap would not).
     return (
       <TerminalPane
+        key={activeTerminalId}
         ref={paneRef}
         connId={connId}
-        terminalId={tid}
+        terminalId={activeTerminalId}
         fonts={fonts}
         modifiers={modifiers}
         onSelect={selectTerminal}
-        selected={selectedTerminalId === tid}
+        selected
         native={native}
       />
     );
   };
 
-  const showToolbar = connId !== null && project !== null && selectedTerminalId !== null;
+  const showToolbar = connId !== null && project !== null && activeTerminalId !== null;
 
   return (
     <View style={styles.root}>
@@ -259,17 +238,20 @@ export const WorkspaceScreen: React.FC = () => {
         </Pressable>
         <View style={styles.flexSpacer} />
         {connId ? <View style={[styles.dot, { backgroundColor: dotColor }]} /> : null}
-        {connId && project && selectedTerminalId ? (
-          <Pressable hitSlop={8} style={styles.appBarBtn} onPress={onToggleFullscreen}>
-            <Text style={styles.appBarIcon}>{fullscreenTerminal ? '🗗' : '⛶'}</Text>
-          </Pressable>
-        ) : null}
         {connId && project ? (
           <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setActionsOpen(true)}>
             <Text style={styles.appBarIcon}>{'＋'}</Text>
           </Pressable>
         ) : null}
       </View>
+
+      {connId && project && project.terminalIds.length > 1 ? (
+        <TerminalTabs
+          project={project}
+          activeTerminalId={activeTerminalId}
+          onSelect={selectTerminal}
+        />
+      ) : null}
 
       {/* Body + key toolbar (toolbar rides above the keyboard) */}
       <KeyboardAvoidingView
@@ -280,10 +262,10 @@ export const WorkspaceScreen: React.FC = () => {
         keyboardVerticalOffset={insets.top}
       >
         <View style={styles.flex}>{renderBody()}</View>
-        {showToolbar && connId ? (
+        {showToolbar && connId && activeTerminalId ? (
           <KeyToolbar
             connId={connId}
-            terminalId={selectedTerminalId}
+            terminalId={activeTerminalId}
             modifiers={modifiers}
             native={native}
             onHideKeyboard={() => paneRef.current?.blur()}
@@ -376,7 +358,7 @@ export const WorkspaceScreen: React.FC = () => {
               onNewTerminal();
             }}
           />
-          {selectedTerminalId ? (
+          {activeTerminalId ? (
             <>
               <ActionItem
                 label="Split Vertical"
@@ -390,13 +372,6 @@ export const WorkspaceScreen: React.FC = () => {
                 onPress={() => {
                   setActionsOpen(false);
                   onSplit('horizontal');
-                }}
-              />
-              <ActionItem
-                label="Minimize"
-                onPress={() => {
-                  setActionsOpen(false);
-                  onMinimize();
                 }}
               />
             </>

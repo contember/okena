@@ -11,8 +11,13 @@
  *   - the selected project's layout JSON (`getProjectLayoutJson`).
  *
  * It auto-selects the focused project when nothing is selected, and auto-selects
- * a terminal within the selected project (newly-added one, or the first if the
- * current selection vanished) — mirroring the Dart `_pollState` logic.
+ * a terminal within the selected project (newly-added one, or the remembered /
+ * first one if the current selection vanished) — mirroring the Dart
+ * `_pollState` logic.
+ *
+ * The phone shows one terminal at a time, so the store also remembers the
+ * selected terminal per project (`terminalByProject`) and can reopen a
+ * remembered selection when polling starts (see `start`'s `restore`).
  *
  * Lifecycle: the Dart provider listened to the connection provider and
  * started/stopped polling on connect/disconnect. Here that wiring is explicit —
@@ -36,6 +41,11 @@ import type {
   TerminalId,
 } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
+import {
+  pickTerminal,
+  resolveRestore,
+  type SelectionMemory,
+} from '../models/terminalSelection';
 
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
@@ -86,23 +96,36 @@ export interface WorkspaceState {
   selectedTerminalId: TerminalId | null;
   /** Seconds since last WS activity (also tracked here, per the Dart provider). */
   secondsSinceActivity: number;
+  /** The terminal last selected in each project, for switching back to a project. */
+  terminalByProject: Record<ProjectId, TerminalId>;
+  /**
+   * Set when a restore named a project the server no longer has. The screen
+   * shows the project list and clears it via {@link clearRestoreProjectMissing}.
+   */
+  restoreProjectMissing: boolean;
 
   // ── actions ────────────────────────────────────────────────────────────
   /**
    * Start polling for the given connection. Idempotent: re-calling with a new
    * `connId` restarts against it. Does an immediate first poll (as Dart did).
    * Call when the connection becomes `connected`.
+   *
+   * `restore` reopens a remembered selection: its project + terminal are
+   * selected once the project list arrives, instead of the server's focused
+   * project. Ignored when already polling `connId`.
    */
-  start(connId: ConnId): void;
+  start(connId: ConnId, restore?: SelectionMemory): void;
   /**
    * Stop polling and clear all workspace state. Call when the connection is no
    * longer connected (mirrors the Dart `_onConnectionChanged` else-branch).
    */
   stop(): void;
-  /** Select a project; clears the terminal selection so it re-auto-selects. Mirrors `selectProject`. */
+  /** Select a project and its remembered (or first) terminal. Mirrors `selectProject`. */
   selectProject(projectId: ProjectId): void;
   /** Select a terminal within the current project. Mirrors `selectTerminal`. */
   selectTerminal(terminalId: TerminalId): void;
+  /** Acknowledge {@link restoreProjectMissing}. */
+  clearRestoreProjectMissing(): void;
   /**
    * The currently-selected project object, or the first project as a fallback,
    * or `null`. Mirrors the Dart `selectedProject` getter. (Provided as a
@@ -136,6 +159,8 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let activeConnId: ConnId | null = null;
 /** Previous terminal-id set for the selected project (newly-added detection). */
 let previousTerminalIds: Set<TerminalId> | null = null;
+/** Selection to reopen once the first non-empty project list arrives. */
+let pendingRestore: SelectionMemory | null = null;
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -144,6 +169,17 @@ function stopPolling(): void {
   }
   activeConnId = null;
   previousTerminalIds = null;
+  pendingRestore = null;
+}
+
+/** `map` with `projectId → terminalId` set; the same object when unchanged. */
+function rememberTerminal(
+  map: Record<ProjectId, TerminalId>,
+  projectId: ProjectId,
+  terminalId: TerminalId | null,
+): Record<ProjectId, TerminalId> {
+  if (terminalId === null || map[projectId] === terminalId) return map;
+  return { ...map, [projectId]: terminalId };
 }
 
 /** Shallow id+name+git+services equality for the project list (mirrors `_projectListEquals`). */
@@ -242,8 +278,26 @@ function pollState(
   let selectedProjectId = prev.selectedProjectId;
   let selectedTerminalId = prev.selectedTerminalId;
 
+  // Reopen a remembered selection once the project list is known. Until then,
+  // hold off the focused-project fallback so it can't win the race.
+  if (pendingRestore && projects.length > 0) {
+    const outcome = resolveRestore(projects, pendingRestore);
+    pendingRestore = null;
+    if (outcome?.kind === 'restored') {
+      selectedProjectId = outcome.projectId;
+      selectedTerminalId = outcome.terminalId;
+      patch.selectedProjectId = selectedProjectId;
+      patch.selectedTerminalId = selectedTerminalId;
+      previousTerminalIds = null;
+      changed = true;
+    } else if (outcome?.kind === 'projectMissing') {
+      patch.restoreProjectMissing = true;
+      changed = true;
+    }
+  }
+
   // Auto-select the focused project if nothing is selected.
-  if (selectedProjectId === null && focusedId) {
+  if (selectedProjectId === null && focusedId && !pendingRestore) {
     selectedProjectId = focusedId;
     patch.selectedProjectId = focusedId;
     changed = true;
@@ -254,7 +308,7 @@ function pollState(
   const project = resolveSelectedProject(projects, selectedProjectId);
   if (project && project.terminalIds.length > 0) {
     if (selectedTerminalId === null || !project.terminalIds.includes(selectedTerminalId)) {
-      selectedTerminalId = project.terminalIds[0]!;
+      selectedTerminalId = pickTerminal(project.terminalIds, [prev.terminalByProject[project.id]]);
       patch.selectedTerminalId = selectedTerminalId;
       changed = true;
     } else if (previousTerminalIds !== null) {
@@ -266,6 +320,11 @@ function pollState(
       }
     }
     previousTerminalIds = new Set(project.terminalIds);
+    const remembered = rememberTerminal(prev.terminalByProject, project.id, selectedTerminalId);
+    if (remembered !== prev.terminalByProject) {
+      patch.terminalByProject = remembered;
+      changed = true;
+    }
   } else {
     previousTerminalIds = null;
     if (selectedTerminalId !== null) {
@@ -321,11 +380,17 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     selectedProjectId: null,
     selectedTerminalId: null,
     secondsSinceActivity: 0,
+    terminalByProject: {},
+    restoreProjectMissing: false,
 
-    start(connId) {
+    start(connId, restore) {
       if (pollTimer !== null && activeConnId === connId) return; // already polling this conn
       stopPolling();
       activeConnId = connId;
+      if (restore) {
+        set({ terminalByProject: { ...restore.terminalByProject } });
+        if (restore.projectId !== null) pendingRestore = restore;
+      }
       pollTimer = setInterval(() => pollState(get, set), WORKSPACE_POLL_MS);
       pollState(get, set); // immediate first poll
     },
@@ -340,14 +405,22 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         projectLayoutJson: null,
         selectedProjectId: null,
         selectedTerminalId: null,
+        terminalByProject: {},
+        restoreProjectMissing: false,
       });
     },
 
     selectProject(projectId) {
       previousTerminalIds = null;
+      const { projects, terminalByProject } = get();
+      const project = projects.find((p) => p.id === projectId);
       set({
         selectedProjectId: projectId,
-        selectedTerminalId: null,
+        // Reopen the terminal last used in this project (else its first); the
+        // next poll re-validates it against the live terminal list.
+        selectedTerminalId: project
+          ? pickTerminal(project.terminalIds, [terminalByProject[projectId]])
+          : null,
         // Swap the layout with the project so the old tree isn't shown until
         // the next poll.
         projectLayoutJson: activeConnId
@@ -357,7 +430,17 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     },
 
     selectTerminal(terminalId) {
-      set({ selectedTerminalId: terminalId });
+      const project = get().getSelectedProject();
+      set({
+        selectedTerminalId: terminalId,
+        terminalByProject: project
+          ? rememberTerminal(get().terminalByProject, project.id, terminalId)
+          : get().terminalByProject,
+      });
+    },
+
+    clearRestoreProjectMissing() {
+      if (get().restoreProjectMissing) set({ restoreProjectMissing: false });
     },
 
     getSelectedProject() {

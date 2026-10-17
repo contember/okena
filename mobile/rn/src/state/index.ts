@@ -30,6 +30,18 @@ export {
 } from './workspaceStore';
 
 export {
+  useSessionStore,
+  sessionStore,
+  configureSessionStore,
+  findRestoreServer,
+  restoreForServer,
+  SESSION_MEMORY_KEY,
+  type SessionState,
+  type SessionMemory,
+  type ServerSession,
+} from './sessionStore';
+
+export {
   asyncStoragePersistence,
   createMemoryPersistence,
   type Persistence,
