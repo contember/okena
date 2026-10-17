@@ -24,6 +24,9 @@
  *     selected text to the clipboard and clears. Double-tap selects a word.
  *   - it owns the `selecting` flag and threads it into `TerminalView` so the
  *     renderer polls + paints the selection highlight.
+ *   - two-finger pinch changes the terminal font size (the persisted setting
+ *     from the settings store, shared by every pane); TerminalView re-measures
+ *     and resizes the PTY.
  *
  * Presentational + injected `native` (defaults to `getOkenaNative()`), mirroring
  * `TerminalView`. The shared `modifiers` store is threaded down from the
@@ -55,7 +58,8 @@ import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalView, type TerminalFonts } from './TerminalView';
-import { KeyModifiers, applyModifiersToText } from './KeyToolbar';
+import { KeyModifiers, applyModifiersToText } from './keyInput';
+import { useSettingsStore } from '../state/settingsStore';
 import { accumulateScroll, exceedsTouchSlop, pointToCell } from './terminalScroll';
 
 // Sentinel buffer: keeps spaces in the TextInput so backspace always has
@@ -88,8 +92,18 @@ export interface TerminalPaneProps {
    * pane. Focus is never summoned when the keyboard is down.
    */
   selected?: boolean;
+  /** Font size in pt. Defaults to the persisted setting (settings store). */
+  fontSize?: number;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
+}
+
+/** Distance between the first two touches, or null for a single touch. */
+function pinchDistance(e: GestureResponderEvent): number | null {
+  // Synthetic events (tests) may omit `touches`.
+  const [a, b] = e.nativeEvent.touches ?? [];
+  if (!a || !b) return null;
+  return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
 // Internal mutable grid size, reported by TerminalView via onGridSizeChange.
@@ -109,10 +123,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       modifiers,
       onSelect,
       selected = false,
+      fontSize,
       native = getOkenaNative(),
     },
     ref,
   ) => {
+    const storedFontSize = useSettingsStore((s) => s.terminalFontSize);
+    const setFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+    const effectiveFontSize = fontSize ?? storedFontSize;
+    // Active pinch: start distance + font size at its start.
+    const pinch = useRef<{ distance: number; fontSize: number } | null>(null);
     const inputRef = useRef<TextInput>(null);
     const [selecting, setSelecting] = useState(false);
     const [copied, setCopied] = useState(false);
@@ -270,8 +290,26 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       };
     }, []);
 
+    /** Handles a two-finger move; returns true while a pinch owns the gesture. */
+    const handlePinch = useCallback(
+      (e: GestureResponderEvent): boolean => {
+        const distance = pinchDistance(e);
+        if (distance === null || selectingRef.current) return pinch.current !== null;
+        if (!pinch.current) {
+          clearLongPress();
+          moved.current = true;
+          pinch.current = { distance: Math.max(distance, 1), fontSize: effectiveFontSize };
+          return true;
+        }
+        setFontSize((pinch.current.fontSize * distance) / pinch.current.distance);
+        return true;
+      },
+      [clearLongPress, effectiveFontSize, setFontSize],
+    );
+
     const onGrant = useCallback(
       (e: GestureResponderEvent) => {
+        pinch.current = null;
         const { locationX: x, locationY: y, pageX, pageY } = e.nativeEvent;
         grantPos.current = { x, y };
         grantPage.current = { x: pageX, y: pageY };
@@ -300,6 +338,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     const onMove = useCallback(
       (e: GestureResponderEvent) => {
+        if (handlePinch(e)) return;
         const { x, y } = panePoint(e);
 
         if (selectingRef.current) {
@@ -341,10 +380,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           }
         }
       },
-      [native, connId, terminalId, touchToCell, clearLongPress, panePoint],
+      [native, connId, terminalId, touchToCell, clearLongPress, panePoint, handlePinch],
     );
 
     const endGesture = useCallback(() => {
+      pinch.current = null;
       clearLongPress();
       dragLastPageY.current = null;
       scrollAccum.current = 0;
@@ -432,6 +472,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             connId={connId}
             terminalId={terminalId}
             fonts={fonts}
+            fontSize={effectiveFontSize}
             selecting={selecting}
             onGridSizeChange={onGridSizeChange}
           />

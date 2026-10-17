@@ -49,9 +49,11 @@ const OkenaColorsArgb = {
   glassStroke: 0x18ffffff,
   backdrop: 0x8f000000,
   // Key toolbar
-  keyBg: 0xff161616,
+  keyBg: 0xff1e1e21,
+  keyBgPressed: 0xff38383d,
   keyBorder: 0xff2a2a2a,
-  keyText: 0xffb0b0b8,
+  keyText: 0xffe8e8ec,
+  keyTextMuted: 0xff8e8e96,
 } as const;
 
 type ColorName = keyof typeof OkenaColorsArgb;
@@ -71,9 +73,11 @@ export const TerminalTheme = {
   fontFamily: Platform.select({ ios: 'JetBrains Mono', default: 'JetBrainsMono' }),
   fontFamilyFallback: ['Menlo', 'Consolas', 'DejaVu Sans Mono', 'monospace'] as const,
 
-  defaultFontSize: 13,
-  minFontSize: 6,
-  maxFontSize: 24,
+  /** Default terminal font size (pt); user-adjustable in Settings. */
+  defaultFontSize: 10.5,
+  minFontSize: 8,
+  maxFontSize: 20,
+  fontSizeStep: 0.5,
   defaultColumns: 80,
   lineHeightFactor: 1.2,
 

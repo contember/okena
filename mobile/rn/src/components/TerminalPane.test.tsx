@@ -14,6 +14,8 @@ import type { SkFont } from '@shopify/react-native-skia';
 import { KeyModifiers } from './KeyToolbar';
 import { TerminalPane } from './TerminalPane';
 import type { OkenaNative } from '../native/okena';
+import { createMemoryPersistence } from '../state/persistence';
+import { configureSettingsStore, useSettingsStore } from '../state/settingsStore';
 
 // The Skia renderer needs a GPU surface and the clipboard a native module;
 // the input chrome under test needs neither.
@@ -21,6 +23,7 @@ import type { OkenaNative } from '../native/okena';
 const mockTerminalViewProps: {
   current?: {
     onGridSizeChange?: (cols: number, rows: number, cw: number, ch: number) => void;
+    fontSize?: number;
   };
 } = {};
 jest.mock('./TerminalView', () => ({
@@ -257,6 +260,60 @@ describe('TerminalPane drag scrolling', () => {
   it('keeps the touch for the whole gesture', () => {
     const { renderer, surface } = setup();
     expect(surface.props.onResponderTerminationRequest()).toBe(false);
+    act(() => renderer.unmount());
+  });
+});
+
+describe('TerminalPane font size', () => {
+  beforeEach(() => {
+    configureSettingsStore({ persistence: createMemoryPersistence() });
+    useSettingsStore.setState({ terminalFontSize: 10.5, loaded: true });
+  });
+
+  function twoFingers(distance: number) {
+    return {
+      nativeEvent: {
+        locationX: 50,
+        locationY: 50,
+        pageX: 50,
+        pageY: 50,
+        touches: [
+          { pageX: 100, pageY: 100 },
+          { pageX: 100 + distance, pageY: 100 },
+        ],
+      },
+    };
+  }
+
+  function surfaceOf(renderer: TestRenderer.ReactTestRenderer) {
+    return renderer.root.find(
+      (n) => n.type === View && typeof n.props.onResponderMove === 'function',
+    );
+  }
+
+  it('renders the terminal at the persisted font size', () => {
+    const renderer = renderPane('t1');
+    expect(mockTerminalViewProps.current?.fontSize).toBe(10.5);
+    act(() => useSettingsStore.getState().setTerminalFontSize(14));
+    expect(mockTerminalViewProps.current?.fontSize).toBe(14);
+    act(() => renderer.unmount());
+  });
+
+  it('pinches to zoom without tapping or scrolling', () => {
+    const onSelect = jest.fn();
+    const scrollWheel = jest.fn();
+    const native = { scrollWheel } as unknown as OkenaNative;
+    const renderer = renderPane('t1', { onSelect, native });
+    const surface = surfaceOf(renderer);
+    act(() => {
+      surface.props.onResponderGrant(twoFingers(100));
+      surface.props.onResponderMove(twoFingers(100)); // pinch starts
+      surface.props.onResponderMove(twoFingers(200)); // 2x
+      surface.props.onResponderRelease(twoFingers(200));
+    });
+    expect(useSettingsStore.getState().terminalFontSize).toBe(20);
+    expect(scrollWheel).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
     act(() => renderer.unmount());
   });
 });

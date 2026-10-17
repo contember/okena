@@ -272,6 +272,7 @@ export const WorkspaceScreen: React.FC = () => {
             modifiers={modifiers}
             native={native}
             onHideKeyboard={() => paneRef.current?.blur()}
+            onShowKeyboard={() => paneRef.current?.focus()}
           />
         ) : null}
       </KeyboardAvoidingView>

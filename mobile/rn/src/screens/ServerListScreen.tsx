@@ -39,6 +39,8 @@ import {
 import { useConnectionStore } from '../state';
 import { Icon } from '../components/Icon';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
+import { SettingsIcon } from '../components/KeyIcons';
+import { SettingsSheet } from './SettingsSheet';
 
 const DEFAULT_PORT = '19100';
 
@@ -50,6 +52,7 @@ export const ServerListScreen: React.FC = () => {
   const removeServer = useConnectionStore((s) => s.removeServer);
 
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Which server (by key) currently shows its delete affordance (long-pressed).
   const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
 
@@ -110,13 +113,29 @@ export const ServerListScreen: React.FC = () => {
       {/* Header */}
       <View style={styles.header}>
         <Text style={OkenaTypography.largeTitle}>Servers</Text>
-        <Pressable
-          style={({ pressed }) => [styles.addButton, pressed && styles.addButtonPressed]}
-          onPress={() => setSheetOpen(true)}
-          accessibilityLabel="Add server"
-        >
-          <Text style={styles.addButtonPlus}>+</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            style={({ pressed }) => [styles.addButton, pressed && styles.addButtonPressed]}
+            onPress={() => setSettingsOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            hitSlop={4}
+          >
+            <SettingsIcon
+              color={OkenaColors.textSecondary}
+              background={OkenaColors.surfaceElevated}
+              size={18}
+            />
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.addButton, pressed && styles.addButtonPressed]}
+            onPress={() => setSheetOpen(true)}
+            accessibilityLabel="Add server"
+            hitSlop={4}
+          >
+            <Text style={styles.addButtonPlus}>+</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* Content */}
@@ -146,6 +165,7 @@ export const ServerListScreen: React.FC = () => {
           setSheetOpen(false);
         }}
       />
+      <SettingsSheet visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </View>
   );
 };
@@ -308,10 +328,11 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingBottom: 8,
   },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   addButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: OkenaColors.surfaceElevated,

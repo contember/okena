@@ -103,7 +103,8 @@ export interface TerminalViewProps {
    */
   selecting?: boolean;
   /**
-   * Called whenever the computed grid size changes, AFTER `resizeLocal` has run.
+   * Called whenever the grid is computed (layout or font-size change), AFTER
+   * any `resizeLocal`.
    * The host typically debounces a `resizeTerminal` here, but this component
    * already does that internally; this is for the host to track cols/rows.
    */
@@ -432,12 +433,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   const glyphFallback = useGlyphFallback(fonts.regular);
 
   // ── Layout → cols/rows → resizeLocal + debounced resizeTerminal ──────────
-  const onLayout = useCallback(
-    (e: LayoutChangeEvent) => {
-      const { width, height } = e.nativeEvent.layout;
-      if (width <= 0 || height <= 0) return;
-      setSize({ w: width, h: height });
-
+  const layoutSize = useRef<{ w: number; h: number } | null>(null);
+  const applyGrid = useCallback(
+    (width: number, height: number) => {
       const { cellWidth, cellHeight } = metrics;
       if (cellWidth <= 0 || cellHeight <= 0) return;
 
@@ -450,7 +448,6 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
         // Immediate local resize for responsive rendering (no WS round-trip).
         native.resizeLocal(connId, terminalId, newCols, newRows);
-        onGridSizeChange?.(newCols, newRows, cellWidth, cellHeight);
 
         if (!initialResizeSent.current) {
           // First resize fires immediately — avoids a flash of garbled content.
@@ -465,8 +462,22 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           }, 200);
         }
       }
+      // Report even when cols/rows are unchanged: a font-size change still
+      // moves the cell size the host uses for touch → cell mapping.
+      onGridSizeChange?.(newCols, newRows, cellWidth, cellHeight);
     },
     [native, connId, terminalId, metrics, onGridSizeChange],
+  );
+
+  const onLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      if (width <= 0 || height <= 0) return;
+      setSize({ w: width, h: height });
+      layoutSize.current = { w: width, h: height };
+      applyGrid(width, height);
+    },
+    [applyGrid],
   );
 
   // Reset resize/init state when the target terminal changes.
@@ -475,6 +486,13 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     colsRef.current = 0;
     rowsRef.current = 0;
   }, [connId, terminalId]);
+
+  // A font-size change alters the cell metrics without a layout event:
+  // recompute cols/rows (and resize the PTY) for the current size.
+  useEffect(() => {
+    const laid = layoutSize.current;
+    if (laid) applyGrid(laid.w, laid.h);
+  }, [applyGrid]);
 
   // ── Repaint loop: rAF gated on takeDirty() (Decision C) ──────────────────
   useEffect(() => {

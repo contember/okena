@@ -36,6 +36,7 @@ import {
 import { workspaceStore } from './state/workspaceStore';
 import { restoreForServer, sessionStore } from './state/sessionStore';
 import { bindSessionMemory, loadAndRestore } from './state/sessionRestore';
+import { settingsStore } from './state/settingsStore';
 import { OkenaColors } from './theme';
 
 import { ServerListScreen } from './screens/ServerListScreen';
@@ -77,6 +78,7 @@ export const App: React.FC = () => {
     // yet — expected off-device; the mock path configures the stores first.
     const conn = connectionStore().getState();
     conn.initApp();
+    void settingsStore().getState().load();
 
     const unbindNav = bindConnectionToNavigation();
     const unbindWs = bindConnectionToWorkspace();
