@@ -8,6 +8,7 @@ pub mod serve;
 pub mod server;
 pub mod tls;
 pub mod types;
+pub mod usage;
 
 // The remote server runs in the daemon process, so nothing in-process describes
 // its status. Clients read the daemon's `remote.json` (see [`local`]) and its

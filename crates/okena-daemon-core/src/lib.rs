@@ -19,6 +19,7 @@
 //! - the observer tasks (see [`observers`]),
 //! - the PTY event loop ([`pty_loop::run_pty_loop`]),
 //! - the git-status poller ([`git_poll::run_git_poll`]),
+//! - the agent usage poller ([`usage_poll::run_usage_poll`]),
 //! - the remote command loop ([`command_loop::daemon_command_loop`]), and
 //! - the gpui-free settings/theme handlers ([`daemon_config`]).
 //!
@@ -40,6 +41,7 @@ pub mod reactor;
 pub mod service_cx;
 pub mod soft_close;
 pub mod toast_poll;
+pub mod usage_poll;
 pub mod workspace_cx;
 pub mod worktree_close_watchdog;
 pub mod worktree_stale_sweep;

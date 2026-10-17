@@ -154,6 +154,17 @@ async fn handle_ws(
     // Subscribe to daemon-originated toasts (fire-and-forget broadcast).
     let mut toast_rx = state.toast_tx.subscribe();
     let mut presentation_rx = state.presentation_tx.subscribe();
+    // Agent usage: push the current snapshot now, then every change.
+    let mut usage_rx = state.usage.subscribe();
+    let mut usage_open = true;
+    {
+        let usage = usage_rx.borrow_and_update().clone();
+        let msg = serde_json::to_string(&WsOutbound::UsageChanged { usage })
+            .expect("BUG: WsOutbound must serialize");
+        // A closed writer is noticed by the main loop, which runs the
+        // connection cleanup; returning here would skip it.
+        let _ = out_tx.send(Message::Text(msg.into())).await;
+    }
     // Once a sender is gone we disable its select arm, otherwise `recv()` would
     // resolve `Err(Closed)` instantly and busy-spin the loop.
     let mut toast_open = true;
@@ -569,6 +580,22 @@ async fn handle_ws(
                     if out_tx.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }
+                }
+            }
+
+            // Agent usage snapshot changed (fetch started/finished, settings).
+            result = usage_rx.changed(), if usage_open => {
+                if result.is_ok() {
+                    let usage = usage_rx.borrow_and_update().clone();
+                    let resp = serde_json::to_string(&WsOutbound::UsageChanged { usage })
+                        .expect("BUG: WsOutbound must serialize");
+                    if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                        break;
+                    }
+                } else {
+                    // The hub's sender lives in AppState, so this only happens
+                    // during teardown; stop polling the closed channel.
+                    usage_open = false;
                 }
             }
 

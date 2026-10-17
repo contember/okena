@@ -196,6 +196,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             true,
             okena_ext_updater::UpdateInfo::new("0.0.0-test".to_string()),
+            crate::usage::UsageHub::detached(),
         )
     }
 

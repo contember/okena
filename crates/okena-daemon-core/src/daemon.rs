@@ -66,6 +66,7 @@ use okena_remote_server::bridge::{self, BridgeReceiver};
 use okena_remote_server::claude_remote::ClaudeRemoteHub;
 use okena_remote_server::pty_broadcaster::PtyBroadcaster;
 use okena_remote_server::server::RemoteServer;
+use okena_remote_server::usage::UsageHub;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{LocalBackend, TerminalBackend, TerminalSessionTeardown};
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
@@ -265,6 +266,11 @@ pub struct DaemonCore {
     /// Open Claude dialogs for `GetState`. Weak: the hub holds a bridge sender,
     /// and the command loop must still end once the server drops its senders.
     claude_hub: Weak<ClaudeRemoteHub>,
+    /// Agent usage state shared with the remote server; the usage poller
+    /// (spawned in [`run`](DaemonCore::run)) publishes into it.
+    usage_hub: UsageHub,
+    /// Refresh requests from `POST /v1/usage/refresh`, drained by the poller.
+    usage_refresh_rx: mpsc::UnboundedReceiver<okena_remote_server::usage::UsageRefresh>,
     /// Single-writer instance lock (§5). The daemon is the sole owner of the
     /// profile's `workspace.json` + lock; held for the daemon's lifetime so a
     /// second instance (or a classic in-process GUI) cannot clobber the profile.
@@ -373,6 +379,11 @@ impl DaemonCore {
             handle.clone(),
         ));
 
+        // Agent usage hub, seeded from the settings so clients connecting
+        // before the poller's first pass already see which providers are on.
+        let (usage_hub, usage_refresh_rx) =
+            UsageHub::new(crate::usage_poll::initial_usage(&params.settings));
+
         // ── 4. Settings + config ─────────────────────────────────────────────
         let settings = Arc::new(Mutex::new(params.settings));
         let mut daemon_config = DaemonConfig::new(settings.clone());
@@ -471,6 +482,7 @@ impl DaemonCore {
             params.ui_owned,
             params.tls_enabled,
             env!("CARGO_PKG_VERSION"),
+            usage_hub.clone(),
         )?;
 
         // ── 7. Print pairing info to stdout ──────────────────────────────────
@@ -509,6 +521,8 @@ impl DaemonCore {
             daemon_config,
             claude_pane_env,
             claude_hub: command_loop_claude_hub,
+            usage_hub,
+            usage_refresh_rx,
             _instance_lock: instance_lock,
             shutdown_requested,
         })
@@ -542,6 +556,8 @@ impl DaemonCore {
             daemon_config,
             claude_pane_env,
             claude_hub,
+            usage_hub,
+            usage_refresh_rx,
             // Bound (not `..`) so the lock is held until the end of `run`, then
             // released on drop after the server is stopped.
             _instance_lock,
@@ -591,15 +607,23 @@ impl DaemonCore {
                 remote_visible_projects,
                 git_poll_trigger_tx.clone(),
             ));
+            tokio::task::spawn_local(crate::claude_remote::run_preload_refresh(
+                claude_pane_env.clone(),
+                settings.clone(),
+            ));
+            // Claude Code / Codex usage for the remote API (`/v1/usage`) and
+            // the `usage_changed` WS push. Reads the extension toggles from
+            // the daemon's settings.
+            tokio::task::spawn_local(crate::usage_poll::run_usage_poll(
+                settings.clone(),
+                usage_hub,
+                usage_refresh_rx,
+            ));
             // Forward the daemon's HookMonitor toasts to clients. The daemon has
             // no surface; this drains its pending toasts and broadcasts them over
             // the same channel the remote server fans out (`WsOutbound::Toast`).
             // `(*toast_tx).clone()` clones the inner `broadcast::Sender` (cheap,
             // shares the channel) so the task can outlive this `Arc` handle.
-            tokio::task::spawn_local(crate::claude_remote::run_preload_refresh(
-                claude_pane_env.clone(),
-                settings.clone(),
-            ));
             tokio::task::spawn_local(crate::toast_poll::run_toast_poll(
                 reactor.hook_monitor.clone(),
                 (*toast_tx).clone(),

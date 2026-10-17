@@ -313,6 +313,35 @@ where
     }
 }
 
+/// `POST /v1/usage/refresh`: ask the server to refetch agent usage for one
+/// provider (`None` = all enabled). The server throttles, answers with its
+/// current snapshot immediately, and pushes the fetched result over the WS
+/// (`usage_changed`).
+#[cfg(feature = "client")]
+pub async fn request_usage_refresh_async(
+    config: &RemoteConnectionConfig,
+    token: &str,
+    provider: Option<okena_core::api::ApiUsageProvider>,
+) -> Result<okena_core::api::ApiUsage, String> {
+    let (client, url) = crate::remote_http::async_client_and_url(config, "/v1/usage/refresh")?;
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&okena_core::api::UsageRefreshRequest { provider })
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Server returned {status}"));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))
+}
+
 /// Post an action asynchronously using the same connection-aware transport and
 /// response contract as [`RemoteActionClient`].
 #[cfg(feature = "client")]

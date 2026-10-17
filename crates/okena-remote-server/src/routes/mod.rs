@@ -12,6 +12,7 @@ pub mod state;
 pub mod stream;
 pub mod tokens;
 pub mod update;
+pub mod usage;
 
 use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
@@ -94,6 +95,9 @@ pub struct AppState {
     /// [`management_middleware`].
     pub local_bootstrap: bool,
     pub update_info: okena_ext_updater::UpdateInfo,
+    /// Agent usage snapshot + refresh requests, shared with the daemon's
+    /// usage poller.
+    pub usage: crate::usage::UsageHub,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -146,6 +150,7 @@ pub fn build_router(
     had_client: Arc<AtomicBool>,
     local_bootstrap: bool,
     update_info: okena_ext_updater::UpdateInfo,
+    usage: crate::usage::UsageHub,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -168,6 +173,7 @@ pub fn build_router(
         had_client,
         local_bootstrap,
         update_info,
+        usage,
     };
 
     // Routes that require auth
@@ -205,6 +211,11 @@ pub fn build_router(
                 .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
         )
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
+        .route("/v1/usage", axum::routing::get(usage::get_usage))
+        .route(
+            "/v1/usage/refresh",
+            axum::routing::post(usage::post_refresh),
+        )
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route(
             "/v1/tokens/{id}",
@@ -420,6 +431,18 @@ mod tests {
     }
 
     fn router_with_bootstrap(auth_store: Arc<AuthStore>, local_bootstrap: bool) -> Router {
+        router_with_usage(
+            auth_store,
+            local_bootstrap,
+            crate::usage::UsageHub::detached(),
+        )
+    }
+
+    fn router_with_usage(
+        auth_store: Arc<AuthStore>,
+        local_bootstrap: bool,
+        usage: crate::usage::UsageHub,
+    ) -> Router {
         // Dropping the bridge receiver makes authorized calls fail at the
         // bridge instead of hanging on a reply that never comes.
         let (bridge_tx, _) = crate::bridge::bridge_channel();
@@ -447,6 +470,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             local_bootstrap,
             okena_ext_updater::UpdateInfo::new("0.0.0-test".to_string()),
+            usage,
         )
     }
 
@@ -522,6 +546,73 @@ mod tests {
                 .expect("the router is infallible")
                 .status()
         }
+    }
+
+    #[tokio::test]
+    async fn usage_routes_require_auth_and_answer_with_a_snapshot() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+
+        // Off-host callers without a token are refused like every REST route.
+        for call in [Call::get("/v1/usage"), Call::post("/v1/usage/refresh")] {
+            assert_eq!(
+                call.via_peer(OFF_HOST).status(&mut router).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            Call::get("/v1/usage")
+                .via_peer(OFF_HOST)
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::OK
+        );
+        // `Call` sends `{}` — refresh everything.
+        assert_eq!(
+            Call::post("/v1/usage/refresh")
+                .via_peer(OFF_HOST)
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_refresh_validates_the_body_and_forwards_the_provider() {
+        use okena_core::api::ApiUsageProvider;
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let (hub, mut refresh_rx) = crate::usage::UsageHub::new(Default::default());
+        let mut router = router_with_usage(store, true, hub);
+        let mut post = async |body: &'static str| {
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/usage/refresh")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body))
+                .expect("build request");
+            req.extensions_mut().insert(LOOPBACK);
+            router.call(req).await.expect("infallible").status()
+        };
+        assert_eq!(post(r#"{"provider":"codex"}"#).await, StatusCode::OK);
+        assert_eq!(
+            refresh_rx.try_recv().unwrap(),
+            Some(ApiUsageProvider::Codex)
+        );
+        assert_eq!(post("").await, StatusCode::OK);
+        assert_eq!(refresh_rx.try_recv().unwrap(), None);
+        assert_eq!(
+            post(r#"{"providr":"codex"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"provider":"gemini"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(refresh_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -710,15 +801,19 @@ mod tests {
         }
     }
 
-    /// Like `next_frame_type`, but skips `system_stats_changed`: the stream
-    /// pushes it on its own timer, starting right after `auth_ok`.
-    async fn next_frame_type_skipping_stats<S>(socket: &mut S) -> Option<String>
+    /// Like `next_frame_type`, but skips the periodic pushes
+    /// (`system_stats_changed`, `usage_changed`): the stream sends them on its
+    /// own timers, starting right after `auth_ok`.
+    async fn next_frame_type_skipping_periodic<S>(socket: &mut S) -> Option<String>
     where
         S: futures::Stream<Item = Result<TestFrame, TestFrameError>> + Unpin,
     {
         loop {
             let frame_type = next_frame_type(socket).await;
-            if frame_type.as_deref() != Some("system_stats_changed") {
+            if !matches!(
+                frame_type.as_deref(),
+                Some("system_stats_changed" | "usage_changed")
+            ) {
                 return frame_type;
             }
         }
@@ -802,6 +897,11 @@ mod tests {
             next_frame_type(&mut socket).await.as_deref(),
             Some("auth_ok")
         );
+        // The current usage snapshot follows right after auth.
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("usage_changed")
+        );
     }
 
     /// Revocation must end the established stream, not merely refuse the next
@@ -827,15 +927,19 @@ mod tests {
             next_frame_type(&mut socket).await.as_deref(),
             Some("auth_ok")
         );
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("usage_changed")
+        );
 
         assert!(store.revoke_token(&token_id));
 
         assert_eq!(
-            next_frame_type_skipping_stats(&mut socket).await.as_deref(),
+            next_frame_type_skipping_periodic(&mut socket).await.as_deref(),
             Some("auth_failed")
         );
         assert!(
-            next_frame_type_skipping_stats(&mut socket).await.is_none(),
+            next_frame_type_skipping_periodic(&mut socket).await.is_none(),
             "the daemon must close the revoked stream"
         );
     }
