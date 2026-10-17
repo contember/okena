@@ -35,6 +35,7 @@ export const ICONS = {
     d: 'M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM6 9h.01M10 9h.01M14 9h.01M18 9h.01M8 13h.01M12 13h.01M16 13h.01M7 16h10',
   },
   prompt: { d: 'M5 7l5 5-5 5M12 17h7' },
+  gauge: { d: 'M4 17a8 8 0 1 1 16 0M12 17l3.5-5' },
   disconnect: { d: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M5.7 5.7l12.6 12.6' },
 } satisfies Record<string, IconDef>;
 

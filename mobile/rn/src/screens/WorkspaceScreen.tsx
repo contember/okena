@@ -3,7 +3,8 @@
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
  *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
- *     when there are several), a small connection-quality dot, and a "＋"
+ *     when there are several), the agent usage rings (tap for the
+ *     {@link UsageSheet}), a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
@@ -70,6 +71,10 @@ import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPan
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
 import { Icon } from '../components/Icon';
+import { UsageIndicator } from '../components/UsageIndicator';
+import { useNow } from '../components/useNow';
+import { indicatorItems } from '../models/usage';
+import { ConnectedUsageSheet } from './UsageSheet';
 import type { TerminalFonts } from '../components/TerminalView';
 
 const native: OkenaNative = (() => {
@@ -122,6 +127,7 @@ export const WorkspaceScreen: React.FC = () => {
   const clearRestoreProjectMissing = useWorkspaceStore((s) => s.clearRestoreProjectMissing);
   const previousProjectId = useWorkspaceStore((s) => s.previousProjectId);
   const signals = useWorkspaceStore((s) => s.projectSignals);
+  const usage = useWorkspaceStore((s) => s.usage);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
@@ -135,6 +141,11 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
+  const [usageOpen, setUsageOpen] = useState(false);
+
+  // Pace moves with the clock, so re-derive the ring colors each minute too.
+  const usageNow = useNow(60_000, usage !== null);
+  const usageItems = useMemo(() => indicatorItems(usage, usageNow), [usage, usageNow]);
 
   // The remembered project is gone: show the project list instead.
   useEffect(() => {
@@ -255,7 +266,7 @@ export const WorkspaceScreen: React.FC = () => {
         modifiers={modifiers}
         onSelect={selectTerminal}
         selected
-        focusBlocked={drawerOpen || switcherOpen || actionsOpen}
+        focusBlocked={drawerOpen || switcherOpen || actionsOpen || usageOpen}
         native={native}
       />
     );
@@ -283,6 +294,7 @@ export const WorkspaceScreen: React.FC = () => {
           ) : null}
         </Pressable>
         <View style={styles.flexSpacer} />
+        {connId ? <UsageIndicator items={usageItems} onPress={() => setUsageOpen(true)} /> : null}
         {connId ? <View style={[styles.dot, { backgroundColor: dotColor }]} /> : null}
         {connId && project ? (
           <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setActionsOpen(true)}>
@@ -326,6 +338,8 @@ export const WorkspaceScreen: React.FC = () => {
 
       {/* Drawer */}
       <ProjectDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} native={native} />
+
+      <ConnectedUsageSheet visible={usageOpen} onClose={() => setUsageOpen(false)} />
 
       {/* Project switcher */}
       <Modal
