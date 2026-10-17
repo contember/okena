@@ -75,6 +75,8 @@ export interface KeyToolbarProps {
   onHideKeyboard?: () => void;
   /** Show the soft keyboard (focus the selected pane's input). */
   onShowKeyboard?: () => void;
+  /** Called after the toolbar sent input, so the pane can reset its keyboard buffer. */
+  onInputSent?: () => void;
   /** Injected native surface (defaults to `getOkenaNative()`). */
   native?: OkenaNative;
 }
@@ -108,6 +110,7 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
   modifiers,
   onHideKeyboard,
   onShowKeyboard,
+  onInputSent,
   native = getOkenaNative(),
 }) => {
   const mod = useKeyModifiers(modifiers);
@@ -126,8 +129,9 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
         // Input still works while the local terminal state is catching up.
       }
       void native.sendText(connId, terminalId, text);
+      onInputSent?.();
     },
-    [native, connId, terminalId],
+    [native, connId, terminalId, onInputSent],
   );
 
   const sendInput = useCallback(
@@ -135,11 +139,12 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
       if (!terminalId) return;
       if (input.kind === 'special') {
         void native.sendSpecialKey(connId, terminalId, input.key);
+        onInputSent?.();
       } else {
         sendText(input.text);
       }
     },
-    [native, connId, terminalId, sendText],
+    [native, connId, terminalId, sendText, onInputSent],
   );
 
   const pasteClipboard = useCallback(() => {
