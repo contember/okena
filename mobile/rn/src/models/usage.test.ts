@@ -12,6 +12,7 @@ import {
   formatResetClock,
   formatResetsIn,
   formatWindowLabel,
+  hasHistoryShape,
   headlineSeverity,
   indicatorAccessibilityLabel,
   indicatorItems,
@@ -289,6 +290,14 @@ describe('display rules', () => {
     expect(view[0]!.detailText).toBe('Updated 10m ago · retry in 30s');
     expect(view[0]!.isError).toBe(true);
     expect(view[1]!.statusText).toBe('Not signed in on this machine');
+  });
+});
+
+describe('history sparkline', () => {
+  it('needs two samples spanning at least 3% of the bar', () => {
+    expect(hasHistoryShape([{ x: 0.5 }])).toBe(false);
+    expect(hasHistoryShape([{ x: 0.5 }, { x: 0.51 }])).toBe(false);
+    expect(hasHistoryShape([{ x: 0.1 }, { x: 0.2 }, { x: 0.5 }])).toBe(true);
   });
 });
 
