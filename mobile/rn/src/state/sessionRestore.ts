@@ -27,14 +27,21 @@ export function bindSessionMemory(): () => void {
       return;
     }
     const c = conn.getState();
-    if (!selectIsConnected(c) || !c.activeServer || ws.selectedProjectId === null) return;
+    // The screen falls back to the first project while nothing is explicitly
+    // selected (no focused project on the server), so record what is shown.
+    const project = ws.getSelectedProject();
+    if (!selectIsConnected(c) || !c.activeServer || project === null) return;
     session.getState().recordSelection(c.activeServer, {
-      projectId: ws.selectedProjectId,
+      projectId: project.id,
       terminalByProject: ws.terminalByProject,
     });
   });
   const unbindConn = conn.subscribe((c, prev) => {
-    if (c.activeServer === null && prev.activeServer !== null && selectIsConnected(prev)) {
+    if (
+      c.activeServer === null &&
+      prev.activeServer !== null &&
+      selectIsConnected(prev)
+    ) {
       session.getState().clearAutoReconnect();
     }
   });
@@ -51,9 +58,15 @@ export function bindSessionMemory(): () => void {
  */
 export async function loadAndRestore(): Promise<void> {
   const conn = connectionStore();
-  await Promise.all([conn.getState().loadServers(), sessionStore().getState().load()]);
+  await Promise.all([
+    conn.getState().loadServers(),
+    sessionStore().getState().load(),
+  ]);
   const state = conn.getState();
   if (state.activeServer !== null) return;
-  const server = findRestoreServer(state.servers, sessionStore().getState().memory);
+  const server = findRestoreServer(
+    state.servers,
+    sessionStore().getState().memory,
+  );
   if (server) state.connectTo(server);
 }

@@ -7,6 +7,7 @@
  */
 
 import { createSavedServer, listToJson } from '../models/savedServer';
+import type { ProjectInfo } from '../native/okena';
 import {
   configureConnectionStore,
   SAVED_SERVERS_KEY,
@@ -25,7 +26,26 @@ import {
 } from './sessionStore';
 import { useWorkspaceStore } from './workspaceStore';
 
-const SERVER = createSavedServer({ host: 'mac.lan', port: 19100, token: 'tok', fingerprint: 'fp' });
+const PROJECT = (id: string): ProjectInfo => ({
+  id,
+  name: id,
+  path: `/tmp/${id}`,
+  showInOverview: true,
+  terminalIds: ['t1', 't2'],
+  terminalNames: {},
+  gitLinesAdded: 0,
+  gitLinesRemoved: 0,
+  services: [],
+  folderColor: 'blue',
+  worktreeIds: [],
+});
+
+const SERVER = createSavedServer({
+  host: 'mac.lan',
+  port: 19100,
+  token: 'tok',
+  fingerprint: 'fp',
+});
 
 function stubNative(connect: jest.Mock): ConnectionNative {
   return {
@@ -41,7 +61,10 @@ function stubNative(connect: jest.Mock): ConnectionNative {
   };
 }
 
-function setup(memory: SessionMemory): { persistence: Persistence; connect: jest.Mock } {
+function setup(memory: SessionMemory): {
+  persistence: Persistence;
+  connect: jest.Mock;
+} {
   const persistence = createMemoryPersistence({
     [SAVED_SERVERS_KEY]: listToJson([SERVER]),
     [SESSION_MEMORY_KEY]: JSON.stringify(memory),
@@ -64,7 +87,10 @@ describe('loadAndRestore', () => {
   });
 
   it('reconnects to the server that was open last', async () => {
-    const { connect } = setup({ last: { host: 'mac.lan', port: 19100 }, servers: {} });
+    const { connect } = setup({
+      last: { host: 'mac.lan', port: 19100 },
+      servers: {},
+    });
     await loadAndRestore();
 
     expect(connect).toHaveBeenCalledWith('mac.lan', 19100, 'tok', true, 'fp');
@@ -85,8 +111,17 @@ describe('bindSessionMemory', () => {
 
   afterEach(() => {
     unbind();
-    useConnectionStore.setState({ activeServer: null, connId: null, status: { kind: 'disconnected' } });
-    useWorkspaceStore.setState({ selectedProjectId: null, selectedTerminalId: null, terminalByProject: {} });
+    useConnectionStore.setState({
+      activeServer: null,
+      connId: null,
+      status: { kind: 'disconnected' },
+    });
+    useWorkspaceStore.setState({
+      projects: [],
+      selectedProjectId: null,
+      selectedTerminalId: null,
+      terminalByProject: {},
+    });
   });
 
   it('records selections while connected and forgets the target on disconnect', async () => {
@@ -95,31 +130,86 @@ describe('bindSessionMemory', () => {
     unbind = bindSessionMemory();
 
     // Not connected yet: nothing is recorded.
-    useWorkspaceStore.setState({ selectedProjectId: 'p1', selectedTerminalId: 't1' });
-    expect(await persistence.getItem(SESSION_MEMORY_KEY)).toBe(JSON.stringify(EMPTY_SESSION_MEMORY));
+    useWorkspaceStore.setState({
+      projects: [PROJECT('p1')],
+      selectedProjectId: 'p1',
+      selectedTerminalId: 't1',
+    });
+    expect(await persistence.getItem(SESSION_MEMORY_KEY)).toBe(
+      JSON.stringify(EMPTY_SESSION_MEMORY),
+    );
 
-    useConnectionStore.setState({ activeServer: SERVER, connId: 'conn-1', status: { kind: 'connected' } });
-    useWorkspaceStore.setState({ selectedTerminalId: 't2', terminalByProject: { p1: 't2' } });
-    let stored = parseSessionMemory(await persistence.getItem(SESSION_MEMORY_KEY));
+    useConnectionStore.setState({
+      activeServer: SERVER,
+      connId: 'conn-1',
+      status: { kind: 'connected' },
+    });
+    useWorkspaceStore.setState({
+      selectedTerminalId: 't2',
+      terminalByProject: { p1: 't2' },
+    });
+    let stored = parseSessionMemory(
+      await persistence.getItem(SESSION_MEMORY_KEY),
+    );
     expect(stored).toEqual({
       last: { host: 'mac.lan', port: 19100 },
-      servers: { 'mac.lan:19100': { projectId: 'p1', terminalByProject: { p1: 't2' } } },
+      servers: {
+        'mac.lan:19100': { projectId: 'p1', terminalByProject: { p1: 't2' } },
+      },
     });
 
-    useConnectionStore.setState({ activeServer: null, connId: null, status: { kind: 'disconnected' } });
+    useConnectionStore.setState({
+      activeServer: null,
+      connId: null,
+      status: { kind: 'disconnected' },
+    });
     stored = parseSessionMemory(await persistence.getItem(SESSION_MEMORY_KEY));
     expect(stored.last).toBeNull();
     expect(stored.servers['mac.lan:19100']?.projectId).toBe('p1');
   });
 
-  it('keeps the reconnect target when the connection drops', async () => {
-    const { persistence } = setup({ last: { host: 'mac.lan', port: 19100 }, servers: {} });
+  it('records the first project when the server has no focused project', async () => {
+    const { persistence } = setup(EMPTY_SESSION_MEMORY);
     await useSessionStore.getState().load();
-    useConnectionStore.setState({ activeServer: SERVER, connId: 'conn-1', status: { kind: 'connected' } });
+    useConnectionStore.setState({
+      activeServer: SERVER,
+      connId: 'conn-1',
+      status: { kind: 'connected' },
+    });
+    unbind = bindSessionMemory();
+
+    // Nothing explicitly selected: the screen shows the first project.
+    useWorkspaceStore.setState({
+      projects: [PROJECT('p1'), PROJECT('p2')],
+      selectedTerminalId: 't2',
+    });
+    useWorkspaceStore.getState().selectTerminal('t2');
+    const stored = parseSessionMemory(
+      await persistence.getItem(SESSION_MEMORY_KEY),
+    );
+    expect(stored.servers['mac.lan:19100']).toEqual({
+      projectId: 'p1',
+      terminalByProject: { p1: 't2' },
+    });
+  });
+
+  it('keeps the reconnect target when the connection drops', async () => {
+    const { persistence } = setup({
+      last: { host: 'mac.lan', port: 19100 },
+      servers: {},
+    });
+    await useSessionStore.getState().load();
+    useConnectionStore.setState({
+      activeServer: SERVER,
+      connId: 'conn-1',
+      status: { kind: 'connected' },
+    });
     unbind = bindSessionMemory();
 
     useConnectionStore.setState({ status: { kind: 'connecting' } });
-    const stored = parseSessionMemory(await persistence.getItem(SESSION_MEMORY_KEY));
+    const stored = parseSessionMemory(
+      await persistence.getItem(SESSION_MEMORY_KEY),
+    );
     expect(stored.last).toEqual({ host: 'mac.lan', port: 19100 });
   });
 });
