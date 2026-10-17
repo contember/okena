@@ -16,7 +16,15 @@ Pod::Spec.new do |s|
   # generated `OkenaTerminalView-Swift.h`, which needs a module.
   s.source_files = 'ios/**/*.{h,m,mm,swift}'
   s.swift_version = '5.9'
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
+  # The Rust render ABI (okena_render.h + module.modulemap, Clang module
+  # `OkenaRender`). Only headers: the symbols resolve at app link time from
+  # the one Rust copy in the OkenaMobileFfi pod.
+  okena_render_include = File.realpath(File.join(__dir__, '..', '..', '..', '..', 'crates', 'okena-mobile-ffi', 'include'))
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'SWIFT_INCLUDE_PATHS' => "\"#{okena_render_include}\"",
+    'HEADER_SEARCH_PATHS' => "\"#{okena_render_include}\"",
+  }
 
   install_modules_dependencies(s)
 end
