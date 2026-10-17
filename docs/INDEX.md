@@ -26,6 +26,7 @@ Architecture and build rules live next to the code, not here:
 ## Active sprints
 
 <!-- list the sprint files currently in sprints/ ; empty between sprints -->
+- [Native terminal view (iOS + Android)](sprints/sprint-2026-10-17-native-terminal-view.md) — replace the JS/Skia renderer with Swift/Kotlin views over a Rust C ABI
 - _none active_
 
 ## What's hot
