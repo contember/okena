@@ -656,6 +656,12 @@ Android linking in WU0 and font fallback parity.
   input motionevent DOWN/MOVE/UP` does. Maestro's iOS `takeScreenshot` once failed with
   `NSPOSIXErrorDomain 64` and left the app in the background; `simctl io screenshot` is more
   reliable. Starting a swipe at the left edge on Android triggers the system back gesture.
+- **2026-10-17 Android keyboard blank (fix).** A short terminal went blank when the keyboard
+  opened while another client owned the resize: the grid stayed taller than the view and the
+  Android live tail showed the grid's bottom (blank) rows. `ScrollModel` now puts the live tail
+  on the window that shows the cursor, preferring the screen top (iOS already showed the screen
+  top); the rows below stay reachable by scrolling. Verified on the emulator (short and full
+  terminals, owner and non-owner, keyboard x3, scrolled up, `less`, landscape); JVM test added.
 
 ## Rollout checklist
 
