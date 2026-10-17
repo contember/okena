@@ -1,0 +1,42 @@
+{
+  "name": "okena-terminal-view",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native terminal renderer for the Okena mobile app (Fabric component over the Rust core's C ABI).",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contember/okena.git",
+    "directory": "mobile/rn/modules/okena-terminal-view"
+  },
+  "homepage": "https://github.com/contember/okena",
+  "license": "MIT",
+  "author": "Contember",
+  "main": "src/index.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "*.podspec",
+    "!android/build",
+    "!android/.cxx"
+  ],
+  "codegenConfig": {
+    "name": "OkenaTerminalViewSpec",
+    "type": "components",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.okena.terminalview"
+    },
+    "ios": {
+      "componentProvider": {
+        "OkenaTerminalView": "OkenaTerminalViewComponentView"
+      }
+    }
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  }
+}

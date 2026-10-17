@@ -15,6 +15,7 @@
 		6CF409327A28A471572AFDFA /* JetBrainsMono-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 235CDC058C041BDB0D5969FB /* JetBrainsMono-Italic.ttf */; };
 		73C36E86651F2AFEDA60E45E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
+		7E0A51C2D3B4F5061728394A /* NotoSansSymbols2-Subset.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7E0A51C2D3B4F5061728394B /* NotoSansSymbols2-Subset.ttf */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
@@ -30,6 +31,7 @@
 		5709B34CF0A7D63546082F79 /* Pods-OkenaMobile.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OkenaMobile.release.xcconfig"; path = "Target Support Files/Pods-OkenaMobile/Pods-OkenaMobile.release.xcconfig"; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-OkenaMobile.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-OkenaMobile.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = OkenaMobile/AppDelegate.swift; sourceTree = "<group>"; };
+		7E0A51C2D3B4F5061728394B /* NotoSansSymbols2-Subset.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "NotoSansSymbols2-Subset.ttf"; path = "../assets/NotoSansSymbols2-Subset.ttf"; sourceTree = SOURCE_ROOT; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = OkenaMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F98923835456CDBB1BAEC0CC /* JetBrainsMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "JetBrainsMono-Regular.ttf"; path = "../assets/JetBrainsMono-Regular.ttf"; sourceTree = SOURCE_ROOT; };
@@ -75,6 +77,7 @@
 				103ACC08741A751824FA27B5 /* JetBrainsMono-Bold.ttf */,
 				235CDC058C041BDB0D5969FB /* JetBrainsMono-Italic.ttf */,
 				4A1D2EA9F8DB6C22F874E010 /* JetBrainsMono-BoldItalic.ttf */,
+				7E0A51C2D3B4F5061728394B /* NotoSansSymbols2-Subset.ttf */,
 			);
 			name = Fonts;
 			sourceTree = "<group>";
@@ -184,6 +187,7 @@
 				4EEC1CEECE4FFD77D4F95AC5 /* JetBrainsMono-Bold.ttf in Resources */,
 				6CF409327A28A471572AFDFA /* JetBrainsMono-Italic.ttf in Resources */,
 				20036E6A85F287824FD6F8A7 /* JetBrainsMono-BoldItalic.ttf in Resources */,
+				7E0A51C2D3B4F5061728394A /* NotoSansSymbols2-Subset.ttf in Resources */,
 				73C36E86651F2AFEDA60E45E /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

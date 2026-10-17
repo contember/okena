@@ -20,3 +20,4 @@ Lifecycle (full detail in [`../CLAUDE.md`](../CLAUDE.md)):
 ## Active
 
 <!-- one line per active sprint; empty between sprints -->
+- [Native terminal view (iOS + Android)](sprint-2026-10-17-native-terminal-view.md) — replace the JS/Skia renderer with Swift/Kotlin views over a Rust C ABI

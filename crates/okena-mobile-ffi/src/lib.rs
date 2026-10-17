@@ -27,6 +27,7 @@
 
 mod api;
 mod client;
+pub mod render;
 mod types;
 
 use okena_core::api::ActionRequest;

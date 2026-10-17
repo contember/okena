@@ -1,0 +1,7 @@
+// Clang module for Swift: add this directory to SWIFT_INCLUDE_PATHS, then
+// `import OkenaRender`. The symbols live in the OkenaMobileFfi static library,
+// which the app already links once; do not link it again here.
+module OkenaRender {
+    header "okena_render.h"
+    export *
+}
