@@ -6,10 +6,11 @@
  * the terminal id set is untouched (CORR-15).
  */
 
-import type { ProjectInfo, TerminalActivity } from '../native/okena';
+import type { ProjectInfo, TerminalActivity, UsageInfo } from '../native/okena';
 import {
   configureWorkspaceStore,
   useWorkspaceStore,
+  USAGE_REFRESH_TIMEOUT_MS,
   WORKSPACE_POLL_MS,
   type WorkspaceNative,
 } from './workspaceStore';
@@ -61,6 +62,9 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getTerminalActivity: () => [],
     markTerminalSeen: () => {},
     focusTerminal: () => Promise.resolve(),
+    getUsage: () => undefined,
+    getUsageRevision: () => 0,
+    requestUsageRefresh: () => Promise.resolve(),
   };
 }
 
@@ -385,5 +389,94 @@ describe('workspace activity signals', () => {
     pinned = true;
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().projects[0]!.pinned).toBe(true);
+  });
+});
+
+describe('workspace agent usage', () => {
+  const snapshot = (fetching: boolean, generatedAt: number): UsageInfo => ({
+    providers: [
+      { provider: 'claude', status: 'ok', fetching, consecutiveFailures: 0, windows: [] },
+    ],
+    workingDays: [0, 1, 2, 3, 4],
+    generatedAt,
+  });
+
+  function usageNative(state: { revision: number; usage?: UsageInfo }, calls: string[]) {
+    return {
+      ...stubNative([TABS_FIRST_ACTIVE]),
+      getUsageRevision: () => state.revision,
+      getUsage: () => {
+        calls.push('getUsage');
+        return state.usage;
+      },
+      requestUsageRefresh: (_c: string, provider: string | undefined) => {
+        calls.push(`refresh:${provider ?? 'all'}`);
+        return Promise.resolve();
+      },
+    } satisfies WorkspaceNative;
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('reads the snapshot only when its revision moves', () => {
+    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const calls: string[] = [];
+    configureWorkspaceStore({ native: usageNative(state, calls) });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().usage?.generatedAt).toBe(1);
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS * 3);
+    expect(calls).toEqual(['getUsage']);
+
+    state.revision = 2;
+    state.usage = snapshot(false, 2);
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().usage?.generatedAt).toBe(2);
+    expect(calls).toEqual(['getUsage', 'getUsage']);
+
+    useWorkspaceStore.getState().stop();
+    expect(useWorkspaceStore.getState().usage).toBeNull();
+  });
+
+  it('shows a refresh until a finished snapshot arrives', () => {
+    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const calls: string[] = [];
+    configureWorkspaceStore({ native: usageNative(state, calls) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().refreshUsage();
+    expect(calls).toContain('refresh:all');
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
+
+    // The daemon announces the fetch first: still loading.
+    state.revision = 2;
+    state.usage = snapshot(true, 2);
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
+
+    state.revision = 3;
+    state.usage = snapshot(false, 3);
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
+    expect(useWorkspaceStore.getState().usage?.generatedAt).toBe(3);
+  });
+
+  it('gives up on a throttled refresh after the timeout', () => {
+    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    configureWorkspaceStore({ native: usageNative(state, []) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().refreshUsage('claude');
+    jest.advanceTimersByTime(USAGE_REFRESH_TIMEOUT_MS - 1);
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
+    jest.advanceTimersByTime(1);
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
   });
 });
