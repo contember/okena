@@ -33,6 +33,11 @@ final class TerminalFonts {
   let cellHeight: CGFloat
   /// Baseline offset from the row top.
   let baseline: CGFloat
+  /// Top and bottom of the full block `█` glyph in row coordinates. The
+  /// painter fills `█` as a rect over this span: adjacent anti-aliased glyph
+  /// edges at fractional cell positions left faint seams in progress bars.
+  let fullBlockTop: CGFloat
+  let fullBlockBottom: CGFloat
 
   private static let symbolsDescriptor: CTFontDescriptor? = {
     guard let url = Bundle.main.url(forResource: "NotoSansSymbols2-Subset", withExtension: "ttf"),
@@ -87,7 +92,21 @@ final class TerminalFonts {
     let height = max((rawHeight * self.scale).rounded() / self.scale, 1 / self.scale)
     cellWidth = advance.width
     cellHeight = height
-    baseline = (height - textHeight) / 2 + ascent
+    let baseline = (height - textHeight) / 2 + ascent
+    self.baseline = baseline
+    var block: UniChar = 0x2588
+    var blockGlyph: CGGlyph = 0
+    var box = CGRect.zero
+    if CTFontGetGlyphsForCharacters(regular, &block, &blockGlyph, 1) {
+      box = CTFontGetBoundingRectsForGlyphs(regular, .horizontal, &blockGlyph, nil, 1)
+    }
+    if box.height > 0 {
+      fullBlockTop = max(baseline - box.maxY, 0)
+      fullBlockBottom = min(baseline - box.minY, height)
+    } else {
+      fullBlockTop = 0
+      fullBlockBottom = height
+    }
   }
 
   // MARK: Glyph resolution
@@ -335,7 +354,16 @@ final class TerminalRowPainter {
       let style = TerminalFonts.styleIndex(
         bold: flags & UInt16(OKENA_RV_CELL_BOLD) != 0, italic: flags & UInt16(OKENA_RV_CELL_ITALIC) != 0)
 
-      if cell.extra != 0 {
+      if cp == 0x2588 && cell.extra == 0 {
+        // Full block: a rect on whole device pixels, so a bar has no seams.
+        flush()
+        setFill(fg)
+        let px0 = (CGFloat(col) * cw * fonts.scale).rounded() / fonts.scale
+        let px1 = (CGFloat(col + span) * cw * fonts.scale).rounded() / fonts.scale
+        let top = (fonts.fullBlockTop * fonts.scale).rounded() / fonts.scale
+        let bottom = (fonts.fullBlockBottom * fonts.scale).rounded() / fonts.scale
+        ctx.fill(CGRect(x: px0, y: top, width: px1 - px0, height: bottom - top))
+      } else if cell.extra != 0 {
         flush()
         drawGrapheme(frame: frame, cell: cell, style: style, x: x, width: CGFloat(span) * cw, fg: fg)
       } else {
