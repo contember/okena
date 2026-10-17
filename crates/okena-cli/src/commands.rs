@@ -133,6 +133,76 @@ pub fn cli_state() -> i32 {
     }
 }
 
+/// `okena usage [--json]`
+pub fn cli_usage(json_mode: bool) -> i32 {
+    let token = match ensure_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let body = match api_get("/v1/usage", &token) {
+        Ok(body) => body,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if json_mode {
+        println!("{body}");
+        return 0;
+    }
+    let usage: okena_core::api::ApiUsage = match serde_json::from_str(&body) {
+        Ok(usage) => usage,
+        Err(e) => {
+            eprintln!("Invalid usage response: {e}");
+            return 1;
+        }
+    };
+    for line in usage_lines(&usage) {
+        println!("{line}");
+    }
+    0
+}
+
+fn usage_lines(usage: &okena_core::api::ApiUsage) -> Vec<String> {
+    let status_name = |status| {
+        serde_json::to_value(status)
+            .ok()
+            .and_then(|v| v.as_str().map(ToOwned::to_owned))
+            .unwrap_or_default()
+    };
+    let mut lines = Vec::new();
+    for provider in &usage.providers {
+        let status = status_name(provider.status);
+        if provider.windows.is_empty() {
+            lines.push(format!(
+                "{}\t{}\t{}",
+                provider.provider.as_str(),
+                status,
+                provider.error.as_deref().unwrap_or("")
+            ));
+            continue;
+        }
+        for window in &provider.windows {
+            let reset = window
+                .reset_at
+                .map(|at| format!("{}", at.round() as i64))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{}\t{}\t{}\t{:.0}\t{}",
+                provider.provider.as_str(),
+                status,
+                window.id,
+                window.used_percent,
+                reset
+            ));
+        }
+    }
+    lines
+}
+
 pub fn cli_action(json: &str) -> i32 {
     if serde_json::from_str::<serde_json::Value>(json).is_err() {
         eprintln!("Invalid JSON: {json}");
@@ -2441,6 +2511,40 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_lines_one_per_window_or_status() {
+        use okena_core::api::{
+            ApiProviderUsage, ApiUsage, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow,
+            ApiUsageWindowKind,
+        };
+        let mut claude = ApiProviderUsage::empty(ApiUsageProvider::Claude, ApiUsageStatus::Ok);
+        claude.windows.push(ApiUsageWindow {
+            id: "five_hour".into(),
+            label: "Session".into(),
+            kind: ApiUsageWindowKind::FiveHour,
+            used_percent: 41.6,
+            window_seconds: 18000.0,
+            reset_at: Some(1_782_371_508.4),
+            active: true,
+            history: Vec::new(),
+        });
+        let mut codex =
+            ApiProviderUsage::empty(ApiUsageProvider::Codex, ApiUsageStatus::NoCredentials);
+        codex.error = Some("signed out".into());
+        let usage = ApiUsage {
+            providers: vec![claude, codex],
+            working_days: vec![0, 1, 2, 3, 4, 5, 6],
+            generated_at: 0.0,
+        };
+        assert_eq!(
+            super::usage_lines(&usage),
+            vec![
+                "claude\tok\tfive_hour\t42\t1782371508".to_string(),
+                "codex\tno_credentials\tsigned out".to_string(),
+            ]
+        );
+    }
+
     use super::parse_done_marker;
 
     #[test]

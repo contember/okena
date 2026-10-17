@@ -62,6 +62,16 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ServiceCmd,
     },
+    /// Claude Code / Codex rate-limit usage measured by the daemon
+    ///
+    /// Default: one tab-separated line per window: provider, status, window
+    /// id, used percent, reset time (Unix epoch seconds, empty if unknown). A provider
+    /// without windows prints provider, status and the error, if any.
+    Usage {
+        /// Output the raw `GET /v1/usage` JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Identify the current terminal and project (uses $OKENA_TERMINAL_ID)
     Whoami {
         /// Output JSON instead of the default plain text
@@ -513,9 +523,9 @@ pub enum TermCmd {
 /// control back to GUI/profile launch.
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
-        "pair", "health", "state", "action", "services", "service", "whoami", "ls", "project",
-        "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings", "theme",
-        "command", "update",
+        "pair", "health", "state", "action", "services", "service", "usage", "whoami", "ls",
+        "project", "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings",
+        "theme", "command", "update",
     ]
 }
 

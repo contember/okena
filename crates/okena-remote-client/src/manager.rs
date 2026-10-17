@@ -252,6 +252,10 @@ pub enum RemoteManagerEvent {
 
     /// The local daemon published a new authoritative settings snapshot.
     SettingsChanged(Box<AppSettings>),
+
+    /// A connection pushed a new agent usage snapshot (or lost it on
+    /// disconnect). Read it with [`RemoteConnectionManager::usage`].
+    UsageChanged { connection_id: String },
 }
 
 /// GPUI Entity managing all remote connections.
@@ -656,6 +660,37 @@ impl RemoteConnectionManager {
         );
     }
 
+    /// Latest agent usage snapshot pushed by `connection_id`'s server.
+    pub fn usage(&self, connection_id: &str) -> Option<&okena_core::api::ApiUsage> {
+        self.connections.get(connection_id)?.usage()
+    }
+
+    /// Ask `connection_id`'s server to refetch agent usage
+    /// (`POST /v1/usage/refresh`). Fire-and-forget: the fetched result arrives
+    /// as a `usage_changed` push.
+    pub fn request_usage_refresh(
+        &self,
+        connection_id: &str,
+        provider: Option<okena_core::api::ApiUsageProvider>,
+    ) {
+        let Some(connection) = self.connections.get(connection_id) else {
+            return;
+        };
+        let config = connection.config().clone();
+        let Some(token) = config.effective_auth_token() else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            if let Err(error) = okena_transport::remote_action::request_usage_refresh_async(
+                &config, &token, provider,
+            )
+            .await
+            {
+                log::debug!("usage refresh for {} failed: {error}", config.name);
+            }
+        });
+    }
+
     /// Send through the same FIFO as `send_action` and return the API response.
     /// Void responses use the canonical `{"ok": true}` envelope.
     pub fn send_action_with_result(
@@ -846,6 +881,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
             ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
             ConnectionEvent::SystemStatsChanged { .. } => "SystemStatsChanged",
+            ConnectionEvent::UsageChanged { .. } => "UsageChanged",
             ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::PresentationRequested { .. } => "PresentationRequested",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
@@ -994,6 +1030,15 @@ impl RemoteConnectionManager {
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.set_system_stats(Some(stats));
+                }
+            }
+            ConnectionEvent::UsageChanged {
+                connection_id,
+                usage,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    conn.set_usage(Some(usage));
+                    cx.emit(RemoteManagerEvent::UsageChanged { connection_id });
                 }
             }
             ConnectionEvent::PresentationRequested {

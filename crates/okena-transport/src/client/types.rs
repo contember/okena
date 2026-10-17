@@ -100,6 +100,12 @@ pub enum ConnectionEvent {
         connection_id: String,
         stats: okena_core::api::ApiSystemStats,
     },
+    /// Agent usage (Claude Code / Codex) measured on the server's machine.
+    /// Full snapshot; arrives right after connecting and on every change.
+    UsageChanged {
+        connection_id: String,
+        usage: okena_core::api::ApiUsage,
+    },
     /// A daemon-originated toast to display on this client (e.g. a remote
     /// lifecycle-hook failure). The daemon has no surface, so it forwards these
     /// over the WebSocket and the client renders them via its `ToastManager`.

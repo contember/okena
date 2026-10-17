@@ -109,6 +109,7 @@ fn dispatch(cli: Cli) -> i32 {
                 json,
             } => commands::cli_service("restart", &name, project.as_deref(), json),
         },
+        Command::Usage { json } => commands::cli_usage(json),
         Command::Whoami { json } => commands::cli_whoami(json),
         Command::Ls { json } => commands::cli_ls(json),
 
