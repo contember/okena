@@ -6,9 +6,15 @@
  * `@react-navigation/drawer`) rendered above the workspace. It shows:
  *   - a header (app name + active server name + a small status dot),
  *   - a search field filtering projects by name / path (case-insensitive),
- *   - the ordered project list: standalone projects + folders (folder header +
- *     its indented projects), worktrees nested under their parent. Ordering
- *     matches the desktop sidebar's manual view (see `models/projectList.ts`).
+ *   - the project list, in the order the "Project order" setting picks:
+ *     - Activity (default): every project flat under PINNED / NEEDS ATTENTION /
+ *       RUNNING / RECENT headers, like the desktop sidebar's activity view
+ *       (`models/activityOrder.ts`). The order freezes while the drawer is
+ *       open; status dots keep updating.
+ *     - Manual: standalone projects + folders (folder header + its indented
+ *       projects), worktrees nested under their parent, matching the desktop
+ *       sidebar's manual view (`models/projectList.ts`).
+ *     Each row carries an activity dot (amber: needs attention, green: running).
  *   - tapping a project selects it (`selectProject`) and expands it inline to
  *     show its terminals; tapping a terminal selects + focuses it and closes the
  *     drawer.
@@ -45,8 +51,12 @@ import {
   buildProjectList,
   filterProjectList,
   projectDisplayName,
+  projectMatches,
   type ProjectNode,
+  type ProjectSignals,
 } from '../models';
+import { useSettingsStore } from '../state/settingsStore';
+import { ActivityDot, TierHeader, useActivityRows } from './projectActivity';
 import { OkenaColors } from '../theme';
 import { Icon } from './Icon';
 import { SettingsSheet } from '../screens/SettingsSheet';
@@ -127,6 +137,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   const selectedTerminalId = useWorkspaceStore((s) => s.selectedTerminalId);
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
+  const signals = useWorkspaceStore((s) => s.projectSignals);
+  const sortMode = useSettingsStore((s) => s.projectSortMode);
 
   const connId = useConnectionStore((s) => s.connId);
   const activeServer = useConnectionStore((s) => s.activeServer);
@@ -152,6 +164,15 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     [projects, folders, projectOrder],
   );
   const items = useMemo(() => filterProjectList(allItems, query), [allItems, query]);
+  // Activity order, frozen while the drawer is on screen (incl. its close).
+  const allActivityRows = useActivityRows(open || mounted);
+  const activityRows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle.length === 0) return allActivityRows;
+    return allActivityRows.filter((r) => projectMatches(r.project, needle));
+  }, [allActivityRows, query]);
+  const isActivity = sortMode === 'activity';
+  const shownCount = isActivity ? activityRows.length : items.length;
 
   if (!mounted) return null;
 
@@ -238,15 +259,36 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           keyboardDismissMode="on-drag"
           automaticallyAdjustKeyboardInsets
         >
-          {items.length === 0 && query.trim().length > 0 ? (
+          {shownCount === 0 && query.trim().length > 0 ? (
             <Text style={styles.emptyText}>No matching projects</Text>
           ) : null}
-          {items.map((item) =>
+          {isActivity
+            ? activityRows.map((row, i) => (
+                <React.Fragment key={`activity-${row.project.id}`}>
+                  {i === 0 || activityRows[i - 1]!.tier !== row.tier ? (
+                    <TierHeader tier={row.tier} />
+                  ) : null}
+                  <ProjectRow
+                    project={row.project}
+                    depth={0}
+                    signals={signals}
+                    selectedProjectId={selectedProjectId}
+                    selectedTerminalId={selectedTerminalId}
+                    connId={connId}
+                    native={native}
+                    onSelectProject={handleSelectProject}
+                    onSelectTerminal={handleSelectTerminal}
+                    onLongPress={() => openColorPickerForProject(row.project)}
+                  />
+                </React.Fragment>
+              ))
+            : items.map((item) =>
             item.kind === 'folder' ? (
               <FolderSection
                 key={`folder-${item.folder.id}`}
                 folder={item.folder}
                 projects={item.projects}
+                signals={signals}
                 selectedProjectId={selectedProjectId}
                 selectedTerminalId={selectedTerminalId}
                 connId={connId}
@@ -274,6 +316,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
                 key={`project-${item.node.project.id}`}
                 node={item.node}
                 depth={0}
+                signals={signals}
                 selectedProjectId={selectedProjectId}
                 selectedTerminalId={selectedTerminalId}
                 connId={connId}
@@ -371,6 +414,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
 // ── Folder section ────────────────────────────────────────────────────────
 
 interface RowCommon {
+  /** Activity signals per project id (status dot). */
+  signals: Record<string, ProjectSignals>;
   selectedProjectId: string | null;
   selectedTerminalId: string | null;
   connId: string | null;
@@ -448,6 +493,7 @@ const ProjectRow: React.FC<
 > = ({
   project,
   depth,
+  signals,
   selectedProjectId,
   selectedTerminalId,
   connId,
@@ -503,6 +549,7 @@ const ProjectRow: React.FC<
             </View>
           ) : null}
         </View>
+        <ActivityDot signals={signals[project.id]} />
       </Pressable>
 
       {isSelected ? (

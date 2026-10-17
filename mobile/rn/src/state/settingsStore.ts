@@ -1,7 +1,8 @@
 /**
  * settingsStore.ts — persisted app preferences (zustand).
  *
- * The terminal font size and the terminal renderer. Stored as one JSON object
+ * The terminal font size, the terminal renderer and the project list order.
+ * Stored as one JSON object
  * under {@link SETTINGS_KEY} so new preferences don't need new storage keys.
  *
  * Persistence is INJECTED via {@link configureSettingsStore} (same pattern as
@@ -51,6 +52,19 @@ function isTerminalRenderer(value: unknown): value is TerminalRenderer {
   return value === 'native' || value === 'skia';
 }
 
+/**
+ * How the drawer and the switcher order projects: by activity (desktop
+ * sidebar's activity view, `models/activityOrder.ts`) or in the manual order
+ * with folders (`models/projectList.ts`).
+ */
+export type ProjectSortMode = 'activity' | 'manual';
+
+export const DEFAULT_PROJECT_SORT_MODE: ProjectSortMode = 'activity';
+
+function isProjectSortMode(value: unknown): value is ProjectSortMode {
+  return value === 'activity' || value === 'manual';
+}
+
 export interface SettingsDeps {
   persistence: Persistence;
 }
@@ -60,6 +74,8 @@ export interface SettingsState {
   terminalFontSize: number;
   /** Terminal renderer used by every pane. */
   renderer: TerminalRenderer;
+  /** Project list order in the drawer and the switcher. */
+  projectSortMode: ProjectSortMode;
   /** True once persisted settings have been read (or found absent). */
   loaded: boolean;
   /** Read persisted settings. Safe to call more than once. */
@@ -72,6 +88,8 @@ export interface SettingsState {
   resetTerminalFontSize(): void;
   /** Set and persist the terminal renderer. */
   setRenderer(renderer: TerminalRenderer): void;
+  /** Set and persist the project list order. */
+  setProjectSortMode(mode: ProjectSortMode): void;
 }
 
 let injectedDeps: Partial<SettingsDeps> = {};
@@ -89,15 +107,17 @@ interface PersistedSettings {
   version?: unknown;
   terminalFontSize?: unknown;
   renderer?: unknown;
+  projectSortMode?: unknown;
 }
 
-type PersistedFields = Pick<SettingsState, 'terminalFontSize' | 'renderer'>;
+type PersistedFields = Pick<SettingsState, 'terminalFontSize' | 'renderer' | 'projectSortMode'>;
 
 function persist(state: PersistedFields): void {
   const payload: PersistedSettings = {
     version: SETTINGS_VERSION,
     terminalFontSize: state.terminalFontSize,
     renderer: state.renderer,
+    projectSortMode: state.projectSortMode,
   };
   void deps()
     .persistence.setItem(SETTINGS_KEY, JSON.stringify(payload))
@@ -110,10 +130,11 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
   (set, get) => ({
     terminalFontSize: DEFAULT_FONT_SIZE,
     renderer: DEFAULT_RENDERER,
+    projectSortMode: DEFAULT_PROJECT_SORT_MODE,
     loaded: false,
 
     async load() {
-      let { terminalFontSize, renderer } = get();
+      let { terminalFontSize, renderer, projectSortMode } = get();
       try {
         const json = await deps().persistence.getItem(SETTINGS_KEY);
         if (json) {
@@ -125,11 +146,16 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
           if (version >= SETTINGS_VERSION && isTerminalRenderer(parsed.renderer)) {
             renderer = parsed.renderer;
           }
+          // Introduced at version 2 and only ever written by an explicit
+          // choice, so no version gate.
+          if (isProjectSortMode(parsed.projectSortMode)) {
+            projectSortMode = parsed.projectSortMode;
+          }
         }
       } catch {
         // Corrupt or unreadable settings fall back to defaults.
       }
-      set({ terminalFontSize, renderer, loaded: true });
+      set({ terminalFontSize, renderer, projectSortMode, loaded: true });
     },
 
     setTerminalFontSize(size) {
@@ -150,6 +176,12 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
     setRenderer(renderer) {
       if (renderer === get().renderer) return;
       set({ renderer });
+      persist(get());
+    },
+
+    setProjectSortMode(projectSortMode) {
+      if (projectSortMode === get().projectSortMode) return;
+      set({ projectSortMode });
       persist(get());
     },
   }),

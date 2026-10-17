@@ -38,6 +38,8 @@ const PROJECT = (id: string): ProjectInfo => ({
   services: [],
   folderColor: 'blue',
   worktreeIds: [],
+  terminalAgentStatus: {},
+  pinned: false,
 });
 
 const SERVER = createSavedServer({

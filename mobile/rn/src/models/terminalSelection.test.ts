@@ -23,6 +23,8 @@ function project(id: string, terminalIds: string[], names: Record<string, string
     services: [],
     folderColor: 'default',
     worktreeIds: [],
+    terminalAgentStatus: {},
+    pinned: false,
   };
 }
 

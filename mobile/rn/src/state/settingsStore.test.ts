@@ -4,6 +4,7 @@ import { createMemoryPersistence, type Persistence } from './persistence';
 import {
   configureSettingsStore,
   DEFAULT_FONT_SIZE,
+  DEFAULT_PROJECT_SORT_MODE,
   DEFAULT_RENDERER,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
@@ -19,6 +20,7 @@ function setup(initial: Record<string, string> = {}): Persistence {
   useSettingsStore.setState({
     terminalFontSize: DEFAULT_FONT_SIZE,
     renderer: DEFAULT_RENDERER,
+    projectSortMode: DEFAULT_PROJECT_SORT_MODE,
     loaded: false,
   });
   return persistence;
@@ -81,6 +83,7 @@ describe('settings store', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 12,
       renderer: 'native',
+      projectSortMode: 'activity',
     });
   });
 
@@ -106,6 +109,7 @@ describe('settings store', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: DEFAULT_FONT_SIZE,
       renderer: 'native',
+      projectSortMode: 'activity',
     });
   });
 });
@@ -143,6 +147,7 @@ describe('renderer setting', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 12,
       renderer: 'skia',
+      projectSortMode: 'activity',
     });
     useSettingsStore.setState({ renderer: DEFAULT_RENDERER, loaded: false });
     await useSettingsStore.getState().load();
@@ -158,6 +163,43 @@ describe('renderer setting', () => {
       version: SETTINGS_VERSION,
       terminalFontSize: 14,
       renderer: 'skia',
+      projectSortMode: 'activity',
+    });
+  });
+});
+
+describe('project sort mode setting', () => {
+  it('defaults to activity', async () => {
+    setup();
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe('activity');
+  });
+
+  it('persists and reloads manual, keeping the renderer migration intact', async () => {
+    const persistence = setup();
+    useSettingsStore.getState().setProjectSortMode('manual');
+    expect(await persisted(persistence)).toEqual({
+      version: SETTINGS_VERSION,
+      terminalFontSize: DEFAULT_FONT_SIZE,
+      renderer: 'native',
+      projectSortMode: 'manual',
+    });
+    useSettingsStore.setState({ projectSortMode: DEFAULT_PROJECT_SORT_MODE, loaded: false });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe('manual');
+  });
+
+  it('ignores unknown values and loads version 1 objects without one', async () => {
+    setup({ [SETTINGS_KEY]: JSON.stringify({ version: 2, projectSortMode: 'alpha' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState().projectSortMode).toBe(DEFAULT_PROJECT_SORT_MODE);
+
+    setup({ [SETTINGS_KEY]: JSON.stringify({ terminalFontSize: 12, renderer: 'skia' }) });
+    await useSettingsStore.getState().load();
+    expect(useSettingsStore.getState()).toMatchObject({
+      terminalFontSize: 12,
+      renderer: 'native',
+      projectSortMode: 'activity',
     });
   });
 });

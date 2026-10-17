@@ -12,8 +12,9 @@
  * Unlike the desktop, projects missing from `projectOrder` are appended at the
  * end so they stay reachable on mobile.
  *
- * The activity sort mode is per desktop window and is not sent over the wire,
- * so mobile always uses the manual order.
+ * This is the "Manual" project order setting. The default "Activity" order
+ * is `models/activityOrder.ts`; it uses {@link manualProjectOrder} as its
+ * stable baseline.
  */
 
 import type { FolderInfo, ProjectInfo } from '../native/okena';
@@ -105,7 +106,11 @@ export function buildProjectList(
   return items;
 }
 
-function matches(project: ProjectInfo, needle: string): boolean {
+/**
+ * Whether a project matches a lowercased, trimmed search needle (name, the
+ * displayed branch for worktrees, or path).
+ */
+export function projectMatches(project: ProjectInfo, needle: string): boolean {
   return (
     project.name.toLowerCase().includes(needle) ||
     projectDisplayName(project).toLowerCase().includes(needle) ||
@@ -124,8 +129,8 @@ export function filterProjectList(items: ProjectListItem[], query: string): Proj
   if (needle.length === 0) return items;
 
   const filterNode = (node: ProjectNode): ProjectNode | null => {
-    const worktrees = node.worktrees.filter((wt) => matches(wt, needle));
-    if (worktrees.length > 0 || matches(node.project, needle)) {
+    const worktrees = node.worktrees.filter((wt) => projectMatches(wt, needle));
+    if (worktrees.length > 0 || projectMatches(node.project, needle)) {
       return { project: node.project, worktrees };
     }
     return null;
@@ -166,4 +171,11 @@ export function flattenProjectList(items: ProjectListItem[]): ProjectListRow[] {
     }
   }
   return rows;
+}
+
+/** Project ids in the manual list's display order (folders expanded, worktrees after their parent). */
+export function manualProjectOrder(items: ProjectListItem[]): string[] {
+  const ids: string[] = [];
+  for (const row of flattenProjectList(items)) if (row.kind === 'project') ids.push(row.project.id);
+  return ids;
 }

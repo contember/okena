@@ -6,7 +6,7 @@
  * the terminal id set is untouched (CORR-15).
  */
 
-import type { ProjectInfo } from '../native/okena';
+import type { ProjectInfo, TerminalActivity } from '../native/okena';
 import {
   configureWorkspaceStore,
   useWorkspaceStore,
@@ -26,6 +26,8 @@ const PROJECT: ProjectInfo = {
   services: [],
   folderColor: 'blue',
   worktreeIds: [],
+  terminalAgentStatus: {},
+  pinned: false,
 };
 
 /** Two tab layouts over the same terminals — only `activeTab` differs. */
@@ -56,6 +58,9 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getFullscreenTerminal: () => undefined,
     getProjectLayoutJson: () => layouts[Math.min(tick++, layouts.length - 1)]!,
     secondsSinceActivity: () => 0,
+    getTerminalActivity: () => [],
+    markTerminalSeen: () => {},
+    focusTerminal: () => Promise.resolve(),
   };
 }
 
@@ -219,5 +224,166 @@ describe('workspace terminal selection memory', () => {
     p1 = { ...P1, terminalIds: ['a', 'b'] };
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().selectedTerminalId).toBe('a');
+  });
+});
+
+describe('workspace activity signals', () => {
+  const A: ProjectInfo = { ...PROJECT, id: 'pa', terminalIds: ['a1'] };
+  const B: ProjectInfo = { ...PROJECT, id: 'pb', terminalIds: ['b1'] };
+
+  function activityNative(opts: {
+    projects?: () => ProjectInfo[];
+    activity: () => TerminalActivity[];
+    seen?: string[];
+    focused?: { project: string; terminal: string }[];
+  }): WorkspaceNative {
+    return {
+      ...stubNative([TABS_FIRST_ACTIVE]),
+      getProjects: opts.projects ?? (() => [A, B]),
+      getFocusedProjectId: () => 'pa',
+      getTerminalActivity: opts.activity,
+      markTerminalSeen: (_c, tid) => {
+        opts.seen?.push(tid);
+      },
+      focusTerminal: (_c, project, terminal) => {
+        opts.focused?.push({ project, terminal });
+        return Promise.resolve();
+      },
+    };
+  }
+
+  const bell = (terminalId: string): TerminalActivity => ({
+    terminalId,
+    bellUnseen: true,
+    notificationUnseen: false,
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    configureWorkspaceStore({ isForeground: () => true });
+    jest.useRealTimers();
+  });
+
+  it('flags a bell in a background project and marks the shown terminal seen', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({
+      native: activityNative({ activity: () => [bell('a1'), bell('b1')], seen }),
+      isForeground: () => true,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+
+    const s = useWorkspaceStore.getState();
+    expect(s.selectedTerminalId).toBe('a1');
+    expect(seen).toEqual(['a1']);
+    expect(s.projectSignals.pa).toEqual({ attention: false, running: false });
+    expect(s.projectSignals.pb).toEqual({ attention: true, running: false });
+  });
+
+  it('ignores output of the terminal on screen for running', () => {
+    configureWorkspaceStore({
+      native: activityNative({
+        activity: () => [
+          { terminalId: 'a1', bellUnseen: false, notificationUnseen: false, lastOutputMsAgo: 10 },
+          { terminalId: 'b1', bellUnseen: false, notificationUnseen: false, lastOutputMsAgo: 10 },
+        ],
+      }),
+      isForeground: () => true,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    const s = useWorkspaceStore.getState();
+    expect(s.projectSignals.pa!.running).toBe(false);
+    expect(s.projectSignals.pb!.running).toBe(true);
+  });
+
+  it('does not mark anything seen while the app is in the background', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({
+      native: activityNative({ activity: () => [bell('a1')], seen }),
+      isForeground: () => false,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    expect(seen).toEqual([]);
+    expect(useWorkspaceStore.getState().projectSignals.pa!.attention).toBe(true);
+  });
+
+  it('clears attention as soon as the project is opened', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({
+      native: activityNative({ activity: () => [bell('b1')], seen }),
+      isForeground: () => true,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+
+    useWorkspaceStore.getState().selectProject('pb');
+    expect(seen).toEqual(['b1']);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(false);
+  });
+
+  it('acknowledges a done agent once seen, until the next transition to done', () => {
+    let lifecycle = 'done';
+    const withAgent = (): ProjectInfo[] => [
+      A,
+      { ...B, terminalAgentStatus: { b1: { lifecycle } } },
+    ];
+    configureWorkspaceStore({
+      native: activityNative({ projects: withAgent, activity: () => [] }),
+      isForeground: () => true,
+    });
+    const store = useWorkspaceStore.getState();
+    store.start('conn-1');
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+
+    store.selectProject('pb');
+    store.selectProject('pa');
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(false);
+
+    lifecycle = 'working';
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().projectSignals.pb).toEqual({
+      attention: false,
+      running: true,
+    });
+
+    lifecycle = 'done';
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+  });
+
+  it('remembers the previous project and reports the switch to the daemon', () => {
+    const focused: { project: string; terminal: string }[] = [];
+    configureWorkspaceStore({
+      native: activityNative({ activity: () => [], focused }),
+      isForeground: () => true,
+    });
+    const store = useWorkspaceStore.getState();
+    store.start('conn-1');
+    store.selectProject('pb');
+    expect(useWorkspaceStore.getState().previousProjectId).toBe('pa');
+    store.selectProject('pb'); // re-selecting the same project changes nothing
+    expect(useWorkspaceStore.getState().previousProjectId).toBe('pa');
+    store.selectProject('pa');
+    expect(useWorkspaceStore.getState().previousProjectId).toBe('pb');
+    expect(focused).toEqual([
+      { project: 'pb', terminal: 'b1' },
+      { project: 'pa', terminal: 'a1' },
+    ]);
+  });
+
+  it('publishes a pin or new activity stamp even when nothing else changed', () => {
+    let pinned = false;
+    configureWorkspaceStore({
+      native: activityNative({ projects: () => [{ ...A, pinned }, B], activity: () => [] }),
+      isForeground: () => true,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    pinned = true;
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().projects[0]!.pinned).toBe(true);
   });
 });

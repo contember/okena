@@ -28,6 +28,8 @@ function project(id: string, extra: Partial<ProjectInfo> = {}): ProjectInfo {
     services: [],
     folderColor: 'default',
     worktreeIds: [],
+    terminalAgentStatus: {},
+    pinned: false,
     ...extra,
   };
 }
