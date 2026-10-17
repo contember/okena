@@ -36,6 +36,7 @@ import { savedServerDisplayName } from '../models';
 import { useConnectionStore, selectIsPairing } from '../state';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 import { StatusIndicator } from '../components/StatusIndicator';
+import { Icon } from '../components/Icon';
 
 export const PairingScreen: React.FC = () => {
   const status = useConnectionStore((s) => s.status);
@@ -80,7 +81,7 @@ export const PairingScreen: React.FC = () => {
           onPress={disconnect}
           accessibilityLabel="Back"
         >
-          <Text style={styles.backChevron}>{'‹'}</Text>
+          <Icon name="chevronLeft" size={26} strokeWidth={2.4} color={OkenaColors.accent} />
         </Pressable>
         <View style={styles.headerText}>
           <Text style={OkenaTypography.headline} numberOfLines={1}>
@@ -152,7 +153,7 @@ export const PairingScreen: React.FC = () => {
         {isError && (
           <View>
             <View style={styles.errorBadge}>
-              <Text style={styles.errorBadgeMark}>{'✕'}</Text>
+              <Icon name="close" size={30} strokeWidth={2.4} color={OkenaColors.error} />
             </View>
             <View style={styles.errorBox}>
               <Text style={styles.errorText}>{errorMessage ?? 'Connection failed'}</Text>
@@ -203,7 +204,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  backChevron: { color: OkenaColors.accent, fontSize: 28, lineHeight: 30 },
   headerText: { flex: 1, marginLeft: 4 },
   headerSub: {
     ...OkenaTypography.caption2,
@@ -289,7 +289,6 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     backgroundColor: '#f871711a', // error @ ~10%
   },
-  errorBadgeMark: { color: OkenaColors.error, fontSize: 32 },
   errorBox: {
     marginTop: 20,
     padding: 16,

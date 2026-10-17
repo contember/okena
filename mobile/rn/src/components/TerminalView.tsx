@@ -63,6 +63,12 @@ import {
   decodeCellsView,
 } from '../native/cells';
 import { TerminalTheme } from '../theme';
+import {
+  drawFallbackGlyph,
+  useGlyphFallback,
+  type TerminalFallbackGlyph,
+  type TerminalGlyphFallback,
+} from './terminalFonts';
 
 // ── Fonts ───────────────────────────────────────────────────────────────────
 
@@ -186,6 +192,8 @@ interface PaintArgs {
   selection?: SelectionBounds;
   metrics: CellMetrics;
   fonts: TerminalFonts;
+  /** Per-codepoint font fallback (symbols, emoji, CJK). */
+  glyphs: TerminalGlyphFallback;
   fontSize: number;
   width: number;
   height: number;
@@ -215,7 +223,7 @@ function resetSynthetic(font: SkFont) {
 }
 
 function paintTerminal(args: PaintArgs): void {
-  const { canvas, cells, cursor, scroll, selection, metrics, fonts, width, height } = args;
+  const { canvas, cells, cursor, scroll, selection, metrics, fonts, glyphs, width, height } = args;
   const { cellWidth, cellHeight, baseline } = metrics;
   const cols = cells.cols;
   const rows = cells.rows;
@@ -272,19 +280,32 @@ function paintTerminal(args: PaintArgs): void {
       const style0 = flags0 & FLAG_STYLE_MASK;
 
       const startCol = col;
-      let run = cells.char(idx);
-      col++;
-
-      while (col < cols) {
-        const ci = row * cols + col;
-        if (cells.isBlank(ci)) break;
-        const f = cells.flags(ci);
-        const cFg = f & FLAG_INVERSE ? cells.bg(ci) : cells.fg(ci);
-        const cStyle = f & FLAG_STYLE_MASK;
-        if ((cFg >>> 0) !== (fg0 >>> 0) || cStyle !== style0) break;
-        run += cells.char(ci);
+      // Glyphs the primary font lacks are drawn one cell at a time from a
+      // fallback typeface; everything else is batched into a primary-font run.
+      const first = glyphs.resolve(cells.codepoint(idx));
+      let run = '';
+      let fallbackGlyph: TerminalFallbackGlyph | null = null;
+      if (first.kind === 'fallback') {
+        fallbackGlyph = first;
+        // A wide glyph spans its blank spacer cell.
+        col += first.wide && col + 1 < cols && cells.isBlank(idx + 1) ? 2 : 1;
+      } else {
+        run = first.text;
         col++;
+        while (col < cols) {
+          const ci = row * cols + col;
+          if (cells.isBlank(ci)) break;
+          const f = cells.flags(ci);
+          const cFg = f & FLAG_INVERSE ? cells.bg(ci) : cells.fg(ci);
+          const cStyle = f & FLAG_STYLE_MASK;
+          if ((cFg >>> 0) !== (fg0 >>> 0) || cStyle !== style0) break;
+          const next = glyphs.resolve(cells.codepoint(ci));
+          if (next.kind === 'fallback') break;
+          run += next.text;
+          col++;
+        }
       }
+      const runW = (col - startCol) * cellWidth;
 
       // Effective fg (dim halves alpha, matching the Dart painter).
       let fgEff = fg0 >>> 0;
@@ -300,14 +321,18 @@ function paintTerminal(args: PaintArgs): void {
 
       const x = startCol * cellWidth;
       const y = row * cellHeight + baseline;
-      canvas.drawText(run, x, y, textPaint, font);
+      if (fallbackGlyph) {
+        const box = { x, top: row * cellHeight, width: runW, cellHeight, baseline };
+        drawFallbackGlyph(canvas, glyphs, fallbackGlyph, box, args.fontSize, textPaint);
+      } else {
+        canvas.drawText(run, x, y, textPaint, font);
+      }
 
       // Underline / strikethrough as drawn lines (decoration in Dart).
       if (style0 & (FLAG_UNDERLINE | FLAG_STRIKETHROUGH)) {
         const linePaint = Skia.Paint();
         linePaint.setColor(skColor(fgEff));
         linePaint.setStrokeWidth(Math.max(1, args.fontSize / 14));
-        const runW = run.length * cellWidth;
         if (style0 & FLAG_UNDERLINE) {
           const uy = row * cellHeight + cellHeight - 1;
           canvas.drawLine(x, uy, x + runW, uy, linePaint);
@@ -403,6 +428,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     fonts.boldItalic?.setSize(fontSize);
     return measureCell(fonts.regular);
   }, [fonts, fontSize]);
+
+  const glyphFallback = useGlyphFallback(fonts.regular);
 
   // ── Layout → cols/rows → resizeLocal + debounced resizeTerminal ──────────
   const onLayout = useCallback(
@@ -505,6 +532,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
           selection,
           metrics,
           fonts,
+          glyphs: glyphFallback,
           fontSize,
           width: size.w,
           height: size.h,
@@ -513,7 +541,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     );
     // `frame` participates so the picture recomputes each dirty tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, frame, native, connId, terminalId, selecting, metrics, fonts, fontSize]);
+  }, [size, frame, native, connId, terminalId, selecting, metrics, fonts, glyphFallback, fontSize]);
 
   return (
     <View style={styles.root} onLayout={onLayout}>

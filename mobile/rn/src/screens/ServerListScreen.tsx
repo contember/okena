@@ -37,6 +37,7 @@ import {
   type SavedServer,
 } from '../models';
 import { useConnectionStore } from '../state';
+import { Icon } from '../components/Icon';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 
 const DEFAULT_PORT = '19100';
@@ -97,7 +98,7 @@ export const ServerListScreen: React.FC = () => {
               <Text style={styles.deleteBtnText}>Delete</Text>
             </Pressable>
           ) : (
-            <Text style={styles.chevron}>{'›'}</Text>
+            <Icon name="chevronRight" size={18} color={OkenaColors.textTertiary} style={styles.chevron} />
           )}
         </Pressable>
       </View>
@@ -154,7 +155,7 @@ export const ServerListScreen: React.FC = () => {
 const EmptyState: React.FC<{ onAdd: () => void }> = ({ onAdd }) => (
   <View style={styles.center}>
     <View style={styles.emptyGlyph}>
-      <Text style={styles.emptyGlyphText}>{'⌨'}</Text>
+      <Icon name="keyboard" size={40} strokeWidth={1.6} color={OkenaColors.accent} />
     </View>
     <Text style={[OkenaTypography.title, styles.emptyTitle]}>No servers yet</Text>
     <Text style={styles.emptySub}>Add a server to get started</Text>
@@ -356,7 +357,7 @@ const styles = StyleSheet.create({
     color: OkenaColors.textTertiary,
     fontFamily: TerminalTheme.fontFamily,
   },
-  chevron: { color: OkenaColors.textTertiary, fontSize: 18, marginLeft: 8 },
+  chevron: { marginLeft: 8 },
   deleteBtn: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -375,7 +376,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#7c7fff26', // accent @ ~15%
   },
-  emptyGlyphText: { fontSize: 36, color: OkenaColors.accent },
   emptyTitle: { marginTop: 20 },
   emptySub: { ...OkenaTypography.body, color: OkenaColors.textSecondary, marginTop: 8 },
   emptyButton: { marginTop: 28, width: 180 },

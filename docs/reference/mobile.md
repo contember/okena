@@ -89,6 +89,13 @@ The hot path uses `get_visible_cells_packed` (a compact `cols,rows` header + 13-
 of marshalling thousands of records per frame across JSI — the key perf lever (Decision C in the
 migration plan). The record form `get_visible_cells` is kept for non-hot callers.
 
+Glyphs JetBrains Mono lacks (Claude Code's `⏺ ✻ ✔ ⏵`, braille spinners, emoji, CJK) go through a
+per-codepoint fallback (`components/terminalGlyphs.ts`, Skia glue in `terminalFonts.ts`): a few
+primary-font aliases (`⎿` → `└`), then the bundled `assets/NotoSansSymbols2-Subset.ttf` (OFL,
+loaded by Skia from the JS bundle, not registered for `<Text>`), then the platform fallback
+resolved once through SkParagraph. Fallback glyphs are fitted into their cell, or two cells for
+wide characters, and the lookups are cached.
+
 ### Keyboard input (mobile → server)
 
 ```

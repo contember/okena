@@ -48,6 +48,7 @@ import {
   type ProjectNode,
 } from '../models';
 import { OkenaColors } from '../theme';
+import { Icon } from './Icon';
 
 // ── Folder colors (mirror _folderColorToColor in project_drawer.dart) ────────
 
@@ -287,7 +288,9 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
         <View style={styles.divider} />
         {connId ? (
           <Pressable style={styles.footerItem} onPress={() => setAddOpen(true)}>
-            <Text style={styles.footerIcon}>{'＋'}</Text>
+            <View style={styles.footerIcon}>
+              <Icon name="plus" size={18} color={OkenaColors.textSecondary} />
+            </View>
             <Text style={styles.footerText}>Add Project</Text>
           </Pressable>
         ) : null}
@@ -298,7 +301,9 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
             disconnect();
           }}
         >
-          <Text style={styles.footerIcon}>{'⃠'}</Text>
+          <View style={styles.footerIcon}>
+            <Icon name="disconnect" size={18} color={OkenaColors.textSecondary} />
+          </View>
           <Text style={styles.footerText}>Disconnect</Text>
         </Pressable>
       </Animated.View>
@@ -368,7 +373,7 @@ const FolderSection: React.FC<
   return (
     <View>
       <Pressable style={styles.folderHeader} onLongPress={onLongPressFolder}>
-        <Text style={[styles.folderIcon, { color }]}>{'▸'}</Text>
+        <Icon name="caretRight" size={12} color={color} style={styles.folderIcon} />
         <Text style={[styles.folderName, { color }]}>{folder.name}</Text>
       </Pressable>
       {projects.map((node) => (
@@ -443,15 +448,12 @@ const ProjectRow: React.FC<
         onPress={() => onSelectProject(project)}
         onLongPress={onLongPress}
       >
-        <Text
-          style={[
-            styles.projectIcon,
-            { color: isSelected ? OkenaColors.accent : color },
-            depth > 0 && { marginLeft: INDENT_STEP * depth },
-          ]}
-        >
-          {project.parentProjectId ? '⎇' : '▸'}
-        </Text>
+        <Icon
+          name={project.parentProjectId ? 'gitBranch' : 'caretRight'}
+          size={project.parentProjectId ? 15 : 14}
+          color={isSelected ? OkenaColors.accent : color}
+          style={[styles.projectIcon, depth > 0 && { marginLeft: INDENT_STEP * depth }]}
+        />
         <View style={styles.flex}>
           <Text style={styles.projectName} numberOfLines={1}>
             {projectDisplayName(project)}
@@ -459,14 +461,25 @@ const ProjectRow: React.FC<
           {(project.gitBranch && !project.parentProjectId) || runningServices > 0 ? (
             <View style={styles.subtitleRow}>
               {project.gitBranch && !project.parentProjectId ? (
-                <Text style={styles.subtitleText} numberOfLines={1}>
-                  {`⎇ ${project.gitBranch}`}
-                </Text>
+                <>
+                  <Icon name="gitBranch" size={11} color={OkenaColors.textTertiary} />
+                  <Text style={[styles.subtitleText, styles.subtitleBranch]} numberOfLines={1}>
+                    {project.gitBranch}
+                  </Text>
+                </>
               ) : null}
               {runningServices > 0 ? (
-                <Text style={[styles.subtitleText, styles.subtitleRunning]}>
-                  {`  ● ${runningServices}`}
-                </Text>
+                <>
+                  <View
+                    style={[
+                      styles.runningDot,
+                      project.gitBranch && !project.parentProjectId && styles.runningDotSpaced,
+                    ]}
+                  />
+                  <Text style={[styles.subtitleText, styles.subtitleRunning]}>
+                    {runningServices}
+                  </Text>
+                </>
               ) : null}
             </View>
           ) : null}
@@ -484,14 +497,12 @@ const ProjectRow: React.FC<
                 style={styles.terminalRow}
                 onPress={() => onSelectTerminal(project, tid)}
               >
-                <Text
-                  style={[
-                    styles.terminalIcon,
-                    isTerminalSelected && styles.terminalSelected,
-                  ]}
-                >
-                  {'❯'}
-                </Text>
+                <Icon
+                  name="prompt"
+                  size={14}
+                  color={isTerminalSelected ? OkenaColors.accent : OkenaColors.textSecondary}
+                  style={styles.terminalIcon}
+                />
                 <Text
                   style={[
                     styles.terminalName,
@@ -508,7 +519,7 @@ const ProjectRow: React.FC<
                     if (connId) void native.closeTerminal(connId, project.id, tid);
                   }}
                 >
-                  <Text style={styles.terminalClose}>{'✕'}</Text>
+                  <Icon name="close" size={14} color={OkenaColors.textTertiary} />
                 </Pressable>
               </Pressable>
             );
@@ -520,7 +531,12 @@ const ProjectRow: React.FC<
                 void native.createTerminal(connId, project.id);
               }}
             >
-              <Text style={styles.terminalIcon}>{'＋'}</Text>
+              <Icon
+                name="plus"
+                size={14}
+                color={OkenaColors.textSecondary}
+                style={styles.terminalIcon}
+              />
               <Text style={styles.terminalName}>New Terminal</Text>
             </Pressable>
           ) : null}
@@ -629,7 +645,7 @@ const ColorPicker: React.FC<{
               ]}
               onPress={() => onSelect(name)}
             >
-              {selected ? <Text style={styles.swatchCheck}>{'✓'}</Text> : null}
+              {selected ? <Icon name="check" size={18} strokeWidth={3} color="#ffffff" /> : null}
             </Pressable>
           );
         })}
@@ -717,7 +733,7 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 4,
   },
-  folderIcon: { fontSize: 14, marginRight: 8 },
+  folderIcon: { marginRight: 8 },
   folderName: { fontSize: 12, fontWeight: '600', letterSpacing: 0.5 },
   projectRow: {
     flexDirection: 'row',
@@ -726,7 +742,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   projectRowSelected: { backgroundColor: OkenaColors.surfaceOverlay },
-  projectIcon: { fontSize: 16, marginRight: 12 },
+  projectIcon: { marginRight: 12 },
   searchWrap: { paddingHorizontal: 12, paddingVertical: 8 },
   searchInput: {
     backgroundColor: OkenaColors.surfaceElevated,
@@ -745,7 +761,16 @@ const styles = StyleSheet.create({
   projectName: { color: OkenaColors.textPrimary, fontSize: 15 },
   subtitleRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
   subtitleText: { color: OkenaColors.textTertiary, fontSize: 11 },
+  subtitleBranch: { marginLeft: 3, flexShrink: 1 },
   subtitleRunning: { color: OkenaColors.success },
+  runningDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 4,
+    backgroundColor: OkenaColors.success,
+  },
+  runningDotSpaced: { marginLeft: 10 },
   terminalRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -753,10 +778,9 @@ const styles = StyleSheet.create({
     paddingLeft: 56,
     paddingRight: 12,
   },
-  terminalIcon: { color: OkenaColors.textSecondary, fontSize: 13, marginRight: 8 },
+  terminalIcon: { marginRight: 8 },
   terminalName: { color: OkenaColors.textPrimary, fontSize: 14 },
   terminalSelected: { color: OkenaColors.accent },
-  terminalClose: { color: OkenaColors.textTertiary, fontSize: 13 },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: OkenaColors.border },
   footerItem: {
     flexDirection: 'row',
@@ -764,7 +788,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
-  footerIcon: { color: OkenaColors.textSecondary, fontSize: 16, width: 28 },
+  footerIcon: { width: 28 },
   footerText: { color: OkenaColors.textPrimary, fontSize: 15 },
   // dialog
   dialogBackdrop: {
@@ -815,7 +839,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   swatchSelected: { borderWidth: 3, borderColor: '#ffffff' },
-  swatchCheck: { color: '#ffffff', fontSize: 18, fontWeight: '700' },
 });
 
 export default ProjectDrawer;
