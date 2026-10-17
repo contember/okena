@@ -253,6 +253,13 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     );
     /// Binary PTY output arrived — route to the terminal's emulator.
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]);
+    /// A snapshot arrived: the server's rendered grid, replayed on every
+    /// (re)subscribe. Defaults to [`Self::on_terminal_output`]; a handler that
+    /// derives activity from live output overrides it so replayed state does
+    /// not look like new output.
+    fn on_terminal_snapshot(&self, prefixed_id: &str, data: &[u8]) {
+        self.on_terminal_output(prefixed_id, data);
+    }
     /// Terminal removed — clean up platform terminal object.
     fn remove_terminal(&self, prefixed_id: &str);
     /// Resize a terminal's grid to match the server's dimensions.
@@ -1288,7 +1295,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 // Route PTY output or snapshot to the correct terminal
                                 if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
                                     let prefixed = make_prefixed_id(&config_id, remote_tid);
-                                    handler_clone.on_terminal_output(&prefixed, payload);
+                                    if frame_type == okena_core::ws::FRAME_TYPE_SNAPSHOT {
+                                        handler_clone.on_terminal_snapshot(&prefixed, payload);
+                                    } else {
+                                        handler_clone.on_terminal_output(&prefixed, payload);
+                                    }
                                 }
                             }
                             _ => {

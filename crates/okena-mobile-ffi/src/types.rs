@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use crate::client::terminal_holder::TerminalActivity as NativeTerminalActivity;
 use crate::api::{
     connection::ConnectionStatus as NativeConnectionStatus,
     state::{
@@ -207,6 +208,8 @@ pub struct ProjectInfo {
     pub terminal_agent_status: HashMap<String, AgentStatusInfo>,
     pub parent_project_id: Option<String>,
     pub worktree_ids: Vec<String>,
+    pub pinned: bool,
+    pub last_activity_at: Option<u64>,
 }
 
 impl From<NativeProjectInfo> for ProjectInfo {
@@ -230,6 +233,8 @@ impl From<NativeProjectInfo> for ProjectInfo {
                 .collect(),
             parent_project_id: p.parent_project_id,
             worktree_ids: p.worktree_ids,
+            pinned: p.pinned,
+            last_activity_at: p.last_activity_at,
         }
     }
 }
@@ -266,6 +271,30 @@ impl From<NativeFullscreenInfo> for FullscreenInfo {
         FullscreenInfo {
             project_id: f.project_id,
             terminal_id: f.terminal_id,
+        }
+    }
+}
+
+/// Activity signals of one mirrored terminal (see
+/// `crate::client::terminal_holder::TerminalActivity`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TerminalActivity {
+    pub terminal_id: String,
+    /// A BEL arrived since the terminal was last marked seen.
+    pub bell_unseen: bool,
+    /// An `OSC 9` / `OSC 777 ; notify` notification arrived since last seen.
+    pub notification_unseen: bool,
+    /// Milliseconds since the last live output; `None` when there was none.
+    pub last_output_ms_ago: Option<u64>,
+}
+
+impl TerminalActivity {
+    pub(crate) fn new(terminal_id: String, a: NativeTerminalActivity) -> Self {
+        TerminalActivity {
+            terminal_id,
+            bell_unseen: a.bell_unseen,
+            notification_unseen: a.notification_unseen,
+            last_output_ms_ago: a.last_output_ms_ago,
         }
     }
 }

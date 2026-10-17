@@ -40,7 +40,7 @@ use crate::client::manager::ConnectionManager;
 
 pub use types::{
     CellData, ConnectionStatus, CursorShape, CursorState, FolderInfo, FullscreenInfo, ProjectInfo,
-    ScrollInfo, SelectionBounds, ServiceInfo,
+    ScrollInfo, SelectionBounds, ServiceInfo, TerminalActivity,
 };
 
 uniffi::setup_scaffolding!();
@@ -377,6 +377,24 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
         .into_iter()
         .map(Into::into)
         .collect()
+}
+
+/// Activity signals of every mirrored terminal of a connection (unseen bell /
+/// notification, time since the last live output). One call per state poll
+/// feeds the project list's activity ordering.
+#[uniffi::export]
+pub fn get_terminal_activity(conn_id: String) -> Vec<TerminalActivity> {
+    ConnectionManager::get()
+        .terminal_activity(&conn_id)
+        .into_iter()
+        .map(|(terminal_id, activity)| TerminalActivity::new(terminal_id, activity))
+        .collect()
+}
+
+/// The user viewed a terminal: clear its unseen bell and notification.
+#[uniffi::export]
+pub fn mark_terminal_seen(conn_id: String, terminal_id: String) {
+    ConnectionManager::get().with_terminal(&conn_id, &terminal_id, |holder| holder.mark_seen());
 }
 
 /// Get the focused project ID from the cached remote state.

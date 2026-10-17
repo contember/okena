@@ -1,5 +1,5 @@
 use crate::client::handler::MobileConnectionHandler;
-use crate::client::terminal_holder::TerminalHolder;
+use crate::client::terminal_holder::{TerminalActivity, TerminalHolder};
 
 use okena_core::api::{ActionRequest, ApiFullscreen, ApiLayoutNode, StateResponse};
 use okena_transport::client::{
@@ -348,6 +348,25 @@ impl ConnectionManager {
             .collect();
         ids.sort();
         Some(ids)
+    }
+
+    /// Activity signals of every terminal a connection mirrors, keyed by the
+    /// unprefixed terminal id. Empty for an unknown connection.
+    pub fn terminal_activity(&self, conn_id: &str) -> Vec<(String, TerminalActivity)> {
+        let connections = self.connections.read();
+        let Some(conn) = connections.get(conn_id) else {
+            return Vec::new();
+        };
+        let terminals = conn.handler.terminals().read();
+        terminals
+            .iter()
+            .map(|(k, holder)| {
+                (
+                    okena_transport::client::strip_prefix(k, conn_id),
+                    holder.activity(),
+                )
+            })
+            .collect()
     }
 
     /// Get the global singleton. Panics if `init()` hasn't been called.

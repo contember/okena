@@ -66,6 +66,13 @@ impl ConnectionHandler for MobileConnectionHandler {
         }
     }
 
+    fn on_terminal_snapshot(&self, prefixed_id: &str, data: &[u8]) {
+        *self.last_activity.lock() = Instant::now();
+        if let Some(holder) = self.terminals.read().get(prefixed_id) {
+            holder.process_snapshot(data);
+        }
+    }
+
     fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16, _server_owns: bool) {
         // Mobile renders via TerminalHolder, not the GPUI TerminalElement, so it
         // has no process-global resize-authority gate to defer to — just size
@@ -193,6 +200,28 @@ mod tests {
         let holder = terminals.get("remote:conn1:t1").unwrap();
         let cells = holder.get_visible_cells(&okena_core::theme::DARK_THEME);
         assert_eq!(cells.len(), 80 * 24);
+    }
+
+    #[test]
+    fn snapshots_are_not_activity_but_live_output_is() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
+
+        handler.on_terminal_snapshot("remote:conn1:t1", b"prompt$ \x07\x1b]9;hi\x07");
+        {
+            let terminals = handler.terminals().read();
+            let activity = terminals.get("remote:conn1:t1").unwrap().activity();
+            assert_eq!(activity.last_output_ms_ago, None);
+            assert!(!activity.bell_unseen);
+            assert!(!activity.notification_unseen);
+        }
+
+        handler.on_terminal_output("remote:conn1:t1", b"\x07");
+        let terminals = handler.terminals().read();
+        let activity = terminals.get("remote:conn1:t1").unwrap().activity();
+        assert!(activity.last_output_ms_ago.is_some());
+        assert!(activity.bell_unseen);
     }
 
     #[test]

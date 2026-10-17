@@ -45,7 +45,7 @@ use okena_transport::client::WsClientMessage;
 
 use crate::client::manager::ConnectionManager;
 use crate::client::terminal_holder::{
-    GENERATION_DEAD, NoopEventListener, RenderTrackSnapshot, TerminalHolder, mouse_wheel_bytes,
+    GENERATION_DEAD, MobileEventListener, RenderTrackSnapshot, TerminalHolder, mouse_wheel_bytes,
 };
 
 /// Bumped on every incompatible change to `okena_render.h`.
@@ -329,7 +329,7 @@ impl FrameBuffers {
     /// Fill a frame with `rows` rows starting at absolute line `top_line`.
     pub(crate) fn build(
         &mut self,
-        term: &Term<NoopEventListener>,
+        term: &Term<MobileEventListener>,
         track: RenderTrackSnapshot,
         generation: u64,
         top_line: i64,
@@ -600,7 +600,7 @@ fn mode_bits(mode: TermMode) -> u32 {
 
 /// Map an absolute line / column to an alacritty point, clamped to the grid.
 fn to_point(
-    term: &Term<NoopEventListener>,
+    term: &Term<MobileEventListener>,
     track: RenderTrackSnapshot,
     line: i64,
     col: u16,
