@@ -11,6 +11,7 @@ import { useSettingsStore } from '../state/settingsStore';
 
 jest.mock('./Icon', () => ({ Icon: () => null }));
 jest.mock('../screens/SettingsSheet', () => ({ SettingsSheet: () => null }));
+jest.mock('../screens/UsageSheet', () => ({ ConnectedUsageSheet: () => null }));
 
 const native = {
   focusTerminal: jest.fn(async () => {}),

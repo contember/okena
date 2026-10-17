@@ -38,6 +38,7 @@ export const ICONS = {
   chat: { d: 'M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z' },
   arrowUp: { d: 'M12 19V5M5 12l7-7 7 7' },
   stop: { d: 'M7 7h10v10H7z', fill: true },
+  gauge: { d: 'M4 17a8 8 0 1 1 16 0M12 17l3.5-5' },
   disconnect: { d: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M5.7 5.7l12.6 12.6' },
 } satisfies Record<string, IconDef>;
 
