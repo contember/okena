@@ -646,6 +646,16 @@ export function indicatorAccessibilityLabel(items: readonly IndicatorItem[]): st
   return `Agent usage: ${parts.join('; ')}`;
 }
 
+/**
+ * Whether a window's history is worth a sparkline: two or more samples
+ * spanning at least 3 % of the bar, so a fresh daemon's first minutes don't
+ * draw a sliver.
+ */
+export function hasHistoryShape(points: readonly { x: number }[]): boolean {
+  if (points.length < 2) return false;
+  return points[points.length - 1]!.x - points[0]!.x >= 0.03;
+}
+
 /** Any provider with a fetch in flight. */
 export function anyFetching(usage: UsageInfo | null | undefined): boolean {
   return usage?.providers.some((p) => p.fetching) ?? false;

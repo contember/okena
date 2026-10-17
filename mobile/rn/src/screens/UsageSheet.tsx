@@ -32,6 +32,7 @@ import { savedServerDisplayName } from '../models/savedServer';
 import { useConnectionStore, useWorkspaceStore } from '../state';
 import {
   buildUsageView,
+  hasHistoryShape,
   type ProviderView,
   type UsageWindowView,
 } from '../models/usage';
@@ -241,7 +242,7 @@ const WindowRow: React.FC<{ window: UsageWindowView; last: boolean }> = ({ windo
         </Text>
       </View>
       <UsageBar usedPercent={w.usedPercent} timePct={w.timePct} segments={w.segments} />
-      {w.history.length >= 2 ? (
+      {hasHistoryShape(w.history) ? (
         <View style={styles.spark}>
           <UsageSparkline points={w.history} severity={w.severity} />
         </View>
