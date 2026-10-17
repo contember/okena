@@ -24,6 +24,7 @@
     "@react-native-clipboard/clipboard": "^1.16.3",
     "@shopify/react-native-skia": "2.14.0",
     "okena-mobile-ffi": "file:./modules/okena-mobile-ffi",
+    "okena-terminal-view": "file:./modules/okena-terminal-view",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "zustand": "^4.5.5",

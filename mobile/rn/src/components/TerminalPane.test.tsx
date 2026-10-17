@@ -3,16 +3,18 @@
 
 /**
  * TerminalPane regression: keyboard focus and the toolbar's target agree
- * (CORR-14), and touch drags scroll the pane they started in.
+ * (CORR-14), touch drags scroll the pane they started in, and the renderer
+ * setting picks the native view or Skia.
  */
 
 import React from 'react';
 import { Keyboard, TextInput, View } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 import type { SkFont } from '@shopify/react-native-skia';
+import type { OkenaTerminalViewProps } from 'okena-terminal-view';
 
 import { KeyModifiers } from './KeyToolbar';
-import { TerminalPane } from './TerminalPane';
+import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 import type { OkenaNative } from '../native/okena';
 import { createMemoryPersistence } from '../state/persistence';
 import { configureSettingsStore, useSettingsStore } from '../state/settingsStore';
@@ -32,6 +34,27 @@ jest.mock('./TerminalView', () => ({
     return null;
   },
 }));
+// The native renderer is a codegen host component; the mock keeps its props
+// so a test can fire its events, and records commands.
+const mockNativeViewProps: { current?: OkenaTerminalViewProps } = {};
+const mockScrollToBottom = jest.fn();
+jest.mock('okena-terminal-view', () => {
+  const mockReact: typeof React = jest.requireActual('react');
+  const OkenaTerminalView = mockReact.forwardRef(
+    (props: OkenaTerminalViewProps, ref: React.Ref<{ nativeView: true }>) => {
+      mockNativeViewProps.current = props;
+      mockReact.useImperativeHandle(ref, () => ({ nativeView: true as const }));
+      return null;
+    },
+  );
+  return {
+    OkenaTerminalView,
+    OkenaTerminalViewCommands: {
+      scrollToBottom: (ref: unknown) => mockScrollToBottom(ref),
+      clearSelection: () => {},
+    },
+  };
+});
 jest.mock('../native/okena', () => ({ getOkenaNative: () => ({}) }));
 jest.mock('@react-native-clipboard/clipboard', () => ({ setString: () => {} }));
 
@@ -314,6 +337,140 @@ describe('TerminalPane font size', () => {
     expect(useSettingsStore.getState().terminalFontSize).toBe(20);
     expect(scrollWheel).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+});
+
+describe('TerminalPane renderer', () => {
+  beforeEach(() => {
+    configureSettingsStore({ persistence: createMemoryPersistence() });
+    useSettingsStore.setState({ terminalFontSize: 10.5, renderer: 'skia', loaded: true });
+    mockNativeViewProps.current = undefined;
+    mockTerminalViewProps.current = undefined;
+    mockScrollToBottom.mockClear();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function gestureSurfaces(renderer: TestRenderer.ReactTestRenderer) {
+    return renderer.root.findAll(
+      (n) => n.type === View && typeof n.props.onResponderMove === 'function',
+    );
+  }
+
+  function nativeProps(): OkenaTerminalViewProps {
+    const props = mockNativeViewProps.current;
+    if (!props) throw new Error('the native renderer was not rendered');
+    return props;
+  }
+
+  /** Fire a native event handler with `{ nativeEvent }`, as Fabric does. */
+  function fire<T>(handler: ((e: never) => void) | undefined, nativeEvent: T) {
+    if (!handler) throw new Error('missing event handler');
+    act(() => (handler as (e: { nativeEvent: T }) => void)({ nativeEvent }));
+  }
+
+  it('uses the Skia renderer and its gesture surface by default', () => {
+    const renderer = renderPane('t1');
+    expect(mockTerminalViewProps.current).toBeDefined();
+    expect(mockNativeViewProps.current).toBeUndefined();
+    expect(gestureSurfaces(renderer)).toHaveLength(1);
+    act(() => renderer.unmount());
+  });
+
+  it('switches to the native view without JS gestures', () => {
+    const renderer = renderPane('t1');
+    mockTerminalViewProps.current = undefined;
+    act(() => useSettingsStore.getState().setRenderer('native'));
+
+    expect(nativeProps()).toMatchObject({
+      connId: 'conn-1',
+      terminalId: 't1',
+      fontSize: 10.5,
+      focused: false,
+      theme: { background: 0xff000000 },
+    });
+    expect(mockTerminalViewProps.current).toBeUndefined();
+    expect(gestureSurfaces(renderer)).toHaveLength(0);
+    expect(renderer.root.findAllByType(TextInput)).toHaveLength(1);
+    act(() => renderer.unmount());
+  });
+
+  it('focuses the hidden input and selects the pane on a native tap', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const onSelect = jest.fn();
+    const renderer = renderPane('t2', { onSelect });
+    const focus = spyOnInputFocus(renderer);
+
+    fire(nativeProps().onTap, { col: 3, row: 4 });
+
+    expect(onSelect).toHaveBeenCalledWith('t2');
+    expect(focus).toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('persists a font size from a native pinch', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const renderer = renderPane('t1');
+
+    fire(nativeProps().onFontSizeChange, { size: 14 });
+
+    expect(useSettingsStore.getState().terminalFontSize).toBe(14);
+    expect(nativeProps().fontSize).toBe(14);
+    act(() => renderer.unmount());
+  });
+
+  it('leaves PTY sizing to the native view', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const resizeLocal = jest.fn();
+    const resizeTerminal = jest.fn();
+    const native = { resizeLocal, resizeTerminal } as unknown as OkenaNative;
+    const renderer = renderPane('t1', { native });
+
+    fire(nativeProps().onGridSize, { cols: 60, rows: 30, cellWidth: 6.3, cellHeight: 15.6 });
+
+    expect(resizeLocal).not.toHaveBeenCalled();
+    expect(resizeTerminal).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it('scrolls the native view to the bottom on typed input', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const sendText = jest.fn();
+    const native = { sendText, sendSpecialKey: jest.fn() } as unknown as OkenaNative;
+    const renderer = renderPane('t1', { native });
+    const input = renderer.root.findByType(TextInput);
+
+    act(() => {
+      input.props.onChange({ nativeEvent: { text: `${input.props.value}a` } });
+    });
+
+    expect(sendText).toHaveBeenCalledWith('conn-1', 't1', 'a');
+    expect(mockScrollToBottom).toHaveBeenCalledWith({ nativeView: true });
+    act(() => renderer.unmount());
+  });
+
+  it('scrolls the native view to the bottom through the pane handle', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const ref = React.createRef<TerminalPaneHandle>();
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <TerminalPane
+          ref={ref}
+          connId="conn-1"
+          terminalId="t1"
+          fonts={{ regular: FONT }}
+          modifiers={new KeyModifiers()}
+        />,
+      );
+    });
+
+    act(() => ref.current?.scrollToBottom());
+
+    expect(mockScrollToBottom).toHaveBeenCalledWith({ nativeView: true });
     act(() => renderer.unmount());
   });
 });

@@ -26,6 +26,28 @@ PODS:
     - ReactNativeDependencies
     - uniffi-bindgen-react-native (= 0.31.0-3)
     - Yoga
+  - OkenaTerminalView (0.1.0):
+    - hermes-engine
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-Core-prebuilt
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - ReactNativeDependencies
+    - Yoga
   - RCTDeprecation (0.86.3)
   - RCTRequired (0.86.3)
   - RCTSwiftUI (0.86.3)
@@ -1991,6 +2013,7 @@ DEPENDENCIES:
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - OkenaMobileFfi (from `../node_modules/okena-mobile-ffi`)
+  - OkenaTerminalView (from `../node_modules/okena-terminal-view`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../node_modules/react-native/Libraries/Required`)
   - RCTSwiftUI (from `../node_modules/react-native/ReactApple/RCTSwiftUI`)
@@ -2079,6 +2102,8 @@ EXTERNAL SOURCES:
     :tag: hermes-v250829098.0.17
   OkenaMobileFfi:
     :path: "../node_modules/okena-mobile-ffi"
+  OkenaTerminalView:
+    :path: "../node_modules/okena-terminal-view"
   RCTDeprecation:
     :path: "../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation"
   RCTRequired:
@@ -2240,6 +2265,7 @@ SPEC CHECKSUMS:
   FBLazyVector: 2138c6c2ab66c31bf5754dc18097fbc498a49c7f
   hermes-engine: 63c5db7d529c36335fada6582fd293ae2a105d77
   OkenaMobileFfi: 4f01c95adf2bc686482a548fca50325e730258b9
+  OkenaTerminalView: 8972e85f09971c9941bea0b48b57bcd0eb4a587b
   RCTDeprecation: 96f68ebf33f8762466b01d57d6e873c4f30efb07
   RCTRequired: 166eed8ad6d8440e73e56d09a9090366609823d2
   RCTSwiftUI: e818198d11928a78c2b2afe281d072171dab617f

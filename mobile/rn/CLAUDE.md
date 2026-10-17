@@ -32,6 +32,11 @@ See `README.md` for the pinned toolchains, CPU leases, and signed CI release pro
 - **`src/native/cells.ts`** — decoder for the packed cell buffer from `get_visible_cells_packed`
   (the render hot path). Its byte layout is the contract the Rust encoder must match; the jest
   smoke test (`__tests__/cells.test.ts`) guards it.
+- **`modules/okena-terminal-view/`** — versioned local package (NOT generated) with the native
+  terminal renderer: a Fabric component `OkenaTerminalView` (codegen spec in `src/`, Swift view
+  + ObjC++ Fabric wrapper in `ios/`, Kotlin view + ViewManager in `android/`). `TerminalPane`
+  uses it when the `renderer` setting is `'native'`; the default is still `'skia'`. Plan:
+  `docs/sprints/sprint-2026-10-17-native-terminal-view.md`.
 - The native module is **dependency-injected**, never imported globally: stores via
   `configureConnectionStore` / `configureWorkspaceStore`, `TerminalView`/`TerminalPane` via a
   `native` prop. This keeps everything testable with a mock and lets `tsc`/jest run with no

@@ -1,8 +1,8 @@
 /**
  * settingsStore.ts — persisted app preferences (zustand).
  *
- * Currently only the terminal font size. Stored as one JSON object under
- * {@link SETTINGS_KEY} so new preferences don't need new storage keys.
+ * The terminal font size and the terminal renderer. Stored as one JSON object
+ * under {@link SETTINGS_KEY} so new preferences don't need new storage keys.
  *
  * Persistence is INJECTED via {@link configureSettingsStore} (same pattern as
  * the connection store); the default is AsyncStorage. `load()` is called once
@@ -29,6 +29,19 @@ export function normalizeFontSize(size: number): number {
   return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, snapped));
 }
 
+/**
+ * Which terminal renderer panes use: the native view (`okena-terminal-view`)
+ * or the JS + Skia `TerminalView`. A rollout toggle, removed once the native
+ * renderer replaces Skia.
+ */
+export type TerminalRenderer = 'native' | 'skia';
+
+export const DEFAULT_RENDERER: TerminalRenderer = 'skia';
+
+function isTerminalRenderer(value: unknown): value is TerminalRenderer {
+  return value === 'native' || value === 'skia';
+}
+
 export interface SettingsDeps {
   persistence: Persistence;
 }
@@ -36,6 +49,8 @@ export interface SettingsDeps {
 export interface SettingsState {
   /** Terminal font size in pt. */
   terminalFontSize: number;
+  /** Terminal renderer used by every pane. */
+  renderer: TerminalRenderer;
   /** True once persisted settings have been read (or found absent). */
   loaded: boolean;
   /** Read persisted settings. Safe to call more than once. */
@@ -46,6 +61,8 @@ export interface SettingsState {
   stepTerminalFontSize(steps: number): void;
   /** Back to {@link DEFAULT_FONT_SIZE}. */
   resetTerminalFontSize(): void;
+  /** Set and persist the terminal renderer. */
+  setRenderer(renderer: TerminalRenderer): void;
 }
 
 let injectedDeps: Partial<SettingsDeps> = {};
@@ -61,10 +78,16 @@ export function configureSettingsStore(overrides: Partial<SettingsDeps>): void {
 
 interface PersistedSettings {
   terminalFontSize?: unknown;
+  renderer?: unknown;
 }
 
-function persist(state: Pick<SettingsState, 'terminalFontSize'>): void {
-  const payload: PersistedSettings = { terminalFontSize: state.terminalFontSize };
+type PersistedFields = Pick<SettingsState, 'terminalFontSize' | 'renderer'>;
+
+function persist(state: PersistedFields): void {
+  const payload: PersistedSettings = {
+    terminalFontSize: state.terminalFontSize,
+    renderer: state.renderer,
+  };
   void deps()
     .persistence.setItem(SETTINGS_KEY, JSON.stringify(payload))
     .catch(() => {
@@ -75,10 +98,11 @@ function persist(state: Pick<SettingsState, 'terminalFontSize'>): void {
 export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<SettingsState>(
   (set, get) => ({
     terminalFontSize: DEFAULT_FONT_SIZE,
+    renderer: DEFAULT_RENDERER,
     loaded: false,
 
     async load() {
-      let terminalFontSize = get().terminalFontSize;
+      let { terminalFontSize, renderer } = get();
       try {
         const json = await deps().persistence.getItem(SETTINGS_KEY);
         if (json) {
@@ -86,18 +110,19 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
           if (typeof parsed.terminalFontSize === 'number') {
             terminalFontSize = normalizeFontSize(parsed.terminalFontSize);
           }
+          if (isTerminalRenderer(parsed.renderer)) renderer = parsed.renderer;
         }
       } catch {
         // Corrupt or unreadable settings fall back to defaults.
       }
-      set({ terminalFontSize, loaded: true });
+      set({ terminalFontSize, renderer, loaded: true });
     },
 
     setTerminalFontSize(size) {
       const next = normalizeFontSize(size);
       if (next === get().terminalFontSize) return;
       set({ terminalFontSize: next });
-      persist({ terminalFontSize: next });
+      persist(get());
     },
 
     stepTerminalFontSize(steps) {
@@ -106,6 +131,12 @@ export const useSettingsStore: UseBoundStore<StoreApi<SettingsState>> = create<S
 
     resetTerminalFontSize() {
       get().setTerminalFontSize(DEFAULT_FONT_SIZE);
+    },
+
+    setRenderer(renderer) {
+      if (renderer === get().renderer) return;
+      set({ renderer });
+      persist(get());
     },
   }),
 );

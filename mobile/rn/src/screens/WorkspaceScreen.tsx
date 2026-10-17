@@ -273,7 +273,10 @@ export const WorkspaceScreen: React.FC = () => {
             native={native}
             onHideKeyboard={() => paneRef.current?.blur()}
             onShowKeyboard={() => paneRef.current?.focus()}
-            onInputSent={() => paneRef.current?.resetInput()}
+            onInputSent={() => {
+              paneRef.current?.resetInput();
+              paneRef.current?.scrollToBottom();
+            }}
           />
         ) : null}
       </KeyboardAvoidingView>
