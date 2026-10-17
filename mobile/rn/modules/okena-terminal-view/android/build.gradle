@@ -1,0 +1,38 @@
+// Android library for the `OkenaTerminalView` Fabric component.
+//
+// Built only as part of the app (autolinked from mobile/rn/android); it takes
+// the AGP / Kotlin / React Native Gradle plugins from the host's buildscript.
+// The React Native plugin runs codegen for this library from the spec in
+// ../src (codegenConfig in ../package.json).
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+def ext(name, fallback) {
+    return rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback
+}
+
+android {
+    namespace "com.okena.terminalview"
+    compileSdk ext("compileSdkVersion", 36)
+
+    defaultConfig {
+        minSdkVersion ext("minSdkVersion", 24)
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ["${project.buildDir}/generated/source/codegen/java"]
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+}
