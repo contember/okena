@@ -16,7 +16,13 @@
  */
 
 import React, { useEffect } from 'react';
-import { View, StyleSheet } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Platform,
+  StatusBar,
+  StyleSheet,
+} from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { useNavStore, bindConnectionToNavigation } from './navigation';
 import {
@@ -73,15 +79,23 @@ export const App: React.FC = () => {
   }, []);
 
   return (
-    <View style={styles.root}>
-      {screen === 'workspace' ? (
-        <WorkspaceScreen />
-      ) : screen === 'pairing' ? (
-        <PairingScreen />
-      ) : (
-        <ServerListScreen />
-      )}
-    </View>
+    <SafeAreaProvider>
+      <StatusBar barStyle="light-content" />
+      <KeyboardAvoidingView
+        style={styles.root}
+        behavior={Platform.OS === 'android' ? 'padding' : undefined}
+      >
+        <SafeAreaView style={styles.root}>
+          {screen === 'workspace' ? (
+            <WorkspaceScreen />
+          ) : screen === 'pairing' ? (
+            <PairingScreen />
+          ) : (
+            <ServerListScreen />
+          )}
+        </SafeAreaView>
+      </KeyboardAvoidingView>
+    </SafeAreaProvider>
   );
 };
 

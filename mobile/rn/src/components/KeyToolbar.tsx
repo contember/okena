@@ -39,6 +39,7 @@ import {
   Pressable,
   ScrollView,
   Modal,
+  KeyboardAvoidingView,
   TextInput,
   StyleSheet,
   Platform,
@@ -48,7 +49,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 
 import type { OkenaNative, SpecialKey } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
-import { OkenaColors } from '../theme';
+import { OkenaColors, TerminalTheme } from '../theme';
 
 // ── Shared modifier state ──────────────────────────────────────────────────
 
@@ -827,69 +828,74 @@ const ComposeSheet: React.FC<{
       animationType="slide"
       onRequestClose={onClose}
     >
-      <Pressable style={styles.composeBackdrop} onPress={onClose} />
-      <View style={styles.composeSheet}>
-        <View style={styles.sheetHandle} />
-        <View style={styles.composeHeader}>
-          <View style={styles.composeHeading}>
-            <Text style={styles.composeTitle}>Compose input</Text>
-            <Text style={styles.composeSubtitle}>
-              Review text before it reaches the terminal
-            </Text>
+      <KeyboardAvoidingView
+        style={styles.composeContainer}
+        behavior="padding"
+      >
+        <Pressable style={styles.composeBackdrop} onPress={onClose} />
+        <View style={styles.composeSheet}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.composeHeader}>
+            <View style={styles.composeHeading}>
+              <Text style={styles.composeTitle}>Compose input</Text>
+              <Text style={styles.composeSubtitle}>
+                Review text before it reaches the terminal
+              </Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [
+                styles.composePaste,
+                pressed && styles.keyPressed,
+              ]}
+              onPress={() => {
+                void Clipboard.getString()
+                  .then((clipboardText) =>
+                    setText((current) => current + clipboardText),
+                  )
+                  .catch(() => {
+                    // Clipboard access can be denied by the OS.
+                  });
+              }}
+            >
+              <Text style={styles.composePasteText}>Paste</Text>
+            </Pressable>
           </View>
-          <Pressable
-            style={({ pressed }) => [
-              styles.composePaste,
-              pressed && styles.keyPressed,
-            ]}
-            onPress={() => {
-              void Clipboard.getString()
-                .then((clipboardText) =>
-                  setText((current) => current + clipboardText),
-                )
-                .catch(() => {
-                  // Clipboard access can be denied by the OS.
-                });
-            }}
-          >
-            <Text style={styles.composePasteText}>Paste</Text>
-          </Pressable>
+          <TextInput
+            style={styles.composeInput}
+            value={text}
+            onChangeText={setText}
+            autoFocus
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            autoComplete="off"
+            importantForAutofill="no"
+            keyboardType={
+              Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
+            }
+            placeholder="Command, path, or multiline input"
+            placeholderTextColor={OkenaColors.textTertiary}
+          />
+          <View style={styles.composeActions}>
+            <Pressable style={styles.composeBtn} onPress={onClose}>
+              <Text style={styles.composeBtnText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.composeBtn, styles.composeInsert]}
+              onPress={() => submit(false)}
+            >
+              <Text style={styles.composeInsertText}>Insert</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.composeBtn, styles.composeSend]}
+              onPress={() => submit(true)}
+            >
+              <Text style={styles.composeSendText}>Run ↵</Text>
+            </Pressable>
+          </View>
         </View>
-        <TextInput
-          style={styles.composeInput}
-          value={text}
-          onChangeText={setText}
-          autoFocus
-          multiline
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          autoComplete="off"
-          importantForAutofill="no"
-          keyboardType={
-            Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
-          }
-          placeholder="Command, path, or multiline input"
-          placeholderTextColor={OkenaColors.textTertiary}
-        />
-        <View style={styles.composeActions}>
-          <Pressable style={styles.composeBtn} onPress={onClose}>
-            <Text style={styles.composeBtnText}>Cancel</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.composeBtn, styles.composeInsert]}
-            onPress={() => submit(false)}
-          >
-            <Text style={styles.composeInsertText}>Insert</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.composeBtn, styles.composeSend]}
-            onPress={() => submit(true)}
-          >
-            <Text style={styles.composeSendText}>Run ↵</Text>
-          </Pressable>
-        </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 };
@@ -925,7 +931,7 @@ const styles = StyleSheet.create({
   keyPressed: { opacity: 0.62 },
   keyText: {
     color: OkenaColors.keyText,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1035,7 +1041,7 @@ const styles = StyleSheet.create({
   },
   deckKeyText: {
     color: OkenaColors.textPrimary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1062,6 +1068,7 @@ const styles = StyleSheet.create({
   },
   deckActionPrimaryText: { color: '#ffffff', fontSize: 13, fontWeight: '700' },
   // Compose sheet
+  composeContainer: { flex: 1 },
   composeBackdrop: { flex: 1, backgroundColor: OkenaColors.backdrop },
   composeSheet: {
     backgroundColor: OkenaColors.surface,
@@ -1109,7 +1116,7 @@ const styles = StyleSheet.create({
     minHeight: 120,
     maxHeight: 240,
     color: OkenaColors.textPrimary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 14,
     backgroundColor: OkenaColors.surfaceElevated,
     borderRadius: 8,

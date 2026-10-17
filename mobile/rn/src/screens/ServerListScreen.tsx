@@ -24,7 +24,6 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -38,7 +37,7 @@ import {
   type SavedServer,
 } from '../models';
 import { useConnectionStore } from '../state';
-import { OkenaColors, OkenaTypography } from '../theme';
+import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 
 const DEFAULT_PORT = '19100';
 
@@ -217,7 +216,7 @@ const AddServerSheet: React.FC<{
       {/* Tap the dimmed backdrop to dismiss. */}
       <Pressable style={styles.backdrop} onPress={close}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior="padding"
           style={styles.sheetWrap}
         >
           {/* Stop taps inside the sheet from bubbling to the backdrop. */}
@@ -291,7 +290,6 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: OkenaColors.background,
-    paddingTop: 44, // approximate top safe-area inset (no SafeAreaView dep)
   },
   center: {
     flex: 1,
@@ -356,7 +354,7 @@ const styles = StyleSheet.create({
     ...OkenaTypography.caption,
     marginTop: 3,
     color: OkenaColors.textTertiary,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
   },
   chevron: { color: OkenaColors.textTertiary, fontSize: 18, marginLeft: 8 },
   deleteBtn: {

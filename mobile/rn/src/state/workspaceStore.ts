@@ -152,7 +152,10 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const pa = a[i]!;
     const pb = b[i]!;
-    if (pa.id !== pb.id || pa.name !== pb.name) return false;
+    if (pa.id !== pb.id || pa.name !== pb.name || pa.path !== pb.path) return false;
+    if (pa.showInOverview !== pb.showInOverview) return false;
+    if (pa.parentProjectId !== pb.parentProjectId) return false;
+    if (!arrayEquals(pa.worktreeIds, pb.worktreeIds)) return false;
     if (!arrayEquals(pa.terminalIds, pb.terminalIds)) return false;
     if (pa.gitBranch !== pb.gitBranch) return false;
     if (pa.gitLinesAdded !== pb.gitLinesAdded) return false;
@@ -167,6 +170,18 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
       }
     }
     if (pa.folderColor !== pb.folderColor) return false;
+  }
+  return true;
+}
+
+/** Folder lists equal by id, name, color and member order (drives drawer ordering). */
+function folderListEquals(a: FolderInfo[], b: FolderInfo[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const fa = a[i]!;
+    const fb = b[i]!;
+    if (fa.id !== fb.id || fa.name !== fb.name || fa.folderColor !== fb.folderColor) return false;
+    if (!arrayEquals(fa.projectIds, fb.projectIds)) return false;
   }
   return true;
 }
@@ -209,12 +224,7 @@ function pollState(
     patch.projects = newProjects;
     changed = true;
   }
-  if (
-    !arrayEquals(
-      newFolders.map((f) => f.id),
-      prev.folders.map((f) => f.id),
-    )
-  ) {
+  if (!folderListEquals(newFolders, prev.folders)) {
     patch.folders = newFolders;
     changed = true;
   }

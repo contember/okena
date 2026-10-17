@@ -176,6 +176,10 @@ export interface ProjectInfo {
   services: ServiceInfo[];
   /** Lowercased folder color name (e.g. `"blue"`). */
   folderColor: string;
+  /** Parent project id when this project is a git worktree. */
+  parentProjectId?: ProjectId;
+  /** Worktree child ids, in the order the desktop sidebar lists them. */
+  worktreeIds: ProjectId[];
 }
 
 /** Folder info — mirrors FFI `FolderInfo` (`api/state.rs`). */
@@ -284,6 +288,19 @@ export interface OkenaNative {
   /** Scroll the display: positive = up (into scrollback), negative = down. */
   scroll(connId: ConnId, terminalId: TerminalId, delta: number): void;
 
+  /**
+   * Scroll gesture of `lines` notches at cell `col`/`row` (positive = up). Like
+   * the desktop: wheel events to the app when it enabled mouse reporting,
+   * otherwise the local scrollback moves.
+   */
+  scrollWheel(
+    connId: ConnId,
+    terminalId: TerminalId,
+    lines: number,
+    col: number,
+    row: number,
+  ): void;
+
   /** Total/visible line counts and the current display offset. */
   getScrollInfo(connId: ConnId, terminalId: TerminalId): ScrollInfo;
 
@@ -337,8 +354,11 @@ export interface OkenaNative {
   /** Layout tree for a project, serialized as JSON (`ApiLayoutNode`). */
   getProjectLayoutJson(connId: ConnId, projectId: ProjectId): string | undefined;
 
-  /** Whether a terminal has unread output since the last cell fetch. */
+  /** Whether a terminal has changed (output/resize/scroll/selection). Never cleared. */
   isDirty(connId: ConnId, terminalId: TerminalId): boolean;
+
+  /** Consume the dirty flag: true once per batch of changes. Drives the repaint loop. */
+  takeDirty(connId: ConnId, terminalId: TerminalId): boolean;
 
   /** Send a named special key (async — goes over the WS). */
   sendSpecialKey(connId: ConnId, terminalId: TerminalId, key: SpecialKey): Promise<void>;
@@ -502,13 +522,17 @@ function toCursorState(c: {col: number; row: number; shape: number; visible: boo
 }
 
 // Generated records carry `terminalNames` as a JS `Map`; the app reads it as a
-// plain `Record`. Convert and pass everything else through.
-function toProjectInfo(p: ProjectInfo & {terminalNames: unknown}): ProjectInfo {
+// plain `Record`. Convert and pass everything else through. Bindings generated
+// before `worktree_ids` existed omit it, so default it to an empty list.
+function toProjectInfo(
+  p: Omit<ProjectInfo, 'worktreeIds'> & {terminalNames: unknown; worktreeIds?: ProjectId[]},
+): ProjectInfo {
   const names = p.terminalNames;
   return {
     ...p,
     terminalNames:
       names instanceof Map ? Object.fromEntries(names) : (names as Record<string, string>),
+    worktreeIds: p.worktreeIds ?? [],
   };
 }
 
@@ -543,9 +567,17 @@ export function getOkenaNative(): OkenaNative {
       getCursor: (connId: ConnId, terminalId: TerminalId) =>
         toCursorState(gen.getCursor(connId, terminalId)),
       getProjects: (connId: ConnId) =>
-        (gen.getProjects(connId) as Array<ProjectInfo & {terminalNames: unknown}>).map(
+        (gen.getProjects(connId) as Array<Parameters<typeof toProjectInfo>[0]>).map(
           toProjectInfo,
         ),
+      // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep
+      // scrolling the local scrollback and keep the always-repaint loop.
+      scrollWheel:
+        typeof gen.scrollWheel === 'function'
+          ? gen.scrollWheel
+          : (connId: ConnId, terminalId: TerminalId, lines: number) =>
+              gen.scroll(connId, terminalId, lines),
+      takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
       canReportCertFingerprint: () => pinsReadable,
       getCertFingerprint: (connId: ConnId) =>
         pinsReadable ? gen.getCertFingerprint(connId) : undefined,

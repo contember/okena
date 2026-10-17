@@ -6,7 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use okena_core::theme::ThemeColors;
 use parking_lot::Mutex;
@@ -184,6 +184,37 @@ impl TerminalHolder {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
+    /// Snap the display back to the live screen (display_offset = 0). Mirrors
+    /// the desktop `Terminal::scroll_to_bottom`, which every input path calls.
+    pub fn scroll_to_bottom(&self) {
+        let mut term = self.term.lock();
+        if term.grid().display_offset() == 0 {
+            return;
+        }
+        term.scroll_display(Scroll::Bottom);
+        drop(term);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Wheel-event bytes for `count` notches at visual cell `col`/`row`, or
+    /// `None` when the app has not requested mouse reporting (the caller then
+    /// scrolls the local scrollback). Same split as the desktop
+    /// `TerminalContent::handle_scroll`: the encoding (SGR vs legacy X10) follows
+    /// the mode the mirrored app enabled.
+    pub fn mouse_wheel_input(&self, up: bool, col: u16, row: u16, count: u32) -> Option<Vec<u8>> {
+        let mode = *self.term.lock().mode();
+        if !mode.intersects(TermMode::MOUSE_MODE) {
+            return None;
+        }
+        Some(mouse_wheel_bytes(
+            up,
+            col,
+            row,
+            count,
+            mode.contains(TermMode::SGR_MOUSE),
+        ))
+    }
+
     /// Get scroll information: (total_lines, visible_lines, display_offset).
     pub fn scroll_info(&self) -> (usize, usize, usize) {
         let term = self.term.lock();
@@ -203,6 +234,7 @@ impl TerminalHolder {
         let point = Point::new(Line(buffer_row), Column(col));
         let selection = Selection::new(SelectionType::Simple, point, Side::Left);
         term.selection = Some(selection);
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Start a word (semantic) selection at the given visual col/row.
@@ -213,6 +245,7 @@ impl TerminalHolder {
         let point = Point::new(Line(buffer_row), Column(col));
         let selection = Selection::new(SelectionType::Semantic, point, Side::Left);
         term.selection = Some(selection);
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Extend the current selection to the given visual col/row.
@@ -223,13 +256,16 @@ impl TerminalHolder {
         if let Some(ref mut selection) = term.selection {
             let point = Point::new(Line(buffer_row), Column(col));
             selection.update(point, Side::Right);
+            self.dirty.store(true, Ordering::Relaxed);
         }
     }
 
     /// Clear the current selection.
     pub fn clear_selection(&self) {
         let mut term = self.term.lock();
-        term.selection = None;
+        if term.selection.take().is_some() {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Get the selected text, if any.
@@ -259,13 +295,37 @@ impl TerminalHolder {
 
     /// Take the dirty flag (returns true if it was dirty, resets to false).
     ///
-    /// Reserved for the RN render loop's `is_dirty()`-gated repaint (migration
-    /// plan Decision C): the canvas will call this once per frame to consume the
-    /// flag. Not yet wired into the uniffi surface, hence `allow(dead_code)`.
-    #[allow(dead_code)]
+    /// The RN render loop consumes this once per frame (migration plan
+    /// Decision C), so an idle terminal stops rebuilding its picture.
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::Relaxed)
     }
+}
+
+/// Encode `count` wheel notches (button 64 = up, 65 = down) at 0-based cell
+/// `col`/`row`. Byte-for-byte the desktop `Terminal::send_mouse_scroll`.
+fn mouse_wheel_bytes(up: bool, col: u16, row: u16, count: u32, sgr: bool) -> Vec<u8> {
+    let button: u8 = if up { 64 } else { 65 };
+    let mut buf = Vec::new();
+    for _ in 0..count {
+        if sgr {
+            buf.extend_from_slice(
+                format!("\x1b[<{};{};{}M", button, u32::from(col) + 1, u32::from(row) + 1)
+                    .as_bytes(),
+            );
+        } else {
+            let clamp = |v: u16| u8::try_from(v).unwrap_or(u8::MAX).saturating_add(33);
+            buf.extend_from_slice(&[
+                0x1b,
+                b'[',
+                b'M',
+                button.saturating_add(32),
+                clamp(col),
+                clamp(row),
+            ]);
+        }
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -315,6 +375,66 @@ mod tests {
 
         assert!(holder.take_dirty());
         assert!(!holder.is_dirty());
+    }
+
+    #[test]
+    fn selection_changes_mark_dirty() {
+        let holder = TerminalHolder::new(80, 24);
+        holder.start_selection(0, 0);
+        assert!(holder.take_dirty());
+        holder.update_selection(3, 0);
+        assert!(holder.take_dirty());
+        holder.clear_selection();
+        assert!(holder.take_dirty());
+        holder.clear_selection();
+        assert!(!holder.take_dirty());
+    }
+
+    #[test]
+    fn scroll_to_bottom_returns_to_live_screen() {
+        let holder = TerminalHolder::new(10, 4);
+        for i in 0..20 {
+            holder.process_output(format!("line {i}\r\n").as_bytes());
+        }
+        holder.scroll(5);
+        assert_eq!(holder.scroll_info().2, 5);
+        holder.take_dirty();
+        holder.scroll_to_bottom();
+        assert_eq!(holder.scroll_info().2, 0);
+        assert!(holder.take_dirty());
+        holder.scroll_to_bottom();
+        assert!(!holder.take_dirty());
+    }
+
+    #[test]
+    fn wheel_input_is_none_without_mouse_reporting() {
+        let holder = TerminalHolder::new(80, 24);
+        assert_eq!(holder.mouse_wheel_input(true, 0, 0, 1), None);
+    }
+
+    #[test]
+    fn wheel_input_uses_sgr_when_the_app_enabled_it() {
+        let holder = TerminalHolder::new(80, 24);
+        // 1000 = button reporting, 1006 = SGR encoding.
+        holder.process_output(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(
+            holder.mouse_wheel_input(true, 4, 2, 2),
+            Some(b"\x1b[<64;5;3M\x1b[<64;5;3M".to_vec())
+        );
+        assert_eq!(
+            holder.mouse_wheel_input(false, 0, 0, 1),
+            Some(b"\x1b[<65;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn wheel_input_falls_back_to_legacy_encoding() {
+        let holder = TerminalHolder::new(80, 24);
+        holder.process_output(b"\x1b[?1000h");
+        assert_eq!(
+            holder.mouse_wheel_input(false, 4, 2, 1),
+            Some(vec![0x1b, b'[', b'M', 65 + 32, 4 + 33, 2 + 33])
+        );
     }
 
     #[test]

@@ -37,7 +37,7 @@ import {
 import type { LayoutNode } from '../models';
 import type { OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
-import { OkenaColors } from '../theme';
+import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalPane, type TerminalPaneHandle } from './TerminalPane';
 import type { TerminalFonts } from './TerminalView';
 import type { KeyModifiers } from './KeyToolbar';
@@ -307,7 +307,7 @@ const styles = StyleSheet.create({
   minimizedText: {
     color: OkenaColors.textSecondary,
     fontSize: 12,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
   },
   minimizedChevron: { color: OkenaColors.textTertiary, fontSize: 14 },
   tabBar: {

@@ -1,0 +1,83 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+react {
+    autolinkLibrariesWithApp()
+}
+
+def uploadStore = providers.environmentVariable("OKENA_UPLOAD_STORE_FILE").orNull
+def uploadStorePassword = providers.environmentVariable("OKENA_UPLOAD_STORE_PASSWORD").orNull
+def uploadAlias = providers.environmentVariable("OKENA_UPLOAD_KEY_ALIAS").orNull
+def uploadKeyPassword = providers.environmentVariable("OKENA_UPLOAD_KEY_PASSWORD").orNull
+def signingValues = [uploadStore, uploadStorePassword, uploadAlias, uploadKeyPassword]
+if (signingValues.any { it != null } && !signingValues.every { it != null && !it.isEmpty() }) {
+    throw new GradleException("Set all four OKENA_UPLOAD_* signing variables, or none for an unsigned validation build.")
+}
+def releaseVersionCode = providers.environmentVariable("OKENA_VERSION_CODE").getOrElse("1")
+if (!(releaseVersionCode ==~ /[1-9][0-9]*/) || releaseVersionCode.toLong() > 2100000000) {
+    throw new GradleException("OKENA_VERSION_CODE must be a positive integer at most 2100000000.")
+}
+def releaseApplicationId = providers.environmentVariable("OKENA_APPLICATION_ID").getOrElse("com.contember.okena")
+if (!(releaseApplicationId ==~ /[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+/)) {
+    throw new GradleException("OKENA_APPLICATION_ID must be a valid Android application ID.")
+}
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+    namespace "com.okenamobile"
+
+    defaultConfig {
+        applicationId releaseApplicationId
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode releaseVersionCode.toInteger()
+        versionName "0.1.0"
+    }
+
+    sourceSets.main.assets.srcDirs = [layout.buildDirectory.dir("generated/okenaAssets")]
+
+    signingConfigs {
+        if (uploadStore != null) {
+            upload {
+                storeFile file(uploadStore)
+                storePassword uploadStorePassword
+                keyAlias uploadAlias
+                keyPassword uploadKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // An absent upload key produces an unsigned validation artifact, never a debug-signed release.
+            if (uploadStore != null) {
+                signingConfig signingConfigs.upload
+            }
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+tasks.register("copyTerminalFonts", Sync) {
+    from("../../assets") { include "*.ttf" }
+    into(layout.buildDirectory.dir("generated/okenaAssets/fonts"))
+    // ReactFontManager resolves fontFamily + the Android style suffix.
+    rename { name ->
+        [
+            "JetBrainsMono-Regular.ttf": "JetBrainsMono.ttf",
+            "JetBrainsMono-Bold.ttf": "JetBrainsMono_bold.ttf",
+            "JetBrainsMono-Italic.ttf": "JetBrainsMono_italic.ttf",
+            "JetBrainsMono-BoldItalic.ttf": "JetBrainsMono_bold_italic.ttf",
+        ].get(name, name)
+    }
+}
+tasks.named("preBuild").configure { dependsOn("copyTerminalFonts") }
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+}

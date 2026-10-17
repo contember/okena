@@ -21,8 +21,9 @@
  *       Pass 2: glyph runs batched by (effective fg + style flags) within a row.
  *       Pass 3: cursor (block / underline / beam, honoring visibility).
  *       Pass 4: scrollback thumb indicator.
- *   - Repaint is driven by `requestAnimationFrame` gated on `isDirty()`
- *     (Decision C), NOT a fixed 33ms timer.
+ *   - Repaint is driven by `requestAnimationFrame` gated on `takeDirty()`
+ *     (Decision C), NOT a fixed 33ms timer. The flag is consumed, so an idle
+ *     pane does no per-frame work (it used to rebuild every frame).
  *   - Sizing: `onLayout` → cols/rows from a measured monospace glyph →
  *     `resizeLocal` immediately + debounced `resizeTerminal` (200ms), as today.
  *
@@ -100,7 +101,12 @@ export interface TerminalViewProps {
    * The host typically debounces a `resizeTerminal` here, but this component
    * already does that internally; this is for the host to track cols/rows.
    */
-  onGridSizeChange?: (cols: number, rows: number) => void;
+  onGridSizeChange?: (
+    cols: number,
+    rows: number,
+    cellWidth: number,
+    cellHeight: number,
+  ) => void;
 }
 
 // ── Geometry from font metrics ────────────────────────────────────────────────
@@ -117,7 +123,9 @@ interface CellMetrics {
  * `_computeCellSize()` in terminal_view.dart (`width` of 'M', height * lineHeightFactor).
  */
 function measureCell(font: SkFont): CellMetrics {
-  const advance = font.measureText('M').width;
+  // Use the glyph advance that drawText uses; measureText returns ink bounds,
+  // which do not match the advance on every platform.
+  const [advance] = font.getGlyphWidths(font.getGlyphIDs('M'));
   const m = font.getMetrics();
   // ascent is negative (above baseline), descent positive (below).
   const textHeight = -m.ascent + m.descent;
@@ -376,7 +384,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 }) => {
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   // Bumped to force the picture to recompute (the actual cell data lives in
-  // native; this is just a repaint trigger gated on isDirty()).
+  // native; this is just a repaint trigger gated on takeDirty()).
   const [frame, setFrame] = useState(0);
 
   const colsRef = useRef(0);
@@ -415,7 +423,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
 
         // Immediate local resize for responsive rendering (no WS round-trip).
         native.resizeLocal(connId, terminalId, newCols, newRows);
-        onGridSizeChange?.(newCols, newRows);
+        onGridSizeChange?.(newCols, newRows, cellWidth, cellHeight);
 
         if (!initialResizeSent.current) {
           // First resize fires immediately — avoids a flash of garbled content.
@@ -441,7 +449,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
     rowsRef.current = 0;
   }, [connId, terminalId]);
 
-  // ── Repaint loop: rAF gated on isDirty() (Decision C) ────────────────────
+  // ── Repaint loop: rAF gated on takeDirty() (Decision C) ──────────────────
   useEffect(() => {
     let raf = 0;
     let mounted = true;
@@ -449,7 +457,10 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
       if (!mounted) return;
       // Repaint when native reports new output. We always repaint on the very
       // first tick (frame===0 picture) so initial content shows.
-      if (native.isDirty(connId, terminalId)) {
+      // `takeDirty` consumes the flag: output, resize, scroll and selection
+      // changes each repaint once. Polling `isDirty` (never cleared) rebuilt
+      // every pane's picture on every frame and starved the JS thread.
+      if (native.takeDirty(connId, terminalId)) {
         setFrame((f) => f + 1);
       }
       raf = requestAnimationFrame(tick);

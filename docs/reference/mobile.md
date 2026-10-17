@@ -81,7 +81,7 @@ mobile/
 Remote PTY → WS binary frame → RemoteClient WS reader (okena-core)
   → MobileConnectionHandler.on_terminal_output()
   → TerminalHolder.process_output(data)          ← alacritty ANSI processing → dirty flag
-  → RN render loop (requestAnimationFrame, gated on isDirty())
+  → RN render loop (requestAnimationFrame, gated on take_dirty(), which consumes the flag)
   → getVisibleCellsPacked() → ArrayBuffer → decodeCells() → Skia 3-pass paint
 ```
 
@@ -155,8 +155,9 @@ emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../../mobile/rn/src/n
 | `init_app()` / `connect()` / `pair()` / `disconnect()` / `connection_status()` | mixed | Connection lifecycle |
 | `get_visible_cells_packed(conn, term) → Vec<u8>` | sync | Packed grid buffer — the render hot path |
 | `get_visible_cells` / `get_cursor` / `get_scroll_info` / selection getters | sync | Render/selection reads |
-| `is_dirty(conn, term) → bool` | sync | Unread output since last fetch |
-| `send_text` / `resize_terminal` / `resize_local` / `scroll` / `send_special_key` | sync | Input / viewport |
+| `is_dirty(conn, term) → bool` / `take_dirty(conn, term) → bool` | sync | Changed since last frame (`take_dirty` clears the flag; the render loop uses it) |
+| `send_text` / `resize_terminal` / `resize_local` / `scroll` / `send_special_key` | sync | Input / viewport (`send_*` snap the view to the bottom) |
+| `scroll_wheel(conn, term, lines, col, row)` | sync | Touch scroll: wheel events in mouse-reporting apps, else local scrollback |
 | `get_projects` / `get_folders` / `get_project_order` / `get_project_layout_json` / `get_fullscreen_terminal` | sync | Cached-state reads |
 | terminal / git / service / project / layout actions (`create_terminal`, `git_diff`, `start_service`, `add_project`, `update_split_sizes`, `move_pane_to`, …) | async | POST `/v1/actions`, return `()`/JSON |
 
@@ -169,9 +170,10 @@ emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../../mobile/rn/src/n
 | **Web client** | Complete (React SPA, xterm.js) |
 | **Mobile FFI crate** (`okena-mobile-ffi`) | Complete — self-contained, ~60 uniffi fns + packed buffer; `cargo test -p okena-mobile-ffi` passing (11 tests) |
 | **RN TS app** (`mobile/rn`) | Scaffold complete — screens, zustand stores (DI-testable), Skia `TerminalView`, packed-cell decoder; type-checks + lints |
-| **ubrn binding generation** | Config present (`mobile/rn/ubrn.config.yaml`); cross-compile not yet run (needs NDK/Xcode) |
-| **Native host projects** (`android/`, `ios/`) | Not generated yet — `react-native init` + merge, see `mobile/rn/README.md` |
-| **Phase-0 spikes** (toolchain S1, Skia throughput S2) | Not yet run on-device |
+| **ubrn binding generation** | npm scripts generate the local `modules/okena-mobile-ffi` package and apply Android fixes automatically |
+| **Native host projects** (`android/`, `ios/`) | Android and iOS sources versioned |
+| **Android delivery** | `android.yml` builds validation artifacts on changes and signed AABs on manual dispatch; see the mobile README for device verification |
+| **iOS delivery** | `ios.yml` builds an unsigned archive on changes and uploads a cloud-signed build to TestFlight on manual dispatch |
 
 See `mobile/rn/README.md` for the exact device-side steps and `mobile/RN_MIGRATION.md` for the
 phased plan.

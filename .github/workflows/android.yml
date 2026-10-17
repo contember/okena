@@ -1,0 +1,147 @@
+name: Android beta
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "mobile/rn/**"
+      - "crates/okena-mobile-ffi/**"
+      - "crates/okena-core/**"
+      - "crates/okena-transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "mobile/rn/**"
+      - "crates/okena-mobile-ffi/**"
+      - "crates/okena-core/**"
+      - "crates/okena-transport/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: Produce a signed Google Play upload bundle
+        type: boolean
+        default: false
+      version_code:
+        description: Google Play version code (must exceed every previous upload)
+        type: string
+        default: "1"
+      application_id:
+        description: Android application ID (permanent per Play app after its first upload)
+        type: string
+        default: com.contember.okena
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: mobile/rn
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      OKENA_VERSION_CODE: ${{ inputs.version_code || '1' }}
+      OKENA_APPLICATION_ID: ${{ inputs.application_id || 'com.contember.okena' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: mobile/rn/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Prepare upload key
+        if: ${{ inputs.signed }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" || {
+            echo 'Configure all four ANDROID_UPLOAD_* repository secrets before requesting a signed build.' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/okena-upload.p12"
+      - name: Install Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-ndk28
+      - name: Install Android toolchain
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Check JavaScript
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test -- --runInBand
+      - name: Build Rust and generate bindings
+        run: npm run ubrn:android
+      - name: Build bundle and APK
+        env:
+          OKENA_UPLOAD_STORE_FILE: ${{ inputs.signed && format('{0}/okena-upload.p12', runner.temp) || '' }}
+          OKENA_UPLOAD_STORE_PASSWORD: ${{ inputs.signed && secrets.ANDROID_UPLOAD_STORE_PASSWORD || '' }}
+          OKENA_UPLOAD_KEY_ALIAS: ${{ inputs.signed && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
+          OKENA_UPLOAD_KEY_PASSWORD: ${{ inputs.signed && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
+        run: |
+          if [ -z "$OKENA_UPLOAD_STORE_FILE" ]; then
+            unset OKENA_UPLOAD_STORE_FILE OKENA_UPLOAD_STORE_PASSWORD OKENA_UPLOAD_KEY_ALIAS OKENA_UPLOAD_KEY_PASSWORD
+          fi
+          cd android
+          ./gradlew --no-daemon --max-workers=4 :app:bundleRelease :app:assembleRelease :app:lintRelease
+      - name: Validate bundle and native alignment
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar \
+            --output "$RUNNER_TEMP/bundletool.jar"
+          printf 'a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  %s\n' "$RUNNER_TEMP/bundletool.jar" | sha256sum --check
+          java -jar "$RUNNER_TEMP/bundletool.jar" validate --bundle=android/app/build/outputs/bundle/release/app-release.aab
+          java -jar "$RUNNER_TEMP/bundletool.jar" dump config --bundle=android/app/build/outputs/bundle/release/app-release.aab | grep -q PAGE_ALIGNMENT_16K
+          python3 scripts/check-native-alignment.py android/app/build/outputs/bundle/release/app-release.aab
+          for apk in android/app/build/outputs/apk/release/*.apk; do
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
+          done
+      - name: Verify upload signature
+        if: ${{ inputs.signed }}
+        run: |
+          jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab | tee "$RUNNER_TEMP/signature.txt"
+          grep -q 'jar verified' "$RUNNER_TEMP/signature.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okena-android-${{ inputs.signed && 'signed' || 'unsigned-validation' }}-${{ inputs.application_id || 'com.contember.okena' }}-${{ inputs.version_code || '1' }}
+          path: |
+            mobile/rn/android/app/build/outputs/bundle/release/*.aab
+            mobile/rn/android/app/build/outputs/apk/release/*.apk
+            mobile/rn/android/app/build/reports/lint-results-release.html
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove upload key
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/okena-upload.p12"

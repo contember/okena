@@ -32,11 +32,19 @@ import {
   Modal,
   ScrollView,
   StyleSheet,
+  TextInput,
 } from 'react-native';
 import { useFont } from '@shopify/react-native-skia';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useWorkspaceStore, useConnectionStore } from '../state';
-import { parseLayout } from '../models';
+import {
+  buildProjectList,
+  filterProjectList,
+  flattenProjectList,
+  parseLayout,
+  projectDisplayName,
+} from '../models';
 import { getOkenaNative, type OkenaNative } from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { LayoutRenderer } from '../components/LayoutRenderer';
@@ -56,6 +64,7 @@ const native: OkenaNative = (() => {
 })();
 
 export const WorkspaceScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   // ── fonts (Skia useFont; null until loaded) ────────────────────────────────
   const fontSize = TerminalTheme.defaultFontSize;
   const regular = useFont(require('../../assets/JetBrainsMono-Regular.ttf'), fontSize);
@@ -82,6 +91,8 @@ export const WorkspaceScreen: React.FC = () => {
 
   // ── stores ──────────────────────────────────────────────────────────────────
   const projects = useWorkspaceStore((s) => s.projects);
+  const folders = useWorkspaceStore((s) => s.folders);
+  const projectOrder = useWorkspaceStore((s) => s.projectOrder);
   const selectedProjectId = useWorkspaceStore((s) => s.selectedProjectId);
   const selectedTerminalId = useWorkspaceStore((s) => s.selectedTerminalId);
   const fullscreenTerminal = useWorkspaceStore((s) => s.fullscreenTerminal);
@@ -100,6 +111,21 @@ export const WorkspaceScreen: React.FC = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [switcherQuery, setSwitcherQuery] = useState('');
+
+  // Switcher rows in desktop sidebar order, filtered by the search field.
+  const projectList = useMemo(
+    () => buildProjectList(projects, folders, projectOrder),
+    [projects, folders, projectOrder],
+  );
+  const switcherRows = useMemo(
+    () => flattenProjectList(filterProjectList(projectList, switcherQuery)),
+    [projectList, switcherQuery],
+  );
+  const closeSwitcher = () => {
+    setSwitcherOpen(false);
+    setSwitcherQuery('');
+  };
 
   // Layout tree for the selected project. Keyed on the authoritative JSON, so
   // tab switches, minimizes and split changes re-render even though they leave
@@ -116,7 +142,7 @@ export const WorkspaceScreen: React.FC = () => {
         ? OkenaColors.warning
         : OkenaColors.error;
 
-  const projectName = project?.name ?? 'No Project';
+  const projectName = project ? projectDisplayName(project) : 'No Project';
 
   // ── terminal actions ──────────────────────────────────────────────────────
   const onNewTerminal = () => {
@@ -249,6 +275,9 @@ export const WorkspaceScreen: React.FC = () => {
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // The keyboard frame is in screen coordinates, but this view's frame is
+        // relative to the safe-area container; offset by the top inset.
+        keyboardVerticalOffset={insets.top}
       >
         <View style={styles.flex}>{renderBody()}</View>
         {showToolbar && connId ? (
@@ -270,26 +299,55 @@ export const WorkspaceScreen: React.FC = () => {
         visible={switcherOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setSwitcherOpen(false)}
+        onRequestClose={closeSwitcher}
       >
-        <Pressable style={styles.menuBackdrop} onPress={() => setSwitcherOpen(false)}>
-          <View style={styles.menu}>
-            <ScrollView>
-              {projects.map((p) => {
+        <Pressable style={styles.menuBackdrop} onPress={closeSwitcher}>
+          {/* Inner Pressable swallows taps so they don't close the menu. */}
+          <Pressable style={styles.menu} onPress={() => {}}>
+            <TextInput
+              style={styles.menuSearch}
+              placeholder="Search projects"
+              placeholderTextColor={OkenaColors.textTertiary}
+              value={switcherQuery}
+              onChangeText={setSwitcherQuery}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              clearButtonMode="while-editing"
+              returnKeyType="search"
+              keyboardAppearance="dark"
+            />
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              automaticallyAdjustKeyboardInsets
+            >
+              {switcherRows.length === 0 ? (
+                <Text style={[styles.menuItem, styles.dim]}>No matching projects</Text>
+              ) : null}
+              {switcherRows.map((row) => {
+                if (row.kind === 'folder') {
+                  return (
+                    <Text key={`folder-${row.folder.id}`} style={styles.menuFolder} numberOfLines={1}>
+                      {row.folder.name}
+                    </Text>
+                  );
+                }
+                const { project: p, depth } = row;
                 const isSel = p.id === project?.id;
                 return (
                   <Pressable
                     key={p.id}
-                    style={styles.menuItem}
+                    style={[styles.menuItem, { paddingLeft: 16 + depth * 12 }]}
                     onPress={() => {
                       selectProject(p.id);
-                      setSwitcherOpen(false);
+                      closeSwitcher();
                     }}
                   >
                     <Text style={[styles.menuItemText, isSel && styles.menuItemSelected]} numberOfLines={1}>
-                      {p.name}
+                      {projectDisplayName(p)}
                     </Text>
-                    {p.gitBranch ? (
+                    {p.gitBranch && !p.parentProjectId ? (
                       <Text style={styles.menuBranch} numberOfLines={1}>
                         {`⎇ ${p.gitBranch}`}
                       </Text>
@@ -298,7 +356,7 @@ export const WorkspaceScreen: React.FC = () => {
                 );
               })}
             </ScrollView>
-          </View>
+          </Pressable>
         </Pressable>
       </Modal>
 
@@ -364,8 +422,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   flexSpacer: { flex: 1 },
   appBar: {
-    height: 96,
-    paddingTop: 44,
+    height: 52,
     paddingHorizontal: 8,
     flexDirection: 'row',
     alignItems: 'center',
@@ -399,6 +456,25 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   menuItem: { paddingHorizontal: 16, paddingVertical: 10 },
+  menuSearch: {
+    marginHorizontal: 8,
+    marginVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: OkenaColors.surface,
+    color: OkenaColors.textPrimary,
+    fontSize: 14,
+  },
+  menuFolder: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 2,
+    color: OkenaColors.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
   menuItemText: { color: OkenaColors.textPrimary, fontSize: 14 },
   menuItemSelected: { color: OkenaColors.accent, fontWeight: '700' },
   menuBranch: { color: OkenaColors.textTertiary, fontSize: 11, marginTop: 2 },

@@ -34,7 +34,7 @@ import {
 
 import { savedServerDisplayName } from '../models';
 import { useConnectionStore, selectIsPairing } from '../state';
-import { OkenaColors, OkenaTypography } from '../theme';
+import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 import { StatusIndicator } from '../components/StatusIndicator';
 
 export const PairingScreen: React.FC = () => {
@@ -187,7 +187,6 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: OkenaColors.background,
-    paddingTop: 44, // approximate top safe-area inset (no SafeAreaView dep)
   },
 
   // Header
@@ -240,7 +239,7 @@ const styles = StyleSheet.create({
   codeInput: {
     fontSize: 28,
     letterSpacing: 8,
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontWeight: '500',
     color: OkenaColors.textPrimary,
     height: 56,
@@ -274,7 +273,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   fingerprintValue: {
-    fontFamily: 'JetBrainsMono',
+    fontFamily: TerminalTheme.fontFamily,
     fontSize: 11,
     color: OkenaColors.textSecondary,
     textAlign: 'center',

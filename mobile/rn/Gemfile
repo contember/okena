@@ -1,0 +1,12 @@
+source 'https://rubygems.org'
+
+ruby '>= 3.4'
+
+gem 'cocoapods', '1.17.0'
+
+# Ruby 3.4 removed these from the standard library; CocoaPods still loads them.
+gem 'bigdecimal'
+gem 'logger'
+gem 'benchmark'
+gem 'mutex_m'
+gem 'nkf'
