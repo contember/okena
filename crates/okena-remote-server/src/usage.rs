@@ -8,12 +8,23 @@
 //! unbounded channel; the poller applies the per-provider throttle.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use okena_core::api::{ApiUsage, ApiUsageProvider};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
-/// A refresh request: one provider, or `None` for all enabled ones.
-pub type UsageRefresh = Option<ApiUsageProvider>;
+/// How long [`UsageHub::refresh`] waits for the poller to apply a request.
+const REFRESH_APPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A refresh request for the poller.
+#[derive(Debug)]
+pub struct UsageRefresh {
+    /// One provider, or `None` for all enabled ones.
+    pub provider: Option<ApiUsageProvider>,
+    /// Signalled once the poller has applied the request (started the
+    /// fetches it allows) and published the resulting snapshot.
+    pub applied: Option<oneshot::Sender<()>>,
+}
 
 /// Cloneable handle shared by the poller and the routes.
 #[derive(Clone)]
@@ -65,8 +76,30 @@ impl UsageHub {
     }
 
     /// Ask the poller to refetch. Fire-and-forget; the poller throttles.
-    pub fn request_refresh(&self, provider: UsageRefresh) {
-        let _ = self.refresh_tx.send(provider);
+    pub fn request_refresh(&self, provider: Option<ApiUsageProvider>) {
+        let _ = self.refresh_tx.send(UsageRefresh {
+            provider,
+            applied: None,
+        });
+    }
+
+    /// Ask the poller to refetch and return the snapshot once it has applied
+    /// the request, so `fetching` tells the caller whether a fetch actually
+    /// started (or was already running). Falls back to the current snapshot
+    /// when nobody polls or the poller does not answer within 2 s.
+    pub async fn refresh(&self, provider: Option<ApiUsageProvider>) -> ApiUsage {
+        let (applied, done) = oneshot::channel();
+        if self
+            .refresh_tx
+            .send(UsageRefresh {
+                provider,
+                applied: Some(applied),
+            })
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(REFRESH_APPLY_TIMEOUT, done).await;
+        }
+        self.snapshot()
     }
 }
 
@@ -95,9 +128,29 @@ mod tests {
         assert!(!rx.has_changed().unwrap());
 
         hub.request_refresh(Some(ApiUsageProvider::Codex));
-        assert_eq!(
-            refresh_rx.try_recv().unwrap(),
-            Some(ApiUsageProvider::Codex)
-        );
+        let request = refresh_rx.try_recv().unwrap();
+        assert_eq!(request.provider, Some(ApiUsageProvider::Codex));
+        assert!(request.applied.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_waits_for_the_poller_and_tolerates_no_poller() {
+        let (hub, mut refresh_rx) = UsageHub::new(ApiUsage::default());
+        let poller_hub = hub.clone();
+        let poller = tokio::spawn(async move {
+            let request = refresh_rx.recv().await.unwrap();
+            assert_eq!(request.provider, None);
+            poller_hub.publish(ApiUsage {
+                working_days: vec![1],
+                ..ApiUsage::default()
+            });
+            request.applied.unwrap().send(()).unwrap();
+            refresh_rx
+        });
+        assert_eq!(hub.refresh(None).await.working_days, vec![1]);
+        drop(poller.await.unwrap());
+
+        // Receiver gone: returns the current snapshot immediately.
+        assert_eq!(hub.refresh(None).await.working_days, vec![1]);
     }
 }

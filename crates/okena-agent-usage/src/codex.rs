@@ -61,52 +61,196 @@ fn read_auth_from(path: PathBuf) -> Option<CodexAuth> {
     })
 }
 
+/// Result of an OAuth refresh-token exchange.
+#[derive(Debug, PartialEq)]
+enum RefreshError {
+    /// The token endpoint rejected the refresh token (HTTP 400/401, e.g.
+    /// `invalid_grant`): the user has to sign in again.
+    Rejected,
+    /// Network/transport failure, 5xx, or an unexpected response. Transient:
+    /// retried with the normal backoff while the last data stays visible.
+    Transient(String),
+}
+
+/// Form-urlencode one value (`application/x-www-form-urlencoded`).
+fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn refresh_request_body(refresh_token: &str) -> String {
+    format!(
+        "grant_type=refresh_token&client_id={}&refresh_token={}",
+        form_encode(CODEX_CLIENT_ID),
+        form_encode(refresh_token)
+    )
+}
+
+/// New tokens from a successful refresh response.
+#[derive(Debug)]
+struct RefreshedTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+}
+
+/// Classify the token endpoint's answer. Only an explicit 400/401 means the
+/// refresh token is dead; everything else is transient.
+fn classify_refresh_response(
+    response: Result<okena_transport::http::HttpResponse, okena_transport::http::HttpError>,
+) -> Result<RefreshedTokens, RefreshError> {
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            return Err(RefreshError::Transient(
+                "Codex token refresh failed (network error or timeout)".into(),
+            ));
+        }
+    };
+    match response.status() {
+        400 | 401 => return Err(RefreshError::Rejected),
+        status if !response.is_success() => {
+            return Err(RefreshError::Transient(format!(
+                "Codex token refresh failed: HTTP {status}"
+            )));
+        }
+        _ => {}
+    }
+    let body: serde_json::Value = response.json().map_err(|_| {
+        RefreshError::Transient("Codex token refresh returned invalid JSON".into())
+    })?;
+    let token = |key: &str| {
+        body[key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let access_token = token("access_token").ok_or_else(|| {
+        RefreshError::Transient("Codex token refresh response had no access token".into())
+    })?;
+    Ok(RefreshedTokens {
+        access_token,
+        refresh_token: token("refresh_token"),
+        id_token: token("id_token"),
+    })
+}
+
 /// Refresh the OAuth access token using the refresh token and persist the new
 /// tokens back to `auth.json` (as the Codex CLI would).
-fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
-    let resp: serde_json::Value = okena_transport::http::send(
+fn refresh_access_token(auth: &CodexAuth) -> Result<String, RefreshError> {
+    let response = okena_transport::http::send(
         okena_transport::http::HttpRequest::post(TOKEN_URL)
             .body(
                 "application/x-www-form-urlencoded",
-                format!(
-                    "grant_type=refresh_token&client_id={}&refresh_token={}",
-                    CODEX_CLIENT_ID, auth.refresh_token
-                ),
+                refresh_request_body(&auth.refresh_token),
             )
             .timeout(Duration::from_secs(10))
             .user_agent(USER_AGENT)
             .label("codex.token-refresh"),
-    )
-    .ok()?
-    .json()
-    .ok()?;
-
-    let new_access = resp["access_token"].as_str()?;
-    let new_refresh = resp["refresh_token"].as_str();
-    persist_refreshed_tokens(&auth.auth_path, new_access, new_refresh);
-    Some(new_access.to_string())
+    );
+    let tokens = classify_refresh_response(response)?;
+    if let Err(error) = persist_refreshed_tokens(&auth.auth_path, &tokens) {
+        // The new token still works for this fetch; the CLI keeps its own
+        // copy. Log without any token material.
+        log::warn!("[codex-usage] could not write refreshed tokens to auth.json: {error}");
+    }
+    Ok(tokens.access_token)
 }
 
-fn persist_refreshed_tokens(path: &std::path::Path, access: &str, refresh: Option<&str>) {
-    if let Ok(content) = std::fs::read_to_string(path)
-        && let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content)
-    {
-        if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
-            tokens.insert(
-                "access_token".to_string(),
-                serde_json::Value::String(access.to_string()),
-            );
-            if let Some(rt) = refresh {
-                tokens.insert(
-                    "refresh_token".to_string(),
-                    serde_json::Value::String(rt.to_string()),
-                );
-            }
-        }
-        if let Ok(updated) = serde_json::to_string_pretty(&file_json) {
-            let _ = std::fs::write(path, updated);
-        }
+/// `last_refresh` in the Codex CLI's format: RFC 3339 UTC, microseconds.
+fn last_refresh_now() -> String {
+    format!("{:.6}", jiff::Timestamp::now())
+}
+
+/// Write the refreshed tokens into `auth.json`, keeping every other field.
+/// Atomic: a 0600 temp file in the same directory, fsync, rename.
+fn persist_refreshed_tokens(
+    path: &std::path::Path,
+    tokens: &RefreshedTokens,
+) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let mut file_json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let Some(root) = file_json.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "auth.json is not an object",
+        ));
+    };
+    let Some(file_tokens) = root.get_mut("tokens").and_then(|t| t.as_object_mut()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "auth.json has no tokens object",
+        ));
+    };
+    let mut set = |key: &str, value: &str| {
+        file_tokens.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    };
+    set("access_token", &tokens.access_token);
+    if let Some(refresh) = &tokens.refresh_token {
+        set("refresh_token", refresh);
     }
+    if let Some(id_token) = &tokens.id_token {
+        set("id_token", id_token);
+    }
+    root.insert(
+        "last_refresh".to_string(),
+        serde_json::Value::String(last_refresh_now()),
+    );
+    let updated = serde_json::to_string_pretty(&file_json)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    write_atomic_private(path, updated.as_bytes())
+}
+
+fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "auth.json has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "auth.json".into());
+    let tmp = dir.join(format!(".{file_name}.okena-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            // `mode` only applies on creation; a leftover temp file keeps its
+            // old permissions otherwise.
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 enum RequestError {
@@ -196,15 +340,21 @@ pub fn fetch() -> (FetchOutcome, Option<String>) {
     let resp = match get_with_token(USAGE_URL, "codex.usage", &access_token, &auth.account_id) {
         Ok(resp) => resp,
         Err(RequestError::Status(401, _)) => {
-            let Some(new_token) = refresh_access_token(&auth) else {
-                return (
-                    FetchOutcome::NoCredentials(
-                        "Codex token refresh failed; sign in again with the Codex CLI".into(),
-                    ),
-                    account_id,
-                );
+            access_token = match refresh_access_token(&auth) {
+                Ok(new_token) => new_token,
+                Err(RefreshError::Rejected) => {
+                    return (
+                        FetchOutcome::NoCredentials(
+                            "Codex token refresh was rejected; sign in again with the Codex CLI"
+                                .into(),
+                        ),
+                        account_id,
+                    );
+                }
+                Err(RefreshError::Transient(error)) => {
+                    return (FetchOutcome::Failed(error), account_id);
+                }
             };
-            access_token = new_token;
             match get_with_token(USAGE_URL, "codex.usage", &access_token, &auth.account_id) {
                 Ok(resp) => resp,
                 Err(error) => {
@@ -457,7 +607,9 @@ mod tests {
         std::fs::write(
             &path,
             serde_json::json!({
+                "auth_mode": "chatgpt",
                 "OPENAI_API_KEY": null,
+                "last_refresh": "2020-01-01T00:00:00.000000Z",
                 "tokens": {
                     "access_token": "old-access",
                     "refresh_token": "old-refresh",
@@ -472,14 +624,92 @@ mod tests {
         assert_eq!(auth.account_id, "acct-1");
         assert!(!format!("{auth:?}").contains("old-access"));
 
-        persist_refreshed_tokens(&path, "new-access", Some("new-refresh"));
+        persist_refreshed_tokens(
+            &path,
+            &RefreshedTokens {
+                access_token: "new-access".into(),
+                refresh_token: Some("new-refresh".into()),
+                id_token: None,
+            },
+        )
+        .unwrap();
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["tokens"]["access_token"], "new-access");
         assert_eq!(written["tokens"]["refresh_token"], "new-refresh");
         assert_eq!(written["tokens"]["id_token"], "keep-me");
+        assert_eq!(written["auth_mode"], "chatgpt");
+        assert!(written["OPENAI_API_KEY"].is_null());
+        let last_refresh = written["last_refresh"].as_str().unwrap();
+        assert!(last_refresh.ends_with('Z'), "{last_refresh}");
+        assert!(last_refresh.parse::<jiff::Timestamp>().is_ok());
+        assert_ne!(last_refresh, "2020-01-01T00:00:00.000000Z");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "auth.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind");
 
         std::fs::write(&path, r#"{"tokens": {"access_token": "x"}}"#).unwrap();
         assert!(read_auth_from(path).is_none());
+    }
+
+    fn response(status: u16, body: &str) -> okena_transport::http::HttpResponse {
+        okena_transport::http::HttpResponse::new(status, Vec::new(), body.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn refresh_errors_only_sign_out_on_400_and_401() {
+        assert_eq!(
+            classify_refresh_response(Ok(response(400, r#"{"error":"invalid_grant"}"#)))
+                .unwrap_err(),
+            RefreshError::Rejected
+        );
+        assert_eq!(
+            classify_refresh_response(Ok(response(401, ""))).unwrap_err(),
+            RefreshError::Rejected
+        );
+        for status in [403, 429, 500, 503] {
+            assert!(matches!(
+                classify_refresh_response(Ok(response(status, ""))).unwrap_err(),
+                RefreshError::Transient(_)
+            ));
+        }
+        assert!(matches!(
+            classify_refresh_response(Err(okena_transport::http::HttpError::Transport(
+                "timed out".into()
+            )))
+            .unwrap_err(),
+            RefreshError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_refresh_response(Ok(response(200, "not json"))).unwrap_err(),
+            RefreshError::Transient(_)
+        ));
+        let tokens = classify_refresh_response(Ok(response(
+            200,
+            r#"{"access_token":"a","refresh_token":"r","id_token":"i"}"#,
+        )))
+        .unwrap();
+        assert_eq!(tokens.access_token, "a");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("r"));
+        assert_eq!(tokens.id_token.as_deref(), Some("i"));
+    }
+
+    #[test]
+    fn refresh_body_is_form_encoded() {
+        assert_eq!(
+            refresh_request_body("a+b/c=d&e f"),
+            format!(
+                "grant_type=refresh_token&client_id={CODEX_CLIENT_ID}&refresh_token=a%2Bb%2Fc%3Dd%26e%20f"
+            )
+        );
     }
 }
