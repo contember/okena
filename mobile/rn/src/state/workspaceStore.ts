@@ -12,7 +12,9 @@
  *   - per-terminal activity (`getTerminalActivity`), folded into per-project
  *     {@link ProjectSignals} for the activity-ordered project list,
  *   - open Claude dialogs per terminal (`getClaudeDialogCounts`) and the
- *     terminals with a connected `claude` (`getClaudeSessions`).
+ *     terminals with a connected `claude` (`getClaudeSessions`),
+ *   - the server's agent usage (`getUsage`), fetched only when
+ *     `getUsageRevision` moved, so an unchanged snapshot costs one call.
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
@@ -48,6 +50,7 @@ import type {
   ProjectId,
   ProjectInfo,
   TerminalId,
+  UsageInfo,
 } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import {
@@ -69,6 +72,13 @@ export const WORKSPACE_POLL_MS = 1000;
 export type TerminalViewMode = 'terminal' | 'chat';
 
 /**
+ * How long a usage refresh shows as loading at most (ms). The daemon throttles
+ * refreshes to one per provider per minute, so a throttled request never
+ * produces a new snapshot to end the loading state.
+ */
+export const USAGE_REFRESH_TIMEOUT_MS = 5000;
+
+/**
  * The slice of the native surface this store calls. Narrowed from
  * {@link OkenaNative} so a test stub only has to provide these.
  */
@@ -86,6 +96,9 @@ export type WorkspaceNative = Pick<
   | 'getTerminalActivity'
   | 'markTerminalSeen'
   | 'focusTerminal'
+  | 'getUsage'
+  | 'getUsageRevision'
+  | 'requestUsageRefresh'
 >;
 
 /** Dependencies the store calls out to. Overridable for tests. */
@@ -141,6 +154,10 @@ export interface WorkspaceState {
   claudeSessions: TerminalId[];
   /** How each terminal is shown; terminals not listed show the terminal. */
   terminalViews: Record<TerminalId, TerminalViewMode>;
+  /** The server's latest Claude / Codex usage snapshot, if it sent one. */
+  usage: UsageInfo | null;
+  /** A refresh is in flight: until a new snapshot without a running fetch, or a timeout. */
+  usageRefreshing: boolean;
 
   // ── actions ────────────────────────────────────────────────────────────
   /**
@@ -164,6 +181,11 @@ export interface WorkspaceState {
   selectTerminal(terminalId: TerminalId): void;
   /** Show a terminal as its terminal or as its Claude chat. */
   setTerminalView(terminalId: TerminalId, view: TerminalViewMode): void;
+  /**
+   * Ask the daemon to refetch usage (`provider` `claude` / `codex`, or all)
+   * and show {@link usageRefreshing} until the result arrives.
+   */
+  refreshUsage(provider?: string): void;
   /** Acknowledge {@link restoreProjectMissing}. */
   clearRestoreProjectMissing(): void;
   /**
@@ -212,6 +234,19 @@ let lastActivity: TerminalActivity[] = [];
  * `done` is unseen again: the key is effectively terminal + transition.
  */
 const doneSeen = new Set<TerminalId>();
+/** Usage revision the store last read (`-1` = never read). */
+let usageRevision = -1;
+/** Usage revision when the current refresh started (`null` = no refresh). */
+let refreshBaseRevision: number | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearRefresh(): void {
+  refreshBaseRevision = null;
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -223,6 +258,8 @@ function stopPolling(): void {
   pendingRestore = null;
   lastActivity = [];
   doneSeen.clear();
+  usageRevision = -1;
+  clearRefresh();
 }
 
 /** `map` with `projectId → terminalId` set; the same object when unchanged. */
@@ -480,6 +517,24 @@ function pollState(
     changed = true;
   }
 
+  // Agent usage: the snapshot carries history, so convert it only on change.
+  const revision = native.getUsageRevision(connId);
+  if (revision !== usageRevision) {
+    usageRevision = revision;
+    const usage = native.getUsage(connId) ?? null;
+    patch.usage = usage;
+    changed = true;
+    // The refresh is done once a newer snapshot shows no fetch in flight.
+    if (
+      refreshBaseRevision !== null &&
+      revision !== refreshBaseRevision &&
+      !(usage?.providers.some((p) => p.fetching) ?? false)
+    ) {
+      clearRefresh();
+      patch.usageRefreshing = false;
+    }
+  }
+
   // Connection health (drives the staleness indicator's 3s / 10s thresholds).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
@@ -538,6 +593,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     claudeDialogs: {},
     claudeSessions: [],
     terminalViews: {},
+    usage: null,
+    usageRefreshing: false,
 
     start(connId, restore) {
       if (pollTimer !== null && activeConnId === connId) return; // already polling this conn
@@ -568,7 +625,29 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         claudeDialogs: {},
         claudeSessions: [],
         terminalViews: {},
+        usage: null,
+        usageRefreshing: false,
       });
+    },
+
+    refreshUsage(provider) {
+      const connId = activeConnId;
+      if (!connId) return;
+      clearRefresh();
+      refreshBaseRevision = usageRevision;
+      refreshTimer = setTimeout(() => {
+        clearRefresh();
+        set({ usageRefreshing: false });
+      }, USAGE_REFRESH_TIMEOUT_MS);
+      set({ usageRefreshing: true });
+      deps()
+        .native.requestUsageRefresh(connId, provider)
+        .catch(() => {
+          // An older daemon or a dropped connection: the snapshot stays as is.
+          if (activeConnId !== connId) return;
+          clearRefresh();
+          set({ usageRefreshing: false });
+        });
     },
 
     selectProject(projectId) {
