@@ -10,8 +10,9 @@
  * "resets in …", history sparkline), then Claude extra usage or Codex credits.
  *
  * Opening the sheet asks the daemon to refetch; a spinner shows until the new
- * snapshot arrives or a few seconds pass (the daemon throttles to once a
- * minute per provider, so a reopen often gets no new fetch).
+ * snapshot arrives or a few seconds pass. The daemon throttles to once a
+ * minute per provider, so a reopen often starts no fetch; the spinner then
+ * ends as soon as the daemon says so.
  */
 
 import React, { useEffect, useMemo } from 'react';

@@ -3,8 +3,12 @@
  *
  * A port of `crates/okena-agent-usage/src/pace.rs` (the math the desktop
  * widgets use) plus the display rules of the desktop popovers
- * (`okena-ext-claude` / `okena-ext-codex`), so the phone shows the same
- * numbers and colors as the desktop for the same snapshot.
+ * (`okena-ext-claude` / `okena-ext-codex`): which windows get a row or the
+ * headline, so the phone shows the same numbers and colors as the desktop for
+ * the same snapshot. Codex rows are titled by window length ("5-hour limit" /
+ * "Weekly limit" / "Code review"), as in the desktop popover's
+ * `window_title`; the API's primary/secondary order says nothing about which
+ * window is which.
  *
  * Time is epoch SECONDS (the wire unit). Calendar math (working-day blocks,
  * reset-anchored dividers, "today/tomorrow" labels) uses the device's local
@@ -406,6 +410,7 @@ export function shouldShowScoped(window: UsageWindowInfo): boolean {
   return window.active || window.usedPercent >= 0.5;
 }
 
+/** Codex row title by period (mirrors `window_title` in `okena-ext-codex`). */
 function codexWindowTitle(window: UsageWindowInfo): string {
   const period = formatWindowLabel(window.windowSeconds);
   if (period === '5h') return '5-hour limit';

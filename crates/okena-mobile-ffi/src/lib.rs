@@ -478,21 +478,22 @@ pub fn get_usage_revision(conn_id: String) -> u32 {
 /// Ask the daemon to refetch usage now. `provider` is `"claude"`, `"codex"`
 /// or `None` for every enabled provider. The daemon throttles to one attempt
 /// per provider per 60 s; the fresh snapshot arrives via `usage_changed`.
+/// Resolves to whether a fetch is now running for the requested provider(s)
+/// (`false` when throttled), so the UI can end its spinner right away.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn request_usage_refresh(
     conn_id: String,
     provider: Option<String>,
-) -> Result<(), MobileFfiError> {
+) -> Result<bool, MobileFfiError> {
     let provider = match provider.as_deref() {
         None => None,
         Some(name) => Some(usage::parse_provider(name).ok_or_else(|| MobileFfiError::Action {
             message: format!("Unknown usage provider: {name}"),
         })?),
     };
-    ConnectionManager::get()
+    Ok(ConnectionManager::get()
         .request_usage_refresh(&conn_id, provider)
-        .await?;
-    Ok(())
+        .await?)
 }
 
 /// Get all terminal IDs from the cached remote state (flat list).

@@ -6,23 +6,31 @@
  * colored by `max(abs, pace)` severity. About 56 pt wide, so the project name
  * keeps most of a small phone's bar. Renders nothing when no provider is
  * enabled and signed in.
+ *
+ * Pace moves with the clock, so the rings re-derive every minute. That tick
+ * lives here, not in the screen, so only this small component re-renders.
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { indicatorAccessibilityLabel, type IndicatorItem, type ProviderId } from '../models/usage';
+import { indicatorAccessibilityLabel, indicatorItems, type ProviderId } from '../models/usage';
+import type { UsageInfo } from '../native/okena';
+import { useWorkspaceStore } from '../state/workspaceStore';
 import { OkenaColors } from '../theme';
 import { UsageRing } from './UsageVisuals';
+import { useNow } from './useNow';
 
 const INITIALS: Record<ProviderId, string> = { claude: 'C', codex: 'X' };
 
 export interface UsageIndicatorProps {
-  items: readonly IndicatorItem[];
+  usage: UsageInfo | null;
   onPress: () => void;
 }
 
-export const UsageIndicator: React.FC<UsageIndicatorProps> = ({ items, onPress }) => {
+export const UsageIndicator: React.FC<UsageIndicatorProps> = ({ usage, onPress }) => {
+  const now = useNow(60_000, usage !== null);
+  const items = useMemo(() => indicatorItems(usage, now), [usage, now]);
   if (items.length === 0) return null;
   return (
     <Pressable
@@ -44,6 +52,12 @@ export const UsageIndicator: React.FC<UsageIndicatorProps> = ({ items, onPress }
       ))}
     </Pressable>
   );
+};
+
+/** {@link UsageIndicator} over the workspace store's snapshot. */
+export const ConnectedUsageIndicator: React.FC<{ onPress: () => void }> = ({ onPress }) => {
+  const usage = useWorkspaceStore((s) => s.usage);
+  return <UsageIndicator usage={usage} onPress={onPress} />;
 };
 
 const styles = StyleSheet.create({

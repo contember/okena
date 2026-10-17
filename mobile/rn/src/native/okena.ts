@@ -493,9 +493,10 @@ export interface OkenaNative {
   /**
    * Ask the daemon to refetch (`provider` `claude` / `codex`, or all when
    * `undefined`). Throttled to 60 s per provider; the result arrives as a new
-   * snapshot.
+   * snapshot. Resolves to whether a fetch is now running for the requested
+   * provider(s): `false` means throttled, so no new result is coming.
    */
-  requestUsageRefresh(connId: ConnId, provider: string | undefined): Promise<void>;
+  requestUsageRefresh(connId: ConnId, provider: string | undefined): Promise<boolean>;
 
   // ── terminal actions (state.rs, async) ───────────────────────────────────
 
@@ -749,8 +750,8 @@ export function getOkenaNative(): OkenaNative {
         typeof gen.getUsageRevision === 'function' ? (gen.getUsageRevision(connId) as number) : 0,
       requestUsageRefresh: (connId: ConnId, provider: string | undefined) =>
         typeof gen.requestUsageRefresh === 'function'
-          ? (gen.requestUsageRefresh(connId, provider) as Promise<void>)
-          : Promise.resolve(),
+          ? (gen.requestUsageRefresh(connId, provider) as Promise<boolean>)
+          : Promise.resolve(false),
       canReportCertFingerprint: () => pinsReadable,
       getCertFingerprint: (connId: ConnId) =>
         pinsReadable ? gen.getCertFingerprint(connId) : undefined,

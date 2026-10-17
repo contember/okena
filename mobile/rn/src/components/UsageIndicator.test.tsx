@@ -39,10 +39,53 @@ function texts(renderer: TestRenderer.ReactTestRenderer): string[] {
 }
 
 describe('UsageIndicator', () => {
-  it('renders nothing without items', () => {
+  const now = 1_781_773_200;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(now * 1000);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const fiveHour = (usedPercent: number, resetAt: number) => ({
+    id: 'five_hour',
+    label: 'Session',
+    kind: 'five_hour',
+    usedPercent,
+    windowSeconds: 18_000,
+    resetAt,
+    active: true,
+    history: [],
+  });
+
+  function indicatorUsage(usedPercent: number, resetAt: number): UsageInfo {
+    return {
+      providers: [
+        {
+          provider: 'claude',
+          status: 'ok',
+          fetching: false,
+          consecutiveFailures: 0,
+          windows: [fiveHour(usedPercent, resetAt)],
+        },
+        { provider: 'codex', status: 'pending', fetching: true, consecutiveFailures: 0, windows: [] },
+      ],
+      workingDays: [0, 1, 2, 3, 4, 5, 6],
+      generatedAt: now,
+    };
+  }
+
+  function severity(renderer: TestRenderer.ReactTestRenderer): string {
+    return renderer.root.findAll((n) => n.props.severity !== undefined)[0]!.props.severity;
+  }
+
+  it('renders nothing without usage', () => {
     let renderer!: TestRenderer.ReactTestRenderer;
     act(() => {
-      renderer = TestRenderer.create(<UsageIndicator items={[]} onPress={() => {}} />);
+      renderer = TestRenderer.create(<UsageIndicator usage={null} onPress={() => {}} />);
     });
     expect(renderer.toJSON()).toBeNull();
   });
@@ -52,13 +95,7 @@ describe('UsageIndicator', () => {
     let renderer!: TestRenderer.ReactTestRenderer;
     act(() => {
       renderer = TestRenderer.create(
-        <UsageIndicator
-          items={[
-            { provider: 'claude', name: 'Claude', usedPercent: 20.4, severity: 'normal', period: '5h' },
-            { provider: 'codex', name: 'Codex', usedPercent: undefined, severity: 'normal' },
-          ]}
-          onPress={onPress}
-        />,
+        <UsageIndicator usage={indicatorUsage(20.4, now + 9_000)} onPress={onPress} />,
       );
     });
     expect(texts(renderer)).toEqual(['20', 'C', '–', 'X']);
@@ -70,6 +107,22 @@ describe('UsageIndicator', () => {
     );
     act(() => button.props.onPress());
     expect(onPress).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it('re-derives the pace color as the clock moves', () => {
+    // 50 % used, 1h of the 5h window elapsed: far ahead of pace.
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(
+        <UsageIndicator usage={indicatorUsage(50, now + 14_400)} onPress={() => {}} />,
+      );
+    });
+    expect(severity(renderer)).toBe('critical');
+    // Two hours later 3h of 5h (60 %) have elapsed: back within pace.
+    act(() => jest.advanceTimersByTime(2 * 3_600_000));
+    expect(severity(renderer)).toBe('normal');
+    act(() => renderer.unmount());
   });
 });
 

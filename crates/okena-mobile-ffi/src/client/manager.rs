@@ -40,6 +40,31 @@ impl MobileConnection {
         client.set_usage(usage);
         self.usage_revision.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Store a snapshot that arrived outside the WS stream (the refresh POST
+    /// response). It only replaces a snapshot the stream already delivered and
+    /// never an even newer one, so it can neither resurrect usage after a
+    /// disconnect nor overwrite a `usage_changed` push that overtook it.
+    fn store_usage_if_newer(&self, usage: ApiUsage) {
+        let mut client = self.client.write();
+        let Some(current) = client.usage() else {
+            return;
+        };
+        if current == &usage || current.generated_at > usage.generated_at {
+            return;
+        }
+        client.set_usage(Some(usage));
+        self.usage_revision.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether `usage` shows a fetch running for `provider` (any provider when
+/// `None`).
+fn usage_fetch_running(usage: &ApiUsage, provider: Option<ApiUsageProvider>) -> bool {
+    usage
+        .providers
+        .iter()
+        .any(|entry| entry.fetching && provider.is_none_or(|wanted| entry.provider == wanted))
 }
 
 fn merge_layout_presentation(server: &ApiLayoutNode, local: &ApiLayoutNode) -> ApiLayoutNode {
@@ -572,7 +597,6 @@ impl ConnectionManager {
             .and_then(|conn| conn.client.read().config().pinned_cert_sha256.clone())
     }
 
-    /// Get the cached remote state.
     /// Latest agent usage snapshot pushed by the server, if any.
     pub fn get_usage(&self, conn_id: &str) -> Option<ApiUsage> {
         let connections = self.connections.read();
@@ -601,16 +625,24 @@ impl ConnectionManager {
 
     /// Ask the daemon to refetch usage (`POST /v1/usage/refresh`). The daemon
     /// throttles per provider; the fresh result arrives as `usage_changed`.
+    /// Returns whether a fetch is running for the requested provider(s) per the
+    /// snapshot the POST answers with (`false` when the request was throttled),
+    /// and stores that snapshot when it is newer than the cached one.
     pub async fn request_usage_refresh(
         &self,
         conn_id: &str,
         provider: Option<ApiUsageProvider>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let (config, token) = self.config_and_token(conn_id)?;
-        okena_transport::remote_action::request_usage_refresh_async(&config, &token, provider)
-            .await
-            .map_err(anyhow::Error::msg)?;
-        Ok(())
+        let usage =
+            okena_transport::remote_action::request_usage_refresh_async(&config, &token, provider)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        let running = usage_fetch_running(&usage, provider);
+        if let Some(conn) = self.connections.read().get(conn_id) {
+            conn.store_usage_if_newer(usage);
+        }
+        Ok(running)
     }
 
     fn config_and_token(&self, conn_id: &str) -> anyhow::Result<(RemoteConnectionConfig, String)> {
@@ -625,6 +657,7 @@ impl ConnectionManager {
         Ok((config, token))
     }
 
+    /// Get the cached remote state.
     pub fn get_state(&self, conn_id: &str) -> Option<StateResponse> {
         let connections = self.connections.read();
         connections
@@ -1153,6 +1186,55 @@ mod tests {
 
         mgr.remove_connection(&first);
         mgr.remove_connection(&second);
+    }
+
+    fn usage_with(generated_at: f64, fetching: &[(&str, bool)]) -> ApiUsage {
+        let providers: Vec<serde_json::Value> = fetching
+            .iter()
+            .map(|(provider, fetching)| {
+                serde_json::json!({ "provider": provider, "status": "ok", "fetching": fetching })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "providers": providers,
+            "generated_at": generated_at,
+        }))
+        .expect("valid usage snapshot")
+    }
+
+    #[test]
+    fn usage_fetch_running_honours_the_requested_provider() {
+        let usage = usage_with(1.0, &[("claude", false), ("codex", true)]);
+        assert!(usage_fetch_running(&usage, None));
+        assert!(usage_fetch_running(&usage, Some(ApiUsageProvider::Codex)));
+        assert!(!usage_fetch_running(&usage, Some(ApiUsageProvider::Claude)));
+
+        let idle = usage_with(1.0, &[("claude", false), ("codex", false)]);
+        assert!(!usage_fetch_running(&idle, None));
+        assert!(!usage_fetch_running(&ApiUsage::default(), None));
+    }
+
+    #[test]
+    fn refresh_snapshot_only_replaces_an_older_streamed_one() {
+        ConnectionManager::init();
+        let mgr = ConnectionManager::get();
+        let conn_id = mgr.add_connection(UNREACHABLE_HOST, 19105, None, true, None);
+        let store = |usage: ApiUsage| {
+            mgr.connections.read()[&conn_id].store_usage_if_newer(usage);
+        };
+
+        store(usage_with(10.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id), None, "nothing streamed yet");
+
+        mgr.set_usage(&conn_id, Some(usage_with(10.0, &[("claude", false)])));
+        store(usage_with(5.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id).map(|u| u.generated_at), Some(10.0));
+
+        store(usage_with(11.0, &[("claude", true)]));
+        assert_eq!(mgr.get_usage(&conn_id).map(|u| u.generated_at), Some(11.0));
+        assert_eq!(mgr.usage_revision(&conn_id), 2);
+
+        mgr.remove_connection(&conn_id);
     }
 
     #[test]
