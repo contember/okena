@@ -156,7 +156,10 @@ export interface WorkspaceState {
   terminalViews: Record<TerminalId, TerminalViewMode>;
   /** The server's latest Claude / Codex usage snapshot, if it sent one. */
   usage: UsageInfo | null;
-  /** A refresh is in flight: until a new snapshot without a running fetch, or a timeout. */
+  /**
+   * A refresh is in flight: until the daemon reports no fetch started
+   * (throttled), a new snapshot without a running fetch, or a timeout.
+   */
   usageRefreshing: boolean;
 
   // ── actions ────────────────────────────────────────────────────────────
@@ -239,8 +242,14 @@ let usageRevision = -1;
 /** Usage revision when the current refresh started (`null` = no refresh). */
 let refreshBaseRevision: number | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Identifies the refresh in flight. Bumped whenever a refresh ends or a new one
+ * starts, so a late answer to an earlier request cannot clear a newer one.
+ */
+let refreshToken = 0;
 
 function clearRefresh(): void {
+  refreshToken += 1;
   refreshBaseRevision = null;
   if (refreshTimer !== null) {
     clearTimeout(refreshTimer);
@@ -639,15 +648,21 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         clearRefresh();
         set({ usageRefreshing: false });
       }, USAGE_REFRESH_TIMEOUT_MS);
+      const token = refreshToken;
       set({ usageRefreshing: true });
+      const finish = () => {
+        if (token !== refreshToken || activeConnId !== connId) return;
+        clearRefresh();
+        set({ usageRefreshing: false });
+      };
       deps()
         .native.requestUsageRefresh(connId, provider)
-        .catch(() => {
-          // An older daemon or a dropped connection: the snapshot stays as is.
-          if (activeConnId !== connId) return;
-          clearRefresh();
-          set({ usageRefreshing: false });
-        });
+        .then((running) => {
+          // Throttled or nothing enabled: no snapshot is coming, stop now.
+          if (!running) finish();
+        })
+        // An older daemon or a dropped connection: the snapshot stays as is.
+        .catch(finish);
     },
 
     selectProject(projectId) {

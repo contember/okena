@@ -120,10 +120,12 @@ WS "usage_changed" → ConnectionManager stores ApiUsage per connection, bumps a
 
 The app bar shows one small ring per enabled, signed-in provider (`UsageIndicator`), colored by the
 desktop's `max(abs, pace)` severity. Tapping it, or Usage in the drawer footer, opens `UsageSheet`,
-which calls `requestUsageRefresh` on open (the daemon throttles to once a minute per provider).
+which calls `requestUsageRefresh` on open (the daemon throttles to once a minute per provider). It
+resolves to whether a fetch is running; when it is not (throttled), the spinner ends at once.
 `src/models/usage.ts` ports the pace math of `okena-agent-usage::pace`, including the working-day
 reshaping of weekly windows, and the desktop popover's display rules, so both clients show the same
-numbers. Times use the phone's clock and zone; clock skew against the daemon is not corrected.
+numbers (golden tests in `usage.test.ts` and `pace.rs` pin shared values). Codex rows are
+titled by window length ("5-hour limit", "Weekly limit") on both clients. Times use the phone's clock and zone; clock skew against the daemon is not corrected.
 
 ### Presentation: one terminal at a time
 

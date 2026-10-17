@@ -6,6 +6,7 @@ process.env.TZ = 'Europe/Prague';
 
 import type { ProviderUsageInfo, UsageInfo, UsageWindowInfo } from '../native/okena';
 import {
+  absSeverity,
   ALL_WORKING_DAYS,
   buildUsageView,
   formatDuration,
@@ -17,6 +18,7 @@ import {
   indicatorAccessibilityLabel,
   indicatorItems,
   linearTimePct,
+  paceSeverity,
   resetAlignedSegments,
   segmentUnitForWindow,
   timeFraction,
@@ -346,5 +348,88 @@ describe('indicator', () => {
     const items = indicatorItems(usage([provider({ status: 'pending' })]), now);
     expect(items).toEqual([{ provider: 'claude', name: 'Claude', usedPercent: undefined, severity: 'normal', period: undefined }]);
     expect(indicatorAccessibilityLabel(items)).toBe('Agent usage: Claude no data yet');
+  });
+});
+
+// Same inputs and numbers as `golden_values_shared_with_mobile_port` and
+// `golden_dst_week_in_prague_inner` in `crates/okena-agent-usage/src/pace.rs`.
+// Change both together. The zone is the `process.env.TZ` pinned at the top;
+// the Rust side runs that case in a child process with `TZ=Europe/Prague`.
+describe('golden values shared with pace.rs', () => {
+  it('runs in Europe/Prague', () => {
+    expect(new Date(Date.UTC(2026, 6, 1)).getTimezoneOffset()).toBe(-120);
+    expect(new Date(Date.UTC(2026, 11, 1)).getTimezoneOffset()).toBe(-60);
+  });
+
+  it('matches linear time and severities', () => {
+    expect(linearTimePct(1_000, 18_000, -3_500)).toBe(75);
+    expect(linearTimePct(1_000, 18_000, -20_000)).toBe(0);
+    expect(linearTimePct(1_000, 18_000, 2_000)).toBe(100);
+    expect(linearTimePct(1_000, -1, 0)).toBeUndefined();
+
+    const cases: [number, number | undefined, string, string, string][] = [
+      [60, 55, 'normal', 'normal', 'normal'],
+      [60.5, 55, 'warning', 'warning', 'warning'],
+      [80, 64, 'warning', 'critical', 'critical'],
+      [80.5, 90, 'critical', 'normal', 'critical'],
+      [40, 25, 'normal', 'warning', 'warning'],
+      [40, 24.9, 'normal', 'critical', 'critical'],
+      [95, undefined, 'critical', 'normal', 'critical'],
+    ];
+    for (const [pct, timePct, abs, pace, headline] of cases) {
+      expect([absSeverity(pct), paceSeverity(pct, timePct), headlineSeverity(pct, timePct)]).toEqual([
+        abs,
+        pace,
+        headline,
+      ]);
+    }
+
+    const labels: [number, string][] = [
+      [3_600, '1h'],
+      [3_601, '5h'],
+      [18_000, '5h'],
+      [86_400, '1d'],
+      [604_800, '7d'],
+      [2_592_000, '30d'],
+    ];
+    for (const [secs, label] of labels) expect(formatWindowLabel(secs)).toBe(label);
+  });
+
+  describe('a week across the DST end (Sun 2026-10-25)', () => {
+    const reset = 1_793_178_000; // 2026-10-28T09:00:00Z (Wed 10:00 CET)
+    const start = reset - WEEK; // 2026-10-21T09:00:00Z (Wed 11:00 CEST)
+
+    it('anchors the plain grid to the local reset time', () => {
+      const grid = resetAlignedSegments(reset, WEEK, 'day', ALL_WORKING_DAYS, start);
+      const expected = [0.13690476, 0.2797619, 0.42261905, 0.5714286, 0.7142857, 0.8571429];
+      expect(grid.dividers).toHaveLength(expected.length);
+      grid.dividers.forEach((d, i) => expect(d).toBeCloseTo(expected[i]!, 6));
+      expect(grid.timePct).toBeUndefined();
+    });
+
+    it('reshapes Mon–Fri to five blocks on a working day', () => {
+      const monday = 1_793_023_200; // 2026-10-26T14:00:00Z (Mon 15:00 CET)
+      const seg = workingDayReshape(start, reset, MON_FRI, monday)!;
+      expect(seg.dividers).toEqual([0.2, 0.4, 0.6, 0.8]);
+      expect(seg.current).toEqual([0.6, 0.8]);
+      expect(seg.timePct).toBeCloseTo(72.5, 4);
+      expect(timeFraction(seg, monday, reset, WEEK)).toBeCloseTo(0.725, 6);
+    });
+
+    it('pegs an off-day to the last elapsed working day', () => {
+      const sunday = 1_792_926_000; // 2026-10-25T11:00:00Z (Sun 12:00 CET)
+      const seg = workingDayReshape(start, reset, MON_FRI, sunday)!;
+      expect(seg.current).toBeUndefined();
+      expect(seg.timePct).toBe(60);
+    });
+
+    it('counts the 25-hour Sunday from local midnight', () => {
+      const evening = 1_792_954_800; // 2026-10-25T19:00:00Z (Sun 20:00 CET, 21 h in)
+      const seg = workingDayReshape(start, reset, workingDaysFromIndices([0, 1, 2, 3, 4, 6]), evening)!;
+      expect(seg.dividers).toHaveLength(5);
+      expect(seg.current![0]).toBeCloseTo(0.5, 6);
+      expect(seg.current![1]).toBeCloseTo(4 / 6, 6);
+      expect(seg.timePct).toBeCloseTo(64.583333, 4);
+    });
   });
 });

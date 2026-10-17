@@ -94,9 +94,7 @@ import { ProjectDrawer } from '../components/ProjectDrawer';
 import { ClaudeChat } from '../components/ClaudeChat';
 import { DialogBadge } from '../components/ClaudeIndicator';
 import { Icon } from '../components/Icon';
-import { UsageIndicator } from '../components/UsageIndicator';
-import { useNow } from '../components/useNow';
-import { indicatorItems } from '../models/usage';
+import { ConnectedUsageIndicator } from '../components/UsageIndicator';
 import { ConnectedUsageSheet } from './UsageSheet';
 import type { TerminalFonts } from '../components/TerminalView';
 
@@ -170,7 +168,6 @@ export const WorkspaceScreen: React.FC = () => {
   const claudeSessions = useWorkspaceStore((s) => s.claudeSessions);
   const terminalViews = useWorkspaceStore((s) => s.terminalViews);
   const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
-  const usage = useWorkspaceStore((s) => s.usage);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
@@ -191,10 +188,6 @@ export const WorkspaceScreen: React.FC = () => {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
   const [usageOpen, setUsageOpen] = useState(false);
-
-  // Pace moves with the clock, so re-derive the ring colors each minute too.
-  const usageNow = useNow(60_000, usage !== null);
-  const usageItems = useMemo(() => indicatorItems(usage, usageNow), [usage, usageNow]);
 
   // The remembered project is gone: show the project list instead.
   useEffect(() => {
@@ -403,10 +396,7 @@ export const WorkspaceScreen: React.FC = () => {
           />
         ) : null}
         {connId ? (
-          <UsageIndicator
-            items={usageItems}
-            onPress={() => setUsageOpen(true)}
-          />
+          <ConnectedUsageIndicator onPress={() => setUsageOpen(true)} />
         ) : null}
         {connId ? (
           <View style={[styles.dot, { backgroundColor: dotColor }]} />

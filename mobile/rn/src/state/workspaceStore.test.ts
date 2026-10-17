@@ -67,7 +67,7 @@ function stubNative(layouts: string[]): WorkspaceNative {
     focusTerminal: () => Promise.resolve(),
     getUsage: () => undefined,
     getUsageRevision: () => 0,
-    requestUsageRefresh: () => Promise.resolve(),
+    requestUsageRefresh: () => Promise.resolve(false),
   };
 }
 
@@ -474,7 +474,11 @@ describe('workspace agent usage', () => {
     generatedAt,
   });
 
-  function usageNative(state: { revision: number; usage?: UsageInfo }, calls: string[]) {
+  function usageNative(
+    state: { revision: number; usage?: UsageInfo },
+    calls: string[],
+    refresh: () => Promise<boolean> = () => Promise.resolve(true),
+  ) {
     return {
       ...stubNative([TABS_FIRST_ACTIVE]),
       getUsageRevision: () => state.revision,
@@ -484,10 +488,13 @@ describe('workspace agent usage', () => {
       },
       requestUsageRefresh: (_c: string, provider: string | undefined) => {
         calls.push(`refresh:${provider ?? 'all'}`);
-        return Promise.resolve();
+        return refresh();
       },
     } satisfies WorkspaceNative;
   }
+
+  /** Let the refresh promise's handlers run (fake timers leave microtasks alone). */
+  const settle = () => Promise.resolve().then(() => undefined);
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -541,15 +548,51 @@ describe('workspace agent usage', () => {
     expect(useWorkspaceStore.getState().usage?.generatedAt).toBe(3);
   });
 
-  it('gives up on a throttled refresh after the timeout', () => {
+  it('gives up on a refresh whose result never arrives after the timeout', async () => {
     const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
     configureWorkspaceStore({ native: usageNative(state, []) });
     useWorkspaceStore.getState().start('conn-1');
 
     useWorkspaceStore.getState().refreshUsage('claude');
+    await settle();
     jest.advanceTimersByTime(USAGE_REFRESH_TIMEOUT_MS - 1);
     expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
     jest.advanceTimersByTime(1);
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
+  });
+
+  it('ends a throttled refresh as soon as the daemon answers', async () => {
+    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    configureWorkspaceStore({ native: usageNative(state, [], () => Promise.resolve(false)) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().refreshUsage('claude');
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
+    await settle();
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
+  });
+
+  it('ignores a late failure of an earlier refresh', async () => {
+    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const pending: Array<{ resolve: (running: boolean) => void; reject: (e: Error) => void }> = [];
+    const refresh = () =>
+      new Promise<boolean>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      });
+    configureWorkspaceStore({ native: usageNative(state, [], refresh) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().refreshUsage('claude');
+    useWorkspaceStore.getState().refreshUsage('codex');
+    expect(pending).toHaveLength(2);
+
+    pending[0].reject(new Error('timed out'));
+    await settle();
+    await settle();
+    expect(useWorkspaceStore.getState().usageRefreshing).toBe(true);
+
+    pending[1].resolve(false);
+    await settle();
     expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
   });
 });

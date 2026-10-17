@@ -656,6 +656,132 @@ mod tests {
         assert_eq!(format_window_label(604800.0), "7d");
     }
 
+    // ── Golden values shared with the mobile port ───────────────────────
+    //
+    // `mobile/rn/src/models/usage.test.ts` ("golden values shared with pace.rs")
+    // asserts the same numbers for the same inputs. Change both together.
+
+    #[test]
+    fn golden_values_shared_with_mobile_port() {
+        assert_eq!(linear_time_pct(1_000.0, 18_000.0, -3_500.0), Some(75.0));
+        assert_eq!(linear_time_pct(1_000.0, 18_000.0, -20_000.0), Some(0.0));
+        assert_eq!(linear_time_pct(1_000.0, 18_000.0, 2_000.0), Some(100.0));
+        assert_eq!(linear_time_pct(1_000.0, -1.0, 0.0), None);
+
+        let cases = [
+            // (pct, time_pct, abs, pace, headline)
+            (60.0, Some(55.0), Severity::Normal, Severity::Normal, Severity::Normal),
+            (60.5, Some(55.0), Severity::Warning, Severity::Warning, Severity::Warning),
+            (80.0, Some(64.0), Severity::Warning, Severity::Critical, Severity::Critical),
+            (80.5, Some(90.0), Severity::Critical, Severity::Normal, Severity::Critical),
+            (40.0, Some(25.0), Severity::Normal, Severity::Warning, Severity::Warning),
+            (40.0, Some(24.9), Severity::Normal, Severity::Critical, Severity::Critical),
+            (95.0, None, Severity::Critical, Severity::Normal, Severity::Critical),
+        ];
+        for (pct, time_pct, abs, pace, headline) in cases {
+            assert_eq!(abs_severity(pct), abs, "abs {pct}");
+            assert_eq!(pace_severity(pct, time_pct), pace, "pace {pct} {time_pct:?}");
+            assert_eq!(headline_severity(pct, time_pct), headline, "headline {pct} {time_pct:?}");
+        }
+
+        for (secs, label) in [
+            (3_600.0, "1h"),
+            (3_601.0, "5h"),
+            (18_000.0, "5h"),
+            (86_400.0, "1d"),
+            (604_800.0, "7d"),
+            (2_592_000.0, "30d"),
+        ] {
+            assert_eq!(format_window_label(secs), label, "{secs}");
+        }
+    }
+
+    /// The DST case needs the process zone pinned to Europe/Prague, and the
+    /// zone is process-wide, so it runs in a child test process with `TZ` set.
+    #[test]
+    fn golden_dst_week_in_prague() {
+        let exe = std::env::current_exe().expect("test binary");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "pace::tests::golden_dst_week_in_prague_inner",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("TZ", "Europe/Prague")
+            .output()
+            .expect("run child test");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run by golden_dst_week_in_prague with TZ=Europe/Prague"]
+    fn golden_dst_week_in_prague_inner() {
+        assert_eq!(std::env::var("TZ").as_deref(), Ok("Europe/Prague"));
+        assert_eq!(
+            jiff::tz::TimeZone::system().iana_name(),
+            Some("Europe/Prague"),
+            "system zone must follow TZ"
+        );
+        // Weekly window Wed 2026-10-21 09:00Z (11:00 CEST) → Wed 2026-10-28
+        // 09:00Z (10:00 CET), spanning the DST end on Sun 2026-10-25.
+        let reset = 1_793_178_000.0_f64; // 2026-10-28T09:00:00Z
+        let start = reset - 7.0 * 86_400.0;
+
+        // Plain grid: day blocks at the reset's local 10:00, so the dividers
+        // before the DST end sit one hour off the UTC multiples of 1/7.
+        let grid =
+            reset_aligned_segments(reset, 7.0 * 86_400.0, SegmentUnit::Day, WorkingDays::all());
+        let expected_grid: [f32; 6] = [
+            0.136_904_76,
+            0.279_761_9,
+            0.422_619_05,
+            0.571_428_6,
+            0.714_285_7,
+            0.857_142_9,
+        ];
+        assert_eq!(grid.dividers.len(), expected_grid.len());
+        for (got, want) in grid.dividers.iter().zip(expected_grid) {
+            assert!((got - want).abs() < 1e-6, "grid {got} vs {want}");
+        }
+        assert!(grid.time_pct.is_none());
+
+        let mon_fri = WorkingDays {
+            days: [true, true, true, true, true, false, false],
+        };
+        // Mon 2026-10-26 15:00 CET: the 4th of 5 working days, 15 h in.
+        let monday = 1_793_023_200.0_f64; // 2026-10-26T14:00:00Z
+        let seg = working_day_reshape(start, reset, mon_fri, monday).expect("reshape");
+        assert_eq!(seg.dividers, vec![0.2, 0.4, 0.6, 0.8]);
+        assert_eq!(seg.current, Some((0.6, 0.8)));
+        assert!((seg.time_pct.unwrap() - 72.5).abs() < 1e-4);
+        assert!((seg.time_fraction(monday, reset, 7.0 * 86_400.0) - 0.725).abs() < 1e-6);
+
+        // Sun 2026-10-25 12:00 CET: off-day after three working days.
+        let sunday = 1_792_926_000.0_f64; // 2026-10-25T11:00:00Z
+        let seg = working_day_reshape(start, reset, mon_fri, sunday).expect("reshape");
+        assert_eq!(seg.current, None);
+        assert_eq!(seg.time_pct, Some(60.0));
+
+        // Sunday working too: the 25-hour day counts elapsed seconds from
+        // local midnight (CEST), so 20:00 CET is 21 h in, not 20.
+        let with_sunday = WorkingDays {
+            days: [true, true, true, true, true, false, true],
+        };
+        let evening = 1_792_954_800.0_f64; // 2026-10-25T19:00:00Z
+        let seg = working_day_reshape(start, reset, with_sunday, evening).expect("reshape");
+        assert_eq!(seg.dividers.len(), 5);
+        let (cs, ce) = seg.current.expect("Sunday is a working day");
+        assert!((cs - 0.5).abs() < 1e-6 && (ce - 4.0 / 6.0).abs() < 1e-6);
+        assert!((seg.time_pct.unwrap() - 64.583_333).abs() < 1e-4);
+    }
+
     #[test]
     fn format_reset_time_empty_for_unset() {
         assert_eq!(format_reset_time_epoch(0.0, true), "");
