@@ -19,4 +19,5 @@ pub mod soft_close;
 pub mod theme;
 pub mod timing;
 pub mod types;
+pub mod usage;
 pub mod ws;
