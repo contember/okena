@@ -148,9 +148,9 @@ impl CodexUsage {
             .iter()
             .filter_map(|window| {
                 let (label, marker_id) = match window.id.as_str() {
-                    "primary" => ("Rate Limit", "codex-marker-primary"),
-                    "secondary" => ("Secondary", "codex-marker-secondary"),
-                    "code_review" => ("Code Review", "codex-marker-review"),
+                    "primary" => (window_title(window), "codex-marker-primary"),
+                    "secondary" => (window_title(window), "codex-marker-secondary"),
+                    "code_review" => ("Code review".to_string(), "codex-marker-review"),
                     _ => return None,
                 };
                 Some(
@@ -391,6 +391,18 @@ fn format_age(age: Duration) -> String {
     }
 }
 
+/// Row title for a rate-limit window, named by its length like the mobile
+/// app ("5-hour limit", "Weekly limit"); the API's primary/secondary order
+/// says nothing about which window is which.
+fn window_title(window: &okena_core::api::ApiUsageWindow) -> String {
+    match format_window_label(window.window_seconds) {
+        "5h" => "5-hour limit".to_string(),
+        "7d" => "Weekly limit".to_string(),
+        "1d" => "Daily limit".to_string(),
+        period => format!("{period} limit"),
+    }
+}
+
 fn reset_count_label(count: u64) -> String {
     if count == 1 {
         "1 reset available".to_string()
@@ -494,6 +506,20 @@ mod tests {
     #[test]
     fn reset_summary_uses_singular_plural_and_first_expiry() {
         assert_eq!(reset_count_label(1), "1 reset available");
+        let window = |window_seconds| okena_core::api::ApiUsageWindow {
+            id: "primary".into(),
+            label: "Rate Limit".into(),
+            kind: okena_core::api::ApiUsageWindowKind::Other,
+            used_percent: 0.0,
+            window_seconds,
+            reset_at: None,
+            active: true,
+            history: Vec::new(),
+        };
+        assert_eq!(window_title(&window(18000.0)), "5-hour limit");
+        assert_eq!(window_title(&window(604800.0)), "Weekly limit");
+        assert_eq!(window_title(&window(86400.0)), "Daily limit");
+        assert_eq!(window_title(&window(2592000.0)), "30d limit");
         assert_eq!(reset_count_label(3), "3 resets available");
 
         let resets = ApiResetCredits {

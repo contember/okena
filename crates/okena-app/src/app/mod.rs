@@ -417,12 +417,12 @@ impl Okena {
             let weak_manager = remote_manager.downgrade();
             store.update(cx, |store, _| {
                 store.set_refresh(std::rc::Rc::new(move |provider, cx: &mut App| {
-                    if let Some(manager) = weak_manager.upgrade() {
+                    weak_manager.upgrade().is_some_and(|manager| {
                         manager.read(cx).request_usage_refresh(
                             okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
                             Some(provider),
-                        );
-                    }
+                        )
+                    })
                 }));
             });
         }
