@@ -188,9 +188,25 @@ describe('TerminalPane open keyboard with terminal', () => {
     jest.restoreAllMocks();
   });
 
+  /** The renderer laid out: what the auto-focus waits for. */
+  const reportGrid = () =>
+    act(() => mockTerminalViewProps.current?.onGridSizeChange?.(80, 24, 8, 16));
+
+  it('waits for the renderer to lay out before opening the keyboard', () => {
+    const renderer = renderPane('t1', { selected: true, autoFocus: true });
+    const focus = spyOnInputFocus(renderer);
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 3));
+    expect(focus).not.toHaveBeenCalled();
+    reportGrid();
+    act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
+    expect(focus).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
   it('opens the keyboard when shown with the setting on', () => {
     const renderer = renderPane('t1', { selected: true, autoFocus: true });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
     expect(focus).toHaveBeenCalledTimes(1);
     act(() => renderer.unmount());
@@ -199,6 +215,7 @@ describe('TerminalPane open keyboard with terminal', () => {
   it('leaves the keyboard closed with the setting off', () => {
     const renderer = renderPane('t1', { selected: true, autoFocus: false });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 2));
     expect(focus).not.toHaveBeenCalled();
     act(() => renderer.unmount());
@@ -208,6 +225,7 @@ describe('TerminalPane open keyboard with terminal', () => {
     useSettingsStore.setState({ openKeyboardWithTerminal: false });
     let renderer = renderPane('t1', { selected: true });
     let focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
     expect(focus).not.toHaveBeenCalled();
     act(() => renderer.unmount());
@@ -215,6 +233,7 @@ describe('TerminalPane open keyboard with terminal', () => {
     useSettingsStore.setState({ openKeyboardWithTerminal: true });
     renderer = renderPane('t1', { selected: true });
     focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
     expect(focus).toHaveBeenCalledTimes(1);
     act(() => renderer.unmount());
@@ -224,6 +243,7 @@ describe('TerminalPane open keyboard with terminal', () => {
   it('waits while an overlay is open, then opens once it closes', () => {
     const renderer = renderPane('t1', { selected: true, autoFocus: true, focusBlocked: true });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS * 2));
     expect(focus).not.toHaveBeenCalled();
 
@@ -238,6 +258,7 @@ describe('TerminalPane open keyboard with terminal', () => {
   it('does not reopen after an overlay that did not switch terminals', () => {
     const renderer = renderPane('t1', { selected: true, autoFocus: true });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
     expect(focus).toHaveBeenCalledTimes(1);
 
@@ -254,6 +275,7 @@ describe('TerminalPane open keyboard with terminal', () => {
   it('opens again for a newly shown terminal', () => {
     const renderer = renderPane('t1', { selected: true, autoFocus: true });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => jest.advanceTimersByTime(AUTO_FOCUS_DELAY_MS));
     act(() => {
       renderer.update(pane('t2', { selected: true, autoFocus: true }));
@@ -267,6 +289,7 @@ describe('TerminalPane open keyboard with terminal', () => {
     (Keyboard.isVisible as jest.Mock).mockReturnValue(true);
     const renderer = renderPane('t3', { selected: false, focusBlocked: true, autoFocus: false });
     const focus = spyOnInputFocus(renderer);
+    reportGrid();
     act(() => {
       renderer.update(pane('t3', { selected: true, focusBlocked: true, autoFocus: false }));
     });

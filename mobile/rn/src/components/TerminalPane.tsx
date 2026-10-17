@@ -245,9 +245,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       [resetInput, scrollToBottom],
     );
 
+    // The renderer has laid out and reported its grid at least once.
+    const [gridReady, setGridReady] = useState(false);
     const onGridSizeChange = useCallback(
       (cols: number, rows: number, cellWidth: number, cellHeight: number) => {
         grid.current = { cols, rows, cellWidth, cellHeight };
+        setGridReady(true);
       },
       [],
     );
@@ -278,20 +281,22 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selected]);
 
-    // Auto-open the keyboard once per shown terminal. Deferred so the input is
-    // laid out (and, after an overlay, the modal is gone) before it focuses.
+    // Auto-open the keyboard once per shown terminal. It waits for the
+    // renderer's first grid report and then a short delay, so the pane lays
+    // out at full size first and the keyboard's shrink is an ordinary resize;
+    // the delay also lets a closing overlay leave first.
     const autoFocusPending = useRef(true);
     useEffect(() => {
       autoFocusPending.current = true;
     }, [terminalId]);
     useEffect(() => {
-      if (!effectiveAutoFocus || focusBlocked || !autoFocusPending.current) return;
+      if (!effectiveAutoFocus || focusBlocked || !gridReady || !autoFocusPending.current) return;
       const timer = setTimeout(() => {
         autoFocusPending.current = false;
         inputRef.current?.focus();
       }, AUTO_FOCUS_DELAY_MS);
       return () => clearTimeout(timer);
-    }, [effectiveAutoFocus, focusBlocked, terminalId]);
+    }, [effectiveAutoFocus, focusBlocked, gridReady, terminalId]);
 
     const onChange = useCallback(
       (e: NativeSyntheticEvent<TextInputChangeEventData>) => {
