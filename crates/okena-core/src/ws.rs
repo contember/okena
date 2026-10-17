@@ -1,6 +1,6 @@
 use crate::api::{
     ApiFullscreenRequest, ApiGitStatus, ApiProjectVisibilityRequest, ApiSystemStats,
-    ApiTerminalFocusRequest, ApiToast,
+    ApiTerminalFocusRequest, ApiToast, ApiUsage,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,14 @@ pub enum WsOutbound {
     },
     SystemStatsChanged {
         stats: ApiSystemStats,
+    },
+    /// Agent usage (Claude Code / Codex rate limits) measured on the daemon's
+    /// machine. Sent once right after `auth_ok` and again whenever the
+    /// daemon's usage state changes (fetch started/finished, settings
+    /// toggled). Always the full snapshot, never a delta. Older clients
+    /// ignore the unknown type.
+    UsageChanged {
+        usage: ApiUsage,
     },
     /// A daemon-originated toast to display on the client. Fire-and-forget event
     /// (mirrors `GitStatusChanged`): the daemon has no surface of its own, so

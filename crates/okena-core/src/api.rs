@@ -4,6 +4,12 @@ use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
+pub use crate::usage::{
+    ApiExtraUsage, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
+    ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow, ApiUsageWindowKind,
+    USAGE_HISTORY_MAX_POINTS, UsageRefreshRequest,
+};
+
 // ── API request/response types ──────────────────────────────────────────────
 
 /// GET /health response
