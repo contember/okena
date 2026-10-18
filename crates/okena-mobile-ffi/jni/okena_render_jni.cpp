@@ -27,6 +27,9 @@
 //       @JvmStatic external fun selectionStart(handle: Long, line: Long, col: Int, side: Int, kind: Int)
 //       @JvmStatic external fun selectionUpdate(handle: Long, line: Long, col: Int, side: Int)
 //       @JvmStatic external fun selectWord(handle: Long, line: Long, col: Int)
+//       @JvmStatic external fun selectionStartWord(handle: Long, line: Long, col: Int): Boolean
+//       @JvmStatic external fun setOutputFrozen(handle: Long, frozen: Boolean)
+//       @JvmStatic external fun outputFrozen(handle: Long): Boolean
 //       @JvmStatic external fun selectionText(handle: Long): String?
 //       @JvmStatic external fun selectionClear(handle: Long)
 //       @JvmStatic external fun wheel(handle: Long, lines: Int, col: Int, row: Int): Boolean
@@ -207,6 +210,21 @@ JNIEXPORT void JNICALL RB(selectionUpdate)(JNIEnv *, jclass, jlong h, jlong line
 
 JNIEXPORT void JNICALL RB(selectWord)(JNIEnv *, jclass, jlong h, jlong line, jint col) {
   okena_rv_select_word(rv(h), static_cast<int64_t>(line), u16(col));
+}
+
+JNIEXPORT jboolean JNICALL RB(selectionStartWord)(JNIEnv *, jclass, jlong h, jlong line,
+                                                  jint col) {
+  return okena_rv_selection_start_word(rv(h), static_cast<int64_t>(line), u16(col)) != 0
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL RB(setOutputFrozen)(JNIEnv *, jclass, jlong h, jboolean frozen) {
+  okena_rv_set_output_frozen(rv(h), frozen ? 1 : 0);
+}
+
+JNIEXPORT jboolean JNICALL RB(outputFrozen)(JNIEnv *, jclass, jlong h) {
+  return okena_rv_output_frozen(rv(h)) != 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL RB(selectionText)(JNIEnv *env, jclass, jlong h) {

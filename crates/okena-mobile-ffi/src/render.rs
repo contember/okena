@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Term, TermMode};
@@ -651,6 +651,93 @@ pub(crate) fn selection_update(holder: &TerminalHolder, line: i64, col: u16, sid
     });
 }
 
+/// The word a long press or double tap selected, in absolute lines,
+/// inclusive. A drag from it extends character-wise and always keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WordAnchor {
+    pub start: (i64, u16),
+    pub end: (i64, u16),
+}
+
+/// Trailing characters dropped from a selected word: sentence punctuation
+/// after a path or URL ("see src/main.rs:12." or "https://x.dev,").
+const WORD_TRAILING_TRIM: &[char] = &['.', ',', ':', ';', '!', '?'];
+
+fn is_blank(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\0' || c == '\u{a0}'
+}
+
+/// Select the word under absolute `line` / `col` as a simple (char-wise)
+/// selection: the semantic unit with [`crate::client::terminal_holder::SEMANTIC_ESCAPE_CHARS`]
+/// (so URLs, paths with `:line`, e-mails and flags stay whole), following
+/// soft wraps, minus trailing punctuation. Returns `None` and leaves the
+/// selection alone when the cell is blank.
+pub(crate) fn select_word_at(holder: &TerminalHolder, line: i64, col: u16) -> Option<WordAnchor> {
+    let mut anchor = None;
+    holder.with_term_mut(|term, track| {
+        let mut point = to_point(term, track, line, col);
+        let spacer = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER;
+        if term.grid()[point].flags.contains(Flags::WIDE_CHAR_SPACER) && point.column.0 > 0 {
+            point.column -= 1;
+        }
+        if is_blank(term.grid()[point].c) {
+            return false;
+        }
+        let start = term.semantic_search_left(point);
+        let mut end = term.semantic_search_right(point);
+        while end > start {
+            let cell = &term.grid()[end];
+            if cell.flags.intersects(spacer) || !WORD_TRAILING_TRIM.contains(&cell.c) {
+                break;
+            }
+            end = end.sub(term, Boundary::Grid, 1);
+        }
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        anchor = Some(WordAnchor {
+            start: (
+                track.screen_top + i64::from(start.line.0),
+                start.column.0 as u16,
+            ),
+            end: (
+                track.screen_top + i64::from(end.line.0),
+                end.column.0 as u16,
+            ),
+        });
+        true
+    });
+    anchor
+}
+
+/// Extend a selection that started on a word to absolute `line` / `col`:
+/// past either end it runs char-wise from the far end of the word, inside
+/// the word it is the word.
+pub(crate) fn selection_update_from_word(
+    holder: &TerminalHolder,
+    anchor: WordAnchor,
+    line: i64,
+    col: u16,
+    side: u8,
+) {
+    holder.with_term_mut(|term, track| {
+        let target = to_point(term, track, line, col);
+        let start = to_point(term, track, anchor.start.0, anchor.start.1);
+        let end = to_point(term, track, anchor.end.0, anchor.end.1);
+        let (from, from_side, to, to_side_) = if target < start {
+            (end, Side::Right, target, to_side(side))
+        } else if target > end {
+            (start, Side::Left, target, to_side(side))
+        } else {
+            (start, Side::Left, end, Side::Right)
+        };
+        let mut selection = Selection::new(SelectionType::Simple, from, from_side);
+        selection.update(to, to_side_);
+        term.selection = Some(selection);
+        true
+    });
+}
+
 /// Wheel bytes for `lines` notches (positive = up) at screen cell
 /// `col`/`row`, or `None` when the view should scroll itself.
 ///
@@ -737,6 +824,10 @@ pub struct OkenaRvHandle {
     counter: Option<Arc<AtomicU64>>,
     frame: FrameBuffers,
     selection_text: Vec<u8>,
+    /// The word the current selection started on (long press), if any.
+    word_anchor: Option<WordAnchor>,
+    /// This handle froze the terminal's output; thawed on close at the latest.
+    froze: bool,
 }
 
 impl OkenaRvHandle {
@@ -833,6 +924,8 @@ pub unsafe extern "C" fn okena_rv_open(
             counter: None,
             frame: FrameBuffers::default(),
             selection_text: Vec::new(),
+            word_anchor: None,
+            froze: false,
         }))
     })
 }
@@ -848,7 +941,13 @@ pub unsafe extern "C" fn okena_rv_close(handle: *mut OkenaRvHandle) {
     }
     // SAFETY: caller contract; the box came from `okena_rv_open`.
     let boxed = unsafe { Box::from_raw(handle) };
-    guard((), move || drop(boxed));
+    guard((), move || {
+        if boxed.froze {
+            // A view torn down mid-gesture must not leave output frozen.
+            boxed.with_holder(TerminalHolder::thaw_output);
+        }
+        drop(boxed)
+    });
 }
 
 /// Current render generation; changes whenever anything a view draws may
@@ -935,12 +1034,15 @@ pub unsafe extern "C" fn okena_rv_selection_start(
     guard((), || {
         // SAFETY: caller contract.
         if let Some(h) = unsafe { handle_mut(handle) } {
+            h.word_anchor = None;
             h.with_holder(|holder| selection_start(holder, line, col, side, kind));
         }
     })
 }
 
-/// Extend the current selection to absolute `line` / `col`.
+/// Extend the current selection to absolute `line` / `col`. After
+/// `okena_rv_selection_start_word` the word stays selected (see
+/// [`selection_update_from_word`]).
 ///
 /// # Safety
 /// `handle` must be null or a live handle.
@@ -954,19 +1056,93 @@ pub unsafe extern "C" fn okena_rv_selection_update(
     guard((), || {
         // SAFETY: caller contract.
         if let Some(h) = unsafe { handle_mut(handle) } {
-            h.with_holder(|holder| selection_update(holder, line, col, side));
+            match h.word_anchor {
+                Some(anchor) => h.with_holder(|holder| {
+                    selection_update_from_word(holder, anchor, line, col, side)
+                }),
+                None => h.with_holder(|holder| selection_update(holder, line, col, side)),
+            };
         }
     })
 }
 
-/// Select the word at absolute `line` / `col` (double tap).
+/// Select the word at absolute `line` / `col` (double tap). Same unit as
+/// `okena_rv_selection_start_word`; a blank cell selects nothing.
 ///
 /// # Safety
 /// `handle` must be null or a live handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn okena_rv_select_word(handle: *mut OkenaRvHandle, line: i64, col: u16) {
     // SAFETY: forwarded caller contract.
-    unsafe { okena_rv_selection_start(handle, line, col, SIDE_LEFT, SELECT_WORD) }
+    unsafe { okena_rv_selection_start_word(handle, line, col) };
+}
+
+/// Start a selection on the word at absolute `line` / `col` (long press):
+/// returns 1 when a word was selected; later `okena_rv_selection_update`
+/// calls extend from it char-wise and keep it. Returns 0 on a blank cell,
+/// leaving the selection unchanged (start a simple selection instead).
+///
+/// # Safety
+/// `handle` must be null or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn okena_rv_selection_start_word(
+    handle: *mut OkenaRvHandle,
+    line: i64,
+    col: u16,
+) -> i32 {
+    guard(0, || {
+        // SAFETY: caller contract.
+        let Some(h) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        h.word_anchor = h
+            .with_holder(|holder| select_word_at(holder, line, col))
+            .flatten();
+        i32::from(h.word_anchor.is_some())
+    })
+}
+
+/// Freeze (`frozen` != 0) or thaw the terminal's live output. While frozen,
+/// output is buffered in Rust instead of applied, so the selection and the
+/// text under the finger stay put; thawing replays it. Freezing again is a
+/// no-op. A frozen terminal thaws by itself (dropping the selection) past
+/// 4 MB or 15 s of held output; poll `okena_rv_output_frozen`. Closing the
+/// handle thaws what it froze.
+///
+/// # Safety
+/// `handle` must be null or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn okena_rv_set_output_frozen(handle: *mut OkenaRvHandle, frozen: u8) {
+    guard((), || {
+        // SAFETY: caller contract.
+        let Some(h) = (unsafe { handle_mut(handle) }) else {
+            return;
+        };
+        if frozen != 0 {
+            h.froze = h.with_holder(TerminalHolder::freeze_output).is_some();
+        } else {
+            h.froze = false;
+            h.with_holder(TerminalHolder::thaw_output);
+        }
+    })
+}
+
+/// 1 while the terminal's output is frozen, else 0.
+///
+/// # Safety
+/// `handle` must be null or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn okena_rv_output_frozen(handle: *mut OkenaRvHandle) -> i32 {
+    guard(0, || {
+        // SAFETY: caller contract.
+        let Some(h) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        i32::from(
+            h.with_holder(TerminalHolder::is_output_frozen)
+                .unwrap_or(false),
+        )
+    })
 }
 
 /// The selected text as UTF-8 (NUL-terminated; length without NUL in
@@ -1008,6 +1184,7 @@ pub unsafe extern "C" fn okena_rv_selection_clear(handle: *mut OkenaRvHandle) {
     guard((), || {
         // SAFETY: caller contract.
         if let Some(h) = unsafe { handle_mut(handle) } {
+            h.word_anchor = None;
             h.with_holder(TerminalHolder::clear_selection);
         }
     })
@@ -1427,5 +1604,169 @@ mod tests {
         let per = start.elapsed() / iters;
         println!("snapshot 60x50: {per:?} per frame");
         assert_eq!(bufs.header().cols, 60);
+    }
+
+    /// Absolute line of screen row `row`.
+    fn screen_line(holder: &TerminalHolder, row: i64) -> i64 {
+        holder.with_term(|_, track| track.screen_top) + row
+    }
+
+    fn word_at(holder: &TerminalHolder, row: i64, col: u16) -> Option<String> {
+        select_word_at(holder, screen_line(holder, row), col)?;
+        holder.get_selected_text()
+    }
+
+    #[test]
+    fn word_selection_keeps_urls_paths_and_flags_whole() {
+        let holder = TerminalHolder::new(80, 6);
+        holder.process_output(
+            b"see https://example.com/a?b=1&c=%20#x, then\r\n\
+              at src/main.rs:12: error\r\n\
+              mail me@host.dev. or --flag=value_x ~/dir/f-1+2\r\n\
+              \xe2\x94\x82 boxed \xe2\x94\x82 (paren) \"quoted\"\r\n",
+        );
+        assert_eq!(
+            word_at(&holder, 0, 10).as_deref(),
+            Some("https://example.com/a?b=1&c=%20#x")
+        );
+        assert_eq!(word_at(&holder, 1, 5).as_deref(), Some("src/main.rs:12"));
+        assert_eq!(word_at(&holder, 2, 7).as_deref(), Some("me@host.dev"));
+        assert_eq!(word_at(&holder, 2, 24).as_deref(), Some("--flag=value_x"));
+        assert_eq!(word_at(&holder, 2, 38).as_deref(), Some("~/dir/f-1+2"));
+        assert_eq!(word_at(&holder, 3, 4).as_deref(), Some("boxed"));
+        assert_eq!(word_at(&holder, 3, 13).as_deref(), Some("paren"));
+        assert_eq!(word_at(&holder, 3, 21).as_deref(), Some("quoted"));
+        // A blank cell selects nothing and keeps the old selection.
+        assert_eq!(select_word_at(&holder, screen_line(&holder, 0), 3), None);
+        assert_eq!(holder.get_selected_text().as_deref(), Some("quoted"));
+    }
+
+    #[test]
+    fn word_selection_follows_soft_wraps() {
+        let holder = TerminalHolder::new(10, 4);
+        holder.process_output(b"x https://abc.dev/long");
+        // Wrapped at column 10: "x https://" + "abc.dev/lo" + "ng".
+        assert_eq!(
+            word_at(&holder, 1, 3).as_deref(),
+            Some("https://abc.dev/long")
+        );
+    }
+
+    #[test]
+    fn drag_from_a_word_extends_char_wise_and_keeps_it() {
+        let holder = TerminalHolder::new(40, 4);
+        holder.process_output(b"alpha beta gamma delta");
+        let line = screen_line(&holder, 0);
+        let anchor = select_word_at(&holder, line, 12).expect("gamma");
+        assert_eq!(holder.get_selected_text().as_deref(), Some("gamma"));
+        // Forward: from the word's start to the finger.
+        selection_update_from_word(&holder, anchor, line, 18, SIDE_RIGHT);
+        assert_eq!(holder.get_selected_text().as_deref(), Some("gamma de"));
+        // Backward: from the word's end to the finger.
+        selection_update_from_word(&holder, anchor, line, 7, SIDE_LEFT);
+        assert_eq!(holder.get_selected_text().as_deref(), Some("eta gamma"));
+        // Back inside the word: the word again.
+        selection_update_from_word(&holder, anchor, line, 13, SIDE_LEFT);
+        assert_eq!(holder.get_selected_text().as_deref(), Some("gamma"));
+    }
+
+    /// Ink (Claude Code) redraws its frame with `CSI 2K` line clears and
+    /// `CSI J`. alacritty drops a selection that intersects a cleared line,
+    /// which used to leave nothing to copy (so the old clipboard stayed).
+    /// Freezing output during the gesture keeps it.
+    #[test]
+    fn redraws_drop_the_selection_unless_output_is_frozen() {
+        let redraw = b"\x1b[2;1H\x1b[2Kworking 2\x1b[3;1H\x1b[J";
+        let holder = TerminalHolder::new(20, 5);
+        holder.process_output(b"\x1b[?1049h\x1b[1;1Htitle\r\nworking 1\r\n");
+        let line = screen_line(&holder, 1);
+        select_word_at(&holder, line, 0).expect("word");
+        assert_eq!(holder.get_selected_text().as_deref(), Some("working"));
+        holder.process_output(redraw);
+        assert_eq!(holder.get_selected_text(), None, "alacritty drops it");
+
+        select_word_at(&holder, line, 0).expect("word");
+        holder.freeze_output();
+        holder.process_output(redraw);
+        holder.process_output(b"\x1b[2;9H\x1b[2K3");
+        assert_eq!(holder.get_selected_text().as_deref(), Some("working"));
+        holder.clear_selection();
+        holder.thaw_output();
+        let mut bufs = FrameBuffers::default();
+        snapshot(&holder, &mut bufs, line, 1);
+        assert_eq!(row_text(&bufs, 0), "        3");
+    }
+
+    #[test]
+    fn freeze_holds_the_view_and_thaw_catches_up() {
+        let holder = TerminalHolder::new(10, 4);
+        feed_lines(&holder, 0..6);
+        let top = holder.with_term(|_, t| t.screen_top);
+        holder.freeze_output();
+        let generation = holder.generation_counter().load(Ordering::Acquire);
+        feed_lines(&holder, 6..40);
+        assert!(holder.is_output_frozen());
+        assert_eq!(
+            holder.with_term(|_, t| t.screen_top),
+            top,
+            "nothing applied"
+        );
+        assert_eq!(
+            holder.generation_counter().load(Ordering::Acquire),
+            generation
+        );
+        holder.thaw_output();
+        assert!(!holder.is_output_frozen());
+        let mut bufs = FrameBuffers::default();
+        let top = holder.with_term(|_, t| t.screen_top);
+        snapshot(&holder, &mut bufs, top, 4);
+        assert_eq!(top, 37, "every buffered line counted once");
+        assert_eq!(row_text(&bufs, 0), "L37");
+        assert_eq!(row_text(&bufs, 2), "L39");
+    }
+
+    #[test]
+    fn freeze_cap_drops_the_selection_and_replays() {
+        let holder = TerminalHolder::new(10, 4);
+        holder.process_output(b"word");
+        select_word_at(&holder, screen_line(&holder, 0), 1).expect("word");
+        holder.freeze_output();
+        let chunk = vec![b'x'; 1 << 20];
+        for _ in 0..4 {
+            holder.process_output(&chunk);
+        }
+        assert!(holder.is_output_frozen(), "4 MB still fits");
+        holder.process_output(b"\r\nend");
+        assert!(!holder.is_output_frozen());
+        assert_eq!(holder.get_selected_text(), None);
+        let mut bufs = FrameBuffers::default();
+        let top = holder.with_term(|_, t| t.screen_top);
+        snapshot(&holder, &mut bufs, top, 4);
+        assert_eq!(row_text(&bufs, 3), "end");
+    }
+
+    #[test]
+    fn snapshot_and_resize_during_a_freeze_replay_first() {
+        let holder = TerminalHolder::new(10, 4);
+        holder.process_output(b"keep me");
+        select_word_at(&holder, screen_line(&holder, 0), 0).expect("word");
+        holder.freeze_output();
+        holder.process_output(b"\r\nqueued");
+        // Same width: the selection survives, so the freeze goes on.
+        holder.resize(10, 5);
+        assert!(holder.is_output_frozen());
+        assert_eq!(holder.get_selected_text().as_deref(), Some("keep"));
+        let mut bufs = FrameBuffers::default();
+        let top = holder.with_term(|_, t| t.screen_top);
+        snapshot(&holder, &mut bufs, top, 2);
+        assert_eq!(row_text(&bufs, 1), "queued", "replayed before the resize");
+        // A snapshot that clears the screen drops the selection: thawed.
+        holder.process_output(b"!");
+        holder.process_snapshot(b"\x1b[H\x1b[2Jfresh");
+        assert!(!holder.is_output_frozen());
+        assert_eq!(holder.get_selected_text(), None);
+        let top = holder.with_term(|_, t| t.screen_top);
+        snapshot(&holder, &mut bufs, top, 1);
+        assert_eq!(row_text(&bufs, 0), "fresh");
     }
 }

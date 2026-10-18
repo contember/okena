@@ -305,8 +305,20 @@ void okena_rv_selection_start(OkenaRvHandle *handle, int64_t line, uint16_t col,
 void okena_rv_selection_update(OkenaRvHandle *handle, int64_t line, uint16_t col,
                                uint8_t side);
 
-/* Select the word at (line, col) (double tap). */
+/* Select the word at (line, col) (double tap). Same unit as
+ * okena_rv_selection_start_word; a blank cell selects nothing. */
 void okena_rv_select_word(OkenaRvHandle *handle, int64_t line, uint16_t col);
+
+/*
+ * Start a selection on the word at (line, col) (long press). Words keep URL,
+ * path, e-mail and flag characters (`: / . - _ ~ = @ # ? & % +`), follow soft
+ * wraps and drop trailing `. , : ; ! ?`. Returns 1 when a word was selected;
+ * later okena_rv_selection_update calls then extend char-wise from it and
+ * always keep it. Returns 0 on a blank cell and leaves the selection as it
+ * was (start a simple selection instead). okena_rv_selection_start and
+ * okena_rv_selection_clear forget the word.
+ */
+int32_t okena_rv_selection_start_word(OkenaRvHandle *handle, int64_t line, uint16_t col);
 
 /*
  * The selected text, UTF-8 and NUL-terminated (length without NUL written to
@@ -321,6 +333,21 @@ void okena_rv_selection_clear(OkenaRvHandle *handle);
 /* The selection follows its text while output scrolls (alacritty rotates it),
  * and is cleared by alt-screen switches. Read its current range from the
  * frame (sel_kind, sel_*). */
+
+/*
+ * Freeze (frozen != 0) or thaw the terminal's live output for a selection
+ * gesture. While frozen, output is buffered instead of applied, so the text
+ * under the finger stays put and redraws (which clear selected lines) cannot
+ * drop the selection; thawing replays the buffer. Freezing twice is a no-op.
+ * The terminal thaws by itself, dropping the selection, past 4 MB or 15 s of
+ * held output; a snapshot or resize replays the buffer first and ends the
+ * freeze if the selection did not survive. okena_rv_close thaws what the
+ * handle froze.
+ */
+void okena_rv_set_output_frozen(OkenaRvHandle *handle, uint8_t frozen);
+
+/* 1 while the terminal's output is frozen, else 0. Poll it during a gesture. */
+int32_t okena_rv_output_frozen(OkenaRvHandle *handle);
 
 /* ── Input and sizing ────────────────────────────────────────────────────── */
 
