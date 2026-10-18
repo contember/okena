@@ -145,12 +145,28 @@ succeeded (`hasConnected` in `connectionStore`), a drop keeps the workspace on s
 attempt budget). The pairing screen's connecting state shows elapsed seconds and offers "Retry
 now" after 6 s.
 
-App lifecycle: `App.tsx` forwards `AppState` changes. Going to the background calls
-`on_app_background`, which pauses reconnect attempts (an established session keeps running);
-Android's Doze drops packets, so attempts made there would only hang and burn the budget. Coming
-back from the background calls `on_app_foreground`: a reconnecting connection retries at once with
-a fresh budget, a `Connecting` or `Error` one restarts its connect, and a connected one is probed
-(ping with a 5 s deadline when nothing arrived for 2 s).
+App lifecycle: `App.tsx` forwards `AppState` changes. Android starts a native
+`ConnectionService` while connecting, connected or reconnecting. It runs in the app process,
+keeping the Rust runtime out of Android's cached-app freezer while the UI is hidden. Its ongoing
+notification opens the app and offers Disconnect, which tears down the Rust connection through
+the connection store before stopping the service. Pairing, observed terminal errors and explicit
+disconnect stop it; removing the app task also stops it. The service is not restarted after process
+death.
+
+The service uses `specialUse` with a terminal-session description in the manifest. Google Play
+requires a corresponding foreground-service declaration and review for this type. Notification
+permission is requested on Android 13+; denial does not prevent the service from running, but
+Android then shows it only in the active-apps task manager. No wake lock is held, so Doze and
+network changes can still interrupt a connection.
+
+When the Android service is running, going to the background keeps reconnect attempts enabled.
+Without a running service (including iOS or a rejected service start), `on_app_background` pauses
+reconnect attempts and leaves the established session running. Coming back calls
+`on_app_foreground`: a reconnecting connection retries at once with a fresh budget, a `Connecting`
+or `Error` one restarts its connect, and a connected one is probed (ping with a 5 s deadline when
+nothing arrived for 2 s). Service starts are deferred until the native activity is resumed. React
+Native pauses its JS polling timers while the activity is hidden; the Rust socket and keepalive continue independently.
+An exhausted reconnect budget is reflected in the service lifecycle when polling resumes.
 
 `init_app` installs a log sink: logcat tag `okena` on Android, unified log subsystem
 `com.contember.okena` on iOS. Okena crates log at Info (connect phases with elapsed time, resolved

@@ -7,7 +7,11 @@
  * Rust — `ConnectionManager::connect`; these cases only cover the JS side.)
  */
 
-import { createSavedServer, listFromJson, type SavedServer } from '../models/savedServer';
+import {
+  createSavedServer,
+  listFromJson,
+  type SavedServer,
+} from '../models/savedServer';
 import type { ConnectionStatus } from '../native/okena';
 import { createMemoryPersistence, type Persistence } from './persistence';
 import {
@@ -22,7 +26,9 @@ import {
 } from './connectionStore';
 import { deriveScreen } from '../navigation/navStore';
 
-function stubNative(overrides: Partial<ConnectionNative> = {}): ConnectionNative {
+function stubNative(
+  overrides: Partial<ConnectionNative> = {},
+): ConnectionNative {
   return {
     initApp: () => {},
     connect: () => 'conn-1',
@@ -49,11 +55,17 @@ function scriptedStatus(script: ConnectionStatus[]): () => ConnectionStatus {
 
 function setup(native: ConnectionNative): Persistence {
   const persistence = createMemoryPersistence();
-  configureConnectionStore({ native, persistence });
+  configureConnectionStore({
+    native,
+    persistence,
+    service: { setActive: () => {}, isRunning: () => false },
+  });
   return persistence;
 }
 
-async function persistedServers(persistence: Persistence): Promise<SavedServer[]> {
+async function persistedServers(
+  persistence: Persistence,
+): Promise<SavedServer[]> {
   const json = await persistence.getItem(SAVED_SERVERS_KEY);
   return json === null ? [] : listFromJson(json);
 }
@@ -69,7 +81,13 @@ describe('connectSavedServer', () => {
     });
 
     connectSavedServer({ connect }, server);
-    expect(connect).toHaveBeenCalledWith('okena.lan', 19100, undefined, true, undefined);
+    expect(connect).toHaveBeenCalledWith(
+      'okena.lan',
+      19100,
+      undefined,
+      true,
+      undefined,
+    );
   });
 
   it('withholds a saved token on a plaintext server too', () => {
@@ -82,7 +100,13 @@ describe('connectSavedServer', () => {
     });
 
     connectSavedServer({ connect }, server);
-    expect(connect).toHaveBeenCalledWith('okena.lan', 19100, undefined, false, undefined);
+    expect(connect).toHaveBeenCalledWith(
+      'okena.lan',
+      19100,
+      undefined,
+      false,
+      undefined,
+    );
   });
 
   it('replays an unpinned token when the binding cannot read pins', () => {
@@ -95,7 +119,13 @@ describe('connectSavedServer', () => {
     });
 
     connectSavedServer({ connect }, server, /* enforcePin */ false);
-    expect(connect).toHaveBeenCalledWith('okena.lan', 19100, 'saved-token', true, undefined);
+    expect(connect).toHaveBeenCalledWith(
+      'okena.lan',
+      19100,
+      'saved-token',
+      true,
+      undefined,
+    );
   });
 
   it('replays a saved token once the certificate is pinned', () => {
@@ -109,7 +139,13 @@ describe('connectSavedServer', () => {
     });
 
     connectSavedServer({ connect }, server);
-    expect(connect).toHaveBeenCalledWith('okena.lan', 19100, 'saved-token', true, 'fp-abc');
+    expect(connect).toHaveBeenCalledWith(
+      'okena.lan',
+      19100,
+      'saved-token',
+      true,
+      'fp-abc',
+    );
   });
 });
 
@@ -117,7 +153,11 @@ describe('connection lifecycle', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     // The store is a module singleton; drop what earlier cases left behind.
-    useConnectionStore.setState({ servers: [], activeServer: null, connId: null });
+    useConnectionStore.setState({
+      servers: [],
+      activeServer: null,
+      connId: null,
+    });
   });
 
   afterEach(() => {
@@ -140,7 +180,9 @@ describe('connection lifecycle', () => {
     store.connectTo(createSavedServer({ host: 'okena.lan', port: 19100 }));
 
     jest.advanceTimersByTime(FAST_POLL_MS * 2);
-    expect(useConnectionStore.getState().status).toEqual({ kind: 'connecting' });
+    expect(useConnectionStore.getState().status).toEqual({
+      kind: 'connecting',
+    });
 
     jest.advanceTimersByTime(FAST_POLL_MS);
     expect(useConnectionStore.getState().status).toEqual({ kind: 'connected' });
@@ -149,12 +191,19 @@ describe('connection lifecycle', () => {
   it('persists the certificate pin alongside the token it was obtained under', async () => {
     const persistence = setup(
       stubNative({
-        connectionStatus: scriptedStatus([{ kind: 'connecting' }, { kind: 'connected' }]),
+        connectionStatus: scriptedStatus([
+          { kind: 'connecting' },
+          { kind: 'connected' },
+        ]),
         getToken: () => 'fresh-token',
         getCertFingerprint: () => 'fp-abc',
       }),
     );
-    const server = createSavedServer({ host: 'okena.lan', port: 19100, tls: true });
+    const server = createSavedServer({
+      host: 'okena.lan',
+      port: 19100,
+      tls: true,
+    });
     const store = useConnectionStore.getState();
     store.addServer(server);
     store.connectTo(server);
@@ -167,19 +216,30 @@ describe('connection lifecycle', () => {
       tls: true,
     });
     expect(await persistedServers(persistence)).toEqual([
-      expect.objectContaining({ token: 'fresh-token', fingerprint: 'fp-abc', tls: true }),
+      expect.objectContaining({
+        token: 'fresh-token',
+        fingerprint: 'fp-abc',
+        tls: true,
+      }),
     ]);
   });
 
   it('records the TLS upgrade a pin implies for a server saved as plaintext', async () => {
     const persistence = setup(
       stubNative({
-        connectionStatus: scriptedStatus([{ kind: 'connecting' }, { kind: 'connected' }]),
+        connectionStatus: scriptedStatus([
+          { kind: 'connecting' },
+          { kind: 'connected' },
+        ]),
         getToken: () => 'fresh-token',
         getCertFingerprint: () => 'fp-abc',
       }),
     );
-    const server = createSavedServer({ host: 'okena.lan', port: 19100, tls: false });
+    const server = createSavedServer({
+      host: 'okena.lan',
+      port: 19100,
+      tls: false,
+    });
     const store = useConnectionStore.getState();
     store.addServer(server);
     store.connectTo(server);
@@ -194,7 +254,10 @@ describe('connection lifecycle', () => {
   it('never re-pairs in a loop when the binding cannot read pins', async () => {
     const persistence = setup(
       stubNative({
-        connectionStatus: scriptedStatus([{ kind: 'connecting' }, { kind: 'connected' }]),
+        connectionStatus: scriptedStatus([
+          { kind: 'connecting' },
+          { kind: 'connected' },
+        ]),
         getToken: () => 'saved-token',
         canReportCertFingerprint: () => false,
         getCertFingerprint: () => {
@@ -224,7 +287,10 @@ describe('connection lifecycle', () => {
   it('leaves the saved server alone when nothing was negotiated', async () => {
     const persistence = setup(
       stubNative({
-        connectionStatus: scriptedStatus([{ kind: 'connecting' }, { kind: 'connected' }]),
+        connectionStatus: scriptedStatus([
+          { kind: 'connecting' },
+          { kind: 'connected' },
+        ]),
       }),
     );
     const server = createSavedServer({
@@ -251,7 +317,11 @@ describe('reconnect handling', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
-    useConnectionStore.setState({ servers: [], activeServer: null, connId: null });
+    useConnectionStore.setState({
+      servers: [],
+      activeServer: null,
+      connId: null,
+    });
   });
 
   afterEach(() => {
@@ -285,7 +355,10 @@ describe('reconnect handling', () => {
 
   it('switches back to fast polling after a drop', () => {
     const connectionStatus = jest.fn(
-      scriptedStatus([{ kind: 'connected' }, { kind: 'reconnecting', attempt: 1 }]),
+      scriptedStatus([
+        { kind: 'connected' },
+        { kind: 'reconnecting', attempt: 1 },
+      ]),
     );
     setup(stubNative({ connectionStatus }));
     useConnectionStore.getState().connectTo(server);
@@ -297,7 +370,11 @@ describe('reconnect handling', () => {
   });
 
   it('shows the pairing screen for a first connect that has not succeeded yet', () => {
-    setup(stubNative({ connectionStatus: () => ({ kind: 'reconnecting', attempt: 2 }) }));
+    setup(
+      stubNative({
+        connectionStatus: () => ({ kind: 'reconnecting', attempt: 2 }),
+      }),
+    );
     useConnectionStore.getState().connectTo(server);
     jest.advanceTimersByTime(FAST_POLL_MS);
     expect(deriveScreen(useConnectionStore.getState())).toBe('pairing');
@@ -365,6 +442,53 @@ describe('reconnect handling', () => {
     expect(onAppBackground).toHaveBeenCalledTimes(1);
     store.onAppStateChange('active');
     expect(onAppForeground).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps reconnects running in the background only while the service is running', () => {
+    const onAppBackground = jest.fn();
+    setup(stubNative({ onAppBackground }));
+    const isRunning = jest.fn(() => true);
+    configureConnectionStore({ service: { setActive: jest.fn(), isRunning } });
+    useConnectionStore.getState().onAppStateChange('background');
+    expect(onAppBackground).not.toHaveBeenCalled();
+
+    useConnectionStore.getState().onAppStateChange('active');
+    isRunning.mockReturnValue(false);
+    useConnectionStore.getState().onAppStateChange('background');
+    expect(onAppBackground).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the service through reconnects and stops it when retries fail', () => {
+    setup(
+      stubNative({
+        connectionStatus: scriptedStatus([
+          { kind: 'connected' },
+          { kind: 'reconnecting', attempt: 1 },
+          { kind: 'error', message: 'offline' },
+        ]),
+      }),
+    );
+    const setActive = jest.fn();
+    configureConnectionStore({ service: { setActive, isRunning: () => true } });
+    useConnectionStore.getState().connectTo(server);
+    expect(setActive).toHaveBeenLastCalledWith(true);
+    jest.advanceTimersByTime(FAST_POLL_MS + SLOW_POLL_MS);
+    expect(setActive).toHaveBeenLastCalledWith(true);
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(setActive).toHaveBeenLastCalledWith(false);
+    useConnectionStore.getState().retryNow();
+    expect(setActive).toHaveBeenLastCalledWith(true);
+    useConnectionStore.getState().disconnect();
+    expect(setActive).toHaveBeenLastCalledWith(false);
+  });
+
+  it('does not keep a service while waiting for pairing', () => {
+    setup(stubNative({ connectionStatus: () => ({ kind: 'pairing' }) }));
+    const setActive = jest.fn();
+    configureConnectionStore({ service: { setActive, isRunning: () => true } });
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(setActive).toHaveBeenLastCalledWith(false);
   });
 
   it('resumes polling on foreground when the transport restarted an errored connect', () => {

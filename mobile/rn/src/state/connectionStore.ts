@@ -10,7 +10,8 @@
  *   - status polling: ~500ms while connecting/pairing/reconnecting, ~2s once
  *     connected (matching the Dart `_startPolling(fast:)` cadence),
  *   - app lifecycle: tells the transport when the app goes to the background
- *     (pause reconnects) and returns (retry now), and "Retry now",
+ *     (pause reconnects unless a foreground service is running) and returns
+ *     (retry now), and "Retry now",
  *   - persisting the auth token and its certificate pin back onto the saved
  *     server once paired.
  *
@@ -20,6 +21,11 @@
  * is constructed lazily so merely importing this module never calls it. Tests
  * inject a mock `OkenaNative` + an in-memory `Persistence`.
  */
+
+import {
+  connectionService,
+  type ConnectionService,
+} from '../native/connectionService';
 
 import { create, type StoreApi, type UseBoundStore } from 'zustand';
 
@@ -33,10 +39,7 @@ import {
   withSavedServer,
   type SavedServer,
 } from '../models/savedServer';
-import {
-  asyncStoragePersistence,
-  type Persistence,
-} from './persistence';
+import { asyncStoragePersistence, type Persistence } from './persistence';
 
 /** AsyncStorage key for the persisted server list (matches Dart `_kSavedServersKey`). */
 export const SAVED_SERVERS_KEY = 'saved_servers';
@@ -71,12 +74,18 @@ export type ConnectionNative = Pick<
 >;
 
 /** The app lifecycle states the store reacts to (RN `AppStateStatus`). */
-export type AppLifecycleState = 'active' | 'background' | 'inactive' | 'unknown' | 'extension';
+export type AppLifecycleState =
+  | 'active'
+  | 'background'
+  | 'inactive'
+  | 'unknown'
+  | 'extension';
 
 /** Dependencies the store calls out to. Overridable for tests. */
 export interface ConnectionDeps {
   native: ConnectionNative;
   persistence: Persistence;
+  service: ConnectionService;
 }
 
 /**
@@ -155,7 +164,7 @@ export interface ConnectionState {
    */
   retryNow(): void;
   /**
-   * Feed RN `AppState` changes in. `background` pauses reconnect attempts;
+   * Feed RN `AppState` changes in. Without a running service, `background` pauses reconnects;
    * returning to `active` from the background retries immediately.
    */
   onAppStateChange(next: AppLifecycleState): void;
@@ -174,6 +183,7 @@ function deps(): ConnectionDeps {
     resolvedDeps = {
       native: injectedDeps.native ?? getOkenaNative(),
       persistence: injectedDeps.persistence ?? asyncStoragePersistence,
+      service: injectedDeps.service ?? connectionService,
     };
   }
   return resolvedDeps;
@@ -184,7 +194,9 @@ function deps(): ConnectionDeps {
  * the first action runs — e.g. at the top of a test, or once at app start if
  * you wire a custom native module. Subsequent calls reset the resolved cache.
  */
-export function configureConnectionStore(overrides: Partial<ConnectionDeps>): void {
+export function configureConnectionStore(
+  overrides: Partial<ConnectionDeps>,
+): void {
   injectedDeps = { ...injectedDeps, ...overrides };
   resolvedDeps = null;
 }
@@ -210,7 +222,10 @@ function startPolling(
 ): void {
   stopPolling();
   pollFast = fast;
-  pollTimer = setInterval(() => pollStatus(get, set), fast ? FAST_POLL_MS : SLOW_POLL_MS);
+  pollTimer = setInterval(
+    () => pollStatus(get, set),
+    fast ? FAST_POLL_MS : SLOW_POLL_MS,
+  );
 }
 
 /** A connect or reconnect is in flight. */
@@ -307,6 +322,9 @@ function pollStatus(
   const newStatus = native.connectionStatus(connId);
   const activity = native.secondsSinceActivity(connId);
 
+  deps().service.setActive(
+    newStatus.kind === 'connected' || isAttempting(newStatus),
+  );
   set({ status: newStatus, secondsSinceActivity: activity });
 
   if (newStatus.kind === 'connected' && oldStatus.kind !== 'connected') {
@@ -316,7 +334,10 @@ function pollStatus(
     persistCredentials(get, set);
   }
 
-  if (isAttempting(newStatus) && (!isAttempting(oldStatus) || get().connectingSince === null)) {
+  if (
+    isAttempting(newStatus) &&
+    (!isAttempting(oldStatus) || get().connectingSince === null)
+  ) {
     // Dropped (or restarted): follow the reconnect closely.
     set({ connectingSince: Date.now() });
   }
@@ -403,6 +424,7 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         native.disconnect(connId);
         stopPolling();
       }
+      deps().service.setActive(true);
       const newConnId = connectSavedServer(
         native,
         server,
@@ -426,7 +448,10 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         await deps().native.pair(connId, code);
       } catch (e) {
         set({
-          status: { kind: 'error', message: e instanceof Error ? e.message : String(e) },
+          status: {
+            kind: 'error',
+            message: e instanceof Error ? e.message : String(e),
+          },
         });
       }
     },
@@ -435,6 +460,7 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
       const { connId } = get();
       if (connId) deps().native.disconnect(connId);
       stopPolling();
+      deps().service.setActive(false);
       set({
         connId: null,
         activeServer: null,
@@ -453,9 +479,13 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         if (activeServer) get().connectTo(activeServer);
         return;
       }
+      deps().service.setActive(true);
       native.reconnectNow(connId);
       // `hasConnected` is kept, so a reconnecting user stays in the workspace.
-      set({ status: native.connectionStatus(connId), connectingSince: Date.now() });
+      set({
+        status: native.connectionStatus(connId),
+        connectingSince: Date.now(),
+      });
       startPolling(get, set, /* fast */ true);
     },
 
@@ -464,7 +494,7 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
       lastAppState = next;
       const native = deps().native;
       if (next === 'background') {
-        native.onAppBackground();
+        if (!deps().service.isRunning()) native.onAppBackground();
         return;
       }
       if (next !== 'active' || previous !== 'background') return;
@@ -473,7 +503,8 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
       if (!connId) return;
       // The transport may have restarted an errored connect: resume polling.
       pollStatus(get, set);
-      if (get().status.kind !== 'connected') startPolling(get, set, /* fast */ true);
+      if (get().status.kind !== 'connected')
+        startPolling(get, set, /* fast */ true);
     },
   }));
 
@@ -492,7 +523,8 @@ export function connectionStore(): StoreApi<ConnectionState> {
 export const selectIsConnected = (s: ConnectionState): boolean =>
   s.status.kind === 'connected';
 /** True while pairing. Mirrors Dart `isPairing`. */
-export const selectIsPairing = (s: ConnectionState): boolean => s.status.kind === 'pairing';
+export const selectIsPairing = (s: ConnectionState): boolean =>
+  s.status.kind === 'pairing';
 /** True while connecting. Mirrors Dart `isConnecting`. */
 export const selectIsConnecting = (s: ConnectionState): boolean =>
   s.status.kind === 'connecting';
