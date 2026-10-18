@@ -507,6 +507,69 @@ impl ConnectionManager {
         }
     }
 
+    /// Retry a connection right away with a fresh attempt budget.
+    ///
+    /// - `Reconnecting`: abort the in-flight attempt / backoff sleep and dial
+    ///   now; terminals and cached state stay.
+    /// - `Connecting` or `Error`: restart the whole connect (health → token →
+    ///   WS), again keeping terminals and cached state.
+    /// - `Connected`: probe the session; a dead socket reconnects within a few
+    ///   seconds, a live one is left alone.
+    /// - `Pairing` / `Disconnected`: nothing to retry.
+    pub fn reconnect_now(&self, conn_id: &str) {
+        let connections = self.connections.read();
+        if let Some(conn) = connections.get(conn_id) {
+            Self::retry_connection(conn_id, conn);
+        }
+    }
+
+    fn retry_connection(conn_id: &str, conn: &MobileConnection) {
+        let status = conn.status.read().clone();
+        match status {
+            ConnectionStatus::Reconnecting { attempt } => {
+                log::info!("[{conn_id}] retry now (was reconnecting, attempt {attempt})");
+                conn.client.read().reconnect_now();
+            }
+            ConnectionStatus::Connecting | ConnectionStatus::Error(_) => {
+                log::info!("[{conn_id}] retry now: restarting connect");
+                *conn.status.write() = ConnectionStatus::Connecting;
+                conn.client.write().reconnect();
+            }
+            ConnectionStatus::Connected => {
+                conn.client.read().probe_connection();
+            }
+            ConnectionStatus::Pairing | ConnectionStatus::Disconnected => {}
+        }
+    }
+
+    /// The app came to the foreground: resume reconnecting and retry every
+    /// connection immediately (see [`Self::reconnect_now`]). The kick goes out
+    /// before the resume so a loop waiting in the background starts its next
+    /// attempt with a fresh budget.
+    pub fn on_app_foreground(&self) {
+        let connections = self.connections.read();
+        for (conn_id, conn) in connections.iter() {
+            log::info!(
+                "[{conn_id}] app foreground, status {:?}",
+                *conn.status.read()
+            );
+            Self::retry_connection(conn_id, conn);
+            conn.client.read().set_reconnect_paused(false);
+        }
+    }
+
+    /// The app went to the background: stop dialing. An established session
+    /// is kept (and keeps its keepalive); if it dies, the reconnect loop waits
+    /// for the foreground instead of burning its budget on attempts that
+    /// Android's Doze would drop anyway.
+    pub fn on_app_background(&self) {
+        let connections = self.connections.read();
+        for (conn_id, conn) in connections.iter() {
+            log::info!("[{conn_id}] app background, pausing reconnects");
+            conn.client.read().set_reconnect_paused(true);
+        }
+    }
+
     /// Pair with the remote server using a pairing code.
     pub fn pair(&self, conn_id: &str, code: &str) {
         let connections = self.connections.read();
@@ -767,6 +830,7 @@ impl ConnectionManager {
 
             match event {
                 ConnectionEvent::StatusChanged { status, .. } => {
+                    log::info!("[{conn_id}] status {status:?}");
                     *conn.status.write() = status;
                 }
                 ConnectionEvent::TokenObtained {

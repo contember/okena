@@ -9,12 +9,15 @@ use crate::client::manager::ConnectionManager;
 
 /// Connection status returned via FFI.
 ///
-/// Simplified version of okena_core's ConnectionStatus — collapses `Reconnecting { attempt }`
-/// into `Connecting` since mobile UI doesn't need the attempt count.
+/// Mirrors okena_transport's ConnectionStatus. `Reconnecting` stays distinct
+/// from `Connecting`: the UI keeps a once-connected user in the workspace (with
+/// a banner) while the transport re-dials, instead of sending them back to the
+/// pairing screen.
 #[derive(Debug, Clone)]
 pub enum ConnectionStatus {
     Disconnected,
     Connecting,
+    Reconnecting { attempt: u32 },
     Connected,
     Pairing,
     Error { message: String },
@@ -29,8 +32,8 @@ impl From<okena_transport::client::ConnectionStatus> for ConnectionStatus {
             okena_transport::client::ConnectionStatus::Connecting => ConnectionStatus::Connecting,
             okena_transport::client::ConnectionStatus::Connected => ConnectionStatus::Connected,
             okena_transport::client::ConnectionStatus::Pairing => ConnectionStatus::Pairing,
-            okena_transport::client::ConnectionStatus::Reconnecting { .. } => {
-                ConnectionStatus::Connecting
+            okena_transport::client::ConnectionStatus::Reconnecting { attempt } => {
+                ConnectionStatus::Reconnecting { attempt }
             }
             okena_transport::client::ConnectionStatus::Error(msg) => {
                 ConnectionStatus::Error { message: msg }
@@ -42,4 +45,22 @@ impl From<okena_transport::client::ConnectionStatus> for ConnectionStatus {
 /// Get current connection status.
 pub fn connection_status(conn_id: String) -> ConnectionStatus {
     ConnectionManager::get().get_status(&conn_id).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnecting_is_not_collapsed_into_connecting() {
+        let status: ConnectionStatus =
+            okena_transport::client::ConnectionStatus::Reconnecting { attempt: 3 }.into();
+        assert!(matches!(status, ConnectionStatus::Reconnecting { attempt: 3 }));
+
+        let ffi: crate::types::ConnectionStatus = status.into();
+        assert!(matches!(
+            ffi,
+            crate::types::ConnectionStatus::Reconnecting { attempt: 3 }
+        ));
+    }
 }

@@ -27,6 +27,7 @@
 
 mod api;
 mod client;
+mod logging;
 pub mod render;
 mod types;
 
@@ -50,7 +51,30 @@ uniffi::setup_scaffolding!();
 /// Initialize the app. Must be called once at startup before any other fn.
 #[uniffi::export]
 pub fn init_app() {
+    logging::init();
     ConnectionManager::init();
+}
+
+/// The app returned to the foreground: resume reconnect attempts and retry
+/// every connection now with a fresh attempt budget (an established session
+/// gets a quick liveness probe instead).
+#[uniffi::export]
+pub fn on_app_foreground() {
+    ConnectionManager::get().on_app_foreground();
+}
+
+/// The app went to the background: pause reconnect attempts until
+/// [`on_app_foreground`]. Established sessions are left running.
+#[uniffi::export]
+pub fn on_app_background() {
+    ConnectionManager::get().on_app_background();
+}
+
+/// Retry one connection now ("Retry now" in the UI): skips the backoff and
+/// resets the attempt budget, keeping terminals and cached state.
+#[uniffi::export]
+pub fn reconnect_now(conn_id: String) {
+    ConnectionManager::get().reconnect_now(&conn_id);
 }
 
 /// Connect to an Okena remote server. Returns a connection ID.
@@ -108,9 +132,8 @@ pub fn disconnect(conn_id: String) {
 /// Get current connection status.
 #[uniffi::export]
 pub fn connection_status(conn_id: String) -> ConnectionStatus {
-    // Delegate to the native api fn, which already maps okena-core's status
-    // (collapsing `Reconnecting` into `Connecting`) into its own enum; we then
-    // convert that into our uniffi enum.
+    // Delegate to the native api fn, which maps okena-transport's status into
+    // its own enum; we then convert that into our uniffi enum.
     crate::api::connection::connection_status(conn_id).into()
 }
 
