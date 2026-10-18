@@ -172,6 +172,14 @@ An exhausted reconnect budget is reflected in the service lifecycle when polling
 `com.contember.okena` on iOS. Okena crates log at Info (connect phases with elapsed time, resolved
 address, reconnect attempts, ping timeouts), dependencies at Warn. Tokens are never logged.
 
+### Project menus
+
+Both the drawer and compact switcher read the in-memory workspace store; opening them does not
+fetch remote state. Their `FlatList` views render a window of rows, including folder headers and
+nested worktrees in manual order. Drawer terminal expansion remains part of its project row.
+Icons reuse density-sized raster images of their Skia paths through React Native `Image`, with
+native tinting; each icon instance does not allocate a Skia canvas.
+
 ## Shared Core: okena-core
 
 `crates/okena-core/` contains everything shared between desktop and mobile (reused **unchanged** by
