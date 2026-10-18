@@ -41,6 +41,15 @@ object RustBridge {
 
   @JvmStatic external fun selectWord(handle: Long, line: Long, col: Int)
 
+  /** Long press: select the word at (line, col); false on a blank cell (nothing selected). */
+  @JvmStatic external fun selectionStartWord(handle: Long, line: Long, col: Int): Boolean
+
+  /** Hold back (true) or replay and resume (false) the terminal's live output. */
+  @JvmStatic external fun setOutputFrozen(handle: Long, frozen: Boolean)
+
+  /** False again once the freeze ended, also by its 4 MB / 15 s cap. */
+  @JvmStatic external fun outputFrozen(handle: Long): Boolean
+
   @JvmStatic external fun selectionText(handle: Long): String?
 
   @JvmStatic external fun selectionClear(handle: Long)

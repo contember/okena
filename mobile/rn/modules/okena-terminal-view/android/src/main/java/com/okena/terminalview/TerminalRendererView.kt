@@ -44,9 +44,11 @@ import kotlin.math.roundToInt
  *     [EdgeEffect] at both ends. In mouse mode (`wheel` returns true) a drag sends discrete
  *     wheel notches and the view does not move.
  *   - **Overlays.** Selection, cursor and the scroll indicator are drawn over the rows.
- *   - **Gestures.** Tap → [Listener.onTap]; double tap selects and copies a word; long press
- *     starts a selection, drag extends it (auto-scrolls at the edges), release copies it;
- *     pinch scales live and reports the snapped size on release.
+ *   - **Gestures.** Tap → [Listener.onTap] after [TAP_DELAY_MS] unless a double tap follows;
+ *     double tap selects and copies a word; long press selects the word under the finger (or
+ *     starts at a blank cell), drag extends it char-wise (auto-scrolls at the edges), release
+ *     copies it, a cancelled touch does not. Live output is frozen while selecting.
+ *     Pinch scales live and reports the snapped size on release.
  *   - **Sizing.** cols/rows from the glyph advance and line height (as `measureCell` in
  *     TerminalView.tsx), `resizeLocal` at once, `resizeTerminal` at once for the first size
  *     and debounced by 200 ms after that.
@@ -66,6 +68,7 @@ class TerminalRendererView(context: Context) : View(context) {
     fun onFontSizeChange(size: Double)
     fun onSelectionCopied(text: String)
     fun onScrollStateChange(atBottom: Boolean)
+    fun onOutputPaused(paused: Boolean)
   }
 
   var listener: Listener? = null
@@ -135,9 +138,11 @@ class TerminalRendererView(context: Context) : View(context) {
   }
 
   fun clearSelection() {
-    if (handle != 0L) RustBridge.selectionClear(handle)
-    selecting = false
-    autoScroll = 0f
+    if (selecting) {
+      finishSelection(copy = false)
+    } else if (handle != 0L) {
+      RustBridge.selectionClear(handle)
+    }
   }
 
   // ── State ────────────────────────────────────────────────────────────────
@@ -205,6 +210,11 @@ class TerminalRendererView(context: Context) : View(context) {
       contentDirty = true
       redraw = true
     }
+    if (selecting && outputPaused && !RustBridge.outputFrozen(handle)) {
+      // The freeze hit its cap, or a snapshot dropped the selection.
+      finishSelection(copy = false)
+      redraw = true
+    }
     if (stepFling()) redraw = true
     if (stepAutoScroll()) redraw = true
     if (!topEdge.isFinished || !bottomEdge.isFinished) redraw = true
@@ -262,10 +272,17 @@ class TerminalRendererView(context: Context) : View(context) {
     removeCallbacks(resizeRunnable)
     removeCallbacks(reassertRunnable)
     removeCallbacks(clearWordRunnable)
+    removeCallbacks(tapRunnable)
     scroller.forceFinished(true)
     flingWheel = false
     selecting = false
     autoScroll = 0f
+    model.hold = false
+    if (outputPaused) {
+      // Closing the handle below thaws the output it froze.
+      outputPaused = false
+      listener?.onOutputPaused(false)
+    }
     if (framePosted) {
       choreographer.removeFrameCallback(frameCallback)
       framePosted = false
@@ -410,6 +427,12 @@ class TerminalRendererView(context: Context) : View(context) {
     if (!present) return
     if ((frame.screenLines != sentRows || frame.cols != sentCols) && sentCols > 0) scheduleReassert()
     model.update(frame.firstLine, frame.screenTopLine, frame.screenLines, rows, frame.reflowEpoch, frame.cursorLine)
+    if (selecting && (frame.screenTopLine != selScreenTop || frame.reflowEpoch != selEpoch)) {
+      // The text moved under the finger (a forced replay): re-extend to it.
+      selScreenTop = frame.screenTopLine
+      selEpoch = frame.reflowEpoch
+      post { if (selecting) extendSelection(lastX, lastY) }
+    }
     val wanted = floor(model.top).toLong()
     if (wanted != top) {
       top = wanted
@@ -752,6 +775,17 @@ class TerminalRendererView(context: Context) : View(context) {
   private var autoScroll = 0f
   private var lastX = 0f
   private var lastY = 0f
+  private var startX = 0f
+  private var startY = 0f
+  /** The long press began on a word (selected at once), not on a blank cell. */
+  private var selectionOnWord = false
+  /** The finger moved at least a cell since the long press began. */
+  private var selectionMoved = false
+  /** This view froze the terminal's output for the running selection. */
+  private var outputPaused = false
+  /** Layout the running selection was last extended on (see [ensureFrame]). */
+  private var selScreenTop = 0L
+  private var selEpoch = 0
 
   private class Hit(val line: Long, val col: Int, val side: Int)
 
@@ -779,11 +813,21 @@ class TerminalRendererView(context: Context) : View(context) {
     val m = metrics ?: return
     if (handle == 0L || frame.status != RvFrame.STATUS_OK) return
     removeCallbacks(clearWordRunnable)
+    removeCallbacks(tapRunnable)
     val h = hit(x, y, m)
-    RustBridge.selectionStart(handle, h.line, h.col, h.side, RvFrame.SELECT_SIMPLE)
+    // Hold output so the text stays under the finger and redraws cannot drop the selection.
+    setOutputPaused(true)
+    // A still press selects the word under the finger; a drag extends from it.
+    selectionOnWord = RustBridge.selectionStartWord(handle, h.line, h.col)
+    if (!selectionOnWord) RustBridge.selectionStart(handle, h.line, h.col, h.side, RvFrame.SELECT_SIMPLE)
     selecting = true
+    selectionMoved = false
+    selScreenTop = frame.screenTopLine
+    selEpoch = frame.reflowEpoch
     lastX = x
     lastY = y
+    startX = x
+    startY = y
     parent?.requestDisallowInterceptTouchEvent(true)
     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
     invalidate()
@@ -793,7 +837,10 @@ class TerminalRendererView(context: Context) : View(context) {
     val m = metrics ?: return
     lastX = x
     lastY = y
-    val edge = m.cellHeight
+    if (!selectionMoved && Math.hypot((x - startX).toDouble(), (y - startY).toDouble()) >= m.cellWidth) {
+      selectionMoved = true
+    }
+    val edge = m.cellHeight * AUTO_SCROLL_ZONE_ROWS
     autoScroll = when {
       y < edge -> -((edge - y) / edge).coerceIn(0.1f, 1f) * AUTO_SCROLL_MAX
       y > height - edge -> ((y - (height - edge)) / edge).coerceIn(0.1f, 1f) * AUTO_SCROLL_MAX
@@ -818,7 +865,8 @@ class TerminalRendererView(context: Context) : View(context) {
   private fun copySelection(clearAfterMs: Long = 0L) {
     if (handle == 0L) return
     val text = RustBridge.selectionText(handle)
-    if (!text.isNullOrEmpty()) {
+    // Never replace the clipboard with nothing but blanks.
+    if (text != null && text.isNotBlank()) {
       val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager?
       clipboard?.setPrimaryClip(ClipData.newPlainText("terminal", text))
       listener?.onSelectionCopied(text)
@@ -832,10 +880,30 @@ class TerminalRendererView(context: Context) : View(context) {
 
   private val clearWordRunnable = Runnable { if (handle != 0L) RustBridge.selectionClear(handle) }
 
-  private fun finishSelection() {
+  /**
+   * End the selection gesture: copy (a word, or a drag of at least a cell; never jitter on a
+   * blank cell) unless [copy] is false, clear, then resume output.
+   */
+  private fun finishSelection(copy: Boolean) {
     selecting = false
     autoScroll = 0f
-    copySelection()
+    if (copy && (selectionOnWord || selectionMoved)) {
+      copySelection()
+    } else if (handle != 0L) {
+      RustBridge.selectionClear(handle)
+    }
+    setOutputPaused(false)
+    invalidate()
+  }
+
+  /** Freeze or resume live output. Frozen, the view holds its absolute position. */
+  private fun setOutputPaused(paused: Boolean) {
+    if (handle == 0L || paused == outputPaused) return
+    outputPaused = paused
+    model.hold = paused
+    RustBridge.setOutputFrozen(handle, paused)
+    contentDirty = true
+    listener?.onOutputPaused(paused)
   }
 
   // ── Pinch ────────────────────────────────────────────────────────────────
@@ -892,6 +960,10 @@ class TerminalRendererView(context: Context) : View(context) {
   /** The touch that stopped a fling is not a tap. */
   private var downStoppedFling = false
 
+  private var tapCol = 0
+  private var tapRow = 0
+  private val tapRunnable = Runnable { listener?.onTap(tapCol, tapRow) }
+
   private val gestures = GestureDetector(
     context,
     object : GestureDetector.SimpleOnGestureListener() {
@@ -905,17 +977,22 @@ class TerminalRendererView(context: Context) : View(context) {
           return true
         }
         val (col, row) = screenCell(e.x, e.y, m)
-        listener?.onTap(col, row)
+        // Wait out a possible double tap: its first tap must not summon the keyboard.
+        removeCallbacks(tapRunnable)
+        tapCol = col
+        tapRow = row
+        postDelayed(tapRunnable, TAP_DELAY_MS)
         return true
       }
 
       override fun onDoubleTap(e: MotionEvent): Boolean {
+        removeCallbacks(tapRunnable)
         if (pinchedThisGesture) return false
         val m = metrics ?: return false
         if (handle == 0L || frame.status != RvFrame.STATUS_OK) return false
         val h = hit(e.x, e.y, m)
         removeCallbacks(clearWordRunnable)
-        RustBridge.selectWord(handle, h.line, h.col)
+        if (!RustBridge.selectionStartWord(handle, h.line, h.col)) return true
         // Keep the word highlighted briefly so the copy is visible.
         copySelection(clearAfterMs = WORD_FLASH_MS)
         return true
@@ -978,7 +1055,7 @@ class TerminalRendererView(context: Context) : View(context) {
       }
       MotionEvent.ACTION_UP -> {
         if (selecting) {
-          finishSelection()
+          finishSelection(copy = true)
         } else if (dragging && !pinchedThisGesture) {
           val vt = velocity
           vt?.computeCurrentVelocity(1000, maxFling.toFloat())
@@ -989,7 +1066,8 @@ class TerminalRendererView(context: Context) : View(context) {
         performClick()
       }
       MotionEvent.ACTION_CANCEL -> {
-        if (selecting) finishSelection()
+        // The system took the touch: never copy what the user did not finish.
+        if (selecting) finishSelection(copy = false)
         endTouch()
       }
     }
@@ -1048,6 +1126,10 @@ class TerminalRendererView(context: Context) : View(context) {
     const val REASSERT_DELAY_MS = 300L
     const val MAX_REASSERTS = 2
     const val WORD_FLASH_MS = 250L
+    /** A single tap reports after this delay unless a double tap follows (iOS: tapDelay). */
+    const val TAP_DELAY_MS = 250L
+    /** Height of the edge auto-scroll zones during a selection drag, in rows. */
+    const val AUTO_SCROLL_ZONE_ROWS = 2.5f
     const val MIN_FONT_SIZE = 8.0
     const val MAX_FONT_SIZE = 20.0
     const val FONT_STEP = 0.5

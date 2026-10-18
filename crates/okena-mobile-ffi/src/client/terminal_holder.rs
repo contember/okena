@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Source of render generations. Global, so a holder that replaces another
 /// under the same id never repeats a value a view has already seen.
@@ -29,6 +29,23 @@ pub const GENERATION_DEAD: u64 = 1 << 63;
 /// each scrolled line needs at least one byte, so the parked display offset
 /// (capped at the limit by alacritty) can never saturate within one step.
 const MAX_OUTPUT_STEP: usize = 4096;
+
+/// Word separators for semantic (word) selection. alacritty's default also
+/// stops at `:`, which cuts URLs to "https" and `file.rs:12` to `file.rs`.
+/// This set keeps URL, path, e-mail and flag characters (`: / . - _ ~ = @ # ?
+/// & % +`) inside a word and still splits on whitespace, quotes, brackets,
+/// `,`, `|` and the box-drawing and bullet glyphs TUIs (Claude Code, Ink)
+/// draw around text. A trailing `.`, `,` or `:` is trimmed separately, see
+/// `render::select_word_at`.
+pub(crate) const SEMANTIC_ESCAPE_CHARS: &str =
+    ",`|\"' ()[]{}<>\t\u{a0}│┃║╎╏┆┇┊┋─━═╭╮╰╯┌┐└┘├┤┬┴┼⎿⏺●•";
+
+/// Cap on PTY bytes buffered while output is frozen for a selection; past
+/// it the selection is dropped and the bytes replayed.
+pub(crate) const FREEZE_MAX_BYTES: usize = 4 << 20;
+
+/// Cap on how long output stays frozen; checked when output arrives.
+pub(crate) const FREEZE_MAX_DURATION: Duration = Duration::from_secs(15);
 
 /// Event listener for the mobile mirror `Term`.
 ///
@@ -122,6 +139,15 @@ pub struct TerminalHolder {
     notify_parser: Mutex<Parser>,
     /// [`monotonic_ms`] of the last live output; 0 = none yet.
     last_output_at: AtomicU64,
+    /// Live output held back while a selection gesture runs, see
+    /// [`TerminalHolder::freeze_output`]. Lock order: `freeze`, then `term`.
+    freeze: Mutex<Option<OutputFreeze>>,
+}
+
+/// Output buffered while frozen.
+struct OutputFreeze {
+    buf: Vec<u8>,
+    since: Instant,
 }
 
 /// Bookkeeping behind the native views' absolute line numbers.
@@ -178,6 +204,10 @@ impl TerminalHolder {
     }
 
     fn with_config(cols: u16, rows: u16, config: TermConfig) -> Self {
+        let config = TermConfig {
+            semantic_escape_chars: SEMANTIC_ESCAPE_CHARS.to_owned(),
+            ..config
+        };
         let term_size = TermSize::new(cols as usize, rows as usize);
         let output_step = config
             .scrolling_history
@@ -203,6 +233,7 @@ impl TerminalHolder {
             notification: AtomicBool::new(false),
             notify_parser: Mutex::new(Parser::new()),
             last_output_at: AtomicU64::new(0),
+            freeze: Mutex::new(None),
         }
     }
 
@@ -233,16 +264,83 @@ impl TerminalHolder {
             self.notification.store(true, Ordering::Relaxed);
         }
         self.last_output_at.store(monotonic_ms(), Ordering::Relaxed);
+        let mut freeze = self.freeze.lock();
+        if let Some(frozen) = freeze.as_mut() {
+            frozen.buf.extend_from_slice(data);
+            if frozen.buf.len() > FREEZE_MAX_BYTES || frozen.since.elapsed() > FREEZE_MAX_DURATION {
+                // Held too long or too much: drop the selection, catch up.
+                let frozen = freeze.take();
+                self.term.lock().selection = None;
+                if let Some(frozen) = frozen {
+                    self.feed(&frozen.buf);
+                }
+            }
+            return;
+        }
         self.feed(data);
     }
 
     /// Feed a snapshot: the server's rendered grid, replayed on every
     /// (re)subscribe. It is state, not activity, so it touches neither the
-    /// unseen flags nor the output timestamp.
+    /// unseen flags nor the output timestamp. Output frozen before it is
+    /// replayed first, so the snapshot lands in order.
     pub fn process_snapshot(&self, data: &[u8]) {
+        let mut freeze = self.freeze.lock();
+        self.replay_frozen(&mut freeze);
         let bell = self.bell.load(Ordering::Relaxed);
         self.feed(data);
         self.bell.store(bell, Ordering::Relaxed);
+        self.end_freeze_if_unselected(&mut freeze);
+    }
+
+    /// Hold back live output (a selection gesture started): bytes are
+    /// buffered instead of applied, so the text under the finger stays put
+    /// and redraws cannot drop the selection. Idempotent. Ended by
+    /// [`Self::thaw_output`], or by the caps ([`FREEZE_MAX_BYTES`],
+    /// [`FREEZE_MAX_DURATION`]), which also drop the selection.
+    pub fn freeze_output(&self) {
+        let mut freeze = self.freeze.lock();
+        if freeze.is_none() {
+            *freeze = Some(OutputFreeze {
+                buf: Vec::new(),
+                since: Instant::now(),
+            });
+        }
+    }
+
+    /// Apply the output held back by [`Self::freeze_output`] and resume live
+    /// output. No-op when not frozen.
+    pub fn thaw_output(&self) {
+        let mut freeze = self.freeze.lock();
+        if let Some(frozen) = freeze.take()
+            && !frozen.buf.is_empty()
+        {
+            self.feed(&frozen.buf);
+        }
+    }
+
+    /// Whether live output is currently held back.
+    pub fn is_output_frozen(&self) -> bool {
+        self.freeze.lock().is_some()
+    }
+
+    /// Apply the buffered bytes now but stay frozen (a snapshot or resize
+    /// must not overtake output that arrived before it).
+    fn replay_frozen(&self, freeze: &mut Option<OutputFreeze>) {
+        if let Some(frozen) = freeze.as_mut()
+            && !frozen.buf.is_empty()
+        {
+            let buf = std::mem::take(&mut frozen.buf);
+            self.feed(&buf);
+        }
+    }
+
+    /// After a forced replay: once the selection is gone there is nothing
+    /// left to protect, so live output resumes.
+    fn end_freeze_if_unselected(&self, freeze: &mut Option<OutputFreeze>) {
+        if freeze.is_some() && self.term.lock().selection.is_none() {
+            *freeze = None;
+        }
     }
 
     /// The current activity signals.
@@ -483,6 +581,8 @@ impl TerminalHolder {
     /// the oldest line keeps its number; the reflow epoch tells native views
     /// that other lines may have moved.
     pub fn resize(&self, cols: u16, rows: u16) {
+        let mut freeze = self.freeze.lock();
+        self.replay_frozen(&mut freeze);
         let mut term = self.term.lock();
         let alt = term.mode().contains(TermMode::ALT_SCREEN);
         let before = term.grid().history_size() as i64;
@@ -501,6 +601,8 @@ impl TerminalHolder {
         drop(term);
         *self.cols.lock() = cols;
         *self.rows.lock() = rows;
+        self.end_freeze_if_unselected(&mut freeze);
+        drop(freeze);
         self.changed();
     }
 

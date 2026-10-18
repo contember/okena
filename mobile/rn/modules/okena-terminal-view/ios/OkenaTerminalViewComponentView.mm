@@ -81,6 +81,10 @@ static uint32_t OTVArgb(double value)
     auto emitter = [weakSelf terminalEventEmitter];
     if (emitter) emitter->onScrollStateChange({.atBottom = (bool)atBottom});
   };
+  view.onOutputPaused = ^(BOOL paused) {
+    auto emitter = [weakSelf terminalEventEmitter];
+    if (emitter) emitter->onOutputPausedChange({.paused = (bool)paused});
+  };
 
   _view = view;
   self.contentView = view;

@@ -85,6 +85,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   @objc public var onSelectionCopied: ((String) -> Void)?
   /// The viewport moved to (true) or away from (false) the live bottom.
   @objc public var onScrollStateChange: ((Bool) -> Void)?
+  /// Live output was frozen (true) for a selection gesture, or resumed (false).
+  @objc public var onOutputPaused: ((Bool) -> Void)?
 
   // MARK: Commands
 
@@ -121,6 +123,11 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private static let maxReasserts = 2
   /// How long a double-tapped word stays highlighted (Android: WORD_FLASH_MS).
   private static let wordFlash: TimeInterval = 0.25
+  /// A single tap reports after this delay, unless it turns into a double tap
+  /// (which selects a word and must not summon the keyboard). Android: TAP_DELAY_MS.
+  private static let tapDelay: TimeInterval = 0.25
+  /// Height of the edge auto-scroll zones during a selection drag, in rows.
+  private static let autoScrollZoneRows: CGFloat = 2.5
 
   // MARK: State
 
@@ -210,6 +217,18 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private var selectionPoint: CGPoint = .zero
   private var autoScrollSpeed: CGFloat = 0
   private var clearSelectionWork: DispatchWorkItem?
+  /// The single tap waiting out `tapDelay`.
+  private var pendingTap: DispatchWorkItem?
+  private var lastDoubleTapAt: CFTimeInterval = 0
+  /// The long press began on a word (selected at once), not on a blank cell.
+  private var selectionOnWord = false
+  /// The finger moved at least a cell since the long press began.
+  private var selectionMoved = false
+  private var selectionStartPoint: CGPoint = .zero
+  /// This view froze the terminal's output for the running selection.
+  private var outputPaused = false
+  /// The layout moved under a running selection: re-extend it to the finger.
+  private var selectionRelayout = false
 
   // Accessibility cache.
   private var accessibilityCache: (generation: UInt64, top: Int64, text: String)?
@@ -287,6 +306,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     displayLink?.invalidate()
     resizeWork?.cancel()
     clearSelectionWork?.cancel()
+    pendingTap?.cancel()
+    // Closing the handle also thaws output this view froze.
     if let handle { okena_rv_close(handle) }
   }
 
@@ -311,6 +332,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     resizeWork?.cancel()
     resizeWork = nil
     clearSelectionWork?.cancel()
+    pendingTap?.cancel()
+    pendingTap = nil
     for (_, slot) in rows { recycle(slot.layer) }
     rows.removeAll()
     lastGeneration = .max
@@ -328,6 +351,11 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     following = true
     selecting = false
     autoScrollSpeed = 0
+    if outputPaused {
+      // The old handle was closed, which thawed its output.
+      outputPaused = false
+      onOutputPaused?(false)
+    }
     stopWheelFling()
     needsUpdate = true
     accessibilityCache = nil
@@ -598,6 +626,10 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     if selecting && autoScrollSpeed != 0 { autoScroll() }
     if wheelFlingVelocity != 0 { stepWheelFling() }
     guard let handle else { return }
+    if selecting, outputPaused, okena_rv_output_frozen(handle) == 0 {
+      // The freeze hit its cap, or a snapshot dropped the selection.
+      finishSelection(copy: false)
+    }
     let generation = okena_rv_generation(handle)
     if generation != lastGeneration || needsUpdate {
       updateViewport()
@@ -693,6 +725,10 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     accessibilityCache = nil
     reportScrollState()
     if perf.enabled { perf.record(ms: (CACurrentMediaTime() - start) * 1000, redrawn: redrawn) }
+    if selectionRelayout {
+      selectionRelayout = false
+      if selecting { extendSelection() }
+    }
   }
 
   /// Apply a frame header: content size, anchoring, mode. Returns true when
@@ -723,6 +759,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       !haveFrame || newFirst != firstLine || newTotal != totalLines || f.reflow_epoch != reflowEpoch
       || newAlt != altScreen || cursorMoved
     guard changed else { return false }
+    if selecting { selectionRelayout = true }
 
     let oldOffset = scrollView.contentOffset.y
     let oldFirst = firstLine
@@ -921,12 +958,25 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     let rowCount = grid?.rows ?? 1
     let col = min(max(Int(point.x / fonts.cellWidth), 0), cols - 1)
     let row = min(max(Int(point.y / fonts.cellHeight), 0), rowCount - 1)
-    onTap?(col, row)
+    // Wait out a possible double tap: its first tap must not summon the keyboard.
+    pendingTap?.cancel()
+    pendingTap = nil
+    guard CACurrentMediaTime() - lastDoubleTapAt > Self.tapDelay else { return }
+    let work = DispatchWorkItem { [weak self] in
+      self?.pendingTap = nil
+      self?.onTap?(col, row)
+    }
+    pendingTap = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.tapDelay, execute: work)
   }
 
   @objc private func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
-    guard recognizer.state == .ended, let handle, let hit = cell(at: recognizer.location(in: self)) else { return }
-    okena_rv_select_word(handle, hit.line, hit.col)
+    guard recognizer.state == .ended else { return }
+    pendingTap?.cancel()
+    pendingTap = nil
+    lastDoubleTapAt = CACurrentMediaTime()
+    guard let handle, let hit = cell(at: recognizer.location(in: self)) else { return }
+    guard okena_rv_selection_start_word(handle, hit.line, hit.col) != 0 else { return }
     copySelection()
     // Keep the word highlighted for a moment so the copy is visible.
     needsUpdate = true
@@ -948,22 +998,65 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       clearSelectionWork?.cancel()
       selecting = true
       selectionPoint = point
-      okena_rv_selection_start(handle, hit.line, hit.col, hit.side, UInt8(OKENA_RV_SELECT_SIMPLE))
+      selectionStartPoint = point
+      selectionMoved = false
+      // Hold output so the text stays under the finger and redraws cannot
+      // drop the selection.
+      setOutputPaused(true)
+      // A still press selects the word under the finger; a drag extends from it.
+      selectionOnWord = okena_rv_selection_start_word(handle, hit.line, hit.col) != 0
+      if !selectionOnWord {
+        okena_rv_selection_start(handle, hit.line, hit.col, hit.side, UInt8(OKENA_RV_SELECT_SIMPLE))
+      }
+      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
       needsUpdate = true
     case .changed:
+      guard selecting else { return }
       selectionPoint = point
+      if !selectionMoved, let fonts,
+        hypot(point.x - selectionStartPoint.x, point.y - selectionStartPoint.y) >= fonts.cellWidth
+      {
+        selectionMoved = true
+      }
       extendSelection()
       updateAutoScroll(point)
-    case .ended, .cancelled, .failed:
+    case .ended:
       guard selecting else { return }
-      selecting = false
-      autoScrollSpeed = 0
-      copySelection()
-      okena_rv_selection_clear(handle)
-      needsUpdate = true
+      finishSelection(copy: true)
+    case .cancelled, .failed:
+      // The system took the touch: never copy what the user did not finish.
+      guard selecting else { return }
+      finishSelection(copy: false)
     default:
       break
     }
+  }
+
+  /// End the selection gesture: copy (a word, or a drag of at least a cell;
+  /// never jitter on a blank cell), clear, then resume output.
+  private func finishSelection(copy: Bool) {
+    selecting = false
+    autoScrollSpeed = 0
+    guard let handle else { return }
+    if copy && (selectionOnWord || selectionMoved) { copySelection() }
+    okena_rv_selection_clear(handle)
+    setOutputPaused(false)
+    needsUpdate = true
+  }
+
+  /// Freeze or resume live output. Frozen, the view stops following the tail;
+  /// resumed, it follows again if it is still at the bottom.
+  private func setOutputPaused(_ paused: Bool) {
+    guard let handle, paused != outputPaused else { return }
+    outputPaused = paused
+    okena_rv_set_output_frozen(handle, paused ? 1 : 0)
+    if paused {
+      following = false
+    } else {
+      following = atBottom
+      reportScrollState()
+    }
+    onOutputPaused?(paused)
   }
 
   private func extendSelection() {
@@ -979,7 +1072,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       autoScrollSpeed = 0
       return
     }
-    let zone = fonts.cellHeight * 1.5
+    let zone = fonts.cellHeight * Self.autoScrollZoneRows
     if point.y < zone {
       autoScrollSpeed = -min((zone - point.y) / zone, 3) * fonts.cellHeight * 0.5
     } else if point.y > bounds.height - zone {
@@ -993,7 +1086,6 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     let y = min(max(scrollView.contentOffset.y + autoScrollSpeed, 0), maxOffset)
     guard y != scrollView.contentOffset.y else { return }
     setOffset(y)
-    following = atBottom
     updateIndicator()
     reportScrollState()
     extendSelection()
@@ -1004,7 +1096,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     var len = 0
     guard let ptr = okena_rv_selection_text(handle, &len), len > 0 else { return }
     let text = String(cString: ptr)
-    guard !text.isEmpty else { return }
+    // Never replace the clipboard with nothing but blanks.
+    guard text.contains(where: { !$0.isWhitespace }) else { return }
     UIPasteboard.general.string = text
     if perf.enabled { NSLog("DBG ntv copied %d chars: %@", text.count, String(text.prefix(200))) }
     onSelectionCopied?(text)

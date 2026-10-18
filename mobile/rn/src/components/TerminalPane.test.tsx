@@ -610,6 +610,20 @@ describe('TerminalPane renderer', () => {
     act(() => renderer.unmount());
   });
 
+  it('shows a Paused chip while the native view holds output for a selection', () => {
+    useSettingsStore.setState({ renderer: 'native' });
+    const renderer = renderPane('t1');
+    const chip = () => renderer.root.findAll((n) => n.props.testID === 'terminal-output-paused');
+    expect(chip()).toHaveLength(0);
+
+    fire(nativeProps().onOutputPausedChange, { paused: true });
+    expect(chip().length).toBeGreaterThan(0);
+
+    fire(nativeProps().onOutputPausedChange, { paused: false });
+    expect(chip()).toHaveLength(0);
+    act(() => renderer.unmount());
+  });
+
   it('leaves PTY sizing to the native view', () => {
     useSettingsStore.setState({ renderer: 'native' });
     const resizeLocal = jest.fn();
