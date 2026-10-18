@@ -28,6 +28,7 @@
 mod api;
 mod client;
 pub mod render;
+mod text_export;
 mod types;
 
 use okena_core::api::ActionRequest;

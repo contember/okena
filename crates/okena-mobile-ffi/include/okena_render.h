@@ -349,6 +349,22 @@ void okena_rv_set_output_frozen(OkenaRvHandle *handle, uint8_t frozen);
 /* 1 while the terminal's output is frozen, else 0. Poll it during a gesture. */
 int32_t okena_rv_output_frozen(OkenaRvHandle *handle);
 
+/* ── Plain text ──────────────────────────────────────────────────────────── */
+
+/*
+ * Plain text of absolute lines start_line..=end_line, clamped to the readable
+ * range (at most 20 000 lines, the newest kept), for the "Select text" mode.
+ * Soft-wrapped rows are joined into one line, trailing blanks trimmed,
+ * wide-char spacers skipped, combining marks kept, blank lines at the end
+ * dropped. UTF-8 and NUL-terminated; length without NUL in *len_out. When
+ * anchor_out is non-NULL it gets the number of '\n' before the line that
+ * holds absolute line anchor_line (pass the viewport's top line to open the
+ * text at the same place). Owned by the handle; valid until the next
+ * okena_rv_text_range or close. NULL when the terminal is missing.
+ */
+const char *okena_rv_text_range(OkenaRvHandle *handle, int64_t start_line, int64_t end_line,
+                                int64_t anchor_line, size_t *len_out, uint32_t *anchor_out);
+
 /* ── Input and sizing ────────────────────────────────────────────────────── */
 
 /*
