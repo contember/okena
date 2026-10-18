@@ -36,6 +36,10 @@ import { savedServerDisplayName } from '../models';
 import { useConnectionStore, selectIsPairing } from '../state';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
 import { StatusIndicator } from '../components/StatusIndicator';
+import { useElapsedSeconds } from '../components/ReconnectBanner';
+
+/** Seconds of "Connecting" before the screen offers "Retry now". */
+export const RETRY_NOW_AFTER_S = 6;
 import { Icon } from '../components/Icon';
 
 export const PairingScreen: React.FC = () => {
@@ -45,6 +49,8 @@ export const PairingScreen: React.FC = () => {
   const pair = useConnectionStore((s) => s.pair);
   const disconnect = useConnectionStore((s) => s.disconnect);
   const connectTo = useConnectionStore((s) => s.connectTo);
+  const retryNow = useConnectionStore((s) => s.retryNow);
+  const connectingSince = useConnectionStore((s) => s.connectingSince);
 
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -52,6 +58,8 @@ export const PairingScreen: React.FC = () => {
   const isError = status.kind === 'error';
   const errorMessage = isError ? status.message : null;
   const showCodeInput = isPairing;
+  const isAttempting = status.kind === 'connecting' || status.kind === 'reconnecting';
+  const elapsed = useElapsedSeconds(isAttempting ? connectingSince : null);
 
   const submitCode = async () => {
     const trimmed = code.trim();
@@ -104,6 +112,21 @@ export const PairingScreen: React.FC = () => {
           <View style={styles.connectingBlock}>
             <ActivityIndicator size="large" color={OkenaColors.textSecondary} />
             <Text style={styles.connectingText}>Connecting to server...</Text>
+            {isAttempting && elapsed > 0 ? (
+              <Text style={styles.elapsedText}>{`${elapsed}s`}</Text>
+            ) : null}
+            {isAttempting && elapsed >= RETRY_NOW_AFTER_S ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.outlineButton,
+                  styles.retryButton,
+                  pressed && styles.outlineButtonPressed,
+                ]}
+                onPress={retryNow}
+              >
+                <Text style={styles.outlineButtonText}>Retry now</Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
 
@@ -228,6 +251,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 20,
   },
+  elapsedText: {
+    ...OkenaTypography.caption2,
+    color: OkenaColors.textTertiary,
+    marginTop: 6,
+    fontVariant: ['tabular-nums'],
+  },
+  retryButton: { alignSelf: 'stretch' },
 
   // Pairing
   pairSub: {

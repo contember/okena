@@ -60,6 +60,10 @@ function stubNative(connect: jest.Mock): ConnectionNative {
     disconnect: () => {},
     connectionStatus: () => ({ kind: 'connecting' }),
     secondsSinceActivity: () => 0,
+    onAppForeground: () => {},
+    onAppBackground: () => {},
+    reconnectNow: () => {},
+    canReconnectNow: () => true,
   };
 }
 

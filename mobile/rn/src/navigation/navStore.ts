@@ -19,7 +19,7 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 
 import {
   connectionStore,
-  selectIsConnected,
+  selectShowWorkspace,
   type ConnectionState,
 } from '../state/connectionStore';
 
@@ -64,14 +64,14 @@ export function currentScreen(): Screen {
 }
 
 /**
- * The screen the connection state implies — the exact rule the Dart `AppRouter`
- * used:
- *   - connected               → `workspace`
+ * The screen the connection state implies — the Dart `AppRouter` rule, plus
+ * staying in the workspace while a once-established connection reconnects:
+ *   - connected, or reconnecting after having connected → `workspace`
  *   - an active server chosen  → `pairing` (connecting/pairing/error)
  *   - otherwise                → `serverList`
  */
 export function deriveScreen(conn: ConnectionState): Screen {
-  if (selectIsConnected(conn)) return 'workspace';
+  if (selectShowWorkspace(conn)) return 'workspace';
   if (conn.activeServer !== null) return 'pairing';
   return 'serverList';
 }
