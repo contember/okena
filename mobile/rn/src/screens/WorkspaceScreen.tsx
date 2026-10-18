@@ -47,7 +47,8 @@ import {
 import { useFont } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useWorkspaceStore, useConnectionStore } from '../state';
+import { useWorkspaceStore, useConnectionStore, selectIsReconnecting } from '../state';
+import { ReconnectBanner } from '../components/ReconnectBanner';
 import {
   buildProjectList,
   filterProjectList,
@@ -130,6 +131,10 @@ export const WorkspaceScreen: React.FC = () => {
   }, [projects, selectedProjectId]);
 
   const connId = useConnectionStore((s) => s.connId);
+  const connStatus = useConnectionStore((s) => s.status);
+  const reconnecting = useConnectionStore(selectIsReconnecting);
+  const connectingSince = useConnectionStore((s) => s.connectingSince);
+  const retryNow = useConnectionStore((s) => s.retryNow);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -196,8 +201,9 @@ export const WorkspaceScreen: React.FC = () => {
     ? pickTerminal(project.terminalIds, [selectedTerminalId])
     : null;
 
-  const dotColor =
-    secondsSinceActivity < 3
+  const dotColor = reconnecting
+    ? OkenaColors.warning
+    : secondsSinceActivity < 3
       ? OkenaColors.success
       : secondsSinceActivity < 10
         ? OkenaColors.warning
@@ -290,6 +296,10 @@ export const WorkspaceScreen: React.FC = () => {
           </Pressable>
         ) : null}
       </View>
+
+      {reconnecting ? (
+        <ReconnectBanner status={connStatus} since={connectingSince} onRetry={retryNow} />
+      ) : null}
 
       {connId && project && project.terminalIds.length > 1 ? (
         <TerminalTabs

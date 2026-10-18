@@ -129,6 +129,33 @@ paired; the workspace store then reopens the remembered project and terminal, fa
 project's first terminal, or opens the project drawer when the project is gone. An explicit
 disconnect clears the reconnect target; a dropped connection keeps it.
 
+### Connection resilience
+
+The transport (`okena-transport` `RemoteClient`, shared with desktop) bounds every connect phase:
+health check and token check 5 s each, WebSocket dial (TCP + TLS + upgrade) 10 s, auth and state
+fetch 10 s each. Host names are resolved and raced across addresses (Happy Eyeballs, 250 ms
+stagger). An established session sends `{"type":"ping"}` every 15 s; after 45 s without any
+inbound frame it sends a probe and gives up 5 s later, so a socket that died silently reconnects
+instead of hanging. A drop re-dials with backoff 1, 2, 4, 8, then 10 s, up to 8 attempts, then
+settles in `Error` (the pairing screen's "Try Again").
+
+The FFI reports `Reconnecting { attempt }` separately from `Connecting`. Once a connection has
+succeeded (`hasConnected` in `connectionStore`), a drop keeps the workspace on screen with
+`ReconnectBanner` ("Retry now" calls `reconnect_now`, which skips the backoff and resets the
+attempt budget). The pairing screen's connecting state shows elapsed seconds and offers "Retry
+now" after 6 s.
+
+App lifecycle: `App.tsx` forwards `AppState` changes. Going to the background calls
+`on_app_background`, which pauses reconnect attempts (an established session keeps running);
+Android's Doze drops packets, so attempts made there would only hang and burn the budget. Coming
+back from the background calls `on_app_foreground`: a reconnecting connection retries at once with
+a fresh budget, a `Connecting` or `Error` one restarts its connect, and a connected one is probed
+(ping with a 5 s deadline when nothing arrived for 2 s).
+
+`init_app` installs a log sink: logcat tag `okena` on Android, unified log subsystem
+`com.contember.okena` on iOS. Okena crates log at Info (connect phases with elapsed time, resolved
+address, reconnect attempts, ping timeouts), dependencies at Warn. Tokens are never logged.
+
 ## Shared Core: okena-core
 
 `crates/okena-core/` contains everything shared between desktop and mobile (reused **unchanged** by
@@ -165,7 +192,8 @@ Desktop uses the same `RemoteClient<H>` with `DesktopConnectionHandler`; mobile 
 - **Terminal ID namespacing.** Remote IDs are prefixed `remote:{connection_id}:{terminal_id}`.
 - **ConnectionManager as `OnceLock` singleton** with a 2-thread tokio runtime — no GPUI entity system
   on mobile. All FFI functions access it via `ConnectionManager::get()`.
-- **FFI `ConnectionStatus`** collapses `Reconnecting { attempt }` into `Connecting`.
+- **FFI `ConnectionStatus`** keeps `Reconnecting { attempt }` distinct from `Connecting`, so a
+  once-connected user stays in the workspace while the transport re-dials.
 - **DARK_THEME** as the default ANSI → ARGB palette; server-driven theme sync is a later addition.
 
 ## FFI Surface (`crates/okena-mobile-ffi/src/lib.rs`)

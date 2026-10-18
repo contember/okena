@@ -48,8 +48,9 @@ export type FolderId = string;
 
 /**
  * Connection status — mirrors the FFI `ConnectionStatus` enum in
- * `api/connection.rs` (the simplified mobile variant; `Reconnecting` is
- * collapsed into `Connecting` Rust-side).
+ * `api/connection.rs`. `reconnecting` means an established session dropped
+ * and the transport is re-dialing (`attempt` is 1-based); `connecting` is the
+ * first connect (or a restarted one).
  *
  * `Error` carries a message, so this is a discriminated union rather than a
  * bare string-union.
@@ -57,6 +58,7 @@ export type FolderId = string;
 export type ConnectionStatus =
   | { kind: 'disconnected' }
   | { kind: 'connecting' }
+  | { kind: 'reconnecting'; attempt: number }
   | { kind: 'connected' }
   | { kind: 'pairing' }
   | { kind: 'error'; message: string };
@@ -290,6 +292,29 @@ export interface OkenaNative {
    * value if the connection doesn't exist. Used for the staleness indicator.
    */
   secondsSinceActivity(connId: ConnId): number;
+
+  /**
+   * The app returned to the foreground: resume reconnect attempts and retry
+   * every connection now with a fresh attempt budget; an established session
+   * gets a quick liveness probe. (No-op with bindings that predate it.)
+   */
+  onAppForeground(): void;
+
+  /**
+   * The app went to the background: pause reconnect attempts until
+   * {@link onAppForeground}. Established sessions keep running.
+   */
+  onAppBackground(): void;
+
+  /**
+   * Retry one connection now: skip the backoff and reset the attempt budget,
+   * keeping terminals and cached state. Only meaningful when
+   * {@link canReconnectNow} is true.
+   */
+  reconnectNow(connId: ConnId): void;
+
+  /** Whether this binding build implements {@link reconnectNow}. Adapter-provided. */
+  canReconnectNow(): boolean;
 
   // ── terminal.rs ────────────────────────────────────────────────────────
 
@@ -533,12 +558,17 @@ export interface OkenaNative {
  * Plain-string enums (split direction, diff mode) and all other record fields
  * already match (camelCase), so they pass through untouched.
  */
-function toConnectionStatus(s: {tag?: string; inner?: {message?: string}}): ConnectionStatus {
+function toConnectionStatus(s: {
+  tag?: string;
+  inner?: {message?: string; attempt?: number};
+}): ConnectionStatus {
   switch (s?.tag) {
     case 'Disconnected':
       return {kind: 'disconnected'};
     case 'Connecting':
       return {kind: 'connecting'};
+    case 'Reconnecting':
+      return {kind: 'reconnecting', attempt: Number(s.inner?.attempt ?? 1)};
     case 'Connected':
       return {kind: 'connected'};
     case 'Pairing':
@@ -649,6 +679,18 @@ export function getOkenaNative(): OkenaNative {
               gen.scroll(connId, terminalId, lines),
       takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
       canReportCertFingerprint: () => pinsReadable,
+      // Bindings generated before the lifecycle hooks existed: no-ops, and
+      // "Retry now" falls back to a fresh connect.
+      onAppForeground: () => {
+        if (typeof gen.onAppForeground === 'function') gen.onAppForeground();
+      },
+      onAppBackground: () => {
+        if (typeof gen.onAppBackground === 'function') gen.onAppBackground();
+      },
+      reconnectNow: (connId: ConnId) => {
+        if (typeof gen.reconnectNow === 'function') gen.reconnectNow(connId);
+      },
+      canReconnectNow: () => typeof gen.reconnectNow === 'function',
       getCertFingerprint: (connId: ConnId) =>
         pinsReadable ? gen.getCertFingerprint(connId) : undefined,
     } as OkenaNative;

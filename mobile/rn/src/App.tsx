@@ -20,6 +20,7 @@
 
 import React, { useEffect } from 'react';
 import {
+  AppState,
   KeyboardAvoidingView,
   Platform,
   StatusBar,
@@ -30,7 +31,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useNavStore, bindConnectionToNavigation } from './navigation';
 import {
   connectionStore,
-  selectIsConnected,
+  selectShowWorkspace,
   type ConnectionState,
 } from './state/connectionStore';
 import { workspaceStore } from './state/workspaceStore';
@@ -46,6 +47,8 @@ import { WorkspaceScreen } from './screens/WorkspaceScreen';
 /**
  * Bridge the connection store to the workspace store's polling lifecycle:
  * start polling (with the live `connId`) when connected, stop + clear when not.
+ * A reconnect keeps polling: the native side keeps the last state and
+ * terminals, so the workspace stays on screen behind the reconnect banner.
  * Mirrors the Dart `WorkspaceProvider._onConnectionChanged`. Polling starts
  * with the selection remembered for the server, so a launch or a reconnect
  * reopens the same project and terminal. Returns an unsubscribe fn.
@@ -55,7 +58,7 @@ function bindConnectionToWorkspace(): () => void {
   const ws = workspaceStore();
 
   const apply = (state: ConnectionState) => {
-    if (selectIsConnected(state) && state.connId) {
+    if (selectShowWorkspace(state) && state.connId) {
       const restore = state.activeServer
         ? restoreForServer(sessionStore().getState().memory, state.activeServer)
         : undefined;
@@ -86,7 +89,12 @@ export const App: React.FC = () => {
     loadAndRestore().catch(() => {
       // A failed restore just leaves the user on the server list.
     });
+    // Pause reconnects in the background and retry at once on return.
+    const appState = AppState.addEventListener('change', (next) =>
+      connectionStore().getState().onAppStateChange(next),
+    );
     return () => {
+      appState.remove();
       unbindNav();
       unbindWs();
       unbindSession();
