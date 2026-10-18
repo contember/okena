@@ -656,9 +656,8 @@ class TerminalRendererView(context: Context) : View(context) {
   private val bottomEdge = EdgeEffect(context)
   private var velocity: VelocityTracker? = null
 
-  /** Fling origin (absolute line at scroller y = 0) and end (px) for a view fling. */
+  /** Fling origin: the absolute line at scroller y = 0 for a view fling. */
   private var flingOrigin = 0L
-  private var flingMaxY = 0
   /** A fling that turns into wheel notches (mouse mode) instead of moving the view. */
   private var flingWheel = false
   private var flingLastY = 0
@@ -690,11 +689,13 @@ class TerminalRendererView(context: Context) : View(context) {
   }
 
   /** Accumulate px into whole notches for `wheel`; scroll the view if the app did not take them. */
-  private fun wheelBy(dy: Float, x: Float, y: Float, m: CellMetrics) {
+  private fun wheelBy(dy: Float, x: Float, y: Float, m: CellMetrics, maxNotches: Int = Int.MAX_VALUE) {
     wheelAccum += dy
-    val notches = (wheelAccum / m.cellHeight).toInt()
-    if (notches == 0) return
-    wheelAccum -= notches * m.cellHeight
+    val whole = (wheelAccum / m.cellHeight).toInt()
+    if (whole == 0) return
+    wheelAccum -= whole * m.cellHeight
+    // The rest of a too large step is dropped.
+    val notches = whole.coerceIn(-maxNotches, maxNotches)
     val (col, row) = screenCell(x, y, m)
     if (!RustBridge.wheel(handle, notches, col, row)) {
       model.scrollBy(-notches.toDouble())
@@ -709,13 +710,14 @@ class TerminalRendererView(context: Context) : View(context) {
     if (wheelMode) {
       flingWheel = true
       flingLastY = 0
-      scroller.fling(0, 0, 0, vy.toInt(), 0, 0, -WHEEL_FLING_RANGE, WHEEL_FLING_RANGE)
+      scroller.fling(0, 0, 0, vy.toInt(), 0, 0, -FLING_RANGE, FLING_RANGE)
     } else {
       flingWheel = false
       flingOrigin = model.minTop
       val y0 = ((model.top - flingOrigin) * m.cellHeight).roundToInt()
-      flingMaxY = ((model.maxTop - flingOrigin) * m.cellHeight).roundToInt()
-      scroller.fling(0, y0, 0, (-vy).toInt(), 0, 0, 0, flingMaxY)
+      // No end bound here: streamed output moves the bottom during the fling. `stepFling`
+      // stops at the current bounds (the model clamps).
+      scroller.fling(0, y0, 0, (-vy).toInt(), 0, 0, 0, y0 + FLING_RANGE)
     }
     schedule()
   }
@@ -729,14 +731,17 @@ class TerminalRendererView(context: Context) : View(context) {
     if (flingWheel) {
       val d = (y - flingLastY).toFloat()
       flingLastY = y
-      wheelBy(d, width / 2f, height / 2f, m)
+      wheelBy(d, width / 2f, height / 2f, m, WHEEL_FLING_MAX_NOTCHES)
       return true
     }
     model.scrollTo(flingOrigin + y / m.cellHeight.toDouble())
-    // OverScroller stops exactly at a bound; hand the remaining speed to the edge effect.
+    // Stopped at a bound (the current one, the model clamps): hand the remaining speed to the
+    // edge effect.
     val v = scroller.currVelocity.toInt()
-    if (v > 0 && (y <= 0 || y >= flingMaxY)) {
-      if (y <= 0) topEdge.onAbsorb(v) else bottomEdge.onAbsorb(v)
+    val up = scroller.finalY < scroller.startY
+    val atBound = if (up) model.top <= model.minTop else model.top >= model.maxTop
+    if (v > 0 && atBound) {
+      if (up) topEdge.onAbsorb(v) else bottomEdge.onAbsorb(v)
       scroller.forceFinished(true)
     }
     emitScrollState()
@@ -1130,6 +1135,9 @@ class TerminalRendererView(context: Context) : View(context) {
     const val FONT_STEP = 0.5
     /** Max auto-scroll speed while a selection drag sits at an edge, lines per frame. */
     const val AUTO_SCROLL_MAX = 0.6f
-    const val WHEEL_FLING_RANGE = 1_000_000
+    /** Scroller range (px) for flings whose end is not a fixed bound. */
+    const val FLING_RANGE = 1_000_000
+    /** At most this many wheel notches per frame from a fling (mouse-mode apps). Same on iOS. */
+    const val WHEEL_FLING_MAX_NOTCHES = 8
   }
 }

@@ -7,8 +7,10 @@
  *   - the current connection (`connId`, `activeServer`) and its `status`,
  *   - the connect → pair → disconnect lifecycle,
  *   - `secondsSinceActivity` (staleness indicator),
- *   - status polling: ~500ms while connecting/pairing, ~2s once connected
- *     (matching the Dart `_startPolling(fast:)` cadence),
+ *   - status polling: ~500ms while connecting/pairing/reconnecting, ~2s once
+ *     connected (matching the Dart `_startPolling(fast:)` cadence),
+ *   - app lifecycle: tells the transport when the app goes to the background
+ *     (pause reconnects) and returns (retry now), and "Retry now",
  *   - persisting the auth token and its certificate pin back onto the saved
  *     server once paired.
  *
@@ -62,7 +64,14 @@ export type ConnectionNative = Pick<
   | 'disconnect'
   | 'connectionStatus'
   | 'secondsSinceActivity'
+  | 'onAppForeground'
+  | 'onAppBackground'
+  | 'reconnectNow'
+  | 'canReconnectNow'
 >;
+
+/** The app lifecycle states the store reacts to (RN `AppStateStatus`). */
+export type AppLifecycleState = 'active' | 'background' | 'inactive' | 'unknown' | 'extension';
 
 /** Dependencies the store calls out to. Overridable for tests. */
 export interface ConnectionDeps {
@@ -88,6 +97,17 @@ export interface ConnectionState {
   secondsSinceActivity: number;
   /** Whether the persisted server list has finished loading. */
   loaded: boolean;
+  /**
+   * Whether the current connection reached `connected` at least once. A drop
+   * after that keeps the user in the workspace with a reconnect banner instead
+   * of sending them back to the pairing screen.
+   */
+  hasConnected: boolean;
+  /**
+   * `Date.now()` when the current (re)connect attempt began, or null while
+   * connected / idle. Drives the elapsed-time and "Retry now" UI.
+   */
+  connectingSince: number | null;
 
   // ── derived helpers (cheap, recomputed by callers via selectors) ─────────
   // (Booleans like isConnected are intentionally NOT stored; derive from
@@ -128,6 +148,17 @@ export interface ConnectionState {
   pair(code: string): Promise<void>;
   /** Tear down the current connection and reset to disconnected. Mirrors `disconnect`. */
   disconnect(): void;
+  /**
+   * Retry the current connection now with a fresh attempt budget, keeping
+   * terminals and cached state. Falls back to a fresh connect when the
+   * binding predates `reconnect_now`.
+   */
+  retryNow(): void;
+  /**
+   * Feed RN `AppState` changes in. `background` pauses reconnect attempts;
+   * returning to `active` from the background retries immediately.
+   */
+  onAppStateChange(next: AppLifecycleState): void;
 }
 
 /**
@@ -161,6 +192,9 @@ export function configureConnectionStore(overrides: Partial<ConnectionDeps>): vo
 // ── polling: the store owns a single timer (start/stop) ─────────────────────
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollFast = false;
+/** Last app lifecycle state seen by {@link ConnectionState.onAppStateChange}. */
+let lastAppState: AppLifecycleState = 'active';
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -175,7 +209,13 @@ function startPolling(
   fast: boolean,
 ): void {
   stopPolling();
+  pollFast = fast;
   pollTimer = setInterval(() => pollStatus(get, set), fast ? FAST_POLL_MS : SLOW_POLL_MS);
+}
+
+/** A connect or reconnect is in flight. */
+function isAttempting(status: ConnectionStatus): boolean {
+  return status.kind === 'connecting' || status.kind === 'reconnecting';
 }
 
 /** Persist the active server list to storage. Fire-and-forget (Dart did the same). */
@@ -271,8 +311,17 @@ function pollStatus(
 
   if (newStatus.kind === 'connected' && oldStatus.kind !== 'connected') {
     // Connected edge: slow down polling and capture the credentials.
+    set({ hasConnected: true, connectingSince: null });
     startPolling(get, set, /* fast */ false);
     persistCredentials(get, set);
+  }
+
+  if (isAttempting(newStatus) && (!isAttempting(oldStatus) || get().connectingSince === null)) {
+    // Dropped (or restarted): follow the reconnect closely.
+    set({ connectingSince: Date.now() });
+  }
+  if (isAttempting(newStatus) && !pollFast) {
+    startPolling(get, set, /* fast */ true);
   }
 
   if (newStatus.kind === 'disconnected' || newStatus.kind === 'error') {
@@ -305,6 +354,8 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
     status: DISCONNECTED,
     secondsSinceActivity: Number.MAX_SAFE_INTEGER,
     loaded: false,
+    hasConnected: false,
+    connectingSince: null,
 
     initApp() {
       deps().native.initApp();
@@ -362,6 +413,8 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         connId: newConnId,
         status: { kind: 'connecting' },
         secondsSinceActivity: Number.MAX_SAFE_INTEGER,
+        hasConnected: false,
+        connectingSince: Date.now(),
       });
       startPolling(get, set, /* fast */ true);
     },
@@ -387,7 +440,40 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         activeServer: null,
         status: DISCONNECTED,
         secondsSinceActivity: Number.MAX_SAFE_INTEGER,
+        hasConnected: false,
+        connectingSince: null,
       });
+    },
+
+    retryNow() {
+      const { connId, activeServer } = get();
+      if (!connId) return;
+      const native = deps().native;
+      if (!native.canReconnectNow()) {
+        if (activeServer) get().connectTo(activeServer);
+        return;
+      }
+      native.reconnectNow(connId);
+      // `hasConnected` is kept, so a reconnecting user stays in the workspace.
+      set({ status: native.connectionStatus(connId), connectingSince: Date.now() });
+      startPolling(get, set, /* fast */ true);
+    },
+
+    onAppStateChange(next) {
+      const previous = lastAppState;
+      lastAppState = next;
+      const native = deps().native;
+      if (next === 'background') {
+        native.onAppBackground();
+        return;
+      }
+      if (next !== 'active' || previous !== 'background') return;
+      native.onAppForeground();
+      const { connId } = get();
+      if (!connId) return;
+      // The transport may have restarted an errored connect: resume polling.
+      pollStatus(get, set);
+      if (get().status.kind !== 'connected') startPolling(get, set, /* fast */ true);
     },
   }));
 
@@ -410,6 +496,15 @@ export const selectIsPairing = (s: ConnectionState): boolean => s.status.kind ==
 /** True while connecting. Mirrors Dart `isConnecting`. */
 export const selectIsConnecting = (s: ConnectionState): boolean =>
   s.status.kind === 'connecting';
+/**
+ * True while a once-established connection is being re-established. The user
+ * stays in the workspace (with a banner) during this.
+ */
+export const selectIsReconnecting = (s: ConnectionState): boolean =>
+  s.hasConnected && isAttempting(s.status);
+/** True when the workspace should be on screen: connected, or reconnecting. */
+export const selectShowWorkspace = (s: ConnectionState): boolean =>
+  selectIsConnected(s) || selectIsReconnecting(s);
 /**
  * True when fully idle: disconnected AND no active server selected. Mirrors
  * Dart `isDisconnected` (used to decide the server-list screen is shown).

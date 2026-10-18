@@ -12,12 +12,15 @@ export {
   selectIsConnected,
   selectIsPairing,
   selectIsConnecting,
+  selectIsReconnecting,
+  selectShowWorkspace,
   selectIsDisconnected,
   SAVED_SERVERS_KEY,
   FAST_POLL_MS,
   SLOW_POLL_MS,
   type ConnectionState,
   type ConnectionDeps,
+  type AppLifecycleState,
 } from './connectionStore';
 
 export {

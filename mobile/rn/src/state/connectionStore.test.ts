@@ -15,9 +15,12 @@ import {
   connectSavedServer,
   FAST_POLL_MS,
   SAVED_SERVERS_KEY,
+  SLOW_POLL_MS,
+  selectIsReconnecting,
   useConnectionStore,
   type ConnectionNative,
 } from './connectionStore';
+import { deriveScreen } from '../navigation/navStore';
 
 function stubNative(overrides: Partial<ConnectionNative> = {}): ConnectionNative {
   return {
@@ -30,6 +33,10 @@ function stubNative(overrides: Partial<ConnectionNative> = {}): ConnectionNative
     disconnect: () => {},
     connectionStatus: () => ({ kind: 'disconnected' }),
     secondsSinceActivity: () => 0,
+    onAppForeground: () => {},
+    onAppBackground: () => {},
+    reconnectNow: () => {},
+    canReconnectNow: () => true,
     ...overrides,
   };
 }
@@ -236,5 +243,148 @@ describe('connection lifecycle', () => {
     expect(await persistedServers(persistence)).toEqual([
       expect.objectContaining({ token: 'saved-token', fingerprint: 'fp-abc' }),
     ]);
+  });
+});
+
+describe('reconnect handling', () => {
+  const server = createSavedServer({ host: 'okena.lan', port: 19100 });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    useConnectionStore.setState({ servers: [], activeServer: null, connId: null });
+  });
+
+  afterEach(() => {
+    useConnectionStore.getState().onAppStateChange('active');
+    useConnectionStore.getState().disconnect();
+    jest.useRealTimers();
+  });
+
+  it('keeps a once-connected user in the workspace while reconnecting', () => {
+    setup(
+      stubNative({
+        connectionStatus: scriptedStatus([
+          { kind: 'connected' },
+          { kind: 'reconnecting', attempt: 1 },
+        ]),
+      }),
+    );
+    useConnectionStore.getState().connectTo(server);
+
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(deriveScreen(useConnectionStore.getState())).toBe('workspace');
+
+    // Connected polls slowly; the drop shows up on the next slow tick.
+    jest.advanceTimersByTime(SLOW_POLL_MS);
+    const state = useConnectionStore.getState();
+    expect(state.status).toEqual({ kind: 'reconnecting', attempt: 1 });
+    expect(selectIsReconnecting(state)).toBe(true);
+    expect(state.connectingSince).not.toBeNull();
+    expect(deriveScreen(state)).toBe('workspace');
+  });
+
+  it('switches back to fast polling after a drop', () => {
+    const connectionStatus = jest.fn(
+      scriptedStatus([{ kind: 'connected' }, { kind: 'reconnecting', attempt: 1 }]),
+    );
+    setup(stubNative({ connectionStatus }));
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS + SLOW_POLL_MS);
+
+    const before = connectionStatus.mock.calls.length;
+    jest.advanceTimersByTime(FAST_POLL_MS * 2);
+    expect(connectionStatus.mock.calls.length - before).toBe(2);
+  });
+
+  it('shows the pairing screen for a first connect that has not succeeded yet', () => {
+    setup(stubNative({ connectionStatus: () => ({ kind: 'reconnecting', attempt: 2 }) }));
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(deriveScreen(useConnectionStore.getState())).toBe('pairing');
+  });
+
+  it('leaves the workspace when reconnecting gives up', () => {
+    setup(
+      stubNative({
+        connectionStatus: scriptedStatus([
+          { kind: 'connected' },
+          { kind: 'error', message: 'Connection lost after 8 attempts' },
+        ]),
+      }),
+    );
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS + SLOW_POLL_MS);
+    expect(deriveScreen(useConnectionStore.getState())).toBe('pairing');
+  });
+
+  it('retries in place through reconnectNow and stays in the workspace', () => {
+    const reconnectNow = jest.fn();
+    setup(
+      stubNative({
+        reconnectNow,
+        connectionStatus: scriptedStatus([
+          { kind: 'connected' },
+          { kind: 'reconnecting', attempt: 3 },
+        ]),
+      }),
+    );
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS + SLOW_POLL_MS);
+
+    useConnectionStore.getState().retryNow();
+    expect(reconnectNow).toHaveBeenCalledWith('conn-1');
+    expect(deriveScreen(useConnectionStore.getState())).toBe('workspace');
+  });
+
+  it('falls back to a fresh connect when the binding has no reconnectNow', () => {
+    const connect = jest.fn(() => 'conn-2');
+    setup(
+      stubNative({
+        connect,
+        canReconnectNow: () => false,
+        connectionStatus: () => ({ kind: 'connecting' }),
+      }),
+    );
+    useConnectionStore.getState().connectTo(server);
+    useConnectionStore.getState().retryNow();
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(useConnectionStore.getState().connId).toBe('conn-2');
+  });
+
+  it('pauses in the background and retries on return to the foreground', () => {
+    const onAppBackground = jest.fn();
+    const onAppForeground = jest.fn();
+    setup(stubNative({ onAppBackground, onAppForeground }));
+    const store = useConnectionStore.getState();
+
+    store.onAppStateChange('inactive');
+    store.onAppStateChange('active');
+    expect(onAppForeground).not.toHaveBeenCalled();
+
+    store.onAppStateChange('background');
+    expect(onAppBackground).toHaveBeenCalledTimes(1);
+    store.onAppStateChange('active');
+    expect(onAppForeground).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes polling on foreground when the transport restarted an errored connect', () => {
+    const connectionStatus = jest.fn(
+      scriptedStatus([
+        { kind: 'error', message: 'boom' },
+        { kind: 'connecting' },
+        { kind: 'connecting' },
+      ]),
+    );
+    setup(stubNative({ connectionStatus }));
+    useConnectionStore.getState().connectTo(server);
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(useConnectionStore.getState().status.kind).toBe('error');
+
+    useConnectionStore.getState().onAppStateChange('background');
+    useConnectionStore.getState().onAppStateChange('active');
+    expect(useConnectionStore.getState().status.kind).toBe('connecting');
+    const before = connectionStatus.mock.calls.length;
+    jest.advanceTimersByTime(FAST_POLL_MS);
+    expect(connectionStatus.mock.calls.length).toBe(before + 1);
   });
 });

@@ -97,8 +97,10 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       reassertCount = 0
       scheduleReassert()
     }
-    following = true
+    stopWheelFling()
     scrollView.setContentOffset(scrollView.contentOffset, animated: false)  // stop a fling
+    // After stopping the fling: its last scroll callback may clear `following`.
+    following = true
     setOffset(liveOffset)
     needsUpdate = true
     reportScrollState()
@@ -166,6 +168,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private var following = true
   private var reportedAtBottom: Bool?
   private var adjustingOffset = false
+  /// The offset at the previous user scroll callback (fling direction).
+  private var lastScrollY: CGFloat = 0
   /// Set when something other than `generation` needs a new snapshot.
   private var needsUpdate = true
   /// Lines from the bottom to restore after a font change re-layout.
@@ -197,6 +201,16 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private let pinchRecognizer = UIPinchGestureRecognizer()
   private let wheelPanRecognizer = UIPanGestureRecognizer()
   private var wheelAccumulator: CGFloat = 0
+  /// Where the wheel notches go (the finger's last position).
+  private var wheelPoint: CGPoint = .zero
+  /// Wheel-mode fling velocity in pt/s (finger down = positive); 0 when idle.
+  /// See the "Wheel fling" extension.
+  private var wheelFlingVelocity: CGFloat = 0
+  private var wheelFlingTime: CFTimeInterval = 0
+  /// The current touch began while a fling ran (wheel or scroll view): it
+  /// only stops the fling and is not a tap.
+  private var touchStoppedFling = false
+  private var touchDownTimestamp: TimeInterval = -1
   private var pinchStartSize: CGFloat?
   private var livePinchSize: CGFloat = 10.5
   private var selecting = false
@@ -342,6 +356,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       outputPaused = false
       onOutputPaused?(false)
     }
+    stopWheelFling()
     needsUpdate = true
     accessibilityCache = nil
     cursorLayer.isHidden = true
@@ -363,6 +378,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       needsUpdate = true
       if let fonts, abs(fonts.scale - screenScale) > 0.01 { applyFontSize() }
     } else {
+      stopWheelFling()
       displayLink?.invalidate()
       displayLink = nil
     }
@@ -370,6 +386,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
 
   @objc private func didEnterBackground() {
     inBackground = true
+    stopWheelFling()
     displayLink?.isPaused = true
   }
 
@@ -565,12 +582,25 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
 
   public func scrollViewDidScroll(_ scrollView: UIScrollView) {
     guard !adjustingOffset else { return }
-    if scrollView.isTracking || scrollView.isDecelerating || scrollView.isDragging {
-      following = atBottom
+    // A drag does not follow: streamed output would snap the view back to the
+    // tail while the finger is still near it. A fling follows once it reaches
+    // the tail moving down, and keeps following through the bounce (streamed
+    // output moves the bottom, so it may not come to rest exactly there). A
+    // fling away from the tail does not follow.
+    let y = scrollView.contentOffset.y
+    if scrollView.isTracking || scrollView.isDragging {
+      following = false
+    } else if scrollView.isDecelerating, y >= lastScrollY, atBottom {
+      following = true
     }
+    lastScrollY = y
     updateIndicator()
     reportScrollState()
     if currentWindow().top != windowTop { updateViewport() }
+  }
+
+  public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    following = false
   }
 
   public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -594,6 +624,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
 
   fileprivate func tick(_ link: CADisplayLink) {
     if selecting && autoScrollSpeed != 0 { autoScroll() }
+    if wheelFlingVelocity != 0 { stepWheelFling() }
     guard let handle else { return }
     if selecting, outputPaused, okena_rv_output_frozen(handle) == 0 {
       // The freeze hit its cap, or a snapshot dropped the selection.
@@ -719,6 +750,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
 
     if wheelMode != consumesWheel {
       consumesWheel = wheelMode
+      stopWheelFling()
       // The app scrolls itself: the scroll view must not move.
       scrollView.isScrollEnabled = !wheelMode
     }
@@ -900,13 +932,27 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     return false
   }
 
+  /// Touch down (hit testing runs before any gesture recognizer sees the
+  /// touch, while the scroll view still decelerates): stop a wheel fling and
+  /// remember whether a fling ran, so that this touch is not a tap.
+  public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let hit = super.hitTest(point, with: event)
+    if hit != nil, let event, event.type == .touches, event.timestamp != touchDownTimestamp {
+      // UIKit may hit-test one touch more than once; judge only the first.
+      touchDownTimestamp = event.timestamp
+      touchStoppedFling = wheelFlingVelocity != 0 || scrollView.isDecelerating
+      stopWheelFling()
+    }
+    return hit
+  }
+
   public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
     if gestureRecognizer === wheelPanRecognizer { return consumesWheel && handle != nil }
     return super.gestureRecognizerShouldBegin(gestureRecognizer)
   }
 
   @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-    guard recognizer.state == .ended, let fonts else { return }
+    guard recognizer.state == .ended, !touchStoppedFling, let fonts else { return }
     let point = recognizer.location(in: self)
     let cols = grid?.cols ?? 1
     let rowCount = grid?.rows ?? 1
@@ -1093,27 +1139,39 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   }
 
   /// Mouse mode / alternate scroll: the pan becomes discrete wheel notches
-  /// (finger down = positive = back in history, as in terminalScroll.ts).
+  /// (finger down = positive = back in history, as in terminalScroll.ts). A
+  /// fast release keeps sending notches (see the "Wheel fling" extension).
   @objc private func handleWheelPan(_ recognizer: UIPanGestureRecognizer) {
-    guard let handle, let fonts else { return }
     switch recognizer.state {
     case .began:
+      stopWheelFling()
       wheelAccumulator = 0
+      wheelPoint = recognizer.location(in: self)
       recognizer.setTranslation(.zero, in: self)
-    case .changed:
-      wheelAccumulator += recognizer.translation(in: self).y
+    case .changed, .ended:
+      wheelPoint = recognizer.location(in: self)
+      let dy = recognizer.translation(in: self).y
       recognizer.setTranslation(.zero, in: self)
-      let lines = Int((wheelAccumulator / fonts.cellHeight).rounded(.towardZero))
-      guard lines != 0 else { return }
-      wheelAccumulator -= CGFloat(lines) * fonts.cellHeight
-      let point = recognizer.location(in: self)
-      let cols = max(frameCols, 1)
-      let col = min(max(Int(point.x / fonts.cellWidth), 0), cols - 1)
-      let row = min(max(Int(point.y / fonts.cellHeight), 0), max(screenLines - 1, 0))
-      _ = okena_rv_wheel(handle, Int32(lines), UInt16(col), UInt16(row))
+      sendWheel(dy)
+      if recognizer.state == .ended { startWheelFling(velocity: recognizer.velocity(in: self).y) }
     default:
       wheelAccumulator = 0
     }
+  }
+
+  /// Accumulate a finger delta (pt) into whole wheel notches at `wheelPoint`.
+  /// At most `maxNotches` go out; the rest of a too large delta is dropped.
+  private func sendWheel(_ dy: CGFloat, maxNotches: Int = .max) {
+    guard let handle, let fonts else { return }
+    wheelAccumulator += dy
+    var lines = Int((wheelAccumulator / fonts.cellHeight).rounded(.towardZero))
+    guard lines != 0 else { return }
+    wheelAccumulator -= CGFloat(lines) * fonts.cellHeight
+    if abs(lines) > maxNotches { lines = lines.signum() * maxNotches }
+    let cols = max(frameCols, 1)
+    let col = min(max(Int(wheelPoint.x / fonts.cellWidth), 0), cols - 1)
+    let row = min(max(Int(wheelPoint.y / fonts.cellHeight), 0), max(screenLines - 1, 0))
+    _ = okena_rv_wheel(handle, Int32(lines), UInt16(col), UInt16(row))
   }
 
   // MARK: Accessibility (basic: the visible lines as text)
@@ -1171,6 +1229,60 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       blue: CGFloat(argb & 0xff) / 255,
       alpha: CGFloat((argb >> 24) & 0xff) / 255
     )
+  }
+}
+
+// MARK: - Wheel fling
+//
+// In wheel mode the app scrolls itself, so the scroll view is off and there is
+// no UIScrollView momentum. A fast release keeps feeding the notch
+// accumulator with a decaying velocity, at UIScrollView's normal deceleration
+// rate, so it feels like the scrollback fling. (Android does the same with an
+// OverScroller, which is how its view fling decays.)
+extension TerminalRendererView {
+  /// Slower releases do not fling (Android: scaledMinimumFlingVelocity = 50 dp/s).
+  private static let wheelFlingMinVelocity: CGFloat = 100
+  /// Android: scaledMaximumFlingVelocity = 8000 dp/s.
+  private static let wheelFlingMaxVelocity: CGFloat = 8000
+  private static let wheelFlingStopVelocity: CGFloat = 20
+  /// Limit for mouse-mode apps: at most this many notches per frame.
+  private static let wheelFlingMaxNotchesPerFrame = 8
+  /// Decay per second: v *= 0.998 per ms (UIScrollView.DecelerationRate.normal).
+  private static let wheelFlingDecay = -log(UIScrollView.DecelerationRate.normal.rawValue) * 1000
+
+  fileprivate func startWheelFling(velocity: CGFloat) {
+    let speed = min(abs(velocity), Self.wheelFlingMaxVelocity)
+    guard speed >= Self.wheelFlingMinVelocity, consumesWheel, handle != nil, !selecting else {
+      stopWheelFling()
+      return
+    }
+    wheelFlingVelocity = velocity < 0 ? -speed : speed
+    wheelFlingTime = CACurrentMediaTime()
+  }
+
+  /// One display-link frame of a running wheel fling.
+  fileprivate func stepWheelFling() {
+    guard consumesWheel, handle != nil, !selecting else {
+      stopWheelFling()
+      return
+    }
+    let now = CACurrentMediaTime()
+    // A stalled frame must not dump a burst of notches.
+    let dt = CGFloat(min(max(now - wheelFlingTime, 0), 0.05))
+    wheelFlingTime = now
+    let k = Self.wheelFlingDecay
+    let factor = exp(-k * dt)
+    // Exact distance of the exponential decay over dt.
+    let dy = wheelFlingVelocity * (1 - factor) / k
+    wheelFlingVelocity *= factor
+    sendWheel(dy, maxNotches: Self.wheelFlingMaxNotchesPerFrame)
+    if abs(wheelFlingVelocity) < Self.wheelFlingStopVelocity { stopWheelFling() }
+  }
+
+  fileprivate func stopWheelFling() {
+    guard wheelFlingVelocity != 0 else { return }
+    wheelFlingVelocity = 0
+    wheelAccumulator = 0
   }
 }
 

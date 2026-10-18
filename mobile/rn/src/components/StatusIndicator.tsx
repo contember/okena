@@ -23,7 +23,7 @@ import { OkenaColors } from '../theme';
  * that trailing alpha. Used to derive the faint bg/border tints (Dart used
  * `color.withOpacity(...)`).
  */
-function withAlpha(hex: string, alpha: number): string {
+export function withAlpha(hex: string, alpha: number): string {
   const base = hex.slice(0, 7); // "#RRGGBB"
   const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255)
     .toString(16)
@@ -38,6 +38,8 @@ function describe(status: ConnectionStatus): { color: string; label: string } {
       return { color: OkenaColors.textTertiary, label: 'Disconnected' };
     case 'connecting':
       return { color: OkenaColors.warning, label: 'Connecting' };
+    case 'reconnecting':
+      return { color: OkenaColors.warning, label: `Reconnecting (attempt ${status.attempt})` };
     case 'connected':
       return { color: OkenaColors.success, label: 'Connected' };
     case 'pairing':
@@ -52,7 +54,8 @@ function describe(status: ConnectionStatus): { color: string; label: string } {
 export const StatusIndicator: React.FC<{ status: ConnectionStatus }> = ({ status }) => {
   const { color, label } = describe(status);
   const isConnected = status.kind === 'connected';
-  const shouldPulse = status.kind === 'connecting' || status.kind === 'pairing';
+  const shouldPulse =
+    status.kind === 'connecting' || status.kind === 'reconnecting' || status.kind === 'pairing';
 
   // Pulse opacity: 0.4 ⇄ 1.0, mirroring the Dart 1200ms reversing tween. Drives
   // the dot + label opacity (the chip bg/border stay a faint static tint, which

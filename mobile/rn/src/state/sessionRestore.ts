@@ -4,7 +4,7 @@
  * Kept out of App.tsx so the wiring is unit-testable with injected stores.
  */
 
-import { connectionStore, selectIsConnected } from './connectionStore';
+import { connectionStore, selectIsConnected, selectShowWorkspace } from './connectionStore';
 import { findRestoreServer, sessionStore } from './sessionStore';
 import { workspaceStore } from './workspaceStore';
 
@@ -40,7 +40,7 @@ export function bindSessionMemory(): () => void {
     if (
       c.activeServer === null &&
       prev.activeServer !== null &&
-      selectIsConnected(prev)
+      selectShowWorkspace(prev)
     ) {
       session.getState().clearAutoReconnect();
     }

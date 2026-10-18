@@ -24,12 +24,14 @@ use crate::api::{
 
 /// Connection status surfaced to the RN layer.
 ///
-/// Mirrors `crate::api::connection::ConnectionStatus` (which itself collapses
-/// core's `Reconnecting { attempt }` into `Connecting`).
+/// Mirrors `crate::api::connection::ConnectionStatus`. `Reconnecting` means an
+/// established session dropped and the transport is re-dialing; `attempt` is
+/// 1-based.
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum ConnectionStatus {
     Disconnected,
     Connecting,
+    Reconnecting { attempt: u32 },
     Connected,
     Pairing,
     Error { message: String },
@@ -40,6 +42,9 @@ impl From<NativeConnectionStatus> for ConnectionStatus {
         match s {
             NativeConnectionStatus::Disconnected => ConnectionStatus::Disconnected,
             NativeConnectionStatus::Connecting => ConnectionStatus::Connecting,
+            NativeConnectionStatus::Reconnecting { attempt } => {
+                ConnectionStatus::Reconnecting { attempt }
+            }
             NativeConnectionStatus::Connected => ConnectionStatus::Connected,
             NativeConnectionStatus::Pairing => ConnectionStatus::Pairing,
             NativeConnectionStatus::Error { message } => ConnectionStatus::Error { message },
