@@ -1239,7 +1239,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 current_token = latest.clone();
             }
 
+            // Set by the session once it reports Connected: a drop after that
+            // starts a fresh budget instead of continuing the old count.
+            let mut reached_connected = false;
             let session = Self::ws_session(
+                &mut reached_connected,
                 &config,
                 &current_token,
                 &event_tx,
@@ -1287,6 +1291,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     break;
                 }
                 Some(Err(SessionError::Transient(e))) => {
+                    if reached_connected {
+                        budget.reset();
+                    }
                     let Some(attempt) = budget.next_attempt() else {
                         let msg = format!(
                             "Connection lost after {} attempts (last error: {})",
@@ -1341,6 +1348,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     // Same per-connection state as run_ws_loop, borrowed.
     #[allow(clippy::too_many_arguments)]
     async fn ws_session(
+        reached_connected: &mut bool,
         config: &RemoteConnectionConfig,
         token: &str,
         event_tx: &async_channel::Sender<ConnectionEvent>,
@@ -1588,6 +1596,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Notify connected
+        *reached_connected = true;
         log::info!(
             "Connected to {} in {}ms",
             config.display_endpoint(),
