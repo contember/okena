@@ -39,6 +39,9 @@ pub enum WsClientMessage {
     /// Declare which projects this client renders, as a full replacement set.
     /// Server-side ids (unprefixed) — scopes the server's `gh` PR/CI fan-out.
     SetVisibleProjects { project_ids: Vec<String> },
+    /// Application-level keepalive (`{"type":"ping"}`); the server answers
+    /// `pong`. Sent by the session itself to detect dead connections.
+    Ping,
 }
 
 /// Error type distinguishing auth failures from transient network errors.

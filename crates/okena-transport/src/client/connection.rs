@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite;
 
 type TcpWsStream =
@@ -220,18 +221,321 @@ fn ws_reconnect_max_attempts(config: &RemoteConnectionConfig) -> u32 {
     if config.id == LOCAL_DAEMON_CONNECTION_ID {
         3
     } else {
-        10
+        8
     }
 }
 
+/// Longest sleep between two reconnect attempts to a remote. Short enough that
+/// a server coming back is picked up within seconds, so a user staring at a
+/// "Reconnecting" banner never waits on a long backoff.
+const WS_RECONNECT_BACKOFF_CAP_SECS: u64 = 10;
+
 /// Sleep before reconnect `attempt` (1-based). Local daemon: flat 1s (see
-/// [`ws_reconnect_max_attempts`]); remotes: exponential 1,2,4,… capped at 30s.
+/// [`ws_reconnect_max_attempts`]); remotes: exponential 1,2,4,8 then capped at
+/// [`WS_RECONNECT_BACKOFF_CAP_SECS`] — about a minute of backoff in total
+/// before the connection settles in Error.
 fn ws_reconnect_backoff_secs(config: &RemoteConnectionConfig, attempt: u32) -> u64 {
     if config.id == LOCAL_DAEMON_CONNECTION_ID {
         1
     } else {
-        std::cmp::min(2u64.saturating_pow(attempt.saturating_sub(1)), 30)
+        std::cmp::min(
+            2u64.saturating_pow(attempt.saturating_sub(1)),
+            WS_RECONNECT_BACKOFF_CAP_SECS,
+        )
     }
+}
+
+/// Bound on dialing the WebSocket: TCP connect (all resolved addresses), TLS
+/// handshake and HTTP upgrade together. Without it a SYN that is silently
+/// dropped (Android Doze, a dead Wi-Fi after wake) hangs for the kernel's full
+/// SYN-retry schedule, about two minutes.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often an established session sends `{"type":"ping"}`. The server answers
+/// with `pong` (supported since 2026-02; older daemons answer `error`, which is
+/// inbound traffic too), so a live connection never goes quiet.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+/// No inbound message for this long → probe the connection.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a probe ping may stay unanswered before the session is declared
+/// dead and reconnected.
+const WS_PROBE_GRACE: Duration = Duration::from_secs(5);
+/// A foreground probe only pings when nothing arrived for this long; a session
+/// that just delivered output is evidently alive.
+const WS_PROBE_MIN_QUIET: Duration = Duration::from_secs(2);
+/// Happy Eyeballs (RFC 8305) delay before racing the next resolved address.
+const HAPPY_EYEBALLS_STAGGER: Duration = Duration::from_millis(250);
+
+/// Reconnect attempt counter for one [`RemoteClient::run_ws_loop`].
+#[derive(Debug)]
+struct ReconnectBudget {
+    attempt: u32,
+    max: u32,
+}
+
+impl ReconnectBudget {
+    fn new(max: u32) -> Self {
+        Self { attempt: 0, max }
+    }
+
+    /// Count a failed attempt. `None` once the budget is spent.
+    fn next_attempt(&mut self) -> Option<u32> {
+        self.attempt += 1;
+        (self.attempt <= self.max).then_some(self.attempt)
+    }
+
+    /// Start over: the app came to the foreground or the user asked to retry.
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+}
+
+/// What the reader must do when its liveness deadline passes.
+#[derive(Debug, PartialEq, Eq)]
+enum LivenessAction {
+    /// Nothing heard for the idle timeout: send a ping and wait the grace.
+    SendProbe,
+    /// The probe went unanswered: the connection is dead.
+    Dead,
+}
+
+/// Dead-connection detection for an established session. Pure (time is passed
+/// in) so the deadline logic is unit-testable.
+#[derive(Debug)]
+struct Liveness {
+    idle: Duration,
+    grace: Duration,
+    last_inbound: Instant,
+    deadline: Instant,
+    probe_pending: bool,
+}
+
+impl Liveness {
+    fn new(now: Instant, idle: Duration, grace: Duration) -> Self {
+        Self {
+            idle,
+            grace,
+            last_inbound: now,
+            deadline: now + idle,
+            probe_pending: false,
+        }
+    }
+
+    fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Any inbound frame proves the connection alive.
+    fn on_inbound(&mut self, now: Instant) {
+        self.last_inbound = now;
+        self.deadline = now + self.idle;
+        self.probe_pending = false;
+    }
+
+    fn on_deadline(&mut self, now: Instant) -> LivenessAction {
+        if self.probe_pending {
+            LivenessAction::Dead
+        } else {
+            self.probe_pending = true;
+            self.deadline = now + self.grace;
+            LivenessAction::SendProbe
+        }
+    }
+
+    /// The app asked to verify the connection (e.g. back from background).
+    /// Returns whether a probe ping must be sent.
+    fn on_probe_request(&mut self, now: Instant, min_quiet: Duration) -> bool {
+        if now.duration_since(self.last_inbound) < min_quiet {
+            return false;
+        }
+        if !self.probe_pending {
+            self.probe_pending = true;
+        }
+        self.deadline = std::cmp::min(self.deadline, now + self.grace);
+        true
+    }
+}
+
+/// Out-of-band control of a client's background connection task, shared by
+/// every task the client spawns. Mobile drives it from app lifecycle events;
+/// desktop never touches it and keeps the default (not paused) behaviour.
+///
+/// `watch` channels carry generation counters, so a signal sent while the task
+/// is busy elsewhere is still seen at its next `changed()`.
+#[derive(Clone)]
+struct SessionControl {
+    /// Abort the in-flight reconnect attempt or backoff sleep and retry now,
+    /// with a fresh attempt budget.
+    kick: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Verify an established session quickly (short deadline ping).
+    probe: Arc<tokio::sync::watch::Sender<u64>>,
+    /// While true, the reconnect loop dials nothing (the app is in the
+    /// background, where Android drops packets and attempts only burn budget).
+    paused: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl SessionControl {
+    fn new() -> Self {
+        Self {
+            kick: Arc::new(tokio::sync::watch::channel(0).0),
+            probe: Arc::new(tokio::sync::watch::channel(0).0),
+            paused: Arc::new(tokio::sync::watch::channel(false).0),
+        }
+    }
+
+    fn kick(&self) {
+        self.kick.send_modify(|generation| *generation += 1);
+    }
+
+    fn probe(&self) {
+        self.probe.send_modify(|generation| *generation += 1);
+    }
+
+    fn set_paused(&self, paused: bool) {
+        self.paused.send_replace(paused);
+    }
+}
+
+/// Wait until the control is not paused. Returns immediately when it isn't.
+async fn wait_until_resumed(paused: &mut tokio::sync::watch::Receiver<bool>) {
+    if !*paused.borrow_and_update() {
+        return;
+    }
+    log::info!("Reconnect paused while the app is in the background");
+    while *paused.borrow_and_update() {
+        if paused.changed().await.is_err() {
+            return;
+        }
+    }
+    log::info!("Reconnect resumed");
+}
+
+/// Order resolved addresses for Happy Eyeballs: alternate address families,
+/// starting with the family the resolver listed first (RFC 8305 §4).
+fn interleave_address_families(addrs: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let Some(first) = addrs.first() else {
+        return addrs;
+    };
+    let first_v6 = first.is_ipv6();
+    let (preferred, other): (Vec<_>, Vec<_>) =
+        addrs.into_iter().partition(|addr| addr.is_ipv6() == first_v6);
+    let mut ordered = Vec::with_capacity(preferred.len() + other.len());
+    let mut preferred = preferred.into_iter();
+    let mut other = other.into_iter();
+    loop {
+        match (preferred.next(), other.next()) {
+            (None, None) => break,
+            (a, b) => ordered.extend(a.into_iter().chain(b)),
+        }
+    }
+    ordered
+}
+
+/// Race TCP connects to `addrs` in order, starting the next one every
+/// `stagger` (or as soon as all running attempts failed). First success wins.
+async fn happy_eyeballs_connect(
+    addrs: Vec<std::net::SocketAddr>,
+    stagger: Duration,
+) -> std::io::Result<tokio::net::TcpStream> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    let mut pending = addrs.into_iter();
+    let mut attempts = FuturesUnordered::new();
+    let mut last_error: Option<std::io::Error> = None;
+    let dial = |addr: std::net::SocketAddr| async move {
+        tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{addr}: {e}")))
+    };
+    match pending.next() {
+        Some(addr) => attempts.push(dial(addr)),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "host resolved to no addresses",
+            ));
+        }
+    }
+    loop {
+        tokio::select! {
+            Some(result) = attempts.next() => match result {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempts.is_empty() {
+                        match pending.next() {
+                            Some(addr) => attempts.push(dial(addr)),
+                            None => break,
+                        }
+                    }
+                }
+            },
+            _ = tokio::time::sleep(stagger), if pending.len() > 0 => {
+                if let Some(addr) = pending.next() {
+                    attempts.push(dial(addr));
+                }
+            }
+            else => break,
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::other("all connection attempts failed")
+    }))
+}
+
+/// TCP-connect to `host:port`. An IP literal is dialed directly; a name is
+/// resolved and its addresses raced (Happy Eyeballs) so one unreachable
+/// address family cannot stall the connection — tungstenite alone would try
+/// the addresses one after another.
+async fn connect_tcp(host: &str, port: u16) -> std::io::Result<tokio::net::TcpStream> {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return tokio::net::TcpStream::connect((ip, port)).await;
+    }
+    let addrs: Vec<_> = tokio::net::lookup_host((bare, port)).await?.collect();
+    happy_eyeballs_connect(interleave_address_families(addrs), HAPPY_EYEBALLS_STAGGER).await
+}
+
+/// Dial the WebSocket of a TCP (non-Unix) config: TCP, then TLS (with the
+/// pinned connector) and the HTTP upgrade. Unbounded — callers wrap it in
+/// [`WS_CONNECT_TIMEOUT`].
+async fn dial_tcp_ws(
+    config: &RemoteConnectionConfig,
+    observed: &crate::client::tls::ObservedFingerprint,
+) -> Result<(TcpWsStream, std::net::SocketAddr), SessionError> {
+    let stream = connect_tcp(&config.host, config.port)
+        .await
+        .map_err(|e| SessionError::Transient(format!("TCP connect failed: {e}")))?;
+    let peer = stream
+        .peer_addr()
+        .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], config.port)));
+    let connector = crate::client::tls::ws_connector(
+        config.tls,
+        config.pinned_cert_sha256.clone(),
+        observed.clone(),
+    );
+    let (ws, _response) =
+        tokio_tungstenite::client_async_tls_with_config(config.ws_url(), stream, None, connector)
+            .await
+            .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {e}")))?;
+    Ok((ws, peer))
+}
+
+/// [`dial_tcp_ws`] bounded by `limit`; a timeout is transient like any other
+/// network failure, so the reconnect loop retries it.
+async fn dial_tcp_ws_within(
+    config: &RemoteConnectionConfig,
+    observed: &crate::client::tls::ObservedFingerprint,
+    limit: Duration,
+) -> Result<(TcpWsStream, std::net::SocketAddr), SessionError> {
+    tokio::time::timeout(limit, dial_tcp_ws(config, observed))
+        .await
+        .map_err(|_| {
+            SessionError::Transient(format!(
+                "WebSocket connect to {} timed out after {}s",
+                config.display_endpoint(),
+                limit.as_secs_f32()
+            ))
+        })?
 }
 
 /// Platform-specific operations that the generic client delegates to.
@@ -304,6 +608,8 @@ pub struct RemoteClient<H: ConnectionHandler> {
     /// server drops a connection's entry on close, and a client that never
     /// re-sends would silently fall out of the `gh` PR/CI scope.
     visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Lifecycle signals into the background task (retry now, probe, pause).
+    control: SessionControl,
 }
 
 impl<H: ConnectionHandler> RemoteClient<H> {
@@ -328,7 +634,29 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             ws_abort_handle: None,
             shared_token,
             visible_projects: Arc::new(std::sync::RwLock::new(Vec::new())),
+            control: SessionControl::new(),
         }
+    }
+
+    /// Retry right away: abort the in-flight reconnect attempt or backoff
+    /// sleep and start over with a fresh attempt budget. Only the reconnect
+    /// loop listens, so call it while the status is `Reconnecting`.
+    pub fn reconnect_now(&self) {
+        self.control.kick();
+    }
+
+    /// Verify an established session: if nothing arrived for a moment, send a
+    /// ping and reconnect unless something comes back within a few seconds.
+    /// For when the app returns from the background, where the socket may have
+    /// died silently.
+    pub fn probe_connection(&self) {
+        self.control.probe();
+    }
+
+    /// Pause (or resume) reconnect attempts. A paused loop dials nothing and
+    /// spends no attempt budget; an established session is left alone.
+    pub fn set_reconnect_paused(&self, paused: bool) {
+        self.control.set_paused(paused);
     }
 
     /// Declare which of this connection's projects the client currently renders.
@@ -433,6 +761,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
         let visible_projects = self.visible_projects.clone();
+        let control = self.control.clone();
 
         let task = self.runtime.spawn(async move {
             let mut config = config;
@@ -452,6 +781,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             };
             let mut chosen: Option<(bool, reqwest::Client, String)> = None;
             let attempts = initial_connect_attempts(&config);
+            let started = Instant::now();
             let mut last_connect_failure: Option<String> = None;
             for attempt in 1..=attempts {
                 if attempt > 1 {
@@ -495,9 +825,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             continue;
                         }
                     };
+                    log::info!(
+                        "Health check {} starting ({}) at +{}ms",
+                        config.display_endpoint(),
+                        if tls { "https" } else { "http" },
+                        started.elapsed().as_millis()
+                    );
                     let health_result = client
                         .get(format!("{}/health", base_url))
-                        .timeout(std::time::Duration::from_secs(5))
+                        .timeout(Duration::from_secs(5))
                         .send()
                         .await;
                     let ok = matches!(
@@ -509,6 +845,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         Ok(resp) => Some(format!("health returned HTTP {}", resp.status())),
                         Err(e) => Some(e.to_string()),
                     };
+                    log::info!(
+                        "Health check {} {} at +{}ms",
+                        config.display_endpoint(),
+                        if ok { "ok" } else { "failed" },
+                        started.elapsed().as_millis()
+                    );
                     if ok {
                         chosen = Some((tls, client, base_url));
                         break;
@@ -592,13 +934,25 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             if let Some(token) = config.effective_auth_token() {
                 let trusted_local_transport =
                     config.saved_token.is_none() && config.is_trusted_local_transport();
-                match client
+                log::info!(
+                    "Token check (GET /v1/state) starting at +{}ms",
+                    started.elapsed().as_millis()
+                );
+                let state_result = client
                     .get(format!("{}/v1/state", base_url))
                     .header("Authorization", format!("Bearer {}", token))
-                    .timeout(std::time::Duration::from_secs(5))
+                    .timeout(Duration::from_secs(5))
                     .send()
-                    .await
-                {
+                    .await;
+                log::info!(
+                    "Token check finished ({}) at +{}ms",
+                    match &state_result {
+                        Ok(resp) => resp.status().to_string(),
+                        Err(_) => "network error".to_string(),
+                    },
+                    started.elapsed().as_millis()
+                );
+                match state_result {
                     Ok(resp) if resp.status().is_success() => {
                         if trusted_local_transport {
                             log::info!(
@@ -619,6 +973,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             handler,
                             shared_token,
                             visible_projects,
+                            control,
                         )
                         .await;
                         return;
@@ -692,6 +1047,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
         let visible_projects = self.visible_projects.clone();
+        let control = self.control.clone();
 
         self.status = ConnectionStatus::Connecting;
 
@@ -772,6 +1128,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 handler,
                                 shared_token,
                                 visible_projects,
+                                control,
                             )
                             .await;
                         }
@@ -861,14 +1218,28 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         handler: Arc<H>,
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
         visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
+        control: SessionControl,
     ) {
         let config = session_config.into_inner();
-        let mut reconnect_attempt: u32 = 0;
-        let max_reconnect_attempts = ws_reconnect_max_attempts(&config);
+        let mut budget = ReconnectBudget::new(ws_reconnect_max_attempts(&config));
         let mut current_token = token;
+        let mut kick_rx = control.kick.subscribe();
+        let mut paused_rx = control.paused.subscribe();
 
         loop {
-            match Self::ws_session(
+            // Never dial from the background; the attempt would only hang in
+            // Doze and burn budget. Foreground resumes us (and resets budget).
+            wait_until_resumed(&mut paused_rx).await;
+            // A kick only aborts work that was already running when it came.
+            kick_rx.borrow_and_update();
+            // Use the latest token (it may have been refreshed meanwhile).
+            if let Ok(guard) = shared_token.read()
+                && let Some(ref latest) = *guard
+            {
+                current_token = latest.clone();
+            }
+
+            let session = Self::ws_session(
                 &config,
                 &current_token,
                 &event_tx,
@@ -876,10 +1247,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 &ws_rx,
                 &handler,
                 &visible_projects,
-            )
-            .await
-            {
-                Ok(()) => {
+                &control,
+            );
+            let outcome = tokio::select! {
+                result = session => Some(result),
+                Ok(()) = kick_rx.changed() => None,
+            };
+
+            match outcome {
+                None => {
+                    log::info!(
+                        "Reconnect to {} requested; abandoning the current attempt",
+                        config.display_endpoint()
+                    );
+                    budget.reset();
+                }
+                Some(Ok(())) => {
                     // Clean disconnect requested
                     log::info!(
                         "WebSocket cleanly disconnected from {}:{}",
@@ -888,7 +1271,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     );
                     break;
                 }
-                Err(SessionError::Auth(msg)) => {
+                Some(Err(SessionError::Auth(msg))) => {
                     log::warn!(
                         "Auth error for {}:{}: {}. Switching to Pairing state.",
                         config.host,
@@ -903,13 +1286,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         .await;
                     break;
                 }
-                Err(SessionError::Transient(e)) => {
-                    reconnect_attempt += 1;
-
-                    if reconnect_attempt > max_reconnect_attempts {
+                Some(Err(SessionError::Transient(e))) => {
+                    let Some(attempt) = budget.next_attempt() else {
                         let msg = format!(
                             "Connection lost after {} attempts (last error: {})",
-                            max_reconnect_attempts, e
+                            budget.max, e
                         );
                         log::error!("{}", msg);
                         let _ = event_tx
@@ -919,9 +1300,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             })
                             .await;
                         break;
-                    }
+                    };
 
-                    let backoff = ws_reconnect_backoff_secs(&config, reconnect_attempt);
+                    let backoff = ws_reconnect_backoff_secs(&config, attempt);
 
                     log::warn!(
                         "WebSocket connection to {}:{} lost: {}. Reconnecting in {}s (attempt {}/{})",
@@ -929,26 +1310,27 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         config.port,
                         e,
                         backoff,
-                        reconnect_attempt,
-                        max_reconnect_attempts
+                        attempt,
+                        budget.max
                     );
 
                     let _ = event_tx
                         .send(ConnectionEvent::StatusChanged {
                             connection_id: config.id.clone(),
-                            status: ConnectionStatus::Reconnecting {
-                                attempt: reconnect_attempt,
-                            },
+                            status: ConnectionStatus::Reconnecting { attempt },
                         })
                         .await;
 
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-
-                    // Read the latest token (may have been refreshed since last attempt)
-                    if let Ok(guard) = shared_token.read()
-                        && let Some(ref latest) = *guard
-                    {
-                        current_token = latest.clone();
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                        Ok(()) = kick_rx.changed() => {
+                            log::info!(
+                                "Reconnect to {} requested; skipping the {}s backoff",
+                                config.display_endpoint(),
+                                backoff
+                            );
+                            budget.reset();
+                        }
                     }
                 }
             }
@@ -956,6 +1338,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     }
 
     /// A single WebSocket session. Returns Ok(()) on clean disconnect, Err on failure.
+    // Same per-connection state as run_ws_loop, borrowed.
+    #[allow(clippy::too_many_arguments)]
     async fn ws_session(
         config: &RemoteConnectionConfig,
         token: &str,
@@ -964,29 +1348,47 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_rx: &async_channel::Receiver<WsClientMessage>,
         handler: &Arc<H>,
         visible_projects: &Arc<std::sync::RwLock<Vec<String>>>,
+        control: &SessionControl,
     ) -> Result<(), SessionError> {
         // Shared stream maps: terminal_id -> stream_id (for writer) and reverse (for reader)
         let stream_map: Arc<std::sync::RwLock<HashMap<String, u32>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
         let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
-        let ws_url = config.ws_url();
         let observed = crate::client::tls::new_observed();
 
-        // Connect WebSocket. With TLS we go through connect_async_tls_with_config
-        // using the pinned rustls connector; otherwise the plain ws:// path.
-        let (ws_stream, _response) = if let Some(path) = local_unix_path(config) {
+        let started = Instant::now();
+        let elapsed_ms = || started.elapsed().as_millis();
+
+        // Connect WebSocket (TCP + TLS + upgrade), bounded so a silently
+        // dropped SYN can't stall the session; a timeout is transient.
+        log::info!(
+            "WS connect to {} starting ({})",
+            config.display_endpoint(),
+            if config.tls { "wss" } else { "ws" }
+        );
+        let ws_stream = if let Some(path) = local_unix_path(config) {
             #[cfg(unix)]
             {
-                let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
-                    SessionError::Transient(format!("Unix socket connect failed: {}", e))
-                })?;
-                let (ws, response) =
+                let dial = async {
+                    let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
+                        SessionError::Transient(format!("Unix socket connect failed: {}", e))
+                    })?;
                     tokio_tungstenite::client_async("ws://okena.local/v1/stream", stream)
                         .await
                         .map_err(|e| {
                             SessionError::Transient(format!("WebSocket connect failed: {}", e))
-                        })?;
-                (AnyWsStream::Unix(Box::new(ws)), response)
+                        })
+                };
+                let (ws, _response) = tokio::time::timeout(WS_CONNECT_TIMEOUT, dial)
+                    .await
+                    .map_err(|_| {
+                        SessionError::Transient(format!(
+                            "WebSocket connect to {} timed out",
+                            config.display_endpoint()
+                        ))
+                    })??;
+                log::info!("WS connected to {} in {}ms", config.display_endpoint(), elapsed_ms());
+                AnyWsStream::Unix(Box::new(ws))
             }
             #[cfg(not(unix))]
             {
@@ -995,24 +1397,25 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     "Unix socket transport is not supported on this platform".to_string(),
                 ));
             }
-        } else if config.tls {
-            let connector = crate::client::tls::ws_connector(
-                true,
-                config.pinned_cert_sha256.clone(),
-                observed.clone(),
-            );
-            let (ws, response) =
-                tokio_tungstenite::connect_async_tls_with_config(&ws_url, None, false, connector)
-                    .await
-                    .map_err(|e| {
-                        SessionError::Transient(format!("WebSocket connect failed: {}", e))
-                    })?;
-            (AnyWsStream::Tcp(Box::new(ws)), response)
         } else {
-            let (ws, response) = tokio_tungstenite::connect_async(&ws_url)
-                .await
-                .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
-            (AnyWsStream::Tcp(Box::new(ws)), response)
+            let result = dial_tcp_ws_within(config, &observed, WS_CONNECT_TIMEOUT).await;
+            match result {
+                Ok((ws, peer)) => {
+                    log::info!(
+                        "WS connected to {} via {} in {}ms",
+                        config.display_endpoint(),
+                        peer,
+                        elapsed_ms()
+                    );
+                    AnyWsStream::Tcp(Box::new(ws))
+                }
+                Err(error) => {
+                    if let SessionError::Transient(msg) = &error {
+                        log::warn!("WS connect failed after {}ms: {}", elapsed_ms(), msg);
+                    }
+                    return Err(error);
+                }
+            }
         };
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
@@ -1047,7 +1450,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     .map_err(|e| SessionError::Transient(format!("Invalid JSON: {}", e)))?;
                 let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if msg_type == "auth_ok" {
-                    log::info!("Authenticated with {}:{}", config.host, config.port);
+                    log::info!(
+                        "Authenticated with {}:{} at +{}ms",
+                        config.host,
+                        config.port,
+                        elapsed_ms()
+                    );
                 } else if msg_type == "auth_failed" {
                     let error = parsed
                         .get("error")
@@ -1080,6 +1488,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             )
         }
         .map_err(SessionError::Transient)?;
+        log::info!("State fetch starting at +{}ms", elapsed_ms());
         let state_resp = client
             .get(format!("{}/v1/state", base_url))
             .header("Authorization", format!("Bearer {}", token))
@@ -1105,6 +1514,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             .json()
             .await
             .map_err(|e| SessionError::Transient(format!("Failed to parse state: {}", e)))?;
+        log::info!("State fetched at +{}ms", elapsed_ms());
 
         // Step 4: Sync terminal objects.
         // On reconnect, remove terminals that no longer exist on the server,
@@ -1178,6 +1588,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
 
         // Notify connected
+        log::info!(
+            "Connected to {} in {}ms",
+            config.display_endpoint(),
+            elapsed_ms()
+        );
         let _ = event_tx
             .send(ConnectionEvent::StatusChanged {
                 connection_id: config.id.clone(),
@@ -1196,7 +1611,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         // Spawn writer task
         let ws_rx_clone = ws_rx.clone();
         let stream_map_for_writer = stream_map.clone();
-        let writer_handle = tokio::spawn(async move {
+        let mut writer_handle = tokio::spawn(async move {
             while let Ok(msg) = ws_rx_clone.recv().await {
                 // Prefer compact binary input when the subscription mapping is known.
                 if let WsClientMessage::SendInput { terminal_id, data } = &msg {
@@ -1267,6 +1682,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             "project_ids": project_ids,
                         })
                     }
+                    WsClientMessage::Ping => serde_json::json!({ "type": "ping" }),
                 };
                 if let Err(e) = futures::SinkExt::send(
                     &mut ws_write,
@@ -1280,10 +1696,73 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             }
         });
 
-        // Reader loop
+        // Reader loop. Besides inbound frames it watches the liveness
+        // deadline, sends the periodic ping, answers probe requests and ends
+        // the session if the writer task dies (a failed send means the socket
+        // is gone even when no read error surfaced yet).
         let mut cached_state = state;
+        let mut liveness = Liveness::new(Instant::now(), WS_IDLE_TIMEOUT, WS_PROBE_GRACE);
+        let mut ping_timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + WS_PING_INTERVAL,
+            WS_PING_INTERVAL,
+        );
+        ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut probe_rx = control.probe.subscribe();
         loop {
-            match futures::StreamExt::next(&mut ws_read).await {
+            let frame = tokio::select! {
+                frame = futures::StreamExt::next(&mut ws_read) => frame,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(liveness.deadline())) => {
+                    match liveness.on_deadline(Instant::now()) {
+                        LivenessAction::SendProbe => {
+                            log::info!(
+                                "No data from {}:{} for {}s; probing with a ping",
+                                config_host,
+                                config_port,
+                                WS_IDLE_TIMEOUT.as_secs()
+                            );
+                            let _ = ws_tx_clone.try_send(WsClientMessage::Ping);
+                        }
+                        LivenessAction::Dead => {
+                            log::warn!(
+                                "Ping timeout: {}:{} did not answer within {}s",
+                                config_host,
+                                config_port,
+                                WS_PROBE_GRACE.as_secs()
+                            );
+                            writer_handle.abort();
+                            return Err(SessionError::Transient(
+                                "Server stopped responding (ping timeout)".to_string(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                _ = ping_timer.tick() => {
+                    let _ = ws_tx_clone.try_send(WsClientMessage::Ping);
+                    continue;
+                }
+                Ok(()) = probe_rx.changed() => {
+                    if liveness.on_probe_request(Instant::now(), WS_PROBE_MIN_QUIET) {
+                        log::info!(
+                            "Probing {}:{} (connection check requested)",
+                            config_host,
+                            config_port
+                        );
+                        let _ = ws_tx_clone.try_send(WsClientMessage::Ping);
+                    }
+                    continue;
+                }
+                _ = &mut writer_handle => {
+                    log::warn!("WebSocket writer to {}:{} stopped", config_host, config_port);
+                    return Err(SessionError::Transient(
+                        "WebSocket writer stopped".to_string(),
+                    ));
+                }
+            };
+            if matches!(frame, Some(Ok(_))) {
+                liveness.on_inbound(Instant::now());
+            }
+            match frame {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
                     // Generic binary frame: [proto:1][type:1][stream_id:4 BE][payload...]
                     if let Some((frame_type, stream_id, payload)) =
@@ -1855,7 +2334,7 @@ mod tests {
         let local = config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint());
         let remote = config("user-remote", None);
         assert_eq!(ws_reconnect_max_attempts(&local), 3);
-        assert_eq!(ws_reconnect_max_attempts(&remote), 10);
+        assert_eq!(ws_reconnect_max_attempts(&remote), 8);
     }
 
     #[test]
@@ -1874,9 +2353,221 @@ mod tests {
         assert_eq!(ws_reconnect_backoff_secs(&remote, 1), 1);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 2), 2);
         assert_eq!(ws_reconnect_backoff_secs(&remote, 3), 4);
-        assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 16);
-        assert_eq!(ws_reconnect_backoff_secs(&remote, 6), 30);
-        assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 30, "capped at 30s");
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 4), 8);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 5), 10);
+        assert_eq!(ws_reconnect_backoff_secs(&remote, 10), 10, "capped at 10s");
+    }
+
+    #[test]
+    fn ws_reconnect_total_backoff_stays_around_a_minute() {
+        let remote = config("user-remote", None);
+        let total: u64 = (1..=ws_reconnect_max_attempts(&remote))
+            .map(|attempt| ws_reconnect_backoff_secs(&remote, attempt))
+            .sum();
+        assert_eq!(total, 55);
+    }
+
+    #[test]
+    fn reconnect_budget_runs_out_and_reset_restores_it() {
+        let mut budget = ReconnectBudget::new(2);
+        assert_eq!(budget.next_attempt(), Some(1));
+        assert_eq!(budget.next_attempt(), Some(2));
+        assert_eq!(budget.next_attempt(), None, "budget spent");
+
+        budget.reset();
+        assert_eq!(budget.next_attempt(), Some(1), "fresh budget after reset");
+    }
+
+    #[test]
+    fn liveness_probes_after_idle_then_declares_dead() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(45);
+        let grace = Duration::from_secs(5);
+        let mut live = Liveness::new(t0, idle, grace);
+        assert_eq!(live.deadline(), t0 + idle);
+
+        let t1 = t0 + idle;
+        assert_eq!(live.on_deadline(t1), LivenessAction::SendProbe);
+        assert_eq!(live.deadline(), t1 + grace, "probe gets the short grace");
+        assert_eq!(live.on_deadline(t1 + grace), LivenessAction::Dead);
+    }
+
+    #[test]
+    fn liveness_inbound_answers_the_probe() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(45);
+        let grace = Duration::from_secs(5);
+        let mut live = Liveness::new(t0, idle, grace);
+
+        let t1 = t0 + idle;
+        assert_eq!(live.on_deadline(t1), LivenessAction::SendProbe);
+        let t2 = t1 + Duration::from_secs(1);
+        live.on_inbound(t2);
+        assert_eq!(live.deadline(), t2 + idle);
+        assert_eq!(
+            live.on_deadline(t2 + idle),
+            LivenessAction::SendProbe,
+            "a fresh idle period probes again instead of dying"
+        );
+    }
+
+    #[test]
+    fn liveness_probe_request_shortens_the_deadline_only_when_quiet() {
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(45);
+        let grace = Duration::from_secs(5);
+        let quiet = Duration::from_secs(2);
+        let mut live = Liveness::new(t0, idle, grace);
+
+        // Output just arrived: no probe needed.
+        assert!(!live.on_probe_request(t0 + Duration::from_secs(1), quiet));
+        assert_eq!(live.deadline(), t0 + idle);
+
+        // Back from background after 20s of silence: ping with a short deadline.
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(live.on_probe_request(t1, quiet));
+        assert_eq!(live.deadline(), t1 + grace);
+        assert_eq!(live.on_deadline(t1 + grace), LivenessAction::Dead);
+    }
+
+    #[test]
+    fn session_control_signals_are_seen_by_a_busy_task() {
+        let control = SessionControl::new();
+        let mut kick = control.kick.subscribe();
+        let mut paused = control.paused.subscribe();
+        assert!(!kick.has_changed().unwrap());
+
+        // Sent while nobody is awaiting: still observed afterwards.
+        control.kick();
+        assert!(kick.has_changed().unwrap());
+        kick.borrow_and_update();
+        assert!(!kick.has_changed().unwrap());
+
+        control.set_paused(true);
+        assert!(*paused.borrow_and_update());
+        control.set_paused(false);
+        assert!(!*paused.borrow_and_update());
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// A server that accepts TCP but never answers the HTTP upgrade — the
+    /// shape of a half-dead NAT mapping or a stuck proxy. The dial must give
+    /// up at the deadline instead of hanging.
+    #[test]
+    fn ws_dial_times_out_when_the_upgrade_never_answers() {
+        rt().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let _hold = tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((socket, _)) = listener.accept().await {
+                    held.push(socket);
+                }
+            });
+            let mut cfg = config("blackhole", None);
+            cfg.port = port;
+
+            let started = Instant::now();
+            let result = dial_tcp_ws_within(
+                &cfg,
+                &crate::client::tls::new_observed(),
+                Duration::from_millis(300),
+            )
+            .await;
+
+            match result {
+                Err(SessionError::Transient(msg)) => assert!(msg.contains("timed out"), "{msg}"),
+                Err(SessionError::Auth(msg)) => panic!("timeout must be transient, got auth: {msg}"),
+                Ok(_) => panic!("blackhole must not connect"),
+            }
+            assert!(started.elapsed() < Duration::from_secs(3));
+        });
+    }
+
+    /// A non-routable address: SYNs go nowhere. Either the deadline fires or
+    /// the OS rejects the route immediately — never a two-minute hang.
+    #[test]
+    fn ws_dial_to_a_non_routable_address_is_bounded() {
+        rt().block_on(async {
+            let mut cfg = config("non-routable", None);
+            cfg.host = "10.255.255.1".to_string();
+            cfg.port = 19199;
+            let started = Instant::now();
+            let result = dial_tcp_ws_within(
+                &cfg,
+                &crate::client::tls::new_observed(),
+                Duration::from_millis(500),
+            )
+            .await;
+            assert!(matches!(result, Err(SessionError::Transient(_))));
+            assert!(started.elapsed() < Duration::from_secs(3));
+        });
+    }
+
+    #[test]
+    fn address_families_are_interleaved_starting_with_the_first() {
+        let v6a: std::net::SocketAddr = "[2001:db8::1]:1".parse().unwrap();
+        let v6b: std::net::SocketAddr = "[2001:db8::2]:1".parse().unwrap();
+        let v4a: std::net::SocketAddr = "192.0.2.1:1".parse().unwrap();
+        let v4b: std::net::SocketAddr = "192.0.2.2:1".parse().unwrap();
+        assert_eq!(
+            interleave_address_families(vec![v6a, v6b, v4a, v4b]),
+            vec![v6a, v4a, v6b, v4b]
+        );
+        assert_eq!(
+            interleave_address_families(vec![v4a, v4b, v6a]),
+            vec![v4a, v6a, v4b]
+        );
+        assert!(interleave_address_families(Vec::new()).is_empty());
+    }
+
+    /// The first address hangs (non-routable); the racer must still connect
+    /// through the second one shortly after the stagger.
+    #[test]
+    fn happy_eyeballs_skips_a_hanging_address() {
+        rt().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let good = listener.local_addr().unwrap();
+            let _accept = tokio::spawn(async move {
+                let _ = listener.accept().await;
+            });
+            let hanging: std::net::SocketAddr = "10.255.255.1:19199".parse().unwrap();
+
+            let started = Instant::now();
+            let stream = tokio::time::timeout(
+                Duration::from_secs(5),
+                happy_eyeballs_connect(vec![hanging, good], Duration::from_millis(50)),
+            )
+            .await
+            .expect("racer must not wait for the hanging address")
+            .expect("second address connects");
+            assert_eq!(stream.peer_addr().unwrap(), good);
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn happy_eyeballs_reports_failure_when_every_address_fails() {
+        rt().block_on(async {
+            // Bind then drop to get a port that refuses connections.
+            let closed = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                l.local_addr().unwrap()
+            };
+            let result =
+                happy_eyeballs_connect(vec![closed, closed], Duration::from_millis(50)).await;
+            assert!(result.is_err());
+            assert!(happy_eyeballs_connect(Vec::new(), Duration::from_millis(50))
+                .await
+                .is_err());
+        });
     }
 
     /// The bearer token must not go out over a certificate this task has not
