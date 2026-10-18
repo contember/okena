@@ -8,7 +8,8 @@
  *     container then only keeps the soft-keyboard input below, turns a tap
  *     into keyboard focus and sends `scrollToBottom` after input. JS does
  *     not resize the PTY in this mode. Nothing consumes `onScrollStateChange`
- *     yet.
+ *     yet. While a selection gesture holds output back
+ *     (`onOutputPausedChange`), a small "Paused" chip shows.
  *   - `skia`: the JS + Skia renderer, with the gesture chrome described below.
  *
  * Skia mode:
@@ -73,6 +74,7 @@ import {
   OkenaTerminalViewCommands,
   type FontSizeChangeEvent,
   type GridSizeEvent,
+  type OutputPausedChangeEvent,
   type TerminalViewTheme,
 } from 'okena-terminal-view';
 import { KeyModifiers, applyModifiersToText } from './keyInput';
@@ -197,6 +199,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     const inputRef = useRef<TextInput>(null);
     const [selecting, setSelecting] = useState(false);
     const [copied, setCopied] = useState(false);
+    // The native view froze live output for a selection gesture.
+    const [outputPaused, setOutputPaused] = useState(false);
     const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // What the hidden TextInput holds (sentinel-padded). The field is
@@ -281,6 +285,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
     useEffect(() => {
       resetInput();
+      setOutputPaused(false);
       return () => {
         if (copiedTimer.current) clearTimeout(copiedTimer.current);
       };
@@ -590,6 +595,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       [setFontSize],
     );
 
+    const onNativeOutputPausedChange = useCallback(
+      (e: NativeSyntheticEvent<OutputPausedChangeEvent>) => setOutputPaused(e.nativeEvent.paused),
+      [],
+    );
+
     return (
       <View style={styles.root}>
         {nativeRenderer ? (
@@ -608,6 +618,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
             onFontSizeChange={onNativeFontSizeChange}
             // The view already copied to the clipboard; just confirm it.
             onSelectionCopied={flashCopied}
+            onOutputPausedChange={onNativeOutputPausedChange}
           />
         ) : (
           <>
@@ -666,6 +677,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           // Keep it from being read out / styled visibly.
           underlineColorAndroid="transparent"
         />
+        {nativeRenderer && outputPaused ? (
+          <View style={styles.pausedChip} pointerEvents="none" testID="terminal-output-paused">
+            <Text style={styles.pausedChipText}>Paused</Text>
+          </View>
+        ) : null}
         {copied ? (
           <View style={styles.copyNotice} pointerEvents="none">
             <Text style={styles.copyNoticeText}>Copied</Text>
@@ -704,6 +720,22 @@ const styles = StyleSheet.create({
     backgroundColor: OkenaColors.surfaceOverlay,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: OkenaColors.borderLight,
+  },
+  pausedChip: {
+    position: 'absolute',
+    top: 8,
+    right: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: OkenaColors.surfaceOverlay,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.borderLight,
+  },
+  pausedChipText: {
+    color: OkenaColors.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
   },
   copyNoticeText: {
     color: OkenaColors.textPrimary,

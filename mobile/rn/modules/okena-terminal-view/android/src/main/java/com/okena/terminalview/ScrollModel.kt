@@ -30,6 +30,11 @@ internal class ScrollModel {
   /** The live tail's top edge, in `[minTop, maxTop]`. */
   var liveTop = 0L
     private set
+  /**
+   * Set while a selection gesture runs: the view keeps its absolute line instead of tracking
+   * the live tail, so the text under the finger does not move.
+   */
+  var hold = false
   private var epoch = 0
   private var known = false
 
@@ -74,7 +79,7 @@ internal class ScrollModel {
     liveTop = live
     // Following, the view sits on the live tail; it may also rest below it (between the tail
     // and the grid's bottom) until the tail moves or the grid reflows.
-    if (follow && (liveMoved || reflowed || top < live)) top = live.toDouble()
+    if (follow && !hold && (liveMoved || reflowed || top < live)) top = live.toDouble()
     clamp()
     return top != before
   }

@@ -22,4 +22,5 @@ export type {
   FontSizeChangeEvent,
   SelectionCopiedEvent,
   ScrollStateChangeEvent,
+  OutputPausedChangeEvent,
 } from './OkenaTerminalViewNativeComponent';

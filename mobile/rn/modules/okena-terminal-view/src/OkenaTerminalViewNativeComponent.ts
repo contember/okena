@@ -50,6 +50,10 @@ export type ScrollStateChangeEvent = Readonly<{
   atBottom: boolean;
 }>;
 
+export type OutputPausedChangeEvent = Readonly<{
+  paused: boolean;
+}>;
+
 export interface NativeProps extends ViewProps {
   /** Connection id from the Rust `ConnectionManager`. */
   connId: string;
@@ -70,6 +74,11 @@ export interface NativeProps extends ViewProps {
   onSelectionCopied?: CodegenTypes.DirectEventHandler<SelectionCopiedEvent>;
   /** The viewport moved to or away from the live bottom. */
   onScrollStateChange?: CodegenTypes.DirectEventHandler<ScrollStateChangeEvent>;
+  /**
+   * Live output was frozen (`paused`) while a selection gesture runs, or
+   * resumed and caught up. The view freezes and resumes on its own.
+   */
+  onOutputPausedChange?: CodegenTypes.DirectEventHandler<OutputPausedChangeEvent>;
 }
 
 export type OkenaTerminalViewType = HostComponent<NativeProps>;

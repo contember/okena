@@ -110,6 +110,9 @@ class OkenaTerminalViewManager :
     override fun onScrollStateChange(atBottom: Boolean) =
       emit("ScrollStateChange") { putBoolean("atBottom", atBottom) }
 
+    override fun onOutputPaused(paused: Boolean) =
+      emit("OutputPausedChange") { putBoolean("paused", paused) }
+
     private inline fun emit(name: String, fill: WritableMap.() -> Unit) {
       val dispatcher = UIManagerHelper.getEventDispatcherForReactTag(context, view.id) ?: return
       val payload = Arguments.createMap().apply(fill)
@@ -123,7 +126,14 @@ class OkenaTerminalViewManager :
     const val NAME = "OkenaTerminalView"
 
     private val EVENT_NAMES =
-      listOf("Tap", "GridSize", "FontSizeChange", "SelectionCopied", "ScrollStateChange")
+      listOf(
+        "Tap",
+        "GridSize",
+        "FontSizeChange",
+        "SelectionCopied",
+        "ScrollStateChange",
+        "OutputPausedChange",
+      )
 
     /** Packed unsigned ARGB sent as a JS number → Android color int. */
     private fun argb(map: ReadableMap, key: String): Int? =
