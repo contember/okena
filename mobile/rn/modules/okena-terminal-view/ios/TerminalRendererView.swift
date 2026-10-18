@@ -60,7 +60,7 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
       invalidateRows()
     }
   }
-  /// Unused: Rust resolves cell colors. Kept for the contract.
+  /// Text color of the "Select text" mode; Rust resolves the cell colors.
   @objc public var foregroundArgb: UInt32 = 0xffcd_d6f4
   @objc public var cursorArgb: UInt32 = 0xfff5_e0dc {
     didSet { if cursorArgb != oldValue { needsUpdate = true } }
@@ -112,6 +112,31 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
     needsUpdate = true
   }
 
+  /// "Select text" mode: show the last `selectTextMaxLines` lines as plain
+  /// text in a full-screen system text view, opened at this view's position.
+  @objc public func openSelectText() {
+    guard let handle, let fonts, haveFrame, totalLines > 0 else { return }
+    let start = CACurrentMediaTime()
+    let lastLine = firstLine + Int64(totalLines) - 1
+    let fromLine = max(firstLine, lastLine - Int64(Self.selectTextMaxLines) + 1)
+    let topLine = firstLine + Int64((scrollView.contentOffset.y / fonts.cellHeight).rounded(.down))
+    var len = 0
+    var anchor: UInt32 = 0
+    guard let ptr = okena_rv_text_range(handle, fromLine, lastLine, topLine, &len, &anchor) else { return }
+    let text = String(cString: ptr)
+    let controller = TerminalTextViewController(
+      text: text, anchorNewlines: Int(anchor), fontSize: fontSize, background: Self.color(argb: backgroundArgb),
+      foreground: Self.color(argb: foregroundArgb))
+    guard let window, var presenter = window.rootViewController else { return }
+    // The soft keyboard would cover the text; the user taps the terminal to get it back.
+    window.endEditing(true)
+    while let next = presenter.presentedViewController { presenter = next }
+    presenter.present(controller, animated: true)
+    if perf.enabled {
+      NSLog("DBG ntv select text: %d chars, built in %.1f ms", len, (CACurrentMediaTime() - start) * 1000)
+    }
+  }
+
   // MARK: Constants
 
   private static let maxCols = 500
@@ -128,6 +153,8 @@ public final class TerminalRendererView: UIView, UIScrollViewDelegate, UIGesture
   private static let tapDelay: TimeInterval = 0.25
   /// Height of the edge auto-scroll zones during a selection drag, in rows.
   private static let autoScrollZoneRows: CGFloat = 2.5
+  /// Lines the "Select text" mode shows at most (the newest).
+  private static let selectTextMaxLines = 5000
 
   // MARK: State
 

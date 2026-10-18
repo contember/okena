@@ -54,6 +54,12 @@ object RustBridge {
 
   @JvmStatic external fun selectionClear(handle: Long)
 
+  /**
+   * Plain text of absolute lines [start]..[end] (soft wraps joined); `anchorOut[0]` gets the
+   * number of newlines before the line holding [anchor]. Null while the terminal is missing.
+   */
+  @JvmStatic external fun textRange(handle: Long, start: Long, end: Long, anchor: Long, anchorOut: IntArray): String?
+
   /** True when the app consumed the notches (mouse mode, or alt screen with 1007). */
   @JvmStatic external fun wheel(handle: Long, lines: Int, col: Int, row: Int): Boolean
 

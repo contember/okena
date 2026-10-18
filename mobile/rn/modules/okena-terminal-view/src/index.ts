@@ -2,7 +2,8 @@
  * okena-terminal-view — the native terminal renderer as a React component.
  *
  * `OkenaTerminalView` is the codegen host component. Use a ref with
- * `OkenaTerminalViewCommands.scrollToBottom(ref)` / `.clearSelection(ref)`.
+ * `OkenaTerminalViewCommands.scrollToBottom(ref)` / `.clearSelection(ref)` /
+ * `.openSelectText(ref)`.
  */
 
 import * as Spec from './OkenaTerminalViewNativeComponent';

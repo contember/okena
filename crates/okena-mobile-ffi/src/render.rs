@@ -828,6 +828,8 @@ pub struct OkenaRvHandle {
     word_anchor: Option<WordAnchor>,
     /// This handle froze the terminal's output; thawed on close at the latest.
     froze: bool,
+    /// Buffer behind `okena_rv_text_range`.
+    range_text: Vec<u8>,
 }
 
 impl OkenaRvHandle {
@@ -926,6 +928,7 @@ pub unsafe extern "C" fn okena_rv_open(
             selection_text: Vec::new(),
             word_anchor: None,
             froze: false,
+            range_text: Vec::new(),
         }))
     })
 }
@@ -1190,6 +1193,54 @@ pub unsafe extern "C" fn okena_rv_selection_clear(handle: *mut OkenaRvHandle) {
     })
 }
 
+/// Plain text of absolute lines `start_line..=end_line` (clamped to the
+/// readable range, at most [`crate::text_export::MAX_EXPORT_LINES`]): soft
+/// wraps joined, trailing blanks trimmed, wide-char spacers skipped, blank
+/// lines at the end dropped. UTF-8, NUL-terminated, length without NUL in
+/// `*len_out`. `*anchor_out` (if non-null) gets the number of `\n` before
+/// the line holding absolute line `anchor_line`. Owned by the handle, valid
+/// until the next call or `okena_rv_close`; null when the terminal is missing.
+///
+/// # Safety
+/// `handle` must be null or a live handle; `len_out` / `anchor_out` null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn okena_rv_text_range(
+    handle: *mut OkenaRvHandle,
+    start_line: i64,
+    end_line: i64,
+    anchor_line: i64,
+    len_out: *mut usize,
+    anchor_out: *mut u32,
+) -> *const c_char {
+    guard(std::ptr::null(), || {
+        // SAFETY: caller contract.
+        let Some(h) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null();
+        };
+        let Some(out) = h.with_holder(|holder| {
+            holder.with_term(|term, track| {
+                crate::text_export::range_text(term, track, start_line, end_line, anchor_line)
+            })
+        }) else {
+            return std::ptr::null();
+        };
+        h.range_text.clear();
+        h.range_text.extend_from_slice(out.text.as_bytes());
+        h.range_text.push(0);
+        // SAFETY: caller contract.
+        unsafe {
+            if !len_out.is_null() {
+                *len_out = out.text.len();
+            }
+            if !anchor_out.is_null() {
+                *anchor_out = out.anchor_newlines;
+            }
+        }
+        h.range_text.as_ptr().cast()
+    })
+}
+
 /// Scroll gesture of `lines` notches (positive = up) at screen cell
 /// `col`/`row`. Returns 1 when the notches went to the app (mouse reporting,
 /// or alt screen with alternate scroll), 0 when the view should scroll its
@@ -1320,6 +1371,9 @@ mod tests {
         assert_eq!(unsafe { okena_rv_generation(h) }, 0);
         assert_eq!(unsafe { okena_rv_wheel(h, 1, 0, 0) }, 0);
         assert!(unsafe { okena_rv_selection_text(h, std::ptr::null_mut()) }.is_null());
+        let text =
+            unsafe { okena_rv_text_range(h, 0, 10, 0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(text.is_null());
         unsafe { okena_rv_close(h) };
         unsafe { okena_rv_close(std::ptr::null_mut()) };
         assert!(unsafe { okena_rv_snapshot(std::ptr::null_mut(), 0, 1) }.is_null());

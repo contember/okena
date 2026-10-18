@@ -30,6 +30,7 @@ function setup(options: { keyboardVisible?: boolean } = {}) {
   const modifiers = new KeyModifiers();
   const onHideKeyboard = jest.fn();
   const onShowKeyboard = jest.fn();
+  const onSelectText = jest.fn();
   let renderer!: TestRenderer.ReactTestRenderer;
   act(() => {
     renderer = TestRenderer.create(
@@ -40,6 +41,7 @@ function setup(options: { keyboardVisible?: boolean } = {}) {
         native={native as unknown as OkenaNative}
         onHideKeyboard={onHideKeyboard}
         onShowKeyboard={onShowKeyboard}
+        onSelectText={onSelectText}
       />,
     );
   });
@@ -60,7 +62,18 @@ function setup(options: { keyboardVisible?: boolean } = {}) {
       key(label).props.onPressIn();
       key(label).props.onPressOut();
     });
-  return { renderer, native, modifiers, onHideKeyboard, onShowKeyboard, key, hasKey, tap, pressIn };
+  return {
+    renderer,
+    native,
+    modifiers,
+    onHideKeyboard,
+    onShowKeyboard,
+    onSelectText,
+    key,
+    hasKey,
+    tap,
+    pressIn,
+  };
 }
 
 describe('KeyToolbar', () => {
@@ -149,5 +162,15 @@ describe('KeyToolbar', () => {
     shown.tap('Toggle keyboard');
     expect(shown.onHideKeyboard).toHaveBeenCalled();
     act(() => shown.renderer.unmount());
+  });
+
+  it('opens the select text mode without sending input', () => {
+    const t = setup();
+    t.tap('More keys');
+    t.tap('Select text');
+    expect(t.onSelectText).toHaveBeenCalledTimes(1);
+    expect(t.native.sendText).not.toHaveBeenCalled();
+    expect(t.native.sendSpecialKey).not.toHaveBeenCalled();
+    act(() => t.renderer.unmount());
   });
 });

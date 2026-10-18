@@ -30,6 +30,8 @@
 //       @JvmStatic external fun selectionStartWord(handle: Long, line: Long, col: Int): Boolean
 //       @JvmStatic external fun setOutputFrozen(handle: Long, frozen: Boolean)
 //       @JvmStatic external fun outputFrozen(handle: Long): Boolean
+//       // Text of lines start..=end; the anchor line's newline count goes into anchorOut[0].
+//       @JvmStatic external fun textRange(handle: Long, start: Long, end: Long, anchor: Long, anchorOut: IntArray): String?
 //       @JvmStatic external fun selectionText(handle: Long): String?
 //       @JvmStatic external fun selectionClear(handle: Long)
 //       @JvmStatic external fun wheel(handle: Long, lines: Int, col: Int, row: Int): Boolean
@@ -235,6 +237,21 @@ JNIEXPORT jstring JNICALL RB(selectionText)(JNIEnv *env, jclass, jlong h) {
 
 JNIEXPORT void JNICALL RB(selectionClear)(JNIEnv *, jclass, jlong h) {
   okena_rv_selection_clear(rv(h));
+}
+
+JNIEXPORT jstring JNICALL RB(textRange)(JNIEnv *env, jclass, jlong h, jlong start, jlong end,
+                                       jlong anchor, jintArray anchor_out) {
+  size_t len = 0;
+  uint32_t anchor_newlines = 0;
+  const char *text = okena_rv_text_range(rv(h), static_cast<int64_t>(start),
+                                         static_cast<int64_t>(end), static_cast<int64_t>(anchor),
+                                         &len, &anchor_newlines);
+  if (!text) return nullptr;
+  if (anchor_out && env->GetArrayLength(anchor_out) > 0) {
+    jint value = static_cast<jint>(anchor_newlines);
+    env->SetIntArrayRegion(anchor_out, 0, 1, &value);
+  }
+  return utf8_to_jstring(env, text, len);
 }
 
 JNIEXPORT jboolean JNICALL RB(wheel)(JNIEnv *, jclass, jlong h, jint lines, jint col, jint row) {

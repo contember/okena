@@ -75,6 +75,8 @@ class OkenaTerminalViewManager :
 
   override fun clearSelection(view: TerminalRendererView) = view.clearSelection()
 
+  override fun openSelectText(view: TerminalRendererView) = view.openSelectText()
+
   // ── Events ───────────────────────────────────────────────────────────────
 
   override fun getExportedCustomDirectEventTypeConstants(): MutableMap<String, Any> {

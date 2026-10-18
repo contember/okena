@@ -84,7 +84,6 @@ describe('key bytes', () => {
     ['down', '\x1b[B'],
     ['enter', '\r'],
     ['ctrl-d', '\x04'],
-    ['ctrl-l', '\x0c'],
     ['ctrl-z', '\x1a'],
     ['ctrl-r', '\x12'],
     ['pgup', '\x1b[5~'],
@@ -114,7 +113,7 @@ describe('key bytes', () => {
 
   it('covers every key that sends input', () => {
     const silent = ALL_KEYS.filter((k) => bytesOf(k.id) === null).map((k) => k.id);
-    expect(silent.sort()).toEqual(['alt', 'compose', 'ctrl', 'keyboard', 'more', 'paste']);
+    expect(silent.sort()).toEqual(['alt', 'compose', 'ctrl', 'keyboard', 'more', 'paste', 'select']);
   });
 
   it('mirrors okena_core SpecialKey::to_bytes', () => {

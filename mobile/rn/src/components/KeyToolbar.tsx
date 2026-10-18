@@ -5,7 +5,7 @@
  *   - one always-visible row of eight equal keys tuned for driving Claude Code:
  *     esc · ^C · tab · shift+tab · up · down · return · more,
  *   - "more" expands a three-row panel above it (same 8-column grid) with
- *     paste/compose, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^L ^Z ^R, paging,
+ *     paste/compose/select text, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^Z ^R, paging,
  *     home/end, `- _`, left/right, forward delete and the keyboard toggle.
  *     The panel stays open until "more" is tapped again, so repeated keys
  *     (arrows) don't need reopening.
@@ -75,6 +75,8 @@ export interface KeyToolbarProps {
   onHideKeyboard?: () => void;
   /** Show the soft keyboard (focus the selected pane's input). */
   onShowKeyboard?: () => void;
+  /** Open the target terminal's native "Select text" mode. */
+  onSelectText?: () => void;
   /** Called after the toolbar sent input, so the pane can reset its keyboard buffer. */
   onInputSent?: () => void;
   /** Injected native surface (defaults to `getOkenaNative()`). */
@@ -110,6 +112,7 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
   modifiers,
   onHideKeyboard,
   onShowKeyboard,
+  onSelectText,
   onInputSent,
   native = getOkenaNative(),
 }) => {
@@ -193,6 +196,9 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
           setComposeInitialText('');
           setComposeOpen(true);
           return;
+        case 'selectText':
+          onSelectText?.();
+          return;
         case 'keyboard':
           if (keyboardVisible) onHideKeyboard?.();
           else onShowKeyboard?.();
@@ -207,7 +213,15 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
         }
       }
     },
-    [modifiers, pasteClipboard, keyboardVisible, onHideKeyboard, onShowKeyboard, sendInput],
+    [
+      modifiers,
+      pasteClipboard,
+      keyboardVisible,
+      onHideKeyboard,
+      onShowKeyboard,
+      onSelectText,
+      sendInput,
+    ],
   );
 
   const renderRow = (keys: readonly ToolbarKey[], rowKey: string) => (

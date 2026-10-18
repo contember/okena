@@ -326,6 +326,7 @@ export const WorkspaceScreen: React.FC = () => {
             native={native}
             onHideKeyboard={() => paneRef.current?.blur()}
             onShowKeyboard={() => paneRef.current?.focus()}
+            onSelectText={() => paneRef.current?.openSelectText()}
             onInputSent={() => {
               paneRef.current?.resetInput();
               paneRef.current?.scrollToBottom();
