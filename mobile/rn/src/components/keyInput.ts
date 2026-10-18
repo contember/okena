@@ -259,6 +259,8 @@ export type KeyAction =
   | { type: 'modifier'; modifier: ToolbarModifier }
   | { type: 'paste' }
   | { type: 'compose' }
+  /** Open the native "Select text" mode of the target terminal. */
+  | { type: 'selectText' }
   | { type: 'keyboard' }
   | { type: 'more' };
 
@@ -326,18 +328,18 @@ export const MORE_ROWS: readonly (readonly ToolbarKey[])[] = [
   [
     { id: 'paste', label: 'paste', accessibilityLabel: 'Paste clipboard', action: { type: 'paste' } },
     { id: 'compose', label: 'edit', accessibilityLabel: 'Compose input', action: { type: 'compose' } },
+    { id: 'select', label: 'select', accessibilityLabel: 'Select text', action: { type: 'selectText' } },
     char('/', 'Slash'),
     char('@', 'At sign'),
     char('|', 'Pipe'),
     char('~', 'Tilde'),
     char('\\', 'Backslash'),
-    char('`', 'Backtick'),
   ],
   [
     { id: 'ctrl', label: 'ctrl', accessibilityLabel: 'Control modifier', action: { type: 'modifier', modifier: 'ctrl' } },
     { id: 'alt', label: 'alt', accessibilityLabel: 'Alt modifier', action: { type: 'modifier', modifier: 'option' } },
     { id: 'ctrl-d', label: '^D', accessibilityLabel: 'Control D', action: special('CtrlD') },
-    { id: 'ctrl-l', label: '^L', accessibilityLabel: 'Control L, clear screen', action: text('\x0c') },
+    char('`', 'Backtick'),
     { id: 'ctrl-z', label: '^Z', accessibilityLabel: 'Control Z', action: special('CtrlZ') },
     { id: 'ctrl-r', label: '^R', accessibilityLabel: 'Control R, history search', action: text('\x12') },
     { id: 'pgup', label: 'pgup', accessibilityLabel: 'Page up', action: special('PageUp'), repeat: true },
@@ -357,7 +359,7 @@ export const MORE_ROWS: readonly (readonly ToolbarKey[])[] = [
 
 /**
  * Resolve a key action to the input it sends under the given modifiers, or
- * `null` for UI actions (paste, compose, modifiers, keyboard, more).
+ * `null` for UI actions (paste, compose, select text, modifiers, keyboard, more).
  */
 export function resolveKeyAction(
   action: KeyAction,

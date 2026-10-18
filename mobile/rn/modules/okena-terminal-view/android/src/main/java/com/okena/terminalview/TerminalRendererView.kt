@@ -103,6 +103,7 @@ class TerminalRendererView(context: Context) : View(context) {
       field = value
       invalidate()
     }
+  /** Text color of the "Select text" mode; cell colors are resolved by the Rust core. */
   var foregroundArgb: Int = 0xffcdd6f4.toInt()
   var cursorArgb: Int = 0xfff5e0dc.toInt()
     set(value) {
@@ -135,6 +136,21 @@ class TerminalRendererView(context: Context) : View(context) {
     contentDirty = true
     invalidate()
     emitScrollState()
+  }
+
+  /**
+   * "Select text" mode: the last [SELECT_TEXT_MAX_LINES] lines as plain text in a full-screen
+   * selectable TextView, opened at this view's position.
+   */
+  fun openSelectText() {
+    if (handle == 0L || frame.status != RvFrame.STATUS_OK) return
+    val started = android.os.SystemClock.elapsedRealtime()
+    val lastLine = frame.screenTopLine + frame.screenLines - 1
+    val fromLine = maxOf(frame.firstLine, lastLine - SELECT_TEXT_MAX_LINES + 1)
+    val anchor = IntArray(1)
+    val text = RustBridge.textRange(handle, fromLine, lastLine, floor(model.top).toLong(), anchor) ?: return
+    Log.i(TAG, "select text: ${text.length} chars from Rust in ${android.os.SystemClock.elapsedRealtime() - started} ms")
+    TerminalTextDialog(context, text, anchor[0], fontSize.toFloat(), backgroundArgb, foregroundArgb, fonts).show()
   }
 
   fun clearSelection() {
@@ -1125,6 +1141,8 @@ class TerminalRendererView(context: Context) : View(context) {
     const val TAP_DELAY_MS = 250L
     /** Height of the edge auto-scroll zones during a selection drag, in rows. */
     const val AUTO_SCROLL_ZONE_ROWS = 2.5f
+    /** Lines the "Select text" mode shows at most (the newest). */
+    const val SELECT_TEXT_MAX_LINES = 5000L
     const val MIN_FONT_SIZE = 8.0
     const val MAX_FONT_SIZE = 20.0
     const val FONT_STEP = 0.5

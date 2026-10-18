@@ -139,4 +139,9 @@ static uint32_t OTVArgb(double value)
   [_view clearSelection];
 }
 
+- (void)openSelectText
+{
+  [_view openSelectText];
+}
+
 @end

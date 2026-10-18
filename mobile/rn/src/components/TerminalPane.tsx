@@ -100,6 +100,12 @@ export interface TerminalPaneHandle {
    * the Rust-side scroll position.
    */
   scrollToBottom(): void;
+  /**
+   * Open the native renderer's "Select text" mode (a full-screen plain-text
+   * copy of the scrollback with the platform selection UI). A no-op with the
+   * Skia renderer.
+   */
+  openSelectText(): void;
 }
 
 export interface TerminalPaneProps {
@@ -238,6 +244,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       }
     }, [nativeRenderer]);
 
+    const openSelectText = useCallback(() => {
+      if (nativeRenderer && nativeViewRef.current) {
+        OkenaTerminalViewCommands.openSelectText(nativeViewRef.current);
+      }
+    }, [nativeRenderer]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -245,8 +257,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         blur: () => inputRef.current?.blur(),
         resetInput,
         scrollToBottom,
+        openSelectText,
       }),
-      [resetInput, scrollToBottom],
+      [resetInput, scrollToBottom, openSelectText],
     );
 
     // The renderer has laid out and reported its grid at least once.

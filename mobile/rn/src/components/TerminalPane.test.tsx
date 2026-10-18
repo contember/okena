@@ -38,6 +38,7 @@ jest.mock('./TerminalView', () => ({
 // so a test can fire its events, and records commands.
 const mockNativeViewProps: { current?: OkenaTerminalViewProps } = {};
 const mockScrollToBottom = jest.fn();
+const mockOpenSelectText = jest.fn();
 jest.mock('okena-terminal-view', () => {
   const mockReact: typeof React = jest.requireActual('react');
   const OkenaTerminalView = mockReact.forwardRef(
@@ -52,6 +53,7 @@ jest.mock('okena-terminal-view', () => {
     OkenaTerminalViewCommands: {
       scrollToBottom: (ref: unknown) => mockScrollToBottom(ref),
       clearSelection: () => {},
+      openSelectText: (ref: unknown) => mockOpenSelectText(ref),
     },
   };
 });
@@ -673,6 +675,9 @@ describe('TerminalPane renderer', () => {
     act(() => ref.current?.scrollToBottom());
 
     expect(mockScrollToBottom).toHaveBeenCalledWith({ nativeView: true });
+
+    act(() => ref.current?.openSelectText());
+    expect(mockOpenSelectText).toHaveBeenCalledWith({ nativeView: true });
     act(() => renderer.unmount());
   });
 });

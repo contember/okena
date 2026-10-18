@@ -86,10 +86,15 @@ export type OkenaTerminalViewType = HostComponent<NativeProps>;
 export interface NativeCommands {
   scrollToBottom: (viewRef: React.ElementRef<OkenaTerminalViewType>) => void;
   clearSelection: (viewRef: React.ElementRef<OkenaTerminalViewType>) => void;
+  /**
+   * Open the native "Select text" mode: a full-screen, frozen plain-text copy
+   * of the recent scrollback with the platform's own selection UI.
+   */
+  openSelectText: (viewRef: React.ElementRef<OkenaTerminalViewType>) => void;
 }
 
 export const Commands: NativeCommands = codegenNativeCommands<NativeCommands>({
-  supportedCommands: ['scrollToBottom', 'clearSelection'],
+  supportedCommands: ['scrollToBottom', 'clearSelection', 'openSelectText'],
 });
 
 export default codegenNativeComponent<NativeProps>(
