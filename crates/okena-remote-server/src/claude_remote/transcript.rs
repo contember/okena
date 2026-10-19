@@ -394,6 +394,8 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
         "WebSearch" => input["query"].as_str(),
         "Task" | "Agent" => input["description"].as_str(),
         "AskUserQuestion" => input["questions"][0]["question"].as_str(),
+        // Without a plan file Claude sends no plan; the summary is then empty.
+        "ExitPlanMode" => Some(input["plan"].as_str().map_or("", plan_title)),
         _ => None,
     };
     let summary = match field {
@@ -402,6 +404,14 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
     };
     let single_line = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_chars(&single_line, SUMMARY_MAX_CHARS)
+}
+
+/// The first non-empty line of a Markdown plan, without its heading marks.
+fn plan_title(plan: &str) -> &str {
+    plan.lines()
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
 }
 
 /// At most `max_chars` characters; a cut text ends with `…`.
@@ -695,6 +705,12 @@ mod tests {
                 json!({"questions": [{"question": "Which color?"}, {"question": "Size?"}]}),
                 "Which color?",
             ),
+            (
+                "ExitPlanMode",
+                json!({"plan": "\n# Append \"phone\"\n\n## Context\nbody"}),
+                "Append \"phone\"",
+            ),
+            ("ExitPlanMode", json!({}), ""),
             ("mcp__x__y", json!({"a": 1}), "{\"a\":1}"),
         ];
         for (name, input, expected) in cases {
