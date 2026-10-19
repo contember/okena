@@ -623,7 +623,8 @@ export function buildProviderView(
       name: PROVIDER_NAMES[provider],
       status: p.status,
       isError: false,
-      fetching: p.fetching,
+      // `fetching` is the login's fetch; the pool comes from the proxy's poll.
+      fetching: false,
       windows: [],
       pool: buildPoolView(p.pool, working, now),
     };

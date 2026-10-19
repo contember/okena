@@ -448,6 +448,7 @@ describe('Claude account pool', () => {
     const login = provider({
       plan: 'max',
       status: 'no_credentials',
+      fetching: true,
       windows: [win({ resetAt: now + 3600 })],
       extraUsage: { isEnabled: true, monthlyLimitCents: 100, usedCreditsCents: 1, utilization: 1 },
       pool: pool({
@@ -464,6 +465,7 @@ describe('Claude account pool', () => {
     expect(view.plan).toBeUndefined();
     expect(view.extra).toBeUndefined();
     expect(view.statusText).toBeUndefined();
+    expect(view.fetching).toBe(false);
     const p = view.pool!;
     expect(p.todayValue).toBe('3h00m left');
     expect(p.todaySeverity).toBe('normal');
