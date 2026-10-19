@@ -17,7 +17,7 @@
  *     Each row carries an activity dot (amber: needs attention, green: running).
  *   - tapping a project selects it (`selectProject`) and expands it inline to
  *     show its terminals; tapping a terminal selects + focuses it and closes the
- *     drawer. A terminal running an agent or with open Claude dialogs has a
+ *     drawer. A terminal with a connected `claude` or open Claude dialogs has a
  *     "Chat" pill that opens it as its Claude chat.
  *   - long-press a project opens an actions sheet: change color (color picker),
  *     and move up/down within its folder (reorder).
@@ -150,6 +150,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
   const signals = useWorkspaceStore((s) => s.projectSignals);
   const claudeDialogs = useWorkspaceStore((s) => s.claudeDialogs);
+  const claudeSessions = useWorkspaceStore((s) => s.claudeSessions);
   const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
 
@@ -356,6 +357,7 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
                   onSelectTerminal={handleSelectTerminal}
                   onOpenChat={handleOpenChat}
                   claudeDialogs={claudeDialogs}
+                  claudeSessions={claudeSessions}
                   onLongPress={() => {
                     const folder = !isActivity
                       ? projectFolders.get(item.project.id)
@@ -486,6 +488,8 @@ interface RowCommon {
   onOpenChat: (project: ProjectInfo, terminalId: string) => void;
   /** Open Claude dialogs per terminal id. */
   claudeDialogs: Record<string, number>;
+  /** Terminals with a connected `claude`. */
+  claudeSessions: string[];
 }
 
 // ── Project row (+ inline expansion when selected) ──────────────────────────
@@ -509,6 +513,7 @@ const ProjectRow: React.FC<
   onSelectTerminal,
   onOpenChat,
   claudeDialogs,
+  claudeSessions,
   onLongPress,
 }) => {
   const isSelected = project.id === selectedProjectId;
@@ -609,7 +614,7 @@ const ProjectRow: React.FC<
                   {name}
                 </Text>
                 <View style={styles.flexSpacer} />
-                {agent !== undefined || dialogs > 0 ? (
+                {claudeSessions.includes(tid) || dialogs > 0 ? (
                   <ClaudeIndicator
                     lifecycle={agent?.lifecycle}
                     dialogs={dialogs}

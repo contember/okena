@@ -531,6 +531,8 @@ export interface OkenaNative {
 
   /** Open Claude dialogs per terminal, from the cached state (sync). */
   getClaudeDialogCounts(connId: ConnId): Record<TerminalId, number>;
+  /** Terminals whose `claude` is connected to Claude remote (sync). */
+  getClaudeSessions(connId: ConnId): TerminalId[];
   /** JSON `ApiClaudeSession`. */
   claudeGetSession(connId: ConnId, terminalId: TerminalId): Promise<string>;
   /**
@@ -676,6 +678,10 @@ function parseRecord<V>(value: unknown, parse: (v: unknown) => V | undefined): R
 
 const asString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 
+function parseStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
 const asCount = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
 
@@ -758,6 +764,7 @@ export function getOkenaNative(): OkenaNative {
       takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
       getClaudeDialogCounts: (connId: ConnId) =>
         parseRecord(gen.getClaudeDialogCounts(connId), asCount),
+      getClaudeSessions: (connId: ConnId) => parseStrings(gen.getClaudeSessions(connId)),
       canReportCertFingerprint: () => pinsReadable,
       // Bindings generated before the lifecycle hooks existed: no-ops, and
       // "Retry now" falls back to a fresh connect.

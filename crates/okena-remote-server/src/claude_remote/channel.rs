@@ -63,7 +63,8 @@ impl ChannelState {
         PollStart::Wait(receive)
     }
 
-    /// The poll `poll_id` returned or was dropped.
+    /// The poll `poll_id` returned or was dropped. A poll that is no longer
+    /// the outstanding one was already answered and timed.
     pub fn end_poll(&mut self, poll_id: u64, now: Instant) {
         if self
             .waiter
@@ -71,8 +72,16 @@ impl ChannelState {
             .is_some_and(|waiter| waiter.poll_id == poll_id)
         {
             self.waiter = None;
+            self.last_poll_end = Some(now);
         }
-        self.last_poll_end = Some(now);
+    }
+
+    /// The session ended: its channel server exits with it.
+    pub fn detach(&mut self) {
+        if let Some(waiter) = self.waiter.take() {
+            let _ = waiter.respond.send(Vec::new());
+        }
+        self.last_poll_end = None;
     }
 
     pub fn clear_prompts(&mut self) {
@@ -102,6 +111,20 @@ mod tests {
         channel.end_poll(1, start);
         assert!(channel.is_attached(start + Duration::from_secs(10)));
         assert!(!channel.is_attached(start + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn detach_ignores_the_late_end_of_the_ended_poll() {
+        let now = Instant::now();
+        let mut channel = ChannelState::default();
+        let PollStart::Wait(_receive) = channel.begin_poll(1, now) else {
+            panic!("nothing queued, the poll must wait");
+        };
+
+        channel.detach();
+        channel.end_poll(1, now);
+
+        assert!(!channel.is_attached(now));
     }
 
     #[test]

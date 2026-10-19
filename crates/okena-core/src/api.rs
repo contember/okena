@@ -46,6 +46,10 @@ pub struct StateResponse {
     /// absent. Runtime-only.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub claude_dialogs: std::collections::HashMap<String, u32>,
+    /// Terminals whose `claude` is connected to Claude remote (hooks or MCP
+    /// channel attached), sorted. Runtime-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_sessions: Vec<String>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1573,6 +1577,7 @@ mod tests {
             }],
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
+            claude_sessions: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

@@ -178,6 +178,7 @@ mod tests {
             windows: vec![],
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
+            claude_sessions: Vec::new(),
         }
     }
 

@@ -17,10 +17,13 @@ in them. Nothing is written to `~/.claude`.
 
 ## Where the chat is
 
+The chat is offered for a terminal whose `claude` is connected (hooks or MCP
+channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
+(`claude_dialogs`).
+
 - **Web**: the **Claude** button in a terminal's header opens the chat panel: a
   drawer on wide screens, full screen on phones.
-- **Mobile**: a terminal running an agent gets a Terminal / Chat switch in the
-  app bar; the chat replaces the terminal and its key toolbar. Terminal tabs and
+- **Mobile**: the terminal gets a Terminal / Chat switch in the app bar; the chat replaces the terminal and its key toolbar. Terminal tabs and
   drawer rows show the agent state and the count of open dialogs, and the
   drawer's **Chat** pill opens a terminal straight in the chat. A project with
   an open dialog is listed under Needs attention.
@@ -85,7 +88,10 @@ it has (new session or rewritten file).
 
 - State lives in daemon memory. After a daemon restart the channel reconnects
   on its own, but hooks count as attached only after the next hook event, and a
-  dialog that was waiting is answerable only in the terminal.
+  dialog that was waiting is answerable only in the terminal. Without the
+  channel, an idle `claude` is not listed as connected until its next step.
+- A `claude` that dies without a `SessionEnd` hook stays listed until the next
+  state change.
 - An interrupt (Escape) fires no `Stop` hook, so `queued` prompts wait for the
   next finished turn.
 - Clients poll (1 s); there are no push notifications.

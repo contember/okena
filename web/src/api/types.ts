@@ -18,6 +18,8 @@ export interface StateResponse {
   windows?: ApiWindow[];
   /** Open Claude remote dialogs per terminal id; terminals without one are absent. */
   claude_dialogs?: Record<string, number>;
+  /** Terminals whose `claude` is connected to Claude remote. */
+  claude_sessions?: string[];
 }
 
 export interface ApiProject {

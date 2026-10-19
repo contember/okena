@@ -497,6 +497,16 @@ pub fn get_claude_dialog_counts(conn_id: String) -> HashMap<String, u32> {
         .unwrap_or_default()
 }
 
+/// Terminals whose `claude` is connected to Claude remote, from the cached
+/// remote state.
+#[uniffi::export]
+pub fn get_claude_sessions(conn_id: String) -> Vec<String> {
+    ConnectionManager::get()
+        .get_state(&conn_id)
+        .map(|state| state.claude_sessions)
+        .unwrap_or_default()
+}
+
 /// Send a special key (e.g. `"Enter"`, `"CtrlC"`, `"ArrowUp"`) to a terminal.
 ///
 /// The body is synchronous (it only enqueues a WS message), so this is a sync

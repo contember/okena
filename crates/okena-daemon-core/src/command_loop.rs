@@ -4218,9 +4218,9 @@ pub async fn daemon_command_loop(
             // ── GetState: full workspace snapshot ────────────────────────────
             RemoteCommand::GetState => {
                 // Taken before the state locks: the hub has its own lock.
-                let claude_dialogs = claude_hub
+                let (claude_dialogs, claude_sessions) = claude_hub
                     .upgrade()
-                    .map(|hub| hub.dialog_counts())
+                    .map(|hub| (hub.dialog_counts(), hub.session_terminals()))
                     .unwrap_or_default();
                 // Lock order: workspace first, then service manager (kept
                 // consistent across the loop). The whole arm is synchronous, so
@@ -4320,6 +4320,7 @@ pub async fn daemon_command_loop(
                     hooks,
                 );
                 resp.claude_dialogs = claude_dialogs;
+                resp.claude_sessions = claude_sessions;
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize

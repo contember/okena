@@ -105,6 +105,11 @@ impl TerminalState {
         }
     }
 
+    /// A connected `claude`: hooks reported, or the channel server is polling.
+    fn has_session(&self, now: Instant) -> bool {
+        self.hooks_attached || self.channel.is_attached(now)
+    }
+
     fn typed_prompt_pending(&self, now: Instant) -> bool {
         self.typed_prompt
             .as_ref()
@@ -158,7 +163,8 @@ struct TranscriptSource {
 
 impl ClaudeRemoteHub {
     /// `bridge_tx` reaches the daemon (terminal info, PTY writes);
-    /// `state_version` is bumped whenever the open-dialog counts change.
+    /// `state_version` is bumped whenever the open-dialog counts or the set of
+    /// connected sessions change.
     pub fn new(bridge_tx: BridgeSender, state_version: Arc<watch::Sender<u64>>) -> Arc<Self> {
         Arc::new(Self {
             bridge_tx,
@@ -179,6 +185,21 @@ impl ClaudeRemoteHub {
                 (terminal_id.clone(), count)
             })
             .collect()
+    }
+
+    /// Terminals with a connected `claude`, for
+    /// [`okena_core::api::StateResponse::claude_sessions`].
+    pub fn session_terminals(&self) -> Vec<String> {
+        let now = Instant::now();
+        let mut terminal_ids: Vec<String> = self
+            .terminals
+            .lock()
+            .iter()
+            .filter(|(_, terminal)| terminal.has_session(now))
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect();
+        terminal_ids.sort();
+        terminal_ids
     }
 
     /// Register the dialog a `PermissionRequest` hook reports and wait until a
@@ -238,9 +259,11 @@ impl ClaudeRemoteHub {
         let input = HookInput::parse(&request.input)?;
         let mut cancelled = Vec::new();
         let mut prompt_to_type = None;
+        let session_changed;
         {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(request.terminal_id.clone()).or_default();
+            let had_session = terminal.has_session(Instant::now());
             terminal.record_hook(&input);
             match input.event {
                 // Compaction continues the same conversation mid-turn.
@@ -277,14 +300,16 @@ impl ClaudeRemoteHub {
                 HookEvent::SessionEnd => {
                     terminal.busy = None;
                     terminal.hooks_attached = false;
+                    terminal.channel.detach();
                     terminal.drop_undelivered_prompts();
                     cancelled = terminal.take_all_dialogs();
                 }
                 HookEvent::Other => {}
             }
+            session_changed = had_session != terminal.has_session(Instant::now());
         }
 
-        if !cancelled.is_empty() {
+        if !cancelled.is_empty() || session_changed {
             cancelled.into_iter().for_each(OpenDialog::cancel);
             self.bump_state_version();
         }
@@ -303,11 +328,17 @@ impl ClaudeRemoteHub {
 
     async fn poll_channel_for(&self, terminal_id: &str, timeout: Duration) -> Vec<String> {
         let poll_id = self.next_id();
-        let start = {
+        let (start, attached) = {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(terminal_id.to_string()).or_default();
-            terminal.channel.begin_poll(poll_id, Instant::now())
+            let now = Instant::now();
+            let had_session = terminal.has_session(now);
+            let start = terminal.channel.begin_poll(poll_id, now);
+            (start, !had_session)
         };
+        if attached {
+            self.bump_state_version();
+        }
         let mut answer = match start {
             PollStart::Ready(prompts) => return prompts,
             PollStart::Wait(answer) => answer,
@@ -1195,6 +1226,42 @@ mod tests {
         hub.hook_event(hook("t1", event("Stop")))
             .expect("valid event");
         assert_eq!(*version.borrow(), unchanged);
+    }
+
+    #[tokio::test]
+    async fn sessions_follow_hooks_and_the_channel() {
+        let (hub, version, _pty) = hub_with_daemon(idle_daemon());
+        assert!(hub.session_terminals().is_empty());
+
+        let start = *version.borrow();
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        assert_eq!(hub.session_terminals(), vec!["t1".to_string()]);
+        let attached = *version.borrow();
+        assert!(attached > start);
+
+        let polling = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.poll_channel_for("t2", Duration::from_secs(60)).await }
+        });
+        for _ in 0..200 {
+            if hub.session_terminals().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            hub.session_terminals(),
+            vec!["t1".to_string(), "t2".to_string()]
+        );
+        assert!(*version.borrow() > attached);
+
+        let before_end = *version.borrow();
+        hub.hook_event(hook("t2", event("SessionEnd")))
+            .expect("valid event");
+        assert_eq!(hub.session_terminals(), vec!["t1".to_string()]);
+        assert!(*version.borrow() > before_end);
+        assert!(polling.await.expect("poll finished").is_empty());
     }
 
     #[tokio::test]

@@ -59,6 +59,7 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getFullscreenTerminal: () => undefined,
     getProjectLayoutJson: () => layouts[Math.min(tick++, layouts.length - 1)]!,
     getClaudeDialogCounts: () => ({}),
+    getClaudeSessions: () => [],
     secondsSinceActivity: () => 0,
     getTerminalActivity: () => [],
     markTerminalSeen: () => {},
@@ -412,6 +413,31 @@ describe('workspace Claude dialog tracking', () => {
     counts = { t1: 1 };
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().claudeDialogs).toEqual({ t1: 1 });
+  });
+});
+
+describe('workspace Claude sessions', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes the terminals with a connected claude', () => {
+    let sessions: string[] = [];
+    configureWorkspaceStore({
+      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeSessions: () => sessions },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().claudeSessions).toEqual([]);
+
+    sessions = ['t1'];
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().claudeSessions).toEqual(['t1']);
   });
 });
 

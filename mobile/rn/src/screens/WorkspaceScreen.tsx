@@ -3,8 +3,8 @@
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
  *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
- *     when there are several), a Terminal / Chat switch for a terminal running
- *     an agent, a small connection-quality dot, and a "＋"
+ *     when there are several), a Terminal / Chat switch for a terminal with a
+ *     connected `claude`, a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
@@ -162,6 +162,7 @@ export const WorkspaceScreen: React.FC = () => {
   const previousProjectId = useWorkspaceStore((s) => s.previousProjectId);
   const signals = useWorkspaceStore((s) => s.projectSignals);
   const claudeDialogs = useWorkspaceStore((s) => s.claudeDialogs);
+  const claudeSessions = useWorkspaceStore((s) => s.claudeSessions);
   const terminalViews = useWorkspaceStore((s) => s.terminalViews);
   const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
@@ -257,7 +258,7 @@ export const WorkspaceScreen: React.FC = () => {
     : 'terminal';
   const canChat =
     activeTerminalId !== null &&
-    (project?.terminalAgentStatus[activeTerminalId] !== undefined ||
+    (claudeSessions.includes(activeTerminalId) ||
       activeDialogs > 0 ||
       activeView === 'chat');
   const showChat = canChat && activeView === 'chat';

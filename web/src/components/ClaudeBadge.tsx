@@ -1,14 +1,15 @@
 import { useApp } from "../state/store";
 import { LIFECYCLE_COLOR } from "./claudeStyles";
 
-/** Header affordance for a terminal running an agent; opens the Claude chat panel. */
+/** Header affordance for a terminal with a connected `claude`; opens the Claude chat panel. */
 export function ClaudeBadge({ terminalId, projectId }: { terminalId: string; projectId: string }) {
   const { state, dispatch } = useApp();
   const project = state.workspace?.projects.find((candidate) => candidate.id === projectId);
   const lifecycle = project?.terminal_agent_status?.[terminalId]?.lifecycle;
   const dialogCount = state.workspace?.claude_dialogs?.[terminalId] ?? 0;
+  const connected = state.workspace?.claude_sessions?.includes(terminalId) ?? false;
 
-  if (!lifecycle && dialogCount === 0) return null;
+  if (!connected && dialogCount === 0) return null;
 
   const description = `${lifecycle ?? "no status"}, ${dialogCount} open dialog${dialogCount === 1 ? "" : "s"}`;
 

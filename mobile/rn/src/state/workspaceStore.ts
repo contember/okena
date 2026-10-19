@@ -11,7 +11,8 @@
  *   - the selected project's layout JSON (`getProjectLayoutJson`),
  *   - per-terminal activity (`getTerminalActivity`), folded into per-project
  *     {@link ProjectSignals} for the activity-ordered project list,
- *   - open Claude dialogs per terminal (`getClaudeDialogCounts`).
+ *   - open Claude dialogs per terminal (`getClaudeDialogCounts`) and the
+ *     terminals with a connected `claude` (`getClaudeSessions`).
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
@@ -80,6 +81,7 @@ export type WorkspaceNative = Pick<
   | 'getFullscreenTerminal'
   | 'getProjectLayoutJson'
   | 'getClaudeDialogCounts'
+  | 'getClaudeSessions'
   | 'secondsSinceActivity'
   | 'getTerminalActivity'
   | 'markTerminalSeen'
@@ -135,6 +137,8 @@ export interface WorkspaceState {
   restoreProjectMissing: boolean;
   /** Open Claude dialogs per terminal id; terminals without one are absent. */
   claudeDialogs: Record<TerminalId, number>;
+  /** Terminals whose `claude` is connected to Claude remote, sorted. */
+  claudeSessions: TerminalId[];
   /** How each terminal is shown; terminals not listed show the terminal. */
   terminalViews: Record<TerminalId, TerminalViewMode>;
 
@@ -365,6 +369,7 @@ function pollState(
   const newProjectOrder = native.getProjectOrder(connId);
   const newFullscreen = native.getFullscreenTerminal(connId) ?? null;
   const newClaudeDialogs = native.getClaudeDialogCounts(connId);
+  const newClaudeSessions = native.getClaudeSessions(connId);
 
   const prev = get();
   const patch: Partial<WorkspaceState> = {};
@@ -388,6 +393,10 @@ function pollState(
   }
   if (!countsEqual(newClaudeDialogs, prev.claudeDialogs)) {
     patch.claudeDialogs = newClaudeDialogs;
+    changed = true;
+  }
+  if (!arrayEquals(newClaudeSessions, prev.claudeSessions)) {
+    patch.claudeSessions = newClaudeSessions;
     changed = true;
   }
 
@@ -527,6 +536,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     previousProjectId: null,
     restoreProjectMissing: false,
     claudeDialogs: {},
+    claudeSessions: [],
     terminalViews: {},
 
     start(connId, restore) {
@@ -556,6 +566,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         previousProjectId: null,
         restoreProjectMissing: false,
         claudeDialogs: {},
+        claudeSessions: [],
         terminalViews: {},
       });
     },
