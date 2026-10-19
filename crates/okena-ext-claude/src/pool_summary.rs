@@ -9,7 +9,7 @@ use crate::settings::PoolDisplay;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::ai_proxy::AiAccount;
+use okena_core::ai_proxy::{AiAccount, AiUsage};
 use okena_extensions::ThemeColors;
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
@@ -31,8 +31,8 @@ pub(crate) struct AccountShare {
     key: AccountKey,
     label: String,
     tier: Option<&'static str>,
-    five_hour: Option<f64>,
-    seven_day: Option<f64>,
+    five_hour: Option<AiUsage>,
+    seven_day: Option<AiUsage>,
     weekly_reset_ms: Option<i64>,
     /// Weekly percent of this account used since midnight.
     used_today: f64,
@@ -106,8 +106,8 @@ pub(crate) fn summarize(
             key: key.clone(),
             label: account.label.clone(),
             tier: tier_label(account),
-            five_hour: account.five_hour.as_ref().map(|usage| usage.utilization),
-            seven_day: account.seven_day.as_ref().map(|usage| usage.utilization),
+            five_hour: account.five_hour.clone(),
+            seven_day: account.seven_day.clone(),
             weekly_reset_ms: account
                 .seven_day
                 .as_ref()
@@ -324,7 +324,12 @@ pub(crate) fn render_body(
     let mut refills: Vec<(i64, &AccountShare)> = summary
         .accounts
         .iter()
-        .filter(|share| share.seven_day.is_some_and(|used| used > 0.0))
+        .filter(|share| {
+            share
+                .seven_day
+                .as_ref()
+                .is_some_and(|usage| usage.utilization > 0.0)
+        })
         .filter_map(|share| Some((share.weekly_reset_ms.filter(|at| *at > now_ms)?, share)))
         .collect();
     refills.sort_by_key(|(at, _)| *at);
@@ -427,7 +432,10 @@ pub(crate) fn render_body(
                                 "{}  {}  +{:.0}%",
                                 moment(at),
                                 share.label,
-                                share.seven_day.unwrap_or_default()
+                                share
+                                    .seven_day
+                                    .as_ref()
+                                    .map_or(0.0, |usage| usage.utilization)
                             ))
                         })),
                 )
@@ -448,13 +456,18 @@ pub(crate) fn render_body(
                 summary
                     .accounts
                     .iter()
-                    .map(|share| render_share(share, open_account.clone(), t, cx)),
+                    .map(|share| render_share(share, summary.working, open_account.clone(), t, cx)),
             ),
     )
 }
 
-fn render_share(share: &AccountShare, open: OpenAccount, t: &ThemeColors, cx: &App) -> AnyElement {
-    let percent = |value: Option<f64>| value.map_or("–".into(), |value| format!("{value:.0}%"));
+fn render_share(
+    share: &AccountShare,
+    working: WorkingDays,
+    open: OpenAccount,
+    t: &ThemeColors,
+    cx: &App,
+) -> AnyElement {
     let cell = |text: String| {
         div()
             .text_size(ui_text_xs(cx))
@@ -477,7 +490,7 @@ fn render_share(share: &AccountShare, open: OpenAccount, t: &ThemeColors, cx: &A
         .child(
             v_flex()
                 .flex_1()
-                .gap(px(1.0))
+                .gap(px(3.0))
                 .child(
                     h_flex()
                         .gap(px(6.0))
@@ -505,11 +518,17 @@ fn render_share(share: &AccountShare, open: OpenAccount, t: &ThemeColors, cx: &A
                             )
                         }),
                 )
+                .children(crate::pool_usage::window_bars(
+                    share.five_hour.as_ref(),
+                    share.seven_day.as_ref(),
+                    working,
+                    &share.key.element_id(),
+                    t,
+                    cx,
+                ))
                 .child(
                     h_flex()
                         .gap(px(10.0))
-                        .child(cell(format!("5h {}", percent(share.five_hour))))
-                        .child(cell(format!("7d {}", percent(share.seven_day))))
                         .child(cell(format!("today +{:.0}%", share.used_today)))
                         .when_some(share.weekly_reset_ms, |row, at| {
                             row.child(cell(format!("resets {}", moment(at))))

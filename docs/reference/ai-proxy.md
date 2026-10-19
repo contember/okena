@@ -159,8 +159,9 @@ it at login; accounts logged in before learn it once per proxy process from the
 usage poll. Hovering either item opens the pool popover with one section per
 limit, each with a sentence on what it means. The soft-limit section adds
 today's use, the safe daily use and its tightest point, where the last 24
-hours' pace runs short, and the next weekly refills; one row per account
-follows. Clicking a row shows
+hours' pace runs short, and the next weekly refills. One row per account
+follows, with a 5h and a 7d bar that carry the same time marker and grid as the
+account's own popover. Clicking a row shows
 that account's usage and history chart in the same popover.
 
 Successful five-minute usage polls append quota samples to

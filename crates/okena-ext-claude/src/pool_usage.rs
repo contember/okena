@@ -12,8 +12,9 @@ use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
 use okena_usage::history::{History, Provider};
 use okena_usage::{
-    SegmentUnit, TriggerItem, UsageRow, WorkingDays, effective_time_pct, format_reset_time_epoch,
-    history_points, now_secs, render_usage_row, usage_body_container, usage_trigger_items,
+    SegmentUnit, Segments, TriggerItem, UsageRow, WorkingDays, effective_time_pct,
+    format_reset_time_epoch, headline_color, history_points, now_secs, render_usage_bar,
+    render_usage_row, reset_aligned_segments, usage_body_container, usage_trigger_items,
 };
 use okena_workspace::remote_sync::HostAiAccounts;
 use std::collections::BTreeMap;
@@ -206,6 +207,62 @@ fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> 
             usage.utilization,
             time_pct(usage, seconds, unit, working),
         ))
+    })
+    .collect()
+}
+
+/// One labeled bar per known window, with the grid and time marker of the
+/// account detail, for the pool popover's account list.
+pub(crate) fn window_bars(
+    five_hour: Option<&AiUsage>,
+    seven_day: Option<&AiUsage>,
+    working: WorkingDays,
+    marker: &str,
+    t: &ThemeColors,
+    cx: &App,
+) -> Vec<AnyElement> {
+    [
+        ("5h", five_hour, FIVE_HOUR_SECS, SegmentUnit::Hour),
+        ("7d", seven_day, SEVEN_DAY_SECS, SegmentUnit::Day),
+    ]
+    .into_iter()
+    .filter_map(|(period, usage, seconds, unit)| {
+        let usage = usage?;
+        let segments = reset_epoch(usage).map_or_else(Segments::default, |reset| {
+            reset_aligned_segments(reset, seconds, unit, working)
+        });
+        let time = segments
+            .time_pct
+            .or_else(|| linear_time_pct(usage, seconds));
+        Some(
+            h_flex()
+                .gap(px(8.0))
+                .items_center()
+                .child(
+                    div()
+                        .w(px(18.0))
+                        .text_size(ui_text_xs(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(period),
+                )
+                .child(div().flex_1().child(render_usage_bar(
+                    t,
+                    usage.utilization,
+                    time,
+                    format!("{marker}-{period}-bar"),
+                    &segments,
+                )))
+                .child(
+                    div()
+                        .w(px(34.0))
+                        .flex()
+                        .justify_end()
+                        .text_size(ui_text_xs(cx))
+                        .text_color(rgb(headline_color(t, usage.utilization, time)))
+                        .child(format!("{:.0}%", usage.utilization)),
+                )
+                .into_any_element(),
+        )
     })
     .collect()
 }
