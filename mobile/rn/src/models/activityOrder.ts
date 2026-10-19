@@ -108,14 +108,16 @@ export interface ProjectSignals {
 
 /**
  * Attention: an unseen bell or notification in any of the project's
- * terminals, an agent that is `blocked`, or one that is `done` and not yet
- * seen on the phone (`doneSeen`). Running: an agent that is `working`, or any
- * terminal with output in the last {@link RUNNING_OUTPUT_WINDOW_MS}.
+ * terminals, an open Claude dialog, an agent that is `blocked`, or one that is
+ * `done` and not yet seen on the phone (`doneSeen`). Running: an agent that is
+ * `working`, or any terminal with output in the last
+ * {@link RUNNING_OUTPUT_WINDOW_MS}.
  */
 export function projectSignals(
   project: ProjectInfo,
   activity: ReadonlyMap<TerminalId, TerminalActivity>,
   doneSeen: ReadonlySet<TerminalId>,
+  claudeDialogs: Readonly<Record<TerminalId, number>>,
 ): ProjectSignals {
   let attention = false;
   let running = false;
@@ -127,6 +129,7 @@ export function projectSignals(
         running = true;
       }
     }
+    if ((claudeDialogs[tid] ?? 0) > 0) attention = true;
     const lifecycle = project.terminalAgentStatus[tid]?.lifecycle;
     if (lifecycle === 'blocked') attention = true;
     else if (lifecycle === 'done' && !doneSeen.has(tid)) attention = true;
@@ -140,10 +143,11 @@ export function computeProjectSignals(
   projects: readonly ProjectInfo[],
   activity: readonly TerminalActivity[],
   doneSeen: ReadonlySet<TerminalId>,
+  claudeDialogs: Readonly<Record<TerminalId, number>>,
 ): Record<ProjectId, ProjectSignals> {
   const byTerminal = new Map(activity.map((a) => [a.terminalId, a]));
   const out: Record<ProjectId, ProjectSignals> = {};
-  for (const p of projects) out[p.id] = projectSignals(p, byTerminal, doneSeen);
+  for (const p of projects) out[p.id] = projectSignals(p, byTerminal, doneSeen, claudeDialogs);
   return out;
 }
 

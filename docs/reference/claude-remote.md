@@ -15,6 +15,17 @@ selects how prompts are delivered.
 Only panes created after the change are affected, and `claude` must be started
 in them. Nothing is written to `~/.claude`.
 
+## Where the chat is
+
+- **Web**: the **Claude** button in a terminal's header opens the chat panel: a
+  drawer on wide screens, full screen on phones.
+- **Mobile**: a terminal running an agent gets a Terminal / Chat switch in the
+  app bar; the chat replaces the terminal and its key toolbar. Terminal tabs and
+  drawer rows show the agent state and the count of open dialogs, and the
+  drawer's **Chat** pill opens a terminal straight in the chat. A project with
+  an open dialog is listed under Needs attention.
+- **Desktop**: settings only; dialogs are answered in the terminal.
+
 ## How a session is connected
 
 1. The daemon writes a Bun preload script and gives new panes

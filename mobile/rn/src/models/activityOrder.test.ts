@@ -119,45 +119,50 @@ describe('projectSignals', () => {
   const map = (...a: TerminalActivity[]) => new Map(a.map((x) => [x.terminalId, x]));
 
   it('flags an unseen bell or notification as attention', () => {
-    expect(projectSignals(project('p'), map(act('p-t', { bellUnseen: true })), none)).toEqual({
+    expect(projectSignals(project('p'), map(act('p-t', { bellUnseen: true })), none, {})).toEqual({
       attention: true,
       running: false,
     });
     expect(
-      projectSignals(project('p'), map(act('p-t', { notificationUnseen: true })), none).attention,
+      projectSignals(project('p'), map(act('p-t', { notificationUnseen: true })), none, {}).attention,
     ).toBe(true);
   });
 
   it('counts recent output as running, older output not', () => {
     const recent = act('p-t', { lastOutputMsAgo: RUNNING_OUTPUT_WINDOW_MS - 1 });
     const stale = act('p-t', { lastOutputMsAgo: RUNNING_OUTPUT_WINDOW_MS });
-    expect(projectSignals(project('p'), map(recent), none).running).toBe(true);
-    expect(projectSignals(project('p'), map(stale), none).running).toBe(false);
-    expect(projectSignals(project('p'), map(act('p-t')), none).running).toBe(false);
+    expect(projectSignals(project('p'), map(recent), none, {}).running).toBe(true);
+    expect(projectSignals(project('p'), map(stale), none, {}).running).toBe(false);
+    expect(projectSignals(project('p'), map(act('p-t')), none, {}).running).toBe(false);
   });
 
   it('maps agent lifecycles: blocked and unseen done need attention, working runs', () => {
     const withAgent = (lifecycle: AgentLifecycle) =>
       project('p', { terminalAgentStatus: { 'p-t': { lifecycle } } });
-    expect(projectSignals(withAgent('blocked'), map(), none)).toEqual({
+    expect(projectSignals(withAgent('blocked'), map(), none, {})).toEqual({
       attention: true,
       running: false,
     });
-    expect(projectSignals(withAgent('working'), map(), none)).toEqual({
+    expect(projectSignals(withAgent('working'), map(), none, {})).toEqual({
       attention: false,
       running: true,
     });
-    expect(projectSignals(withAgent('done'), map(), none).attention).toBe(true);
-    expect(projectSignals(withAgent('done'), map(), new Set(['p-t'])).attention).toBe(false);
-    expect(projectSignals(withAgent('idle'), map(), none)).toEqual({
+    expect(projectSignals(withAgent('done'), map(), none, {}).attention).toBe(true);
+    expect(projectSignals(withAgent('done'), map(), new Set(['p-t']), {}).attention).toBe(false);
+    expect(projectSignals(withAgent('idle'), map(), none, {})).toEqual({
       attention: false,
       running: false,
     });
   });
 
+  it('needs attention while a Claude dialog is open', () => {
+    expect(projectSignals(project('p'), map(), none, { 'p-t': 1 }).attention).toBe(true);
+    expect(projectSignals(project('p'), map(), none, { other: 1 }).attention).toBe(false);
+  });
+
   it('ignores activity of terminals outside the project', () => {
     expect(
-      projectSignals(project('p'), map(act('other', { bellUnseen: true })), none).attention,
+      projectSignals(project('p'), map(act('other', { bellUnseen: true })), none, {}).attention,
     ).toBe(false);
   });
 });
@@ -176,6 +181,7 @@ describe('buildActivityRows', () => {
       projects,
       [act('bell-t', { bellUnseen: true }), act('busy-t', { lastOutputMsAgo: 10 })],
       new Set(),
+      {},
     );
     const rows = buildActivityRows(projects, ['pin', 'a', 'wt', 'b', 'bell', 'busy'], signals);
     expect(rows.map((r) => [r.tier, r.project.id])).toEqual([

@@ -1,7 +1,9 @@
 /**
  * ClaudeDialogCard.tsx — one open Claude dialog with the controls to answer
  * it. The card kind follows `tool_name`: `AskUserQuestion` → questions,
- * `ExitPlanMode` → plan approval, anything else → allow / deny.
+ * `ExitPlanMode` → plan approval, anything else → allow / deny. Denying (and
+ * sending plan feedback) is a second step with an optional message, so the
+ * common answer is one tap.
  */
 
 import React, { useState } from 'react';
@@ -46,10 +48,7 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
   }
   if (dialog.tool_name === 'ExitPlanMode') {
     return (
-      <PlanCard
-        plan={readClaudePlan(dialog.tool_input)}
-        onDecide={onDecide}
-      />
+      <PlanCard plan={readClaudePlan(dialog.tool_input)} onDecide={onDecide} />
     );
   }
   return <PermissionCard dialog={dialog} onDecide={onDecide} />;
@@ -61,39 +60,39 @@ const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
   dialog,
   onDecide,
 }) => {
-  const [reason, setReason] = useState('');
+  const [denying, setDenying] = useState(false);
   return (
-    <View style={styles.card}>
-      <Text style={styles.title}>{dialog.tool_name}</Text>
+    <Card kind="Permission" title={dialog.tool_name}>
       <ScrollView style={styles.preview} nestedScrollEnabled>
         <Text style={styles.mono} selectable>
           {previewClaudeToolInput(dialog.tool_input)}
         </Text>
       </ScrollView>
-      <ReasonInput
-        value={reason}
-        onChange={setReason}
-        placeholder="Reason for denying (optional)"
-      />
-      <View style={styles.actions}>
-        <CardButton
-          label="Allow"
-          primary
-          onPress={() => onDecide({ decision: 'allow' })}
-        />
-        {dialog.permission_suggestions.length > 0 ? (
-          <CardButton
-            label="Always allow"
-            onPress={() => onDecide({ decision: 'allow', always: true })}
-          />
-        ) : null}
-        <CardButton
-          label="Deny"
+      {denying ? (
+        <MessageStep
+          placeholder="Tell Claude why (optional)"
+          confirmLabel="Deny"
           danger
-          onPress={() => onDecide(denial(reason))}
+          onCancel={() => setDenying(false)}
+          onConfirm={(message) => onDecide(denial(message))}
         />
-      </View>
-    </View>
+      ) : (
+        <View style={styles.actions}>
+          <CardButton label="Deny" danger onPress={() => setDenying(true)} />
+          {dialog.permission_suggestions.length > 0 ? (
+            <CardButton
+              label="Always"
+              onPress={() => onDecide({ decision: 'allow', always: true })}
+            />
+          ) : null}
+          <CardButton
+            label="Allow"
+            primary
+            onPress={() => onDecide({ decision: 'allow' })}
+          />
+        </View>
+      )}
+    </Card>
   );
 };
 
@@ -104,10 +103,9 @@ const PlanCard: React.FC<{
   plan: string | undefined;
   onDecide: ClaudeDialogCardProps['onDecide'];
 }> = ({ plan, onDecide }) => {
-  const [feedback, setFeedback] = useState('');
+  const [revising, setRevising] = useState(false);
   return (
-    <View style={styles.card}>
-      <Text style={styles.title}>Plan ready for review</Text>
+    <Card kind="Plan" title="Ready to start?">
       {plan !== undefined ? (
         <ScrollView style={styles.plan} nestedScrollEnabled>
           <Text style={styles.body} selectable>
@@ -115,27 +113,26 @@ const PlanCard: React.FC<{
           </Text>
         </ScrollView>
       ) : (
-        <Text style={styles.body}>
-          Claude wants to exit plan mode. The plan is in the transcript above.
-        </Text>
+        <Text style={styles.muted}>The plan is in the conversation above.</Text>
       )}
-      <ReasonInput
-        value={feedback}
-        onChange={setFeedback}
-        placeholder="What to change (optional)"
-      />
-      <View style={styles.actions}>
-        <CardButton
-          label="Approve"
-          primary
-          onPress={() => onDecide({ decision: 'allow' })}
+      {revising ? (
+        <MessageStep
+          placeholder="What should change? (optional)"
+          confirmLabel="Keep planning"
+          onCancel={() => setRevising(false)}
+          onConfirm={(message) => onDecide(denial(message))}
         />
-        <CardButton
-          label="Keep planning"
-          onPress={() => onDecide(denial(feedback))}
-        />
-      </View>
-    </View>
+      ) : (
+        <View style={styles.actions}>
+          <CardButton label="Keep planning" onPress={() => setRevising(true)} />
+          <CardButton
+            label="Approve"
+            primary
+            onPress={() => onDecide({ decision: 'allow' })}
+          />
+        </View>
+      )}
+    </Card>
   );
 };
 
@@ -154,7 +151,9 @@ const QuestionCard: React.FC<{
     setSelections((current) => ({ ...current, [question.question]: next }));
 
   return (
-    <View style={styles.card}>
+    <Card
+      kind={questions.length > 1 ? `${questions.length} questions` : 'Question'}
+    >
       {questions.map((question, questionIndex) => {
         const selection = selections[question.question] ?? EMPTY_SELECTION;
         return (
@@ -162,7 +161,7 @@ const QuestionCard: React.FC<{
             {question.header ? (
               <Text style={styles.header}>{question.header}</Text>
             ) : null}
-            <Text style={styles.body}>{question.question}</Text>
+            <Text style={styles.questionText}>{question.question}</Text>
             {question.options.map((option, optionIndex) => (
               <OptionRow
                 key={optionIndex}
@@ -198,6 +197,8 @@ const QuestionCard: React.FC<{
                 }
                 placeholder="Your answer"
                 placeholderTextColor={OkenaColors.textTertiary}
+                keyboardAppearance="dark"
+                autoFocus
               />
             ) : null}
           </View>
@@ -213,7 +214,7 @@ const QuestionCard: React.FC<{
           }}
         />
       </View>
-    </View>
+    </Card>
   );
 };
 
@@ -225,14 +226,31 @@ const OptionRow: React.FC<{
   onPress: () => void;
 }> = ({ label, description, multiSelect, selected, onPress }) => (
   <Pressable
-    style={styles.option}
+    style={({ pressed }) => [
+      styles.option,
+      selected && styles.optionSelected,
+      pressed && styles.pressed,
+    ]}
     onPress={onPress}
     accessibilityRole={multiSelect ? 'checkbox' : 'radio'}
     accessibilityState={{ checked: selected }}
   >
-    <Text style={[styles.mark, selected && styles.markSelected]}>
-      {multiSelect ? (selected ? '☑' : '☐') : selected ? '◉' : '○'}
-    </Text>
+    <View
+      style={[
+        styles.mark,
+        multiSelect ? styles.markSquare : styles.markRound,
+        selected && styles.markSelected,
+      ]}
+    >
+      {selected ? (
+        <View
+          style={[
+            styles.markFill,
+            multiSelect ? styles.markFillSquare : styles.markFillRound,
+          ]}
+        />
+      ) : null}
+    </View>
     <View style={styles.flex}>
       <Text style={styles.body}>{label}</Text>
       {description ? (
@@ -251,19 +269,51 @@ function denial(text: string): ApiClaudeDecision {
     : { decision: 'deny' };
 }
 
-const ReasonInput: React.FC<{
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-}> = ({ value, onChange, placeholder }) => (
-  <TextInput
-    style={styles.input}
-    value={value}
-    onChangeText={onChange}
-    placeholder={placeholder}
-    placeholderTextColor={OkenaColors.textTertiary}
-  />
+const Card: React.FC<{
+  kind: string;
+  title?: string;
+  children: React.ReactNode;
+}> = ({ kind, title, children }) => (
+  <View style={styles.card}>
+    <Text style={styles.kind}>{kind.toUpperCase()}</Text>
+    {title !== undefined ? <Text style={styles.title}>{title}</Text> : null}
+    {children}
+  </View>
 );
+
+/** The second step of deny / keep planning: an optional message for Claude. */
+const MessageStep: React.FC<{
+  placeholder: string;
+  confirmLabel: string;
+  danger?: boolean;
+  onCancel: () => void;
+  onConfirm: (message: string) => void;
+}> = ({ placeholder, confirmLabel, danger, onCancel, onConfirm }) => {
+  const [message, setMessage] = useState('');
+  return (
+    <>
+      <TextInput
+        style={styles.input}
+        value={message}
+        onChangeText={setMessage}
+        placeholder={placeholder}
+        placeholderTextColor={OkenaColors.textTertiary}
+        keyboardAppearance="dark"
+        multiline
+        autoFocus
+      />
+      <View style={styles.actions}>
+        <CardButton label="Cancel" onPress={onCancel} />
+        <CardButton
+          label={confirmLabel}
+          primary={!danger}
+          danger={danger}
+          onPress={() => onConfirm(message)}
+        />
+      </View>
+    </>
+  );
+};
 
 const CardButton: React.FC<{
   label: string;
@@ -273,17 +323,25 @@ const CardButton: React.FC<{
   disabled?: boolean;
 }> = ({ label, onPress, primary, danger, disabled }) => (
   <Pressable
-    style={[
+    style={({ pressed }) => [
       styles.button,
       primary && styles.buttonPrimary,
       danger && styles.buttonDanger,
       disabled && styles.buttonDisabled,
+      pressed && styles.pressed,
     ]}
     disabled={disabled}
     onPress={onPress}
     accessibilityRole="button"
   >
-    <Text style={[styles.buttonText, primary && styles.buttonTextPrimary]}>
+    <Text
+      style={[
+        styles.buttonText,
+        primary && styles.buttonTextPrimary,
+        danger && styles.buttonTextDanger,
+      ]}
+      numberOfLines={1}
+    >
       {label}
     </Text>
   </Pressable>
@@ -293,84 +351,138 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   card: {
     backgroundColor: OkenaColors.surfaceElevated,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: OkenaColors.warning,
-    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: OkenaColors.warningBorder,
+    padding: 14,
     marginBottom: 8,
+  },
+  kind: {
+    color: OkenaColors.warning,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    marginBottom: 4,
   },
   title: {
     color: OkenaColors.textPrimary,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '600',
-    marginBottom: 6,
+    marginBottom: 10,
   },
   header: {
     color: OkenaColors.accent,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     marginBottom: 2,
   },
-  body: { color: OkenaColors.textPrimary, fontSize: 14 },
-  description: { color: OkenaColors.textSecondary, fontSize: 12, marginTop: 1 },
+  questionText: {
+    color: OkenaColors.textPrimary,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 21,
+    marginBottom: 8,
+  },
+  body: { color: OkenaColors.textPrimary, fontSize: 15, lineHeight: 21 },
+  muted: { color: OkenaColors.textSecondary, fontSize: 14, lineHeight: 20 },
+  description: {
+    color: OkenaColors.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 2,
+  },
   mono: {
     color: OkenaColors.textPrimary,
     fontFamily: TerminalTheme.fontFamily,
     fontSize: 12,
+    lineHeight: 17,
   },
   preview: {
-    maxHeight: 120,
-    backgroundColor: OkenaColors.surface,
-    borderRadius: 6,
-    padding: 8,
+    maxHeight: 160,
+    flexGrow: 0,
+    backgroundColor: OkenaColors.background,
+    borderRadius: 8,
+    padding: 10,
   },
   plan: {
-    maxHeight: 200,
-    backgroundColor: OkenaColors.surface,
-    borderRadius: 6,
-    padding: 8,
+    maxHeight: 280,
+    flexGrow: 0,
+    backgroundColor: OkenaColors.background,
+    borderRadius: 8,
+    padding: 10,
   },
-  question: { marginBottom: 10 },
+  question: { marginBottom: 12 },
   option: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingVertical: 6,
-  },
-  mark: { color: OkenaColors.textSecondary, fontSize: 16, width: 24 },
-  markSelected: { color: OkenaColors.accent },
-  input: {
-    backgroundColor: OkenaColors.surface,
-    borderRadius: 6,
+    minHeight: 44,
+    paddingVertical: 10,
     paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginTop: 8,
+    marginBottom: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: OkenaColors.borderLight,
+  },
+  optionSelected: {
+    borderColor: OkenaColors.accent,
+    backgroundColor: OkenaColors.accentSoft,
+  },
+  mark: {
+    width: 20,
+    height: 20,
+    marginTop: 1,
+    marginRight: 12,
+    borderWidth: 2,
+    borderColor: OkenaColors.textTertiary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  markRound: { borderRadius: 10 },
+  markSquare: { borderRadius: 5 },
+  markSelected: { borderColor: OkenaColors.accent },
+  markFill: { backgroundColor: OkenaColors.accent },
+  markFillRound: { width: 10, height: 10, borderRadius: 5 },
+  markFillSquare: { width: 10, height: 10, borderRadius: 2 },
+  input: {
+    backgroundColor: OkenaColors.background,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: OkenaColors.borderLight,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 10,
+    maxHeight: 120,
     color: OkenaColors.textPrimary,
-    fontSize: 13,
+    fontSize: 15,
   },
   actions: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    marginTop: 8,
+    marginTop: 12,
     gap: 8,
   },
   button: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    backgroundColor: OkenaColors.surfaceOverlay,
+    borderWidth: 1,
     borderColor: OkenaColors.borderLight,
   },
   buttonPrimary: {
     backgroundColor: OkenaColors.accent,
     borderColor: OkenaColors.accent,
   },
-  buttonDanger: { borderColor: OkenaColors.error },
+  buttonDanger: { borderColor: OkenaColors.errorBorder },
   buttonDisabled: { opacity: 0.4 },
+  pressed: { opacity: 0.7 },
   buttonText: {
     color: OkenaColors.textPrimary,
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '600',
   },
   buttonTextPrimary: { color: '#ffffff' },
+  buttonTextDanger: { color: OkenaColors.error },
 });

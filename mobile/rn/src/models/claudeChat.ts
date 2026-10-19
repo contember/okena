@@ -1,9 +1,9 @@
 /**
- * claudeChat.ts — view models for the Claude chat screen: transcript rows and
- * `AskUserQuestion` answers.
+ * claudeChat.ts — view models for the Claude chat: transcript rows, the
+ * session's activity and `AskUserQuestion` answers.
  */
 
-import type { ApiClaudeEntry, ClaudeQuestion } from '../native/claude';
+import type { ApiClaudeEntry, ApiClaudeSession, ClaudeQuestion } from '../native/claude';
 
 type ToolUseEntry = Extract<ApiClaudeEntry, { kind: 'tool_use' }>;
 type ToolResultEntry = Extract<ApiClaudeEntry, { kind: 'tool_result' }>;
@@ -150,4 +150,14 @@ export function questionAnswers(
     answers[question.question] = answer;
   }
   return answers;
+}
+
+/** What the chat's status strip says about a Claude session. */
+export type ClaudeActivity = 'loading' | 'needsInput' | 'unhooked' | 'working' | 'ready';
+
+export function claudeActivity(session: ApiClaudeSession | null): ClaudeActivity {
+  if (session === null) return 'loading';
+  if (session.dialogs.length > 0) return 'needsInput';
+  if (!session.hooks_attached) return 'unhooked';
+  return session.busy === true ? 'working' : 'ready';
 }

@@ -3,7 +3,8 @@
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
  *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
- *     when there are several), a small connection-quality dot, and a "＋"
+ *     when there are several), a Terminal / Chat switch for a terminal running
+ *     an agent, a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
@@ -14,7 +15,9 @@
  *     layout is not reproduced on the phone (it made every pane too small); the
  *     server layout is left untouched. No fullscreen toggle either: with one
  *     pane on screen it would only change the desktop's fullscreen state.
- *     Empty/no-terminal states match the Dart screen.
+ *     Empty/no-terminal states match the Dart screen. In the Chat view the
+ *     terminal's {@link ClaudeChat} takes its place and the key toolbar is
+ *     hidden.
  *   - the {@link KeyToolbar} pinned above the soft keyboard (rendered inside a
  *     `KeyboardAvoidingView` so it sits on top of the keyboard).
  *   - the slide-in {@link ProjectDrawer}.
@@ -51,6 +54,7 @@ import {
   useWorkspaceStore,
   useConnectionStore,
   selectIsReconnecting,
+  type TerminalViewMode,
 } from '../state';
 import { ReconnectBanner } from '../components/ReconnectBanner';
 import {
@@ -86,6 +90,8 @@ import {
 } from '../components/TerminalPane';
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
+import { ClaudeChat } from '../components/ClaudeChat';
+import { DialogBadge } from '../components/ClaudeIndicator';
 import { Icon } from '../components/Icon';
 import type { TerminalFonts } from '../components/TerminalView';
 
@@ -155,6 +161,9 @@ export const WorkspaceScreen: React.FC = () => {
   );
   const previousProjectId = useWorkspaceStore((s) => s.previousProjectId);
   const signals = useWorkspaceStore((s) => s.projectSignals);
+  const claudeDialogs = useWorkspaceStore((s) => s.claudeDialogs);
+  const terminalViews = useWorkspaceStore((s) => s.terminalViews);
+  const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
@@ -240,6 +249,19 @@ export const WorkspaceScreen: React.FC = () => {
     ? pickTerminal(project.terminalIds, [selectedTerminalId])
     : null;
 
+  const activeDialogs = activeTerminalId
+    ? claudeDialogs[activeTerminalId] ?? 0
+    : 0;
+  const activeView = activeTerminalId
+    ? terminalViews[activeTerminalId] ?? 'terminal'
+    : 'terminal';
+  const canChat =
+    activeTerminalId !== null &&
+    (project?.terminalAgentStatus[activeTerminalId] !== undefined ||
+      activeDialogs > 0 ||
+      activeView === 'chat');
+  const showChat = canChat && activeView === 'chat';
+
   const dotColor = reconnecting
     ? OkenaColors.warning
     : secondsSinceActivity < 3
@@ -290,6 +312,16 @@ export const WorkspaceScreen: React.FC = () => {
         </Centered>
       );
     }
+    if (showChat) {
+      return (
+        <ClaudeChat
+          key={activeTerminalId}
+          connId={connId}
+          terminalId={activeTerminalId}
+          onShowTerminal={() => setTerminalView(activeTerminalId, 'terminal')}
+        />
+      );
+    }
     // Keyed on the terminal: a fresh pane measures itself and sends the PTY
     // resize for the newly shown terminal (an in-place id swap would not).
     return (
@@ -317,7 +349,10 @@ export const WorkspaceScreen: React.FC = () => {
     : manualRows;
 
   const showToolbar =
-    connId !== null && project !== null && activeTerminalId !== null;
+    connId !== null &&
+    project !== null &&
+    activeTerminalId !== null &&
+    !showChat;
 
   return (
     <View style={styles.root}>
@@ -348,6 +383,13 @@ export const WorkspaceScreen: React.FC = () => {
           ) : null}
         </Pressable>
         <View style={styles.flexSpacer} />
+        {canChat && activeTerminalId ? (
+          <ViewSwitch
+            view={activeView}
+            dialogs={activeDialogs}
+            onChange={(view) => setTerminalView(activeTerminalId, view)}
+          />
+        ) : null}
         {connId ? (
           <View style={[styles.dot, { backgroundColor: dotColor }]} />
         ) : null}
@@ -374,6 +416,7 @@ export const WorkspaceScreen: React.FC = () => {
         <TerminalTabs
           project={project}
           activeTerminalId={activeTerminalId}
+          claudeDialogs={claudeDialogs}
           onSelect={selectTerminal}
         />
       ) : null}
@@ -534,6 +577,58 @@ export const WorkspaceScreen: React.FC = () => {
   );
 };
 
+/** Terminal / Chat segmented switch; the Chat side counts open dialogs. */
+const ViewSwitch: React.FC<{
+  view: TerminalViewMode;
+  dialogs: number;
+  onChange: (view: TerminalViewMode) => void;
+}> = ({ view, dialogs, onChange }) => (
+  <View style={styles.viewSwitch} accessibilityRole="tablist">
+    <ViewSwitchSegment
+      icon="prompt"
+      label="Terminal"
+      active={view === 'terminal'}
+      onPress={() => onChange('terminal')}
+    />
+    <ViewSwitchSegment
+      icon="chat"
+      label={dialogs > 0 ? `Chat, ${dialogs} open dialogs` : 'Chat'}
+      active={view === 'chat'}
+      onPress={() => onChange('chat')}
+    >
+      {dialogs > 0 && view !== 'chat' ? (
+        <View style={styles.viewSwitchBadge}>
+          <DialogBadge count={dialogs} />
+        </View>
+      ) : null}
+    </ViewSwitchSegment>
+  </View>
+);
+
+const ViewSwitchSegment: React.FC<{
+  icon: 'prompt' | 'chat';
+  label: string;
+  active: boolean;
+  onPress: () => void;
+  children?: React.ReactNode;
+}> = ({ icon, label, active, onPress, children }) => (
+  <Pressable
+    hitSlop={4}
+    style={[styles.viewSwitchSegment, active && styles.viewSwitchSegmentActive]}
+    onPress={onPress}
+    accessibilityRole="tab"
+    accessibilityLabel={label}
+    accessibilityState={{ selected: active }}
+  >
+    <Icon
+      name={icon}
+      size={16}
+      color={active ? OkenaColors.textPrimary : OkenaColors.textTertiary}
+    />
+    {children}
+  </Pressable>
+);
+
 const SwitcherRow: React.FC<{
   project: ProjectInfo;
   depth: number;
@@ -607,6 +702,22 @@ const styles = StyleSheet.create({
   },
   titleCaret: { marginLeft: 4 },
   dot: { width: 8, height: 8, borderRadius: 4, marginHorizontal: 6 },
+  viewSwitch: {
+    flexDirection: 'row',
+    padding: 2,
+    marginHorizontal: 4,
+    borderRadius: 10,
+    backgroundColor: OkenaColors.surfaceElevated,
+  },
+  viewSwitchSegment: {
+    width: 40,
+    height: 30,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  viewSwitchSegmentActive: { backgroundColor: OkenaColors.keyBgPressed },
+  viewSwitchBadge: { position: 'absolute', top: -4, right: -2 },
   centered: {
     flex: 1,
     alignItems: 'center',

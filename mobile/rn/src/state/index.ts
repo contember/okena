@@ -29,6 +29,7 @@ export {
   configureWorkspaceStore,
   WORKSPACE_POLL_MS,
   type WorkspaceState,
+  type TerminalViewMode,
   type WorkspaceDeps,
 } from './workspaceStore';
 

@@ -1,6 +1,6 @@
 /**
  * ClaudeIndicator.tsx — the agent lifecycle dot and the open-dialog badge of a
- * terminal, as a tappable pill that opens its Claude chat.
+ * terminal, and both as a tappable "Chat" pill that opens its Claude chat.
  */
 
 import React from 'react';
@@ -46,11 +46,11 @@ export const ClaudeIndicator: React.FC<{
     onPress={onPress}
     accessibilityRole="button"
     accessibilityLabel={
-      dialogs > 0 ? `Claude, ${dialogs} open dialogs` : 'Claude'
+      dialogs > 0 ? `Open Claude chat, ${dialogs} open dialogs` : 'Open Claude chat'
     }
   >
     <LifecycleDot lifecycle={lifecycle} />
-    <Text style={styles.label}>Claude</Text>
+    <Text style={styles.label}>Chat</Text>
     {dialogs > 0 ? <DialogBadge count={dialogs} /> : null}
   </Pressable>
 );
@@ -59,15 +59,22 @@ const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: OkenaColors.borderLight,
     marginHorizontal: 6,
   },
-  dot: { width: 7, height: 7, borderRadius: 3.5 },
-  label: { color: OkenaColors.textSecondary, fontSize: 11, marginLeft: 5 },
+  // The ring keeps the dot visible on an accent-colored chip.
+  dot: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    borderWidth: 1.5,
+    borderColor: OkenaColors.surface,
+  },
+  label: { color: OkenaColors.textSecondary, fontSize: 12, marginLeft: 5 },
   badge: {
     minWidth: 16,
     height: 16,

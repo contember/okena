@@ -414,3 +414,23 @@ describe('workspace Claude dialog tracking', () => {
     expect(useWorkspaceStore.getState().claudeDialogs).toEqual({ t1: 1 });
   });
 });
+
+describe('workspace terminal views', () => {
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+  });
+
+  it('remembers the chat view per terminal until switched back or stopped', () => {
+    configureWorkspaceStore({ native: stubNative([TABS_FIRST_ACTIVE]) });
+    const store = useWorkspaceStore.getState();
+    store.start('conn-1');
+
+    store.setTerminalView('t1', 'chat');
+    store.setTerminalView('t2', 'chat');
+    store.setTerminalView('t2', 'terminal');
+    expect(useWorkspaceStore.getState().terminalViews).toEqual({ t1: 'chat' });
+
+    store.stop();
+    expect(useWorkspaceStore.getState().terminalViews).toEqual({});
+  });
+});

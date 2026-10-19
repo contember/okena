@@ -17,7 +17,8 @@
  *     Each row carries an activity dot (amber: needs attention, green: running).
  *   - tapping a project selects it (`selectProject`) and expands it inline to
  *     show its terminals; tapping a terminal selects + focuses it and closes the
- *     drawer.
+ *     drawer. A terminal running an agent or with open Claude dialogs has a
+ *     "Chat" pill that opens it as its Claude chat.
  *   - long-press a project opens an actions sheet: change color (color picker),
  *     and move up/down within its folder (reorder).
  *   - "Add Project" (name + path dialog) and "Disconnect" at the bottom.
@@ -57,6 +58,7 @@ import { useSettingsStore } from '../state/settingsStore';
 import { ActivityDot, TierHeader, useActivityRows } from './projectActivity';
 import { OkenaColors } from '../theme';
 import { Icon } from './Icon';
+import { ClaudeIndicator } from './ClaudeIndicator';
 import { SettingsSheet } from '../screens/SettingsSheet';
 import { SettingsIcon } from './KeyIcons';
 
@@ -147,6 +149,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
   const signals = useWorkspaceStore((s) => s.projectSignals);
+  const claudeDialogs = useWorkspaceStore((s) => s.claudeDialogs);
+  const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
 
   const connId = useConnectionStore((s) => s.connId);
@@ -226,6 +230,11 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     selectTerminal(terminalId);
     if (connId) void native.focusTerminal(connId, project.id, terminalId);
     onClose();
+  };
+
+  const handleOpenChat = (project: ProjectInfo, terminalId: string) => {
+    setTerminalView(terminalId, 'chat');
+    handleSelectTerminal(project, terminalId);
   };
 
   const openColorPickerForProject = (project: ProjectInfo) => {
@@ -345,6 +354,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
                   native={native}
                   onSelectProject={handleSelectProject}
                   onSelectTerminal={handleSelectTerminal}
+                  onOpenChat={handleOpenChat}
+                  claudeDialogs={claudeDialogs}
                   onLongPress={() => {
                     const folder = !isActivity
                       ? projectFolders.get(item.project.id)
@@ -472,6 +483,9 @@ interface RowCommon {
   native: DrawerNative;
   onSelectProject: (project: ProjectInfo) => void;
   onSelectTerminal: (project: ProjectInfo, terminalId: string) => void;
+  onOpenChat: (project: ProjectInfo, terminalId: string) => void;
+  /** Open Claude dialogs per terminal id. */
+  claudeDialogs: Record<string, number>;
 }
 
 // ── Project row (+ inline expansion when selected) ──────────────────────────
@@ -493,6 +507,8 @@ const ProjectRow: React.FC<
   native,
   onSelectProject,
   onSelectTerminal,
+  onOpenChat,
+  claudeDialogs,
   onLongPress,
 }) => {
   const isSelected = project.id === selectedProjectId;
@@ -565,6 +581,8 @@ const ProjectRow: React.FC<
           {project.terminalIds.map((tid, idx) => {
             const isTerminalSelected = tid === selectedTerminalId;
             const name = project.terminalNames[tid] ?? `Terminal ${idx + 1}`;
+            const agent = project.terminalAgentStatus[tid];
+            const dialogs = claudeDialogs[tid] ?? 0;
             return (
               <Pressable
                 key={tid}
@@ -591,6 +609,13 @@ const ProjectRow: React.FC<
                   {name}
                 </Text>
                 <View style={styles.flexSpacer} />
+                {agent !== undefined || dialogs > 0 ? (
+                  <ClaudeIndicator
+                    lifecycle={agent?.lifecycle}
+                    dialogs={dialogs}
+                    onPress={() => onOpenChat(project, tid)}
+                  />
+                ) : null}
                 <Pressable
                   hitSlop={8}
                   onPress={() => {

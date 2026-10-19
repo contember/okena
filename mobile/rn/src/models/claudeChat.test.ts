@@ -1,8 +1,9 @@
 /// <reference types="jest" />
 // tsconfig pins `types` to react/react-native, so pull jest globals in here.
 
-import type { ClaudeQuestion } from '../native/claude';
+import type { ApiClaudeDialog, ApiClaudeSession, ClaudeQuestion } from '../native/claude';
 import {
+  claudeActivity,
   buildClaudeChatRows,
   EMPTY_SELECTION,
   questionAnswers,
@@ -127,5 +128,32 @@ describe('question answers', () => {
         [multi.question]: picked,
       }),
     ).toEqual({ 'Which one?': 'A', 'Which ones?': 'A' });
+  });
+});
+
+describe('claudeActivity', () => {
+  const session: ApiClaudeSession = {
+    terminal_id: 't1',
+    has_transcript: true,
+    hooks_attached: true,
+    channel_attached: true,
+    busy: false,
+    queued_prompts: 0,
+    dialogs: [],
+  };
+  const dialog: ApiClaudeDialog = {
+    id: 'd1',
+    tool_name: 'Bash',
+    tool_input: {},
+    permission_suggestions: [],
+    created_at_ms: 0,
+  };
+
+  it('puts an open dialog before everything else', () => {
+    expect(claudeActivity(null)).toBe('loading');
+    expect(claudeActivity({ ...session, busy: true, dialogs: [dialog] })).toBe('needsInput');
+    expect(claudeActivity({ ...session, hooks_attached: false })).toBe('unhooked');
+    expect(claudeActivity({ ...session, busy: true })).toBe('working');
+    expect(claudeActivity({ ...session, busy: undefined })).toBe('ready');
   });
 });
