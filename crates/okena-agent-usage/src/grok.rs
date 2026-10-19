@@ -33,17 +33,16 @@ struct GrokAuth {
 }
 
 /// `GROK_HOME` when it exists, otherwise `~/.grok`.
-fn resolve_grok_dir() -> PathBuf {
+/// `None` without a usable `GROK_HOME` or home directory.
+fn resolve_grok_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("GROK_HOME") {
         let path = PathBuf::from(dir);
         if path.is_dir() {
-            return path;
+            return Some(path);
         }
         log::warn!("[grok-usage] GROK_HOME does not exist, falling back to ~/.grok");
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".grok")
+    Some(dirs::home_dir()?.join(".grok"))
 }
 
 fn read_grok_auth(dir: &Path) -> Option<GrokAuth> {
@@ -113,7 +112,10 @@ fn billing_request(access_token: &str, version: &str) -> HttpRequest {
 /// Fetch billing usage. Returns the outcome and the Grok user id (the history
 /// source) when a session was readable.
 pub fn fetch() -> (FetchOutcome, Option<String>) {
-    fetch_in(&resolve_grok_dir(), okena_transport::http::send)
+    let Some(dir) = resolve_grok_dir() else {
+        return (FetchOutcome::NoCredentials(NO_CREDENTIALS.into()), None);
+    };
+    fetch_in(&dir, okena_transport::http::send)
 }
 
 fn fetch_in(
@@ -318,11 +320,16 @@ fn number(value: &serde_json::Value) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
+/// The keys of an object, or the JSON type of anything else, never values.
 fn value_keys(value: &serde_json::Value) -> String {
-    value
-        .as_object()
-        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(", "))
-        .unwrap_or_else(|| value.to_string())
+    match value {
+        serde_json::Value::Object(object) => object.keys().cloned().collect::<Vec<_>>().join(", "),
+        serde_json::Value::Array(_) => "(an array)".into(),
+        serde_json::Value::String(_) => "(a string)".into(),
+        serde_json::Value::Number(_) => "(a number)".into(),
+        serde_json::Value::Bool(_) => "(a boolean)".into(),
+        serde_json::Value::Null => "(null)".into(),
+    }
 }
 
 #[cfg(test)]
