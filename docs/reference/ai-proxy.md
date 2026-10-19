@@ -161,8 +161,12 @@ usage poll.
 The host's daemon computes the pool, in its own time zone and with its working
 days, and publishes it as `pool` in the Claude entry of the usage channel
 (`GET /v1/usage`, `usage_changed`). The desktop and the mobile app only render
-it, for every connected host. The pool is recomputed on each accounts poll in
-whole minutes, so it republishes at most once a minute. Hovering either item opens the pool popover with one section per
+it, for every connected host whose daemon publishes it; a host with an older
+daemon shows only the account items. The daemon recomputes the pool on each
+15-second accounts poll and after each proxy command or settings change, and
+republishes it when it changed. The pool follows each account's live
+utilization, so while Claude is in use it can republish on most polls.
+Hovering either item opens the pool popover with one section per
 limit; an (i) next to Today and Nonstop explains each value in a tooltip. The
 soft-limit section adds today's use, the safe daily use, and where the last 24
 hours' pace runs short. One row per account follows, with a 5h and a 7d bar

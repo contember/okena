@@ -219,7 +219,18 @@ auth like the other `/v1` routes. Returns `ApiUsage`
                       "used_credits_cents": 0.0, "utilization": 0.0},
       "credits": null, "reset_credits": null
     },
-    { "provider": "codex", "status": "disabled", "windows": [] }
+    { "provider": "codex", "status": "disabled", "windows": [] },
+    {
+      "provider": "grok", "status": "ok",
+      "windows": [
+        {
+          "id": "included", "label": "Credits", "kind": {"type": "other"},
+          "used_percent": 37.0, "window_seconds": 2678400.0,
+          "reset_at": 1793404800.0, "active": true, "history": []
+        }
+      ],
+      "prepaid_balance": 1200.0
+    }
   ],
   "working_days": [0, 1, 2, 3, 4],
   "generated_at": 1792260190.0
@@ -232,22 +243,27 @@ auth like the other `/v1` routes. Returns `ApiUsage`
 - Window `kind`: `five_hour`, `weekly`, `weekly_scoped` (+ `model`),
   `code_review`, `other`. Window ids double as history series names.
 - Timestamps are epoch seconds. Time elapsed in a window is
-  `(now - (reset_at - window_seconds)) / window_seconds`.
+  `(now - (reset_at - window_seconds)) / window_seconds`; a window with
+  `window_seconds: 0` (Grok without a billing period) has none.
+- `pool` and the `grok` entry come only from daemons that know them; older
+  daemons omit both.
 - `working_days`: `0 = Monday`; the desktop's weekly pace marker only advances
   on these days.
 - Polling: every 5 min per enabled provider (`enabled_extensions` contains
-  `claude-code` / `codex`), backoff 30 s → 1 h on errors, `retry-after` on 429.
+  `claude-code` / `codex` / `grok`), backoff 30 s → 1 h on errors,
+  `retry-after` on 429.
 
 ### `POST /v1/usage/refresh`
 
-Body `{"provider": "claude"}`, `{"provider": "codex"}`, or empty / `{}` for
-all. Returns the `ApiUsage` snapshot as soon as the daemon has applied the
+Body `{"provider": "claude"}`, `{"provider": "codex"}`, `{"provider": "grok"}`,
+or empty / `{}` for all. Returns the `ApiUsage` snapshot as soon as the daemon has applied the
 request (at most ~2 s): a requested provider with `fetching: true` is being
 refetched, otherwise the request was ignored. The fetch result arrives as
 `usage_changed`. Ignored per provider when its last attempt is under 60 s old,
 it is fetching, rate limited, disabled, or in an error backoff after two or
 more consecutive failures whose next attempt is over 60 s away (a single
-failure can be retried). Unknown fields or providers → `400`.
+failure can be retried). Unknown fields or providers → `400`, so a daemon
+older than Grok support rejects `{"provider": "grok"}`.
 
 ### `WS /v1/stream`
 

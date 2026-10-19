@@ -20,6 +20,8 @@
 //! time_pct     = clamp((now - start) / window_seconds * 100, 0, 100)
 //! ```
 //!
+//! A window with `window_seconds == 0` or no `reset_at` has no pace.
+//!
 //! Desktop severity uses `max(abs, pace)`: abs is Critical above 80 %,
 //! Warning above 60 %; pace is Critical when `used_percent > time_pct + 15`,
 //! Warning when `> time_pct + 5`. For ~weekly windows (`window_seconds` within
@@ -156,8 +158,10 @@ pub struct ApiProviderUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepaid_balance: Option<f64>,
     /// Claude only: the AI proxy's account pool, present while the host routes
-    /// new shells through the proxy. Those shells then use the pool, not the
-    /// `claude` login, so clients show the pool instead of `windows`.
+    /// new shells through the proxy, the proxy answers and has accounts, and
+    /// Claude usage is not disabled. Those shells then use the pool, not the
+    /// `claude` login, so clients show the pool instead of `windows`. Daemons
+    /// older than the pool never send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<ApiPool>,
 }
@@ -196,15 +200,16 @@ impl ApiProviderUsage {
 pub struct ApiUsageWindow {
     /// Stable key, also the history series name: Claude `five_hour`,
     /// `seven_day`, `seven_day_<model lowercase>`; Codex `primary`,
-    /// `secondary`, `code_review`.
+    /// `secondary`, `code_review`; Grok `included`, `on_demand`.
     pub id: String,
     /// Display label the desktop uses (`Session`, `Weekly`, `Fable`,
-    /// `Rate Limit`, `Secondary`, `Code Review`).
+    /// `Rate Limit`, `Secondary`, `Code Review`, `Credits`, `On-demand`).
     pub label: String,
     pub kind: ApiUsageWindowKind,
     /// Utilization, 0–100.
     pub used_percent: f64,
-    /// Length of the window in seconds (18000 for 5 h, 604800 for 7 d).
+    /// Length of the window in seconds (18000 for 5 h, 604800 for 7 d);
+    /// `0` when the provider did not say (Grok without a billing period).
     pub window_seconds: f64,
     /// When the window resets (epoch seconds). `None` when the provider did
     /// not say; pace cannot be computed then.
@@ -401,8 +406,8 @@ pub struct ApiPoolAccount {
     /// Weekly percent of this account used since the daemon's local midnight.
     pub used_today_percent: f64,
     /// The `five_hour` and `seven_day` windows, shaped like provider windows
-    /// but without `history`: the pool is republished as often as once a
-    /// minute, and clients draw only the bars.
+    /// but without `history`: the pool is republished whenever an account's
+    /// utilization moves, and clients draw only the bars.
     #[serde(default)]
     pub windows: Vec<ApiUsageWindow>,
 }
