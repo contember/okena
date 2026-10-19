@@ -157,12 +157,11 @@ Today and Nonstop weigh accounts by plan size (Pro 1, Max 5x 5, Max 20x 20),
 from the `rate_limit_tier` of the OAuth profile. The proxy stores
 it at login; accounts logged in before learn it once per proxy process from the
 usage poll. Hovering either item opens the pool popover with one section per
-limit, each with a sentence on what it means. The soft-limit section adds
-today's use, the safe daily use and its tightest point, where the last 24
-hours' pace runs short, and the next weekly refills. One row per account
-follows, with a 5h and a 7d bar that carry the same time marker and grid as the
-account's own popover. Clicking a row shows
-that account's usage and history chart in the same popover.
+limit; an (i) next to Today and Nonstop explains each value in a tooltip. The
+soft-limit section adds today's use, the safe daily use, and where the last 24
+hours' pace runs short. One row per account follows, with a 5h and a 7d bar
+that carry the same time marker and grid as the account's own popover. Clicking
+a row shows that account's usage and history chart in the same popover.
 
 Successful five-minute usage polls append quota samples to
 `<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection

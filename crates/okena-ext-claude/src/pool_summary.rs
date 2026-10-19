@@ -8,6 +8,7 @@ use crate::pool_usage::{AccountKey, PoolHistory};
 use crate::settings::PoolDisplay;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::ai_proxy::{AiAccount, AiUsage};
 use okena_extensions::ThemeColors;
@@ -272,7 +273,6 @@ pub(crate) fn render_body(
     cx: &App,
 ) -> Div {
     let today = summary.today;
-    let now_ms = jiff::Timestamp::now().as_millisecond();
     let work = |points: f64| {
         format!(
             "{} ({:.0}%)",
@@ -321,19 +321,6 @@ pub(crate) fn render_body(
         Some(wall) => format!("runs out {}", moment(wall)),
         None => "lasts the week".into(),
     };
-    let mut refills: Vec<(i64, &AccountShare)> = summary
-        .accounts
-        .iter()
-        .filter(|share| {
-            share
-                .seven_day
-                .as_ref()
-                .is_some_and(|usage| usage.utilization > 0.0)
-        })
-        .filter_map(|share| Some((share.weekly_reset_ms.filter(|at| *at > now_ms)?, share)))
-        .collect();
-    refills.sort_by_key(|(at, _)| *at);
-
     let nonstop_text = match summary.runway {
         Runway::Lasts { ms } => short_duration(ms),
         Runway::BeyondHorizon => "a week or more".into(),
@@ -374,14 +361,14 @@ pub(crate) fn render_body(
         v_flex()
             .gap(px(7.0))
             .child(section("THIS WEEK · SOFT LIMIT"))
-            .child(usage_kv_row(
+            .child(info_kv_row(
                 t,
                 cx,
                 "Today",
+                vec![beyond_safe, pace_note],
                 today_value(summary),
                 severity_color(t, today_severity(summary)),
             ))
-            .child(muted(beyond_safe))
             .child(
                 v_flex()
                     .gap(px(3.0))
@@ -417,40 +404,16 @@ pub(crate) fn render_body(
                         )))
                     }),
             )
-            .when(!refills.is_empty(), |el| {
-                el.child(
-                    v_flex()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(ui_text_xs(cx))
-                                .text_color(rgb(t.text_secondary))
-                                .child("Next refills"),
-                        )
-                        .children(refills.into_iter().take(3).map(|(at, share)| {
-                            muted(format!(
-                                "{}  {}  +{:.0}%",
-                                moment(at),
-                                share.label,
-                                share
-                                    .seven_day
-                                    .as_ref()
-                                    .map_or(0.0, |usage| usage.utilization)
-                            ))
-                        })),
-                )
-            })
             .child(usage_divider(t))
             .child(section("RIGHT NOW · HARD LIMIT"))
-            .child(usage_kv_row(
+            .child(info_kv_row(
                 t,
                 cx,
                 "Nonstop",
+                vec![nonstop_note],
                 nonstop_text,
                 severity_color(t, runway_severity(summary.runway)),
             ))
-            .child(muted(nonstop_note))
-            .child(muted(pace_note))
             .child(usage_divider(t))
             .children(
                 summary
@@ -459,6 +422,60 @@ pub(crate) fn render_body(
                     .map(|share| render_share(share, summary.working, open_account.clone(), t, cx)),
             ),
     )
+}
+
+/// A label/value row whose explanation sits in a tooltip behind an (i).
+fn info_kv_row(
+    t: &ThemeColors,
+    cx: &App,
+    label: &'static str,
+    paragraphs: Vec<String>,
+    value: String,
+    value_color: u32,
+) -> impl IntoElement {
+    let paragraphs: Rc<[String]> = paragraphs.into();
+    h_flex()
+        .items_center()
+        .justify_between()
+        .child(
+            h_flex()
+                .gap(px(5.0))
+                .items_center()
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("claude-pool-info-{label}")))
+                        .child(
+                            svg()
+                                .path("icons/info.svg")
+                                .size(px(12.0))
+                                .text_color(rgb(t.text_muted)),
+                        )
+                        .tooltip(move |window, cx| {
+                            let paragraphs = paragraphs.clone();
+                            Tooltip::element(move |_, _| {
+                                v_flex()
+                                    .w(px(280.0))
+                                    .py(px(4.0))
+                                    .gap(px(6.0))
+                                    .children(paragraphs.iter().cloned())
+                            })
+                            .build(window, cx)
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(ui_text_ms(cx))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(value_color))
+                .child(value),
+        )
 }
 
 fn render_share(
