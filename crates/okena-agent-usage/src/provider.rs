@@ -32,6 +32,7 @@ pub struct ProviderData {
     pub extra_usage: Option<ApiExtraUsage>,
     pub credits: Option<ApiUsageCredits>,
     pub reset_credits: Option<ApiResetCredits>,
+    pub prepaid_balance: Option<f64>,
 }
 
 /// Result of one fetch attempt.
@@ -188,6 +189,7 @@ impl ProviderTracker {
                 self.entry.extra_usage = data.extra_usage;
                 self.entry.credits = data.credits;
                 self.entry.reset_credits = data.reset_credits;
+                self.entry.prepaid_balance = data.prepaid_balance;
                 USAGE_INTERVAL
             }
             FetchOutcome::NoCredentials(message) => {
@@ -394,10 +396,7 @@ mod tests {
         assert_eq!(tracker.entry().status, ApiUsageStatus::Pending);
         assert_eq!(tracker.entry().rate_limited_until, Some(1000.0));
         assert!(!tracker.refresh_allowed(now + Duration::from_secs(60)));
-        assert_eq!(
-            tracker.earliest_start(now),
-            now + Duration::from_secs(900)
-        );
+        assert_eq!(tracker.earliest_start(now), now + Duration::from_secs(900));
 
         tracker.set_disabled();
         assert!(tracker.entry().rate_limited_until.is_none());

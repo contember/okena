@@ -7,18 +7,18 @@
 //! Quantities are weighted by plan size, so 1% of a Max 20x account counts four
 //! times as much as 1% of a Max 5x account.
 
+use crate::history::{History, LimitSample, UsageSample};
+use crate::pace::WorkingDays;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan};
 use okena_core::ai_proxy::{AiAccount, AiUsage};
-use okena_usage::WorkingDays;
-use okena_usage::history::{History, LimitSample, UsageSample};
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const SESSION_MS: i64 = 5 * HOUR_MS;
 const WEEK_MS: i64 = 7 * 24 * HOUR_MS;
 /// The runway simulation stops here; anything longer reads as "a week or more".
-pub(crate) const RUNWAY_HORIZON_MS: i64 = WEEK_MS;
+pub const RUNWAY_HORIZON_MS: i64 = WEEK_MS;
 /// Consecutive samples further apart than this do not say when usage happened.
 const MAX_SAMPLE_GAP_SECS: f64 = 15.0 * 60.0;
 /// Reset timestamps jitter between polls.
@@ -33,7 +33,7 @@ const DEFAULT_WEEKLY_PER_SESSION_POINT: f64 = 0.25;
 const DEFAULT_SESSION_POINTS_PER_HOUR: f64 = 20.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlanSize {
+pub enum PlanSize {
     Max20x,
     Max5x,
     /// Pro, or a plan whose size is not known.
@@ -64,18 +64,18 @@ impl PlanSize {
     }
 }
 
-pub(crate) fn plan_weight(account: &AiAccount) -> f64 {
+pub fn plan_weight(account: &AiAccount) -> f64 {
     PlanSize::of(account).weight()
 }
 
 /// Accounts the proxy can route to at all; blocked ones still count, since
 /// their quota comes back.
-pub(crate) fn in_service(account: &AiAccount) -> bool {
+pub fn in_service(account: &AiAccount) -> bool {
     account.enabled && !account.needs_login
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Pace {
+pub struct Pace {
     /// Weighted session points burned per hour of active work.
     pub session_points_per_hour: f64,
     /// Weekly points one session point costs.
@@ -86,7 +86,7 @@ pub(crate) struct Pace {
 
 /// The pool's pace over the last week: the 75th percentile of the hours with
 /// any usage, so short bursts and idle tails do not drag it down.
-pub(crate) fn pace(accounts: &[(&AiAccount, &History)]) -> Pace {
+pub fn pace(accounts: &[(&AiAccount, &History)]) -> Pace {
     let mut session_points = 0.0;
     let mut weekly_points = 0.0;
     let mut hours = std::collections::BTreeMap::<i64, f64>::new();
@@ -147,7 +147,7 @@ fn limit<'a>(sample: &'a UsageSample, name: &str) -> Option<&'a LimitSample> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Runway {
+pub enum Runway {
     /// Nonstop work at the pool's pace blocks every account after this long.
     Lasts { ms: i64 },
     /// No account blocks within [`RUNWAY_HORIZON_MS`].
@@ -233,7 +233,7 @@ impl SimAccount {
 /// Simulate the proxy serving nonstop work at `pace`: one account at a time,
 /// the one whose weekly quota expires first, switching when it blocks and
 /// returning accounts as their windows reset.
-pub(crate) fn runway(accounts: &[&AiAccount], pace: Pace, now: i64) -> Runway {
+pub fn runway(accounts: &[&AiAccount], pace: Pace, now: i64) -> Runway {
     let mut pool: Vec<SimAccount> = accounts
         .iter()
         .map(|account| SimAccount::new(account, now))
@@ -314,7 +314,7 @@ struct WeeklyPoint {
 /// Weekly points the account used between `from` and `to` (Unix seconds),
 /// measured from its history and the live window at `now`; increments across a
 /// reset count from zero.
-pub(crate) fn weekly_used_between(
+pub fn weekly_used_between(
     account: &AiAccount,
     history: &History,
     from: f64,
@@ -370,7 +370,7 @@ pub(crate) fn weekly_used_between(
 /// What today may still use without the pool running short within the next
 /// week. All quantities are weighted weekly points.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Today {
+pub struct Today {
     /// Used since local midnight.
     pub used: f64,
     /// The most each working day may use, today included, so that no shortage
@@ -396,7 +396,7 @@ impl Today {
 }
 
 /// Local days the day plan looks ahead, today included.
-pub(crate) const HORIZON_DAYS: usize = 7;
+pub const HORIZON_DAYS: usize = 7;
 
 /// One account's weekly window in weighted points.
 #[derive(Clone, Copy, Debug)]
@@ -414,7 +414,7 @@ struct Day {
     working: bool,
 }
 
-pub(crate) fn today(
+pub fn today(
     accounts: &[(&AiAccount, &History)],
     working: WorkingDays,
     now: Timestamp,
@@ -637,7 +637,7 @@ impl DayPlan<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use okena_usage::history::Provider;
+    use crate::history::Provider;
 
     const NOW: i64 = 1_800_000_000_000;
 

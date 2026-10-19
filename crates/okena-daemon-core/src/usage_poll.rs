@@ -58,7 +58,9 @@ pub fn default_fetcher() -> UsageFetcher {
             None => FetchOutcome::NoCredentials("No Claude config directory".into()),
         },
         ApiUsageProvider::Codex => okena_agent_usage::fetch_codex(),
-        ApiUsageProvider::Unknown => FetchOutcome::Failed("unknown provider".into()),
+        ApiUsageProvider::Grok | ApiUsageProvider::Unknown => {
+            FetchOutcome::Failed("unknown provider".into())
+        }
     })
 }
 
@@ -74,7 +76,7 @@ fn extension_id(provider: ApiUsageProvider) -> &'static str {
     match provider {
         ApiUsageProvider::Claude => CLAUDE_EXTENSION_ID,
         ApiUsageProvider::Codex => CODEX_EXTENSION_ID,
-        ApiUsageProvider::Unknown => "",
+        ApiUsageProvider::Grok | ApiUsageProvider::Unknown => "",
     }
 }
 

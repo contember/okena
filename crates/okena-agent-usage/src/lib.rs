@@ -18,6 +18,8 @@ pub mod claude;
 pub mod codex;
 pub mod history;
 pub mod pace;
+pub mod pool;
+pub mod pool_summary;
 pub mod provider;
 
 use std::path::Path;

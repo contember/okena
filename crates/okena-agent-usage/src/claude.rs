@@ -351,6 +351,7 @@ pub fn parse_usage(resp: &serde_json::Value) -> ProviderData {
         extra_usage,
         credits: None,
         reset_credits: None,
+        prepaid_balance: None,
     }
 }
 

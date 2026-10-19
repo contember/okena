@@ -12,6 +12,7 @@
 // (the daemon uses them too); re-exported so widget code keeps its paths.
 pub use okena_agent_usage::history;
 pub use okena_agent_usage::pace::*;
+pub use okena_agent_usage::pool;
 mod daemon_usage;
 mod history_chart;
 pub use daemon_usage::{

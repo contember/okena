@@ -461,6 +461,7 @@ pub fn parse_usage(body: &serde_json::Value) -> Result<ProviderData, String> {
         extra_usage: None,
         credits,
         reset_credits: None,
+        prepaid_balance: None,
     })
 }
 

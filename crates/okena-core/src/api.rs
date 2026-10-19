@@ -5,7 +5,8 @@ use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
 pub use crate::usage::{
-    ApiExtraUsage, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
+    ApiExtraUsage, ApiPool, ApiPoolAccount, ApiPoolAmount, ApiPoolNonstop, ApiPoolPace,
+    ApiPoolToday, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
     ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow, ApiUsageWindowKind,
     USAGE_HISTORY_MAX_POINTS, UsageRefreshRequest,
 };

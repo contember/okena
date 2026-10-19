@@ -1,9 +1,8 @@
-//! Status-bar summary of one host's account pool (see [`crate::pool_model`]):
+//! Status-bar summary of one host's account pool (see [`okena_usage::pool`]):
 //! "Today", the soft limit that keeps quota for the rest of the week, and
 //! "Nonstop", the hard limit when every account is blocked. The popover
 //! explains both and opens each account's detail.
 
-use crate::pool_model::{self, Pace, PlanSize, RUNWAY_HORIZON_MS, Runway, Today};
 use crate::pool_usage::{AccountKey, PoolHistory};
 use crate::settings::PoolDisplay;
 use gpui::prelude::FluentBuilder;
@@ -15,6 +14,7 @@ use okena_extensions::ThemeColors;
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
 use okena_usage::history::History;
+use okena_usage::pool::{self, Pace, PlanSize, RUNWAY_HORIZON_MS, Runway, Today};
 use okena_usage::{
     Severity, WorkingDays, format_reset_time_epoch, severity_color, usage_body_container,
     usage_divider, usage_kv_row, usage_trigger_item,
@@ -85,7 +85,7 @@ pub(crate) fn summarize(
     let accounts: Vec<(&AiAccount, &History, AccountKey)> = host
         .accounts
         .iter()
-        .filter(|account| pool_model::in_service(account))
+        .filter(|account| pool::in_service(account))
         .map(|account| {
             let key = AccountKey::new(host, account);
             let history = history
@@ -99,7 +99,7 @@ pub(crate) fn summarize(
         .iter()
         .map(|(account, history, _)| (*account, *history))
         .collect();
-    let pace = pool_model::pace(&pairs);
+    let pace = pool::pace(&pairs);
     let pool: Vec<&AiAccount> = pairs.iter().map(|(account, _)| *account).collect();
     let shares: Vec<AccountShare> = accounts
         .iter()
@@ -113,7 +113,7 @@ pub(crate) fn summarize(
                 .seven_day
                 .as_ref()
                 .and_then(|usage| usage.resets_at_ms),
-            used_today: pool_model::weekly_used_between(
+            used_today: pool::weekly_used_between(
                 account,
                 history,
                 midnight as f64 / 1000.0,
@@ -127,15 +127,15 @@ pub(crate) fn summarize(
         1.0
     } else {
         pool.iter()
-            .map(|account| pool_model::plan_weight(account))
+            .map(|account| pool::plan_weight(account))
             .sum::<f64>()
             / pool.len() as f64
     };
     HostSummary {
         host_name: (host.connection_id != LOCAL_DAEMON_CONNECTION_ID)
             .then(|| host.host_name.clone()),
-        runway: pool_model::runway(&pool, pace, now_ms),
-        today: pool_model::today(&pairs, working, now, &tz),
+        runway: pool::runway(&pool, pace, now_ms),
+        today: pool::today(&pairs, working, now, &tz),
         pace,
         working,
         mean_weight,
