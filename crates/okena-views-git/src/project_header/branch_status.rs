@@ -9,12 +9,13 @@
 use super::{CiStatusColor, PrStateColor};
 
 use okena_core::theme::ThemeColors;
-use okena_git::GitStatus;
+use okena_git::{GitStatus, MergeQueueState};
 
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::tooltip::Tooltip;
+use okena_ui::tokens::ui_text;
 use okena_ui::truncated_text::truncated_text;
 use std::sync::Arc;
 
@@ -46,16 +47,23 @@ pub struct BranchStatusCallbacks {
 
 /// Render the git branch status pill (branch chip + PR badge + CI pill).
 ///
+/// A PR in a GitHub merge queue gets a merge-queue colored badge with its
+/// queue position on the icon.
+///
 /// Each region is independent: a PR may exist without CI yet (or vice versa
 /// on `main` without a PR), and either part of the row may be missing.
 pub fn render_branch_status(
     status: &GitStatus,
     callbacks: BranchStatusCallbacks,
     t: &ThemeColors,
+    cx: &App,
 ) -> AnyElement {
     let pr_info = status.pr_info.clone();
     let pr_number = pr_info.as_ref().map(|p| p.number);
     let pr_state_color = pr_info.as_ref().map(|p| p.state.color(t));
+    let merge_queue = pr_info.as_ref().and_then(|p| p.merge_queue.clone());
+    let merge_queue_tooltip = pr_info.as_ref().and_then(|p| p.merge_queue_tooltip());
+    let position_text_size = ui_text(7.0, cx);
     let ci_checks = status.ci_checks.clone();
 
     let BranchStatusCallbacks {
@@ -139,6 +147,48 @@ pub fn render_branch_status(
         // still legible" token in every theme — including light, where it is
         // *darker* than muted rather than lighter.
         let badge_color = pr_state_color.unwrap_or(t.text_secondary);
+        // A queued PR swaps its state color for GitHub's merge-queue color (red
+        // once GitHub says it will be kicked out) and shows its queue position.
+        let badge_color = match merge_queue.as_ref().map(|entry| entry.state) {
+            Some(MergeQueueState::Unmergeable) => t.term_red,
+            Some(_) => t.merge_queue_emphasis,
+            None => badge_color,
+        };
+        let icon = svg()
+            .path("icons/git-pull-request.svg")
+            .size(px(10.0))
+            .text_color(rgb(badge_color));
+        // The queue position rides on the icon's top-right corner, like an
+        // unread count, so it can't be misread as part of the PR number.
+        // Two-digit positions stretch the bubble, so `#N` moves further right.
+        let position = merge_queue.as_ref().map(|entry| entry.position.to_string());
+        let number_offset = match position.as_deref() {
+            Some(p) if p.len() > 1 => px(9.0),
+            Some(_) => px(5.0),
+            None => px(0.0),
+        };
+        let icon = div()
+            .relative()
+            .child(icon)
+            .when_some(position, |d, position| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.0))
+                        .left(px(5.0))
+                        .min_w(px(10.0))
+                        .h(px(10.0))
+                        .px(px(2.0))
+                        .rounded_full()
+                        .bg(rgb(badge_color))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(position_text_size)
+                        .text_color(rgb(t.merge_queue_muted))
+                        .child(position),
+                )
+            });
         let mut el = h_flex()
             .id("pr-badge")
             .gap(px(3.0))
@@ -151,17 +201,16 @@ pub fn render_branch_status(
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            .child(
-                svg()
-                    .path("icons/git-pull-request.svg")
-                    .size(px(10.0))
-                    .text_color(rgb(badge_color)),
-            )
+            .child(icon)
             .child(
                 div()
+                    .ml(number_offset)
                     .text_color(rgb(t.text_secondary))
                     .child(format!("#{num}")),
-            );
+            )
+            .when_some(merge_queue_tooltip, |d, tooltip| {
+                d.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            });
         if let Some(cb) = on_pr_click {
             el = el.on_click(move |_, window, cx| {
                 cb(window, cx);

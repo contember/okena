@@ -55,7 +55,10 @@ query PullRequestList($owner: String!, $repo: String!, $headBranch: String!) {
       first: 1,
       orderBy: {field: CREATED_AT, direction: DESC}
     ) {
-      nodes { url state isDraft number baseRefName headRefOid }
+      nodes {
+        url state isDraft number baseRefName headRefOid
+        mergeQueueEntry { position state estimatedTimeToMerge }
+      }
     }
   }
 }"#;
@@ -70,6 +73,38 @@ struct PrNode {
     number: u32,
     base_ref_name: Option<String>,
     head_ref_oid: Option<String>,
+    merge_queue_entry: Option<MergeQueueNode>,
+}
+
+/// `PullRequest.mergeQueueEntry` — `null` unless the PR is queued.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeQueueNode {
+    position: u32,
+    state: String,
+    estimated_time_to_merge: Option<u64>,
+}
+
+fn merge_queue_entry(node: MergeQueueNode) -> crate::MergeQueueEntry {
+    let state = match node.state.as_str() {
+        "QUEUED" => crate::MergeQueueState::Queued,
+        "AWAITING_CHECKS" => crate::MergeQueueState::AwaitingChecks,
+        "MERGEABLE" => crate::MergeQueueState::Mergeable,
+        "LOCKED" => crate::MergeQueueState::Locked,
+        "UNMERGEABLE" => crate::MergeQueueState::Unmergeable,
+        other => {
+            log::warn!(
+                "Unknown merge queue state '{}', defaulting to Queued",
+                other
+            );
+            crate::MergeQueueState::Queued
+        }
+    };
+    crate::MergeQueueEntry {
+        position: node.position,
+        state,
+        estimated_secs: node.estimated_time_to_merge,
+    }
 }
 
 /// The pushed commit that belongs to *this* branch, or `None` when the branch
@@ -167,11 +202,17 @@ fn pr_info_from_node(
         .base_ref_name
         .map(|base| base.trim().to_string())
         .filter(|base| !base.is_empty());
+    // Only an open PR can be queued; ignore a stale entry on anything else.
+    let merge_queue = node
+        .merge_queue_entry
+        .filter(|_| state == crate::PrState::Open)
+        .map(merge_queue_entry);
     Some(crate::PrInfo {
         url: node.url,
         state,
         number: node.number,
         base,
+        merge_queue,
     })
 }
 
@@ -822,6 +863,65 @@ mod tests {
             r#"{"url":"https://github.com/o/r/pull/4","state":"CLOSED","isDraft":false,"number":4,"baseRefName":"main","headRefOid":"oldsha"}"#,
         );
         assert!(pr_info_from_node(node, Some("newsha"), Some("newsha")).is_none());
+    }
+
+    #[test]
+    fn pr_node_maps_merge_queue_entry() {
+        let node = pr_node(
+            r#"{"url":"https://github.com/o/r/pull/8","state":"OPEN","isDraft":false,"number":8,"baseRefName":"main","headRefOid":"abc","mergeQueueEntry":{"position":3,"state":"AWAITING_CHECKS","estimatedTimeToMerge":720}}"#,
+        );
+        let pr = pr_info_from_node(node, None, None).expect("should parse");
+        assert_eq!(
+            pr.merge_queue,
+            Some(crate::MergeQueueEntry {
+                position: 3,
+                state: crate::MergeQueueState::AwaitingChecks,
+                estimated_secs: Some(720),
+            })
+        );
+    }
+
+    #[test]
+    fn pr_node_merge_queue_unknown_state_and_no_estimate() {
+        let node = pr_node(
+            r#"{"url":"https://github.com/o/r/pull/8","state":"OPEN","isDraft":false,"number":8,"mergeQueueEntry":{"position":1,"state":"SOMETHING_NEW","estimatedTimeToMerge":null}}"#,
+        );
+        let entry = pr_info_from_node(node, None, None)
+            .and_then(|pr| pr.merge_queue)
+            .expect("queued");
+        assert_eq!(entry.position, 1);
+        assert_eq!(entry.state, crate::MergeQueueState::Queued);
+        assert_eq!(entry.estimated_secs, None);
+    }
+
+    #[test]
+    fn pr_node_not_queued_has_no_merge_queue() {
+        // Queue exists but this PR is not in it: GitHub sends `null`.
+        let node = pr_node(
+            r#"{"url":"https://github.com/o/r/pull/8","state":"OPEN","isDraft":false,"number":8,"mergeQueueEntry":null}"#,
+        );
+        assert_eq!(
+            pr_info_from_node(node, None, None).unwrap().merge_queue,
+            None
+        );
+        // Repository without a merge queue: GitHub also sends `null`; a
+        // payload without the key must parse the same way.
+        let node = pr_node(
+            r#"{"url":"https://github.com/o/r/pull/8","state":"OPEN","isDraft":false,"number":8}"#,
+        );
+        assert_eq!(
+            pr_info_from_node(node, None, None).unwrap().merge_queue,
+            None
+        );
+    }
+
+    #[test]
+    fn pr_node_ignores_merge_queue_on_merged_pr() {
+        let node = pr_node(
+            r#"{"url":"https://github.com/o/r/pull/8","state":"MERGED","isDraft":false,"number":8,"headRefOid":"abc","mergeQueueEntry":{"position":1,"state":"LOCKED"}}"#,
+        );
+        let pr = pr_info_from_node(node, Some("abc"), None).expect("should parse");
+        assert_eq!(pr.merge_queue, None);
     }
 
     #[test]

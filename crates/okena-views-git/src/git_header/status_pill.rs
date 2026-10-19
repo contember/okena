@@ -119,6 +119,7 @@ impl GitHeader {
                                 on_ci_bounds,
                             },
                             t,
+                            cx,
                         )
                     })
                     // Commit log button

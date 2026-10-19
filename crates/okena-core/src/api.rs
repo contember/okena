@@ -211,6 +211,73 @@ pub struct PrInfo {
     /// repo default. `None` when unknown (older hosts, or `gh` didn't report it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// The PR's entry in the base branch's GitHub merge queue. `None` when the
+    /// PR is not queued, or the repository has no merge queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_queue: Option<MergeQueueEntry>,
+}
+
+impl PrInfo {
+    /// Hover text for the PR badge while the PR sits in a merge queue, e.g.
+    /// `PR #12 · In merge queue · position 3 · ETA ~12 min`.
+    pub fn merge_queue_tooltip(&self) -> Option<String> {
+        let entry = self.merge_queue.as_ref()?;
+        let mut parts = vec![
+            format!("PR #{}", self.number),
+            "In merge queue".to_string(),
+            format!("position {}", entry.position),
+        ];
+        if let Some(note) = entry.state.note() {
+            parts.push(note.to_string());
+        }
+        if let Some(secs) = entry.estimated_secs {
+            parts.push(format!("ETA {}", format_eta(secs)));
+        }
+        Some(parts.join(" · "))
+    }
+}
+
+fn format_eta(secs: u64) -> String {
+    let minutes = secs.div_ceil(60);
+    if minutes < 60 {
+        format!("~{minutes} min")
+    } else {
+        format!("~{} h {} min", minutes / 60, minutes % 60)
+    }
+}
+
+/// A pull request's place in a GitHub merge queue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeQueueEntry {
+    /// Position in the queue as GitHub reports it (1 = next to merge).
+    pub position: u32,
+    pub state: MergeQueueState,
+    /// GitHub's estimate of the time left until the PR merges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_secs: Option<u64>,
+}
+
+/// GitHub's `MergeQueueEntryState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeQueueState {
+    Queued,
+    AwaitingChecks,
+    Mergeable,
+    Locked,
+    Unmergeable,
+}
+
+impl MergeQueueState {
+    /// Extra tooltip wording; plain `Queued` needs none.
+    fn note(self) -> Option<&'static str> {
+        match self {
+            MergeQueueState::Queued => None,
+            MergeQueueState::AwaitingChecks => Some("waiting for checks"),
+            MergeQueueState::Mergeable => Some("ready to merge"),
+            MergeQueueState::Locked => Some("merging"),
+            MergeQueueState::Unmergeable => Some("unmergeable, will be removed from the queue"),
+        }
+    }
 }
 
 /// Open pull request offered as a worktree source.
@@ -1581,6 +1648,11 @@ mod tests {
                 state: PrState::Open,
                 number: 7,
                 base: Some("main".into()),
+                merge_queue: Some(MergeQueueEntry {
+                    position: 2,
+                    state: MergeQueueState::AwaitingChecks,
+                    estimated_secs: Some(600),
+                }),
             }),
             ci_checks: Some(CiCheckSummary {
                 status: CiStatus::Failure,
@@ -1616,6 +1688,40 @@ mod tests {
         assert_eq!(
             parsed.ci_checks.as_ref().unwrap().checks[0].elapsed_label(),
             "1m5s"
+        );
+    }
+
+    #[test]
+    fn merge_queue_tooltip_text() {
+        let mut pr = PrInfo {
+            url: "https://github.com/o/r/pull/7".into(),
+            state: PrState::Open,
+            number: 7,
+            base: None,
+            merge_queue: None,
+        };
+        assert_eq!(pr.merge_queue_tooltip(), None);
+
+        pr.merge_queue = Some(MergeQueueEntry {
+            position: 3,
+            state: MergeQueueState::Queued,
+            estimated_secs: Some(690),
+        });
+        assert_eq!(
+            pr.merge_queue_tooltip().as_deref(),
+            Some("PR #7 · In merge queue · position 3 · ETA ~12 min")
+        );
+
+        pr.merge_queue = Some(MergeQueueEntry {
+            position: 1,
+            state: MergeQueueState::Unmergeable,
+            estimated_secs: Some(3_900),
+        });
+        assert_eq!(
+            pr.merge_queue_tooltip().as_deref(),
+            Some(
+                "PR #7 · In merge queue · position 1 · unmergeable, will be removed from the queue · ETA ~1 h 5 min"
+            )
         );
     }
 
