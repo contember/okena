@@ -8,4 +8,3 @@ gets pulled into a `../sprints/` plan) or it's **deleted**. It is never a place 
 decided work or status.
 
 <!-- index the ideas here, one line each -->
-

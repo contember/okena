@@ -41,10 +41,25 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
    a confirmation dialog for the development channel at every start.
 3. The hooks run `okena claude-remote hook permission|event`. The channel runs
    `okena claude-remote channel` (stdio MCP). Both talk to the daemon over
-   loopback with the CLI token.
+   its Unix socket.
 
 The preload's location, environment and the cases it leaves alone are in
 [`integrations/claude-code/okena-remote/README.md`](../../integrations/claude-code/okena-remote/README.md).
+
+## Client endpoints
+
+All take the bearer token. Errors have a plain-text body.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs` |
+| `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=` | Transcript page, see [Transcript](#transcript) |
+| `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |
+| `POST /v1/claude/terminals/{id}/dialogs/{dialog_id}` | `{ "decision": "allow" \| "deny" \| "answer", "always"?, "message"?, "answers"? }`; `404` once the dialog is answered or gone |
+
+Dialog ids are opaque strings, unique across daemon restarts. String values
+over 16 KiB in a dialog's `tool_input` are cut for clients; the answer to
+Claude uses the full input.
 
 ## Prompts
 
@@ -56,8 +71,11 @@ The preload's location, environment and the cases it leaves alone are in
 | `pty` | No channel, Claude is idle: the text is pasted into the pane and submitted. |
 | `queued` | No channel, Claude is in a turn: the prompt is typed in when the `Stop` hook reports the turn ended. |
 
-`409` means Claude is busy and no `Stop` hook will arrive (no hooks attached).
-Prompts never go into a pane that runs a plain shell. Channel prompts skip
+`400` means an empty prompt or one over 64 KiB. `409` means the prompt cannot
+be delivered: no `claude` runs in the pane, Claude is busy and no `Stop` hook
+will arrive (no hooks attached), or 32 prompts are already queued. A prompt is
+typed into the pane only while its foreground process is `claude`; queued
+prompts are dropped if `claude` is gone when the turn ends. Channel prompts skip
 slash-command parsing and attachments. **Interrupt** sends Escape to the pane.
 
 ## Dialogs
@@ -90,8 +108,14 @@ it has (new session or rewritten file).
   on its own, but hooks count as attached only after the next hook event, and a
   dialog that was waiting is answerable only in the terminal. Without the
   channel, an idle `claude` is not listed as connected until its next step.
-- A `claude` that dies without a `SessionEnd` hook stays listed until the next
-  state change.
+- A `claude` that dies without a `SessionEnd` hook stays listed as connected
+  until its pane closes or a new session starts there; prompts to it get `409`.
+- A prompt is typed into the pane only when the pane's foreground process is
+  named `claude`. One started with `exec` or through a wrapper gets prompts
+  only through the channel.
+- Hook events run asynchronously. Events from an ended session, and events
+  from another session than the current one before its `SessionStart`, are
+  ignored.
 - An interrupt (Escape) fires no `Stop` hook, so `queued` prompts wait for the
   next finished turn.
 - Clients poll (1 s); there are no push notifications.
