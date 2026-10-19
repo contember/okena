@@ -2,7 +2,7 @@
   "name": "okena-mobile-rn",
   "version": "0.1.0",
   "private": true,
-  "description": "Okena mobile terminal client \u2014 React Native over the shared Rust core.",
+  "description": "Okena mobile terminal client — React Native over the shared Rust core.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/contember/okena.git",

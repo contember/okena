@@ -22,15 +22,14 @@
  * inject a mock `OkenaNative` + an in-memory `Persistence`.
  */
 
-import {
-  connectionService,
-  type ConnectionService,
-} from '../native/connectionService';
-
 import { create, type StoreApi, type UseBoundStore } from 'zustand';
 
 import type { ConnectionStatus, ConnId, OkenaNative } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
+import {
+  connectionService,
+  type ConnectionService,
+} from '../native/connectionService';
 import {
   createSavedServer,
   listFromJson,
