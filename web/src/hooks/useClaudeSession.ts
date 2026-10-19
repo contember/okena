@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getClaudeSession, getClaudeTranscript } from "../api/client";
-import type { ApiClaudeEntry, ApiClaudeSession } from "../api/types";
+import type { ApiClaudeEntry, ApiClaudeSession, ApiClaudeTranscriptPage } from "../api/types";
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -35,44 +35,55 @@ export function useClaudeSession(terminalId: string): ClaudeSessionView {
     setTranscriptMissing(false);
     setError(null);
 
+    const applySession = (nextSession: ApiClaudeSession) => {
+      setSession(nextSession);
+      const listedIds = new Set(nextSession.dialogs.map((dialog) => dialog.id));
+      setDismissedDialogIds((current) => keepListed(current, listedIds));
+    };
+
+    const applyPage = (page: ApiClaudeTranscriptPage | null) => {
+      if (page === null) {
+        cursorRef.current = null;
+        sessionIdRef.current = null;
+        setEntries([]);
+        setTranscriptMissing(true);
+        return;
+      }
+      const pageSessionId = page.session_id ?? null;
+      const replace = page.reset || pageSessionId !== sessionIdRef.current;
+      cursorRef.current = page.cursor;
+      sessionIdRef.current = pageSessionId;
+      setTranscriptMissing(false);
+      if (replace) {
+        setEntries(page.entries);
+      } else if (page.entries.length > 0) {
+        setEntries((current) => [...current, ...page.entries]);
+      }
+    };
+
     const poll = async () => {
       timer = null;
       // A hidden page stops here; the visibilitychange listener restarts the loop.
       if (document.hidden) return;
       inFlight = true;
-      try {
-        const [nextSession, page] = await Promise.all([
-          getClaudeSession(terminalId),
-          getClaudeTranscript(terminalId, cursorRef.current, sessionIdRef.current),
-        ]);
-        if (cancelled) return;
-        setSession(nextSession);
-        setError(null);
-        if (page === null) {
-          cursorRef.current = null;
-          sessionIdRef.current = null;
-          setEntries([]);
-          setTranscriptMissing(true);
-        } else {
-          const pageSessionId = page.session_id ?? null;
-          const replace = page.reset || pageSessionId !== sessionIdRef.current;
-          cursorRef.current = page.cursor;
-          sessionIdRef.current = pageSessionId;
-          setTranscriptMissing(false);
-          if (replace) {
-            setEntries(page.entries);
-          } else if (page.entries.length > 0) {
-            setEntries((current) => [...current, ...page.entries]);
-          }
-        }
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : "Request failed");
+      // Settled separately so a failing transcript does not freeze the dialogs, and vice versa.
+      const [sessionResult, pageResult] = await Promise.allSettled([
+        getClaudeSession(terminalId),
+        getClaudeTranscript(terminalId, cursorRef.current, sessionIdRef.current),
+      ]);
+      if (cancelled) return;
+      if (sessionResult.status === "fulfilled") {
+        applySession(sessionResult.value);
       }
+      if (pageResult.status === "fulfilled") {
+        applyPage(pageResult.value);
+      }
+      const failure = [sessionResult, pageResult].find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      setError(failure ? failureMessage(failure.reason) : null);
       inFlight = false;
-      if (!cancelled) {
-        timer = setTimeout(poll, POLL_INTERVAL_MS);
-      }
+      timer = setTimeout(poll, POLL_INTERVAL_MS);
     };
 
     const onVisibilityChange = () => {
@@ -100,4 +111,14 @@ export function useClaudeSession(terminalId: string): ClaudeSessionView {
     : session;
 
   return { session: visibleSession, entries, transcriptMissing, error, dismissDialog };
+}
+
+function failureMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "Request failed";
+}
+
+/** Drops ids of dialogs the server no longer lists; returns `current` itself when nothing changes. */
+function keepListed(current: ReadonlySet<string>, listedIds: ReadonlySet<string>): ReadonlySet<string> {
+  const kept = [...current].filter((id) => listedIds.has(id));
+  return kept.length === current.size ? current : new Set(kept);
 }

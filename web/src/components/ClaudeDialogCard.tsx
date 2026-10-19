@@ -56,13 +56,21 @@ export function ClaudeDialogCard({
 
   if (dialog.tool_name === "AskUserQuestion") {
     const questions = toolInputQuestions(dialog.tool_input);
-    if (questions) {
-      return (
-        <CardFrame title="Claude asks" error={decision.error}>
+    // Allow here would submit the question with no answers, so only Deny is offered.
+    return (
+      <CardFrame title="Claude asks" error={decision.error}>
+        {questions ? (
           <ClaudeQuestionCard questions={questions} decision={decision} />
-        </CardFrame>
-      );
-    }
+        ) : (
+          <>
+            <div className="text-[11px] text-[var(--ok-text-muted)]">
+              These questions cannot be shown here. Answer them in the terminal.
+            </div>
+            <DenyRow decision={decision} denyLabel="Deny" placeholder="Reason (optional)" />
+          </>
+        )}
+      </CardFrame>
+    );
   }
 
   if (dialog.tool_name === "ExitPlanMode") {
@@ -150,7 +158,8 @@ function DenyRow({
   allowAlways = false,
 }: {
   decision: DecisionSubmitter;
-  approveLabel: string;
+  /** Omitted when approving is not possible from this card. */
+  approveLabel?: string;
   denyLabel: string;
   placeholder: string;
   allowAlways?: boolean;
@@ -168,13 +177,15 @@ function DenyRow({
         onChange={(event) => setMessage(event.target.value)}
       />
       <div className="flex flex-wrap gap-2">
-        <button
-          className={PRIMARY_BUTTON_CLASS}
-          disabled={decision.pending}
-          onClick={() => decision.submit({ decision: "allow", always: false })}
-        >
-          {approveLabel}
-        </button>
+        {approveLabel !== undefined && (
+          <button
+            className={PRIMARY_BUTTON_CLASS}
+            disabled={decision.pending}
+            onClick={() => decision.submit({ decision: "allow", always: false })}
+          >
+            {approveLabel}
+          </button>
+        )}
         {allowAlways && (
           <button
             className={SECONDARY_BUTTON_CLASS}
