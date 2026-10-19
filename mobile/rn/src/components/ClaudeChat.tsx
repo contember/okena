@@ -8,9 +8,10 @@
  * closes it on unmount; the store does the polling.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,6 +20,7 @@ import {
   View,
 } from 'react-native';
 
+import { ChatMarkdown } from './ChatMarkdown';
 import { ClaudeDialogCard } from './ClaudeDialogCard';
 import { Icon } from './Icon';
 import {
@@ -44,16 +46,18 @@ const ACTIVITY: Record<ClaudeActivity, { label: string; color: string }> = {
   ready: { label: 'Ready', color: OkenaColors.success },
 };
 
-// A channel prompt shows up in the transcript; the other deliveries do not
-// (yet), so they say where the prompt went.
+// Where a sent prompt went, shown briefly under the composer. A channel
+// prompt needs no note: it shows up in the transcript right away.
+const DELIVERY_NOTE_MS = 4000;
 const DELIVERY_TEXT: Record<ApiClaudePromptDelivery, string | null> = {
   channel: null,
   pty: 'Typed into the terminal',
   queued: 'Queued until Claude finishes',
 };
 
+// Also shown after a daemon restart, until Claude's next hook event.
 const UNHOOKED_HINT =
-  'To answer dialogs here, turn on Claude Remote in Okena settings (Terminal) and restart claude in this terminal.';
+  'Claude connects at its next step when Claude Remote is on in Okena settings (Terminal). If it is off, turn it on and restart claude in this terminal.';
 
 export interface ClaudeChatProps {
   connId: ConnId;
@@ -85,6 +89,15 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
   const rows = useMemo(() => buildClaudeChatRows(entries).reverse(), [entries]);
   const activity = claudeActivity(session);
   const pollError = sessionError ?? transcriptError;
+
+  const dialogsRef = useRef<ScrollView>(null);
+  const dialogCount = session?.dialogs.length ?? 0;
+  const previousDialogCount = useRef(dialogCount);
+  useEffect(() => {
+    // A new dialog needs its card's buttons, which the keyboard would cover.
+    if (dialogCount > previousDialogCount.current) Keyboard.dismiss();
+    previousDialogCount.current = dialogCount;
+  }, [dialogCount]);
 
   return (
     <View style={styles.root}>
@@ -132,6 +145,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
 
       {session && session.dialogs.length > 0 ? (
         <ScrollView
+          ref={dialogsRef}
           style={styles.dialogs}
           contentContainerStyle={styles.dialogsContent}
           keyboardShouldPersistTaps="handled"
@@ -141,6 +155,9 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
               key={dialog.id}
               dialog={dialog}
               onDecide={(decision) => void answerDialog(dialog.id, decision)}
+              onRevealStep={() =>
+                dialogsRef.current?.scrollToEnd({ animated: true })
+              }
             />
           ))}
         </ScrollView>
@@ -200,8 +217,16 @@ const Composer: React.FC = () => {
     }
   };
 
-  const status =
-    promptError ?? (lastDelivery ? DELIVERY_TEXT[lastDelivery] : null);
+  const [deliveryNote, setDeliveryNote] = useState<string | null>(null);
+  useEffect(() => {
+    const note = lastDelivery ? DELIVERY_TEXT[lastDelivery] : null;
+    setDeliveryNote(note);
+    if (note === null) return undefined;
+    const timer = setTimeout(() => setDeliveryNote(null), DELIVERY_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [lastDelivery]);
+
+  const status = promptError ?? deliveryNote;
   // While Claude works and nothing is typed, the button stops the turn.
   const showStop = busy && !hasText;
 
@@ -283,11 +308,7 @@ const ChatRowContent: React.FC<{ row: ClaudeChatRow }> = ({ row }) => {
         </View>
       );
     case 'assistant':
-      return (
-        <Text style={styles.assistantText} selectable>
-          {row.text}
-        </Text>
-      );
+      return <ChatMarkdown text={row.text} style={styles.assistant} />;
     case 'tool':
       return <ToolRow row={row} />;
   }
@@ -320,16 +341,24 @@ const ToolRow: React.FC<{ row: Extract<ClaudeChatRow, { kind: 'tool' }> }> = ({
             name={expanded ? 'caretDown' : 'caretRight'}
             size={12}
             color={failed ? OkenaColors.error : OkenaColors.textTertiary}
+            style={styles.toolMark}
           />
         )}
-        <Text style={styles.toolLine} numberOfLines={expanded ? undefined : 1}>
-          <Text style={[styles.toolName, failed && styles.errorText]}>
-            {row.use?.name ?? 'Tool result'}
-          </Text>
-          {row.use?.summary ? (
-            <Text style={styles.toolSummary}>{`  ${row.use.summary}`}</Text>
-          ) : null}
+        <Text
+          style={[styles.toolText, styles.toolName, failed && styles.errorText]}
+        >
+          {row.use?.name ?? 'Tool result'}
         </Text>
+        {row.use?.summary ? (
+          // Middle: keeps both a command's start and a path's file name.
+          <Text
+            style={[styles.toolText, styles.toolSummary]}
+            numberOfLines={expanded ? undefined : 1}
+            ellipsizeMode="middle"
+          >
+            {row.use.summary}
+          </Text>
+        ) : null}
       </View>
       {expanded && row.result ? (
         <Text
@@ -412,30 +441,26 @@ const styles = StyleSheet.create({
     marginTop: 2,
     textAlign: 'right',
   },
-  assistantText: {
-    color: OkenaColors.textPrimary,
-    fontSize: 15,
-    lineHeight: 22,
-    marginVertical: 6,
-  },
+  assistant: { marginVertical: 6 },
   tool: { paddingVertical: 5 },
-  toolHead: { flexDirection: 'row', alignItems: 'center' },
+  toolHead: { flexDirection: 'row', alignItems: 'flex-start' },
+  toolMark: { marginTop: 2 },
   toolPending: {
     width: 8,
     height: 8,
+    marginTop: 4,
     marginHorizontal: 2,
     borderRadius: 4,
     borderWidth: 1.5,
     borderColor: OkenaColors.accent,
   },
-  toolLine: {
-    flex: 1,
+  toolText: { fontFamily: TerminalTheme.fontFamily, fontSize: 12 },
+  toolName: {
+    color: OkenaColors.textSecondary,
+    fontWeight: '700',
     marginLeft: 6,
-    fontFamily: TerminalTheme.fontFamily,
-    fontSize: 12,
   },
-  toolName: { color: OkenaColors.textSecondary, fontWeight: '700' },
-  toolSummary: { color: OkenaColors.textTertiary },
+  toolSummary: { flex: 1, color: OkenaColors.textTertiary, marginLeft: 10 },
   toolResult: {
     color: OkenaColors.textSecondary,
     fontSize: 11,

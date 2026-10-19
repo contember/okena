@@ -31,15 +31,19 @@ import {
   type ClaudeQuestion,
 } from '../native/claude';
 import { OkenaColors, TerminalTheme } from '../theme';
+import { ChatMarkdown } from './ChatMarkdown';
 
 export interface ClaudeDialogCardProps {
   dialog: ApiClaudeDialog;
   onDecide: (decision: ApiClaudeDecision) => void;
+  /** The message step (deny / keep planning) was laid out; show its buttons. */
+  onRevealStep: () => void;
 }
 
 export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
   dialog,
   onDecide,
+  onRevealStep,
 }) => {
   if (dialog.tool_name === 'AskUserQuestion') {
     const questions = readClaudeQuestions(dialog.tool_input);
@@ -48,10 +52,20 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
   }
   if (dialog.tool_name === 'ExitPlanMode') {
     return (
-      <PlanCard plan={readClaudePlan(dialog.tool_input)} onDecide={onDecide} />
+      <PlanCard
+        plan={readClaudePlan(dialog.tool_input)}
+        onDecide={onDecide}
+        onRevealStep={onRevealStep}
+      />
     );
   }
-  return <PermissionCard dialog={dialog} onDecide={onDecide} />;
+  return (
+    <PermissionCard
+      dialog={dialog}
+      onDecide={onDecide}
+      onRevealStep={onRevealStep}
+    />
+  );
 };
 
 // ── default tool: allow / always allow / deny ────────────────────────────────
@@ -59,6 +73,7 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
 const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
   dialog,
   onDecide,
+  onRevealStep,
 }) => {
   const [denying, setDenying] = useState(false);
   return (
@@ -75,6 +90,7 @@ const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
           danger
           onCancel={() => setDenying(false)}
           onConfirm={(message) => onDecide(denial(message))}
+          onReveal={onRevealStep}
         />
       ) : (
         <View style={styles.actions}>
@@ -102,15 +118,14 @@ const PlanCard: React.FC<{
   // Without a plan file Claude sends no plan; it is then in the transcript.
   plan: string | undefined;
   onDecide: ClaudeDialogCardProps['onDecide'];
-}> = ({ plan, onDecide }) => {
+  onRevealStep: ClaudeDialogCardProps['onRevealStep'];
+}> = ({ plan, onDecide, onRevealStep }) => {
   const [revising, setRevising] = useState(false);
   return (
     <Card kind="Plan" title="Ready to start?">
       {plan !== undefined ? (
         <ScrollView style={styles.plan} nestedScrollEnabled>
-          <Text style={styles.body} selectable>
-            {plan}
-          </Text>
+          <ChatMarkdown text={plan} />
         </ScrollView>
       ) : (
         <Text style={styles.muted}>The plan is in the conversation above.</Text>
@@ -121,6 +136,7 @@ const PlanCard: React.FC<{
           confirmLabel="Keep planning"
           onCancel={() => setRevising(false)}
           onConfirm={(message) => onDecide(denial(message))}
+          onReveal={onRevealStep}
         />
       ) : (
         <View style={styles.actions}>
@@ -288,10 +304,11 @@ const MessageStep: React.FC<{
   danger?: boolean;
   onCancel: () => void;
   onConfirm: (message: string) => void;
-}> = ({ placeholder, confirmLabel, danger, onCancel, onConfirm }) => {
+  onReveal: () => void;
+}> = ({ placeholder, confirmLabel, danger, onCancel, onConfirm, onReveal }) => {
   const [message, setMessage] = useState('');
   return (
-    <>
+    <View onLayout={onReveal}>
       <TextInput
         style={styles.input}
         value={message}
@@ -300,7 +317,6 @@ const MessageStep: React.FC<{
         placeholderTextColor={OkenaColors.textTertiary}
         keyboardAppearance="dark"
         multiline
-        autoFocus
       />
       <View style={styles.actions}>
         <CardButton label="Cancel" onPress={onCancel} />
@@ -311,7 +327,7 @@ const MessageStep: React.FC<{
           onPress={() => onConfirm(message)}
         />
       </View>
-    </>
+    </View>
   );
 };
 
