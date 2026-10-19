@@ -65,13 +65,13 @@ import type { TerminalActivity } from '../native/okena';
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
 
+/** A terminal shown as its terminal or as its Claude chat. */
+export type TerminalViewMode = 'terminal' | 'chat';
+
 /**
  * The slice of the native surface this store calls. Narrowed from
  * {@link OkenaNative} so a test stub only has to provide these.
  */
-/** A terminal shown as its terminal or as its Claude chat. */
-export type TerminalViewMode = 'terminal' | 'chat';
-
 export type WorkspaceNative = Pick<
   OkenaNative,
   | 'getProjects'

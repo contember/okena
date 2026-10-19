@@ -10,7 +10,9 @@
  * Polls that change nothing leave the state objects untouched.
  *
  * Results of a poll or an answer that finish after {@link ClaudeState.close}
- * (or after another terminal was opened) are dropped.
+ * (or after another terminal was opened) are dropped. Per-dialog state (the
+ * hidden answered dialogs, {@link ClaudeState.dialogAnswers}) is trimmed after
+ * every session poll to the dialogs the server still lists.
  *
  * The native module is injected via {@link configureClaudeStore}, like the
  * other stores.
@@ -55,6 +57,11 @@ export interface ClaudeDeps {
   native: ClaudeNative;
 }
 
+/** An answer to a dialog that is on its way, or why the last one failed. */
+export type ClaudeDialogAnswer =
+  | { status: 'sending' }
+  | { status: 'failed'; error: string };
+
 export interface ClaudeState {
   connId: ConnId | null;
   terminalId: TerminalId | null;
@@ -74,8 +81,11 @@ export interface ClaudeState {
   lastDelivery: ApiClaudePromptDelivery | null;
   /** Why the last prompt (or interrupt) was not accepted. */
   promptError: string | null;
-  /** Why the last dialog answer failed (other than "already answered"). */
-  dialogError: string | null;
+  /**
+   * Answers per listed dialog id; a failure other than "already answered"
+   * stays until the next answer or until the dialog is gone.
+   */
+  dialogAnswers: Readonly<Record<string, ClaudeDialogAnswer>>;
 
   /** Start following a terminal. Re-opening the same terminal is a no-op. */
   open(connId: ConnId, terminalId: TerminalId): void;
@@ -83,7 +93,10 @@ export interface ClaudeState {
   close(): void;
   /** Send a prompt; resolves to whether the server accepted it. */
   sendPrompt(text: string): Promise<boolean>;
-  /** Answer a dialog; the dialog leaves the session once answered or gone. */
+  /**
+   * Answer a dialog; the dialog leaves the session once answered or gone.
+   * Ignored while an answer to the same dialog is still sending.
+   */
   answerDialog(dialogId: string, decision: ApiClaudeDecision): Promise<void>;
   /** Press Escape in the terminal; a failure lands in `promptError`. */
   interrupt(): Promise<void>;
@@ -116,7 +129,7 @@ const CLOSED = {
   sending: false,
   lastDelivery: null,
   promptError: null,
-  dialogError: null,
+  dialogAnswers: {},
 } satisfies Partial<ClaudeState>;
 
 // ── polling: one chain per open terminal ────────────────────────────────────
@@ -134,6 +147,29 @@ function stopPolling(): void {
     pollTimer = null;
   }
   answeredDialogIds = new Set();
+}
+
+/** `answers` without the dialogs the server no longer lists; the same object when nothing goes. */
+function listedAnswers(
+  answers: ClaudeState['dialogAnswers'],
+  listedIds: ReadonlySet<string>,
+): ClaudeState['dialogAnswers'] {
+  const ids = Object.keys(answers);
+  if (ids.every((id) => listedIds.has(id))) return answers;
+  return Object.fromEntries(
+    Object.entries(answers).filter(([id]) => listedIds.has(id)),
+  );
+}
+
+function withAnswer(
+  answers: ClaudeState['dialogAnswers'],
+  dialogId: string,
+  answer: ClaudeDialogAnswer | null,
+): ClaudeState['dialogAnswers'] {
+  if (answer !== null) return { ...answers, [dialogId]: answer };
+  return Object.fromEntries(
+    Object.entries(answers).filter(([id]) => id !== dialogId),
+  );
 }
 
 function withoutAnswered(session: ApiClaudeSession): ApiClaudeSession {
@@ -175,10 +211,10 @@ async function poll(
   if (connId === null || terminalId === null) return;
   const native = deps().native;
 
-  let session: ApiClaudeSession;
+  let listed: ApiClaudeSession;
   try {
-    session = withoutAnswered(
-      parseClaudeSession(await native.claudeGetSession(connId, terminalId)),
+    listed = parseClaudeSession(
+      await native.claudeGetSession(connId, terminalId),
     );
   } catch (error) {
     if (pollGeneration === generation)
@@ -186,16 +222,24 @@ async function poll(
     return;
   }
   if (pollGeneration !== generation) return;
+  const listedIds = new Set(listed.dialogs.map((dialog) => dialog.id));
+  answeredDialogIds = new Set(
+    [...answeredDialogIds].filter((id) => listedIds.has(id)),
+  );
+  const session = withoutAnswered(listed);
   const previous = get();
+  const dialogAnswers = listedAnswers(previous.dialogAnswers, listedIds);
   if (
     !sameSession(previous.session, session) ||
-    previous.sessionError !== null
+    previous.sessionError !== null ||
+    dialogAnswers !== previous.dialogAnswers
   ) {
     set({
       session: sameSession(previous.session, session)
         ? previous.session
         : session,
       sessionError: null,
+      dialogAnswers,
     });
   }
 
@@ -296,10 +340,16 @@ export const useClaudeStore: UseBoundStore<StoreApi<ClaudeState>> =
     },
 
     async answerDialog(dialogId, decision) {
-      const { connId, terminalId } = get();
+      const { connId, terminalId, dialogAnswers } = get();
       if (connId === null || terminalId === null) return;
+      if (dialogAnswers[dialogId]?.status === 'sending') return;
       const answerGeneration = generation;
-      set({ dialogError: null });
+      set({
+        dialogAnswers: withAnswer(dialogAnswers, dialogId, {
+          status: 'sending',
+        }),
+      });
+      let failure: string | null = null;
       try {
         await deps().native.claudeAnswerDialog(
           connId,
@@ -309,15 +359,25 @@ export const useClaudeStore: UseBoundStore<StoreApi<ClaudeState>> =
         );
       } catch (error) {
         const message = nativeErrorMessage(error);
-        if (message !== CLAUDE_DIALOG_GONE_MESSAGE) {
-          if (answerGeneration === generation) set({ dialogError: message });
-          return;
-        }
+        if (message !== CLAUDE_DIALOG_GONE_MESSAGE) failure = message;
       }
       if (answerGeneration !== generation) return;
+      const current = get();
+      if (failure !== null) {
+        set({
+          dialogAnswers: withAnswer(current.dialogAnswers, dialogId, {
+            status: 'failed',
+            error: failure,
+          }),
+        });
+        return;
+      }
       answeredDialogIds.add(dialogId);
-      const session = get().session;
-      if (session !== null) set({ session: withoutAnswered(session) });
+      set({
+        session:
+          current.session === null ? null : withoutAnswered(current.session),
+        dialogAnswers: withAnswer(current.dialogAnswers, dialogId, null),
+      });
     },
 
     async interrupt() {
@@ -330,7 +390,3 @@ export const useClaudeStore: UseBoundStore<StoreApi<ClaudeState>> =
       }
     },
   }));
-
-export function claudeStore(): StoreApi<ClaudeState> {
-  return useClaudeStore;
-}

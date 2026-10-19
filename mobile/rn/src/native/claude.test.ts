@@ -7,6 +7,7 @@ import {
   parseClaudeSession,
   parseClaudeTranscriptPage,
   previewClaudeToolInput,
+  readClaudePlan,
   readClaudeQuestions,
 } from './claude';
 import { nativeErrorMessage } from './okena';
@@ -52,13 +53,34 @@ describe('parseClaudeSession', () => {
     expect(parsed.dialogs[0]!.permission_suggestions).toEqual([]);
   });
 
+  it('accepts any JSON value as tool_input, but requires one', () => {
+    for (const toolInput of ['ls', 42, null, ['a']]) {
+      const session = {
+        ...SESSION,
+        dialogs: [{ ...SESSION.dialogs[0], tool_input: toolInput }],
+      };
+      expect(
+        parseClaudeSession(JSON.stringify(session)).dialogs[0]?.tool_input,
+      ).toEqual(toolInput);
+    }
+    const missing = {
+      ...SESSION,
+      dialogs: [{ ...SESSION.dialogs[0], tool_input: undefined }],
+    };
+    expect(() => parseClaudeSession(JSON.stringify(missing))).toThrow(
+      new ClaudeWireError(
+        'session.dialogs[0].tool_input: expected a JSON value',
+      ),
+    );
+  });
+
   it('rejects a wrong field type with its path', () => {
     const bad = {
       ...SESSION,
-      dialogs: [{ ...SESSION.dialogs[0]!, tool_input: 'ls' }],
+      dialogs: [{ ...SESSION.dialogs[0], tool_name: 7 }],
     };
     expect(() => parseClaudeSession(JSON.stringify(bad))).toThrow(
-      new ClaudeWireError('session.dialogs[0].tool_input: expected an object'),
+      new ClaudeWireError('session.dialogs[0].tool_name: expected a string'),
     );
     expect(() =>
       parseClaudeSession(JSON.stringify({ ...SESSION, queued_prompts: -1 })),
@@ -157,6 +179,7 @@ describe('readClaudeQuestions', () => {
   });
 
   it('returns null for input it cannot render', () => {
+    expect(readClaudeQuestions('not an object')).toBeNull();
     expect(readClaudeQuestions({})).toBeNull();
     expect(readClaudeQuestions({ questions: [] })).toBeNull();
     expect(
@@ -171,6 +194,18 @@ describe('previewClaudeToolInput', () => {
       previewClaudeToolInput({ command: 'rm -rf build', description: 'clean' }),
     ).toBe('rm -rf build');
     expect(previewClaudeToolInput({ n: 1 })).toBe('{\n  "n": 1\n}');
+  });
+
+  it('previews a non-object input as JSON', () => {
+    expect(previewClaudeToolInput('ls')).toBe('"ls"');
+    expect(previewClaudeToolInput([1])).toBe('[\n  1\n]');
+  });
+});
+
+describe('readClaudePlan', () => {
+  it('reads the plan of an object input only', () => {
+    expect(readClaudePlan({ plan: '# Plan' })).toBe('# Plan');
+    expect(readClaudePlan('# Plan')).toBeUndefined();
   });
 });
 

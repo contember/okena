@@ -13,7 +13,8 @@ export type AgentLifecycle = 'working' | 'blocked' | 'done' | 'idle';
 export interface ApiClaudeDialog {
   id: string;
   tool_name: string;
-  tool_input: Record<string, unknown>;
+  /** Any JSON value, as Claude sent it; usually an object. */
+  tool_input: unknown;
   permission_suggestions: unknown[];
   created_at_ms: number;
 }
@@ -120,6 +121,10 @@ function count(value: unknown, path: string): number {
     : fail(path, 'a non-negative integer');
 }
 
+function present(value: unknown, path: string): unknown {
+  return value === undefined ? fail(path, 'a JSON value') : value;
+}
+
 function array(value: unknown, path: string): unknown[] {
   return Array.isArray(value) ? value : fail(path, 'an array');
 }
@@ -166,7 +171,7 @@ function parseDialog(value: unknown, path: string): ApiClaudeDialog {
   return {
     id: str(dialog.id, `${path}.id`),
     tool_name: str(dialog.tool_name, `${path}.tool_name`),
-    tool_input: record(dialog.tool_input, `${path}.tool_input`),
+    tool_input: present(dialog.tool_input, `${path}.tool_input`),
     permission_suggestions:
       dialog.permission_suggestions === undefined
         ? []
@@ -268,10 +273,11 @@ export function parseClaudePromptResponse(
  * doesn't have the expected shape (the UI then falls back to allow / deny).
  */
 export function readClaudeQuestions(
-  toolInput: Record<string, unknown>,
+  toolInput: unknown,
 ): ClaudeQuestion[] | null {
   try {
-    const questions = array(toolInput.questions, 'questions').map(
+    const input = record(toolInput, 'tool_input');
+    const questions = array(input.questions, 'questions').map(
       (value, index) => {
         const path = `questions[${index}]`;
         const question = record(value, path);
@@ -304,10 +310,10 @@ export function readClaudeQuestions(
 }
 
 /** `tool_input.plan` of an `ExitPlanMode` dialog, if it is a string. */
-export function readClaudePlan(
-  toolInput: Record<string, unknown>,
-): string | undefined {
-  return typeof toolInput.plan === 'string' ? toolInput.plan : undefined;
+export function readClaudePlan(toolInput: unknown): string | undefined {
+  return isRecord(toolInput) && typeof toolInput.plan === 'string'
+    ? toolInput.plan
+    : undefined;
 }
 
 const PREVIEW_FIELDS = [
@@ -321,12 +327,12 @@ const PREVIEW_FIELDS = [
 ];
 
 /** A readable preview of a tool call: its most telling field, else pretty JSON. */
-export function previewClaudeToolInput(
-  toolInput: Record<string, unknown>,
-): string {
-  for (const field of PREVIEW_FIELDS) {
-    const value = toolInput[field];
-    if (typeof value === 'string' && value.length > 0) return value;
+export function previewClaudeToolInput(toolInput: unknown): string {
+  if (isRecord(toolInput)) {
+    for (const field of PREVIEW_FIELDS) {
+      const value = toolInput[field];
+      if (typeof value === 'string' && value.length > 0) return value;
+    }
   }
   return JSON.stringify(toolInput, null, 2);
 }

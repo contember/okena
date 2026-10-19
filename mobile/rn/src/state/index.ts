@@ -47,12 +47,9 @@ export {
 
 export {
   useClaudeStore,
-  claudeStore,
   configureClaudeStore,
-  CLAUDE_POLL_MS,
   type ClaudeState,
-  type ClaudeDeps,
-  type ClaudeNative,
+  type ClaudeDialogAnswer,
 } from './claudeStore';
 
 export {

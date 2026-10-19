@@ -324,7 +324,7 @@ describe('claude store', () => {
       '{"decision":"allow"}',
     );
     expect(useClaudeStore.getState().session?.dialogs).toEqual([]);
-    expect(useClaudeStore.getState().dialogError).toBeNull();
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({});
 
     // The server still lists it on the next poll; the card stays dropped.
     await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
@@ -352,9 +352,123 @@ describe('claude store', () => {
       .answerDialog('d1', { decision: 'deny', message: 'no' });
 
     expect(useClaudeStore.getState().session?.dialogs).toHaveLength(1);
-    expect(useClaudeStore.getState().dialogError).toBe(
-      'HTTP request failed: refused',
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({
+      d1: { status: 'failed', error: 'HTTP request failed: refused' },
+    });
+  });
+
+  it('sends one answer at a time per dialog', async () => {
+    const pending = deferred<void>();
+    const { native } = stubNative(
+      [page({ reset: true })],
+      session({ dialogs: [DIALOG] }),
     );
+    const answer = jest
+      .fn()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue(undefined);
+    configureClaudeStore({ native: { ...native, claudeAnswerDialog: answer } });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    const first = useClaudeStore
+      .getState()
+      .answerDialog('d1', { decision: 'allow' });
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({
+      d1: { status: 'sending' },
+    });
+
+    await useClaudeStore.getState().answerDialog('d1', { decision: 'deny' });
+    expect(answer).toHaveBeenCalledTimes(1);
+
+    pending.resolve();
+    await first;
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({});
+    expect(useClaudeStore.getState().session?.dialogs).toEqual([]);
+  });
+
+  it('lets a failed answer be sent again', async () => {
+    const { native } = stubNative(
+      [page({ reset: true })],
+      session({ dialogs: [DIALOG] }),
+    );
+    const answer = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('HTTP request failed: refused'))
+      .mockResolvedValue(undefined);
+    configureClaudeStore({ native: { ...native, claudeAnswerDialog: answer } });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    await useClaudeStore.getState().answerDialog('d1', { decision: 'allow' });
+    await useClaudeStore.getState().answerDialog('d1', { decision: 'allow' });
+
+    expect(answer).toHaveBeenCalledTimes(2);
+    expect(useClaudeStore.getState().session?.dialogs).toEqual([]);
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({});
+  });
+
+  it('forgets a dialog once the server stops listing it', async () => {
+    const { native } = stubNative([page({ reset: true })]);
+    const getSession = jest
+      .fn()
+      .mockResolvedValueOnce(JSON.stringify(session({ dialogs: [DIALOG] })))
+      .mockResolvedValueOnce(JSON.stringify(session({ dialogs: [] })))
+      .mockResolvedValue(JSON.stringify(session({ dialogs: [DIALOG] })));
+    const answer = jest.fn(async () => {
+      throw { inner: { message: CLAUDE_DIALOG_GONE_MESSAGE } };
+    });
+    configureClaudeStore({
+      native: {
+        ...native,
+        claudeGetSession: getSession,
+        claudeAnswerDialog: answer,
+      },
+    });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    await useClaudeStore.getState().answerDialog('d1', { decision: 'allow' });
+    expect(useClaudeStore.getState().session?.dialogs).toEqual([]);
+
+    await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
+    // A later dialog with the same id is a new one and shows.
+    await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
+    expect(useClaudeStore.getState().session?.dialogs).toEqual([DIALOG]);
+  });
+
+  it('drops an answer error once its dialog is gone', async () => {
+    const { native } = stubNative([page({ reset: true })]);
+    const other = { ...DIALOG, id: 'd2' };
+    const getSession = jest
+      .fn()
+      .mockResolvedValueOnce(
+        JSON.stringify(session({ dialogs: [DIALOG, other] })),
+      )
+      .mockResolvedValue(JSON.stringify(session({ dialogs: [other] })));
+    configureClaudeStore({
+      native: {
+        ...native,
+        claudeGetSession: getSession,
+        claudeAnswerDialog: async () => {
+          throw new Error('HTTP request failed: refused');
+        },
+      },
+    });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    await useClaudeStore.getState().answerDialog('d1', { decision: 'allow' });
+    await useClaudeStore.getState().answerDialog('d2', { decision: 'allow' });
+    expect(Object.keys(useClaudeStore.getState().dialogAnswers)).toEqual([
+      'd1',
+      'd2',
+    ]);
+
+    await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
+    expect(useClaudeStore.getState().dialogAnswers).toEqual({
+      d2: { status: 'failed', error: 'HTTP request failed: refused' },
+    });
   });
 
   it('exposes the delivery of a sent prompt and the reason of a rejected one', async () => {

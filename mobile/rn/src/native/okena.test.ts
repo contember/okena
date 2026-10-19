@@ -51,4 +51,8 @@ describe('getOkenaNative adapters', () => {
   it('converts dialog counts, dropping invalid ones', () => {
     expect(getOkenaNative().getClaudeDialogCounts('conn')).toEqual({ t1: 2 });
   });
+
+  it('reports no Claude sessions when the bindings predate them', () => {
+    expect(getOkenaNative().getClaudeSessions('conn')).toEqual([]);
+  });
 });

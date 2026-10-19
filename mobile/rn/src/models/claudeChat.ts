@@ -3,7 +3,11 @@
  * session's activity and `AskUserQuestion` answers.
  */
 
-import type { ApiClaudeEntry, ApiClaudeSession, ClaudeQuestion } from '../native/claude';
+import type {
+  ApiClaudeEntry,
+  ApiClaudeSession,
+  ClaudeQuestion,
+} from '../native/claude';
 
 type ToolUseEntry = Extract<ApiClaudeEntry, { kind: 'tool_use' }>;
 type ToolResultEntry = Extract<ApiClaudeEntry, { kind: 'tool_result' }>;
@@ -18,36 +22,49 @@ export type ClaudeChatRow =
   | { kind: 'assistant'; key: string; text: string }
   | { kind: 'tool'; key: string; use?: ToolUseEntry; result?: ToolResultEntry };
 
-/** Transcript entries → chat rows, with each tool result folded into its call. */
+/** The next occurrence number of `id`, counting from 0. */
+function nextOrdinal(counts: Map<string, number>, id: string): number {
+  const ordinal = counts.get(id) ?? 0;
+  counts.set(id, ordinal + 1);
+  return ordinal;
+}
+
+/**
+ * Transcript entries → chat rows, with each tool result folded into its call.
+ * Row keys do not depend on array positions, so they survive entries dropped
+ * from the front of the transcript.
+ */
 export function buildClaudeChatRows(
   entries: readonly ApiClaudeEntry[],
 ): ClaudeChatRow[] {
   const rows: ClaudeChatRow[] = [];
   const toolRowIndex = new Map<string, number>();
-  // One transcript line can yield several entries with the same uuid, so text
-  // rows are keyed by position and tool rows by their call id.
-  entries.forEach((entry, position) => {
+  // One transcript line can yield several entries with the same uuid.
+  const uuidCounts = new Map<string, number>();
+  const toolKeyCounts = new Map<string, number>();
+  const toolKey = (toolUseId: string) => {
+    const ordinal = nextOrdinal(toolKeyCounts, toolUseId);
+    return ordinal === 0 ? `tool:${toolUseId}` : `tool:${toolUseId}#${ordinal}`;
+  };
+  for (const entry of entries) {
+    const textKey = `${entry.uuid}#${nextOrdinal(uuidCounts, entry.uuid)}`;
     switch (entry.kind) {
       case 'user':
         rows.push({
           kind: 'user',
-          key: `${entry.uuid}#${position}`,
+          key: textKey,
           text: entry.text,
           viaChannel: entry.origin === 'channel',
         });
         break;
       case 'assistant':
-        rows.push({
-          kind: 'assistant',
-          key: `${entry.uuid}#${position}`,
-          text: entry.text,
-        });
+        rows.push({ kind: 'assistant', key: textKey, text: entry.text });
         break;
       case 'tool_use':
         toolRowIndex.set(entry.tool_use_id, rows.length);
         rows.push({
           kind: 'tool',
-          key: `tool:${entry.tool_use_id}#${position}`,
+          key: toolKey(entry.tool_use_id),
           use: entry,
         });
         break;
@@ -63,14 +80,14 @@ export function buildClaudeChatRows(
         } else {
           rows.push({
             kind: 'tool',
-            key: `result:${entry.tool_use_id}#${position}`,
+            key: toolKey(entry.tool_use_id),
             result: entry,
           });
         }
         break;
       }
     }
-  });
+  }
   return rows;
 }
 
@@ -153,9 +170,16 @@ export function questionAnswers(
 }
 
 /** What the chat's status strip says about a Claude session. */
-export type ClaudeActivity = 'loading' | 'needsInput' | 'unhooked' | 'working' | 'ready';
+export type ClaudeActivity =
+  | 'loading'
+  | 'needsInput'
+  | 'unhooked'
+  | 'working'
+  | 'ready';
 
-export function claudeActivity(session: ApiClaudeSession | null): ClaudeActivity {
+export function claudeActivity(
+  session: ApiClaudeSession | null,
+): ClaudeActivity {
   if (session === null) return 'loading';
   if (session.dialogs.length > 0) return 'needsInput';
   if (!session.hooks_attached) return 'unhooked';

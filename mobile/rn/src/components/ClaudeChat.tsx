@@ -74,7 +74,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
   const entries = useClaudeStore((s) => s.entries);
   const sessionError = useClaudeStore((s) => s.sessionError);
   const transcriptError = useClaudeStore((s) => s.transcriptError);
-  const dialogError = useClaudeStore((s) => s.dialogError);
+  const dialogAnswers = useClaudeStore((s) => s.dialogAnswers);
   const open = useClaudeStore((s) => s.open);
   const close = useClaudeStore((s) => s.close);
   const answerDialog = useClaudeStore((s) => s.answerDialog);
@@ -154,6 +154,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
             <ClaudeDialogCard
               key={dialog.id}
               dialog={dialog}
+              answer={dialogAnswers[dialog.id]}
               onDecide={(decision) => void answerDialog(dialog.id, decision)}
               onRevealStep={() =>
                 dialogsRef.current?.scrollToEnd({ animated: true })
@@ -161,11 +162,6 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
             />
           ))}
         </ScrollView>
-      ) : null}
-      {dialogError ? (
-        <Text style={[styles.inlineError, styles.errorText]}>
-          {dialogError}
-        </Text>
       ) : null}
 
       <Composer />
@@ -409,7 +405,6 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   errorText: { color: OkenaColors.error },
-  inlineError: { fontSize: 13, paddingHorizontal: 14, paddingBottom: 6 },
   empty: {
     flex: 1,
     alignItems: 'center',

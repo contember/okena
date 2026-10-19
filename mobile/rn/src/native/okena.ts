@@ -762,9 +762,15 @@ export function getOkenaNative(): OkenaNative {
           : (connId: ConnId, terminalId: TerminalId, lines: number) =>
               gen.scroll(connId, terminalId, lines),
       takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
+      // Bindings generated before Claude remote existed: no dialogs, no sessions.
       getClaudeDialogCounts: (connId: ConnId) =>
-        parseRecord(gen.getClaudeDialogCounts(connId), asCount),
-      getClaudeSessions: (connId: ConnId) => parseStrings(gen.getClaudeSessions(connId)),
+        typeof gen.getClaudeDialogCounts === 'function'
+          ? parseRecord(gen.getClaudeDialogCounts(connId), asCount)
+          : {},
+      getClaudeSessions: (connId: ConnId) =>
+        typeof gen.getClaudeSessions === 'function'
+          ? parseStrings(gen.getClaudeSessions(connId))
+          : [],
       canReportCertFingerprint: () => pinsReadable,
       // Bindings generated before the lifecycle hooks existed: no-ops, and
       // "Retry now" falls back to a fresh connect.

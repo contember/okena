@@ -9,7 +9,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { AgentLifecycle } from '../native/claude';
 import { OkenaColors } from '../theme';
 
-export function lifecycleColor(lifecycle: AgentLifecycle | undefined): string {
+function lifecycleColor(lifecycle: AgentLifecycle | undefined): string {
   switch (lifecycle) {
     case 'working':
       return OkenaColors.accent;
@@ -46,7 +46,9 @@ export const ClaudeIndicator: React.FC<{
     onPress={onPress}
     accessibilityRole="button"
     accessibilityLabel={
-      dialogs > 0 ? `Open Claude chat, ${dialogs} open dialogs` : 'Open Claude chat'
+      dialogs > 0
+        ? `Open Claude chat, ${dialogs} open dialogs`
+        : 'Open Claude chat'
     }
   >
     <LifecycleDot lifecycle={lifecycle} />

@@ -50,15 +50,22 @@ export function parseChatMarkdown(source: string): MdBlock[] {
     }
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+  // Lines of the open fence; an unclosed one runs to the end, as in a reply still streaming.
+  let code: string[] | null = null;
+
+  for (const line of lines) {
+    if (code !== null) {
+      if (FENCE.test(line)) {
+        blocks.push({ kind: 'code', text: code.join('\n') });
+        code = null;
+      } else {
+        code.push(line);
+      }
+      continue;
+    }
     if (FENCE.test(line)) {
       flushParagraph();
-      const code: string[] = [];
-      // An unclosed fence runs to the end, as in a reply still streaming.
-      for (i++; i < lines.length && !FENCE.test(lines[i]!); i++)
-        code.push(lines[i]!);
-      blocks.push({ kind: 'code', text: code.join('\n') });
+      code = [];
       continue;
     }
     const heading = HEADING.exec(line);
@@ -66,20 +73,20 @@ export function parseChatMarkdown(source: string): MdBlock[] {
     const ordered = ORDERED.exec(line);
     if (heading) {
       flushParagraph();
-      blocks.push({ kind: 'heading', inlines: parseInlines(heading[1]!) });
+      blocks.push({ kind: 'heading', inlines: parseInlines(heading[1] ?? '') });
     } else if (bullet) {
       flushParagraph();
       blocks.push({
         kind: 'item',
         marker: '•',
-        inlines: parseInlines(bullet[1]!),
+        inlines: parseInlines(bullet[1] ?? ''),
       });
     } else if (ordered) {
       flushParagraph();
       blocks.push({
         kind: 'item',
-        marker: `${ordered[1]}.`,
-        inlines: parseInlines(ordered[2]!),
+        marker: `${ordered[1] ?? ''}.`,
+        inlines: parseInlines(ordered[2] ?? ''),
       });
     } else if (line.trim().length === 0) {
       flushParagraph();
@@ -88,5 +95,6 @@ export function parseChatMarkdown(source: string): MdBlock[] {
     }
   }
   flushParagraph();
+  if (code !== null) blocks.push({ kind: 'code', text: code.join('\n') });
   return blocks;
 }
