@@ -524,7 +524,7 @@ mod tests {
             .find(|(key, _)| key == "BUN_OPTIONS")
             .and_then(|(_, value)| value.clone())
             .expect("BUN_OPTIONS set");
-        assert!(bun_options.starts_with(&format!("--preload {}", preload.display())));
+        assert!(bun_options.starts_with(&format!("--preload={}", preload.display())));
         assert!(env.contains(&(
             "OKENA_CLAUDE_REMOTE_CHANNEL".to_string(),
             Some("1".to_string())

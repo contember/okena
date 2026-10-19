@@ -20,7 +20,7 @@ removed or changed. It then gives every new pane:
 
 | Variable | Value |
 |---|---|
-| `BUN_OPTIONS` | `--preload <path to preload.js>` (plus any `BUN_OPTIONS` the daemon inherited) |
+| `BUN_OPTIONS` | `--preload=<path to preload.js>` (plus any `BUN_OPTIONS` the daemon inherited) |
 | `OKENA_BIN` | the `okena` binary the hooks and the channel server run |
 | `OKENA_CLAUDE_REMOTE_CHANNEL` | `1` when the MCP channel is on, else `0` |
 

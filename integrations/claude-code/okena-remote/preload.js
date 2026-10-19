@@ -1,5 +1,5 @@
 // Okena "Claude remote" preload. The Okena daemon puts it into every new pane
-// as BUN_OPTIONS="--preload <this file>", so it runs before any Bun program in
+// as BUN_OPTIONS="--preload=<this file>", so it runs before any Bun program in
 // that pane. For an interactive Claude Code session it appends the flags that
 // connect the session to Okena: hooks that report to the daemon, and the MCP
 // channel server that delivers remote prompts. Every other program is left

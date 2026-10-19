@@ -56,9 +56,11 @@ fn enabled_env(
         return None;
     }
 
+    // `--preload <path>` with a space makes Bun misread its subcommands
+    // (`bun install` → "Script not found"); the `=` form does not.
     let bun_options = match inherited {
-        Some(inherited) => format!("--preload {preload} {inherited}"),
-        None => format!("--preload {preload}"),
+        Some(inherited) => format!("--preload={preload} {inherited}"),
+        None => format!("--preload={preload}"),
     };
     let channel = if channel { "1" } else { "0" };
     Some(vec![
@@ -113,7 +115,7 @@ mod tests {
         assert_eq!(
             env_for(true, true, Some(PRELOAD), Some(OKENA_BIN), None),
             vec![
-                set("BUN_OPTIONS", &format!("--preload {PRELOAD}")),
+                set("BUN_OPTIONS", &format!("--preload={PRELOAD}")),
                 set("OKENA_BIN", OKENA_BIN),
                 set("OKENA_CLAUDE_REMOTE_CHANNEL", "1"),
             ]
@@ -141,7 +143,7 @@ mod tests {
             env[0],
             set(
                 "BUN_OPTIONS",
-                &format!("--preload {PRELOAD} --smol --preload /x.js")
+                &format!("--preload={PRELOAD} --smol --preload /x.js")
             )
         );
     }
@@ -150,7 +152,7 @@ mod tests {
     fn blank_inherited_bun_options_are_dropped() {
         let env = env_for(true, true, Some(PRELOAD), Some(OKENA_BIN), Some("  "));
 
-        assert_eq!(env[0], set("BUN_OPTIONS", &format!("--preload {PRELOAD}")));
+        assert_eq!(env[0], set("BUN_OPTIONS", &format!("--preload={PRELOAD}")));
     }
 
     #[test]
