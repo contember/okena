@@ -19,7 +19,8 @@ pub(crate) enum ClaudeRemoteError {
     PromptTooLong,
     /// Claude is in a turn and no `Stop` hook will tell us when it ends.
     Busy,
-    /// Neither hooks nor the agent-status OSC show Claude in the pane.
+    /// `claude` is not the pane's foreground process, or neither hooks nor the
+    /// agent-status OSC show it.
     NoClaudeSession,
     QueueFull,
     TerminalNotFound(String),

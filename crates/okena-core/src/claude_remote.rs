@@ -30,12 +30,16 @@ pub struct ClaudeChannelPollResponse {
     pub prompts: Vec<String>,
 }
 
-/// Daemon → remote server: what the daemon's terminal registry knows about the
-/// agent in one pane (from the lifecycle plugin's agent-status OSC).
+/// Daemon → remote server: what the daemon knows about the agent in one pane
+/// (from the lifecycle plugin's agent-status OSC and the pane's process tree).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeTerminalInfo {
     pub session: Option<AgentSession>,
     pub lifecycle: Option<AgentLifecycle>,
+    /// Name of the process the pane's shell runs in the foreground (`comm` on
+    /// Linux). `None` when the shell is at its prompt or the probe failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<String>,
 }
 
 /// What a remote client sees of the Claude session in one pane.

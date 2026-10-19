@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,12 @@ const TYPED_PROMPT_GRACE: Duration = Duration::from_secs(5);
 /// Per terminal, for the PTY queue and the channel queue each.
 const MAX_QUEUED_PROMPTS: usize = 32;
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
+/// Longer strings in a dialog's `tool_input` are cut for clients, which poll
+/// the session every second; a `Write` can carry a whole file.
+const MAX_DIALOG_STRING_BYTES: usize = 16 * 1024;
+const TRUNCATION_MARK: &str = "\n… (truncated)";
+/// `comm` of the native `claude` binary in the pane's foreground.
+const CLAUDE_COMMAND: &str = "claude";
 
 /// Shared state between the `/v1/claude` routes and the daemon: open dialogs
 /// (each held by a long-polling hook process), queued prompts and channel
@@ -43,6 +49,9 @@ pub struct ClaudeRemoteHub {
     state_version: Arc<watch::Sender<u64>>,
     terminals: Mutex<HashMap<String, TerminalState>>,
     next_id: AtomicU64,
+    /// Random per hub, so a dialog id a client remembers from before a daemon
+    /// restart never names a new dialog.
+    dialog_id_prefix: String,
 }
 
 #[derive(Default)]
@@ -51,6 +60,8 @@ struct TerminalState {
     dialogs: Vec<OpenDialog>,
     session_id: Option<String>,
     transcript_path: Option<String>,
+    /// `session_id` reported `SessionEnd`.
+    session_ended: bool,
     hooks_attached: bool,
     /// From hooks only.
     busy: Option<bool>,
@@ -82,7 +93,7 @@ impl OpenDialog {
         ApiClaudeDialog {
             id: self.id.clone(),
             tool_name: self.tool_name.clone(),
-            tool_input: self.tool_input.clone(),
+            tool_input: truncate_long_strings(&self.tool_input),
             permission_suggestions: self.permission_suggestions.clone(),
             created_at_ms: self.created_at_ms,
         }
@@ -95,13 +106,33 @@ impl OpenDialog {
 }
 
 impl TerminalState {
+    /// Whether a hook may update this pane's state. Event hooks run async and
+    /// arrive out of order, so one from an ended or replaced session is stale.
+    fn accepts(&self, input: &HookInput) -> bool {
+        let Some(incoming) = input.session_id.as_deref() else {
+            return false;
+        };
+        let current = self.session_id.as_deref() == Some(incoming);
+        match input.event {
+            // `claude --resume` starts an ended session again under its id.
+            HookEvent::SessionStart => {
+                !(current && self.session_ended) || input.source.as_deref() == Some("resume")
+            }
+            // With no live session, the first event adopts its own: the daemon
+            // restarted while `claude` ran.
+            _ if self.session_ended || self.session_id.is_none() => !current,
+            _ => current,
+        }
+    }
+
+    /// Note an accepted hook. Only a new session moves the session id and the
+    /// transcript path.
     fn record_hook(&mut self, input: &HookInput) {
         self.hooks_attached = true;
-        if let Some(session_id) = &input.session_id {
-            self.session_id = Some(session_id.clone());
-        }
-        if let Some(transcript_path) = &input.transcript_path {
-            self.transcript_path = Some(transcript_path.clone());
+        if input.event == HookEvent::SessionStart || self.session_id != input.session_id {
+            self.session_id = input.session_id.clone();
+            self.transcript_path = input.transcript_path.clone();
+            self.session_ended = false;
         }
     }
 
@@ -171,7 +202,30 @@ impl ClaudeRemoteHub {
             state_version,
             terminals: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            dialog_id_prefix: format!("{:08x}", rand::random::<u32>()),
         })
+    }
+
+    /// Forget the panes that are not in `known_terminal_ids`: the daemon closed
+    /// them. Their open dialogs fall back to the terminal.
+    pub fn retain_terminals(&self, known_terminal_ids: &HashSet<String>) {
+        let now = Instant::now();
+        let mut removed = Vec::new();
+        self.terminals.lock().retain(|terminal_id, terminal| {
+            let known = known_terminal_ids.contains(terminal_id);
+            if !known {
+                removed.push((terminal.has_session(now), terminal.take_all_dialogs()));
+            }
+            known
+        });
+        let mut visible_change = false;
+        for (had_session, dialogs) in removed {
+            visible_change |= had_session || !dialogs.is_empty();
+            dialogs.into_iter().for_each(OpenDialog::cancel);
+        }
+        if visible_change {
+            self.bump_state_version();
+        }
     }
 
     /// Open dialogs per terminal id, for [`okena_core::api::StateResponse::claude_dialogs`].
@@ -221,13 +275,17 @@ impl ClaudeRemoteHub {
             ));
         };
 
-        let dialog_id = self.next_id().to_string();
+        let dialog_id = format!("{}-{}", self.dialog_id_prefix, self.next_id());
         let (respond, answer) = oneshot::channel();
         {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(request.terminal_id.clone()).or_default();
-            terminal.record_hook(&input);
-            terminal.busy = Some(true);
+            // Claude waits on this hook, so its dialog is live even when the
+            // session's own `SessionStart` has not arrived yet.
+            if terminal.accepts(&input) {
+                terminal.record_hook(&input);
+                terminal.busy = Some(true);
+            }
             terminal.dialogs.push(OpenDialog {
                 id: dialog_id.clone(),
                 session_id: input.session_id,
@@ -263,6 +321,9 @@ impl ClaudeRemoteHub {
         {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(request.terminal_id.clone()).or_default();
+            if !terminal.accepts(&input) {
+                return Ok(());
+            }
             let had_session = terminal.has_session(Instant::now());
             terminal.record_hook(&input);
             match input.event {
@@ -300,6 +361,7 @@ impl ClaudeRemoteHub {
                 HookEvent::SessionEnd => {
                     terminal.busy = None;
                     terminal.hooks_attached = false;
+                    terminal.session_ended = true;
                     terminal.channel.detach();
                     terminal.drop_undelivered_prompts();
                     cancelled = terminal.take_all_dialogs();
@@ -314,8 +376,7 @@ impl ClaudeRemoteHub {
             self.bump_state_version();
         }
         if let Some((prompt, generation)) = prompt_to_type {
-            // Nobody waits for the result; the task logs a failure itself.
-            drop(self.spawn_typing(request.terminal_id, prompt, generation));
+            self.spawn_queued_typing(request.terminal_id, prompt, generation);
         }
         Ok(())
     }
@@ -364,7 +425,7 @@ impl ClaudeRemoteHub {
         &self,
         terminal_id: &str,
     ) -> Result<ApiClaudeSession, ClaudeRemoteError> {
-        let info = self.terminal_info(terminal_id).await?;
+        let info = self.terminal_info(terminal_id, false).await?;
         let mut session = {
             let terminals = self.terminals.lock();
             let terminal = terminals.get(terminal_id);
@@ -416,7 +477,9 @@ impl ClaudeRemoteHub {
     ) -> Result<ApiClaudeTranscriptPage, ClaudeRemoteError> {
         let source = match self.hooked_transcript_source(terminal_id) {
             Some(source) => source,
-            None => TranscriptSource::from_terminal_info(&self.terminal_info(terminal_id).await?),
+            None => {
+                TranscriptSource::from_terminal_info(&self.terminal_info(terminal_id, false).await?)
+            }
         };
         let Some(path) = source.path else {
             return Err(ClaudeRemoteError::NoTranscript);
@@ -456,7 +519,7 @@ impl ClaudeRemoteHub {
         if text.len() > MAX_PROMPT_BYTES {
             return Err(ClaudeRemoteError::PromptTooLong);
         }
-        let info = self.terminal_info(terminal_id).await?;
+        let info = self.terminal_info(terminal_id, true).await?;
 
         let generation = self.next_id();
         {
@@ -471,7 +534,8 @@ impl ClaudeRemoteHub {
                 return Ok(ApiClaudePromptDelivery::Channel);
             }
             // Typing into a pane without Claude would run the prompt in a shell.
-            if !terminal.hooks_attached && info.lifecycle.is_none() {
+            // Hooks outlive a `claude` that crashed, so the foreground decides.
+            if !runs_claude(&info) || (!terminal.hooks_attached && info.lifecycle.is_none()) {
                 return Err(ClaudeRemoteError::NoClaudeSession);
             }
             if terminal.busy(now, info.lifecycle) == Some(true) {
@@ -528,13 +592,17 @@ impl ClaudeRemoteHub {
         })
     }
 
+    /// `probe_foreground` only before typing into the pane: the probe is too
+    /// costly for the reads clients poll.
     async fn terminal_info(
         &self,
         terminal_id: &str,
+        probe_foreground: bool,
     ) -> Result<ClaudeTerminalInfo, ClaudeRemoteError> {
         let result = self
             .run(RemoteCommand::ClaudeTerminalInfo {
                 terminal_id: terminal_id.to_string(),
+                probe_foreground,
             })
             .await?;
         match result {
@@ -558,14 +626,49 @@ impl ClaudeRemoteHub {
         generation: u64,
     ) -> tokio::task::JoinHandle<Result<(), ClaudeRemoteError>> {
         let hub = Arc::clone(self);
-        tokio::spawn(async move {
-            let result = hub.type_into_pty(&terminal_id, &text).await;
-            if let Err(error) = &result {
-                log::warn!("claude remote: typing a prompt into {terminal_id} failed: {error:?}");
-                hub.clear_typed_prompt(&terminal_id, generation);
+        tokio::spawn(async move { hub.type_prompt(&terminal_id, &text, generation).await })
+    }
+
+    /// Type the prompt queued for the turn that just ended, unless `claude` has
+    /// left the pane: then every queued prompt is dropped.
+    fn spawn_queued_typing(self: &Arc<Self>, terminal_id: String, text: String, generation: u64) {
+        let hub = Arc::clone(self);
+        // Nobody waits for the result; `type_prompt` logs a failure itself.
+        drop(tokio::spawn(async move {
+            let claude_running = hub
+                .terminal_info(&terminal_id, true)
+                .await
+                .is_ok_and(|info| runs_claude(&info));
+            if claude_running {
+                let _logged = hub.type_prompt(&terminal_id, &text, generation).await;
+            } else {
+                log::warn!(
+                    "claude remote: {terminal_id} no longer runs claude; dropping its queued prompts"
+                );
+                hub.drop_queued_prompts(&terminal_id, generation);
             }
-            result
-        })
+        }));
+    }
+
+    async fn type_prompt(
+        &self,
+        terminal_id: &str,
+        text: &str,
+        generation: u64,
+    ) -> Result<(), ClaudeRemoteError> {
+        let result = self.type_into_pty(terminal_id, text).await;
+        if let Err(error) = &result {
+            log::warn!("claude remote: typing a prompt into {terminal_id} failed: {error:?}");
+            self.clear_typed_prompt(terminal_id, generation);
+        }
+        result
+    }
+
+    fn drop_queued_prompts(&self, terminal_id: &str, generation: u64) {
+        self.clear_typed_prompt(terminal_id, generation);
+        if let Some(terminal) = self.terminals.lock().get_mut(terminal_id) {
+            terminal.pty_queue.clear();
+        }
     }
 
     fn clear_typed_prompt(&self, terminal_id: &str, generation: u64) {
@@ -679,6 +782,31 @@ impl Drop for PollGuard<'_> {
     }
 }
 
+fn runs_claude(info: &ClaudeTerminalInfo) -> bool {
+    info.foreground_command.as_deref() == Some(CLAUDE_COMMAND)
+}
+
+/// `value` with every string longer than [`MAX_DIALOG_STRING_BYTES`] cut and
+/// marked.
+fn truncate_long_strings(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) if text.len() > MAX_DIALOG_STRING_BYTES => {
+            let kept = &text[..text.floor_char_boundary(MAX_DIALOG_STRING_BYTES)];
+            serde_json::Value::String(format!("{kept}{TRUNCATION_MARK}"))
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(truncate_long_strings).collect())
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, field)| (key.clone(), truncate_long_strings(field)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn lifecycle_is_busy(lifecycle: AgentLifecycle) -> bool {
     match lifecycle {
         AgentLifecycle::Working | AgentLifecycle::Blocked => true,
@@ -721,19 +849,57 @@ mod tests {
         watch::Receiver<u64>,
         mpsc::UnboundedReceiver<String>,
     ) {
+        let (hub, version, pty, _daemon) = hub_with_changing_daemon(info);
+        (hub, version, pty)
+    }
+
+    /// The fake daemon's answer, changeable mid-test, and how often it probed
+    /// a pane's foreground.
+    struct FakeDaemon {
+        info: Mutex<ClaudeTerminalInfo>,
+        probes: AtomicU64,
+    }
+
+    /// [`hub_with_daemon`], with the daemon exposed. Like the real daemon, it
+    /// reports `foreground_command` only when asked to probe.
+    fn hub_with_changing_daemon(
+        info: ClaudeTerminalInfo,
+    ) -> (
+        Arc<ClaudeRemoteHub>,
+        watch::Receiver<u64>,
+        mpsc::UnboundedReceiver<String>,
+        Arc<FakeDaemon>,
+    ) {
         let (bridge_tx, bridge_rx) = bridge_channel();
         let (version_tx, version_rx) = watch::channel(0);
         let hub = ClaudeRemoteHub::new(bridge_tx, Arc::new(version_tx));
         let (pty_tx, pty_rx) = mpsc::unbounded_channel();
+        let daemon = Arc::new(FakeDaemon {
+            info: Mutex::new(info),
+            probes: AtomicU64::new(0),
+        });
+        let fake = Arc::clone(&daemon);
         tokio::spawn(async move {
             while let Ok(message) = bridge_rx.recv().await {
                 let result = match message.command {
-                    RemoteCommand::ClaudeTerminalInfo { terminal_id } if terminal_id == "gone" => {
+                    RemoteCommand::ClaudeTerminalInfo { terminal_id, .. }
+                        if terminal_id == "gone" =>
+                    {
                         CommandResult::Err("terminal not found: gone".to_string())
                     }
-                    RemoteCommand::ClaudeTerminalInfo { .. } => CommandResult::Ok(Some(
-                        serde_json::to_value(&info).expect("serializable info"),
-                    )),
+                    RemoteCommand::ClaudeTerminalInfo {
+                        probe_foreground, ..
+                    } => {
+                        let mut info = fake.info.lock().clone();
+                        if probe_foreground {
+                            fake.probes.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            info.foreground_command = None;
+                        }
+                        CommandResult::Ok(Some(
+                            serde_json::to_value(&info).expect("serializable info"),
+                        ))
+                    }
                     RemoteCommand::PastePath { terminal_id, .. } if terminal_id == "broken" => {
                         CommandResult::Err("terminal not found: broken".to_string())
                     }
@@ -755,11 +921,22 @@ mod tests {
                 }
             }
         });
-        (hub, version_rx, pty_rx)
+        (hub, version_rx, pty_rx, daemon)
     }
 
-    fn idle_daemon() -> ClaudeTerminalInfo {
-        ClaudeTerminalInfo::default()
+    /// `claude` runs in the pane; the daemon has no agent status for it.
+    fn claude_in_pane() -> ClaudeTerminalInfo {
+        ClaudeTerminalInfo {
+            foreground_command: Some(CLAUDE_COMMAND.to_string()),
+            ..ClaudeTerminalInfo::default()
+        }
+    }
+
+    fn shell_in_pane() -> ClaudeTerminalInfo {
+        ClaudeTerminalInfo {
+            foreground_command: Some("bash".to_string()),
+            ..ClaudeTerminalInfo::default()
+        }
     }
 
     fn hook(terminal_id: &str, input: serde_json::Value) -> ClaudeHookRequest {
@@ -843,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_answers_the_hook_long_poll() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let ask_input = json!({"questions": [{"question": "Which color?", "options": [{"label": "Red"}, {"label": "Blue"}]}]});
         let cases = [
             (
@@ -887,7 +1064,7 @@ mod tests {
 
     #[tokio::test]
     async fn deciding_an_unknown_dialog_is_not_found() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
             hub.decide("t1", "42", &ApiClaudeDecision::Allow { always: false }),
             Err(ClaudeRemoteError::DialogNotFound)
@@ -896,7 +1073,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_tool_use_cancels_only_the_matching_dialog() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let (_ls_id, ls) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
         let (_rm_id, _rm) =
@@ -920,7 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_cancels_every_dialog_of_the_terminal() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let (_, first) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
         let (_, second) =
@@ -943,7 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_hook_request_removes_its_dialog() {
-        let (hub, version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, version, _pty) = hub_with_daemon(claude_in_pane());
         let (_, waiting) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
         assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
@@ -958,7 +1135,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_request_records_the_session() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let (_, _waiting) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
 
@@ -973,7 +1150,7 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_goes_to_the_attached_channel() {
-        let (hub, _version, mut pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
         let poll = tokio::spawn({
             let hub = Arc::clone(&hub);
             async move { hub.poll_channel_for("t1", Duration::from_secs(5)).await }
@@ -1005,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn timed_out_poll_returns_empty_and_keeps_the_channel_attached() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let prompts = hub.poll_channel_for("t1", Duration::from_millis(10)).await;
         assert!(prompts.is_empty());
 
@@ -1019,7 +1196,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_prompt_is_typed_and_the_next_one_waits_for_stop() {
-        let (hub, _version, mut pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
 
@@ -1051,16 +1228,16 @@ mod tests {
     #[tokio::test]
     async fn without_hooks_the_daemon_lifecycle_decides() {
         let (idle_hub, _version, mut pty) = hub_with_daemon(ClaudeTerminalInfo {
-            session: None,
             lifecycle: Some(AgentLifecycle::Done),
+            ..claude_in_pane()
         });
         let delivery = idle_hub.send_prompt("t1", "go".into()).await;
         assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 go"));
 
         let (busy_hub, _version, mut pty) = hub_with_daemon(ClaudeTerminalInfo {
-            session: None,
             lifecycle: Some(AgentLifecycle::Working),
+            ..claude_in_pane()
         });
         let delivery = busy_hub.send_prompt("t1", "go".into()).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::Busy)));
@@ -1070,8 +1247,8 @@ mod tests {
     #[tokio::test]
     async fn busy_after_session_end_is_refused() {
         let (hub, _version, _pty) = hub_with_daemon(ClaudeTerminalInfo {
-            session: None,
             lifecycle: Some(AgentLifecycle::Blocked),
+            ..claude_in_pane()
         });
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
@@ -1084,7 +1261,7 @@ mod tests {
 
     #[tokio::test]
     async fn blank_prompt_is_rejected() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let delivery = hub.send_prompt("t1", " \n".into()).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::EmptyPrompt)));
     }
@@ -1101,7 +1278,7 @@ mod tests {
             ),
         )
         .expect("write transcript");
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         let mut start = event("SessionStart");
         start["transcript_path"] = json!(path.to_string_lossy());
         hub.hook_event(hook("t1", start)).expect("valid event");
@@ -1137,7 +1314,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcript_without_a_source_is_not_found() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
             hub.transcript("t1", None, None).await,
             Err(ClaudeRemoteError::NoTranscript)
@@ -1146,8 +1323,8 @@ mod tests {
 
     fn claude_running() -> ClaudeTerminalInfo {
         ClaudeTerminalInfo {
-            session: None,
             lifecycle: Some(AgentLifecycle::Idle),
+            ..claude_in_pane()
         }
     }
 
@@ -1163,7 +1340,7 @@ mod tests {
     #[tokio::test]
     async fn turn_and_session_boundaries_cancel_every_dialog() {
         for name in ["UserPromptSubmit", "SessionStart", "SessionEnd"] {
-            let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+            let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
             let (_, waiting) =
                 open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
 
@@ -1177,7 +1354,7 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_keeps_dialogs_busy_state_and_queue() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
         let delivery = hub.send_prompt("t1", "later".into()).await;
@@ -1196,7 +1373,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_version_follows_open_decide_and_cancel() {
-        let (hub, version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, version, _pty) = hub_with_daemon(claude_in_pane());
         let start = *version.borrow();
 
         let (dialog_id, waiting) =
@@ -1230,7 +1407,7 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_follow_hooks_and_the_channel() {
-        let (hub, version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(hub.session_terminals().is_empty());
 
         let start = *version.borrow();
@@ -1266,7 +1443,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pane_without_claude_is_never_typed_into() {
-        let (hub, _version, mut pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, mut pty) = hub_with_daemon(ClaudeTerminalInfo::default());
         let delivery = hub.send_prompt("t1", "rm -rf ~".into()).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::NoClaudeSession)));
         assert!(pty.try_recv().is_err());
@@ -1274,7 +1451,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unconfirmed_typed_prompt_stops_counting_as_busy() {
-        let (hub, _version, mut pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
         let first = hub.send_prompt("t1", "/clear".into()).await;
@@ -1302,7 +1479,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_typing_clears_only_its_own_marker() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("broken", event("SessionStart")))
             .expect("valid event");
 
@@ -1331,7 +1508,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dropped_prompt_request_still_presses_enter() {
-        let (hub, _version, mut pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
         let request = tokio::spawn({
@@ -1372,7 +1549,7 @@ mod tests {
 
     #[tokio::test]
     async fn queues_and_prompt_size_are_capped() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
         for n in 0..MAX_QUEUED_PROMPTS {
@@ -1405,7 +1582,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_terminal_is_not_found() {
-        let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
             hub.session("gone").await,
             Err(ClaudeRemoteError::TerminalNotFound(_))
@@ -1425,7 +1602,7 @@ mod tests {
         std::fs::create_dir(&not_a_file).expect("create dir");
 
         for path in [not_jsonl, not_a_file] {
-            let (hub, _version, _pty) = hub_with_daemon(idle_daemon());
+            let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
             let mut start = event("SessionStart");
             start["transcript_path"] = json!(path.to_string_lossy());
             hub.hook_event(hook("t1", start)).expect("valid event");
@@ -1436,5 +1613,202 @@ mod tests {
             ));
             assert!(!hub.session("t1").await.expect("session").has_transcript);
         }
+    }
+
+    #[tokio::test]
+    async fn hooks_of_a_crashed_claude_do_not_type_into_the_shell() {
+        let (hub, _version, mut pty) = hub_with_daemon(shell_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        let idle = hub.send_prompt("t1", "rm -rf ~".into()).await;
+        assert!(matches!(idle, Err(ClaudeRemoteError::NoClaudeSession)));
+
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        let busy = hub.send_prompt("t1", "rm -rf ~".into()).await;
+        assert!(matches!(busy, Err(ClaudeRemoteError::NoClaudeSession)));
+
+        assert!(pty.try_recv().is_err());
+        assert_eq!(queued_prompts(&hub, "t1"), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn queued_prompts_are_dropped_when_claude_left_the_pane() {
+        let (hub, _version, mut pty, daemon) = hub_with_changing_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        for text in ["first", "second"] {
+            let delivery = hub.send_prompt("t1", text.into()).await;
+            assert_eq!(delivery.expect("accepted"), ApiClaudePromptDelivery::Queued);
+        }
+        *daemon.info.lock() = shell_in_pane();
+
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+
+        for _ in 0..200 {
+            if queued_prompts(&hub, "t1") == (0, 0) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(queued_prompts(&hub, "t1"), (0, 0));
+        assert_eq!(hub.session("t1").await.expect("session").busy, Some(false));
+        tokio::time::sleep(ENTER_DELAY * 2).await;
+        assert!(pty.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn events_after_session_end_do_not_resurrect_the_session() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+
+        for name in ["PostToolUse", "Stop", "SessionStart"] {
+            hub.hook_event(hook("t1", event(name)))
+                .expect("valid event");
+            let session = hub.session("t1").await.expect("session");
+            assert!(!session.hooks_attached, "{name}");
+            assert!(hub.session_terminals().is_empty(), "{name}");
+        }
+
+        let mut resume = event("SessionStart");
+        resume["source"] = json!("resume");
+        hub.hook_event(hook("t1", resume)).expect("valid event");
+        assert!(hub.session("t1").await.expect("session").hooks_attached);
+    }
+
+    #[tokio::test]
+    async fn a_late_event_of_an_older_session_changes_nothing() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        let mut start = event("SessionStart");
+        start["session_id"] = json!("s2");
+        start["transcript_path"] = json!("/home/u/.claude/projects/p/s2.jsonl");
+        hub.hook_event(hook("t1", start)).expect("valid event");
+        let mut ask = permission("Bash", json!({"command": "ls"}));
+        ask["session_id"] = json!("s2");
+        let (_, _waiting) = open_dialog(&hub, "t1", ask).await;
+
+        hub.hook_event(hook(
+            "t1",
+            tool_event("PostToolUse", "Bash", json!({"command": "ls"})),
+        ))
+        .expect("valid event");
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
+        let session = hub.session("t1").await.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s2"));
+        assert!(session.hooks_attached);
+        let transcript_path = hub
+            .terminals
+            .lock()
+            .get("t1")
+            .and_then(|terminal| terminal.transcript_path.clone());
+        assert_eq!(
+            transcript_path.as_deref(),
+            Some("/home/u/.claude/projects/p/s2.jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_session_the_first_event_adopts_its_own() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("PreToolUse")))
+            .expect("valid event");
+        let session = hub.session("t1").await.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s1"));
+        assert!(session.hooks_attached);
+        assert_eq!(session.busy, Some(true));
+    }
+
+    #[tokio::test]
+    async fn forgetting_closed_terminals_cancels_their_dialogs() {
+        let (hub, version, _pty) = hub_with_daemon(claude_in_pane());
+        let (_, waiting) =
+            open_dialog(&hub, "closed", permission("Bash", json!({"command": "ls"}))).await;
+        hub.hook_event(hook("open", event("SessionStart")))
+            .expect("valid event");
+        let before = *version.borrow();
+
+        hub.retain_terminals(&HashSet::from(["open".to_string()]));
+
+        assert_eq!(answer_of(waiting).await, json!({}));
+        assert!(hub.dialog_counts().is_empty());
+        assert_eq!(hub.session_terminals(), vec!["open".to_string()]);
+        assert!(!hub.terminals.lock().contains_key("closed"));
+        assert!(*version.borrow() > before);
+    }
+
+    #[tokio::test]
+    async fn dialog_ids_differ_between_hub_instances() {
+        let (first, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let (second, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let (first_id, _first) =
+            open_dialog(&first, "t1", permission("Bash", json!({"command": "ls"}))).await;
+        let (second_id, _second) =
+            open_dialog(&second, "t1", permission("Bash", json!({"command": "ls"}))).await;
+        assert_ne!(first_id, second_id);
+    }
+
+    #[tokio::test]
+    async fn clients_see_long_dialog_strings_cut_but_the_hook_gets_them_whole() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        // An odd byte offset, so the cut lands inside a two-byte character.
+        let content = format!("x{}", "é".repeat(MAX_DIALOG_STRING_BYTES));
+        let input = json!({"file_path": "/a", "edits": [{"new_string": content}]});
+        let (dialog_id, waiting) = open_dialog(&hub, "t1", permission("Edit", input.clone())).await;
+
+        let session = hub.session("t1").await.expect("session");
+        let shown = &session.dialogs[0].tool_input;
+        assert_eq!(shown["file_path"], json!("/a"));
+        let cut = shown["edits"][0]["new_string"]
+            .as_str()
+            .expect("string stays a string");
+        let kept = cut.strip_suffix(TRUNCATION_MARK).expect("marked cut");
+        assert!(kept.len() <= MAX_DIALOG_STRING_BYTES);
+        assert!(kept.len() > MAX_DIALOG_STRING_BYTES - 4);
+        assert!(content.starts_with(kept));
+
+        hub.decide(
+            "t1",
+            &dialog_id,
+            &ApiClaudeDecision::Allow { always: false },
+        )
+        .expect("dialog open");
+        let answer = answer_of(waiting).await;
+        assert_eq!(
+            answer["hookSpecificOutput"]["decision"]["updatedInput"],
+            input
+        );
+    }
+
+    #[tokio::test]
+    async fn only_typing_probes_the_foreground() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("s1.jsonl");
+        std::fs::write(&path, "").expect("write transcript");
+        let (hub, _version, mut pty, daemon) = hub_with_changing_daemon(ClaudeTerminalInfo {
+            session: Some(okena_core::agent_session::AgentSession {
+                agent: "claude".to_string(),
+                session_id: "00000000-0000-4000-8000-000000000001".to_string(),
+                transcript_path: Some(path.to_string_lossy().into_owned()),
+            }),
+            ..claude_running()
+        });
+
+        hub.session("t1").await.expect("session");
+        hub.transcript("t1", None, None).await.expect("page");
+        assert_eq!(daemon.probes.load(Ordering::Relaxed), 0);
+
+        let delivery = hub.send_prompt("t1", "hi".into()).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 hi"));
+        assert_eq!(daemon.probes.load(Ordering::Relaxed), 1);
     }
 }

@@ -4220,7 +4220,11 @@ pub async fn daemon_command_loop(
                 // Taken before the state locks: the hub has its own lock.
                 let (claude_dialogs, claude_sessions) = claude_hub
                     .upgrade()
-                    .map(|hub| (hub.dialog_counts(), hub.session_terminals()))
+                    .map(|hub| {
+                        // Terminals close through many paths; this sees all of them.
+                        hub.retain_terminals(&known_terminal_ids(&terminals, &workspace));
+                        (hub.dialog_counts(), hub.session_terminals())
+                    })
                     .unwrap_or_default();
                 // Lock order: workspace first, then service manager (kept
                 // consistent across the loop). The whole arm is synchronous, so
@@ -4374,19 +4378,32 @@ pub async fn daemon_command_loop(
             }
 
             // ── ClaudeTerminalInfo ───────────────────────────────────────────
-            RemoteCommand::ClaudeTerminalInfo { terminal_id } => {
+            RemoteCommand::ClaudeTerminalInfo {
+                terminal_id,
+                probe_foreground,
+            } => {
                 let terminal = terminals.lock().get(&terminal_id).cloned();
                 match terminal {
                     Some(terminal) => {
                         let info = ClaudeTerminalInfo {
                             session: terminal.agent_session(),
                             lifecycle: terminal.agent_status().map(|status| status.lifecycle),
+                            foreground_command: None,
                         };
-                        match serde_json::to_value(info) {
-                            Ok(v) => CommandResult::Ok(Some(v)),
-                            Err(e) => CommandResult::Err(format!(
-                                "failed to serialize terminal info: {e}"
-                            )),
+                        if !probe_foreground {
+                            serialize_terminal_info(info)
+                        } else {
+                            let backend = backend.clone();
+                            // The foreground probe forks tmux or scans /proc.
+                            spawn_blocking_command_with(reply, &runtime, move || {
+                                serialize_terminal_info(ClaudeTerminalInfo {
+                                    foreground_command: backend
+                                        .get_foreground_shell_pid(&terminal_id)
+                                        .and_then(okena_terminal::terminal::foreground_command),
+                                    ..info
+                                })
+                            });
+                            continue;
                         }
                     }
                     None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
@@ -4398,6 +4415,27 @@ pub async fn daemon_command_loop(
             let _ = reply.send(result);
         }
     }
+}
+
+fn serialize_terminal_info(info: ClaudeTerminalInfo) -> CommandResult {
+    match serde_json::to_value(info) {
+        Ok(v) => CommandResult::Ok(Some(v)),
+        Err(e) => CommandResult::Err(format!("failed to serialize terminal info: {e}")),
+    }
+}
+
+/// Every terminal the daemon still has: the registry plus the workspace's
+/// panes, which after a restart join the registry only once a client attaches.
+fn known_terminal_ids(
+    terminals: &TerminalsRegistry,
+    workspace: &Arc<Mutex<Workspace>>,
+) -> HashSet<String> {
+    let mut terminal_ids: HashSet<String> = terminals.lock().keys().cloned().collect();
+    let ws = workspace.lock();
+    for project in &ws.data().projects {
+        terminal_ids.extend(ws.all_terminal_ids_for_project(&project.id));
+    }
+    terminal_ids
 }
 
 /// Load replacement data on the blocking pool, then atomically apply it.
@@ -6323,6 +6361,7 @@ mod tests {
                     &bridge_tx,
                     RemoteCommand::ClaudeTerminalInfo {
                         terminal_id: "claude-pane".to_string(),
+                        probe_foreground: false,
                     },
                     "ClaudeTerminalInfo",
                 )
@@ -6338,6 +6377,7 @@ mod tests {
                     ClaudeTerminalInfo {
                         session: None,
                         lifecycle: Some(okena_core::agent_status::AgentLifecycle::Working),
+                        foreground_command: None,
                     }
                 );
 
@@ -6345,6 +6385,7 @@ mod tests {
                     &bridge_tx,
                     RemoteCommand::ClaudeTerminalInfo {
                         terminal_id: "missing".to_string(),
+                        probe_foreground: true,
                     },
                     "ClaudeTerminalInfo unknown",
                 )
@@ -6358,6 +6399,167 @@ mod tests {
                 handle.await.expect("loop task joins");
             })
             .await;
+    }
+
+    /// Reports `shell_pid` as every terminal's foreground shell and counts the
+    /// lookups.
+    struct ShellPidBackend {
+        shell_pid: u32,
+        foreground_lookups: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl TerminalBackend for ShellPidBackend {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(StubTransport)
+        }
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("shell pid backend does not create terminals")
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("shell pid backend does not reconnect terminals")
+        }
+        fn kill(&self, _terminal_id: &str) {}
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            Some(self.shell_pid)
+        }
+        fn get_foreground_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            self.foreground_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(self.shell_pid)
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_terminal_info_probes_the_foreground_only_on_request() {
+        use std::os::unix::process::CommandExt as _;
+
+        let directory = std::env::temp_dir().join(format!("okena-fg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("create fixture dir");
+        let claude = directory.join("claude");
+        std::fs::copy("/bin/sh", &claude).expect("copy sh as claude");
+        // `; :` keeps both shells from exec-ing their last command.
+        let mut shell = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} -c 'sleep 30; :'; :", claude.display()))
+            .process_group(0)
+            .spawn()
+            .expect("spawn shell");
+        let shell_pid = shell.id();
+        let children_file = format!("/proc/{shell_pid}/task/{shell_pid}/children");
+        let mut child_pid = None;
+        for _ in 0..200 {
+            child_pid = std::fs::read_to_string(&children_file)
+                .ok()
+                .and_then(|children| children.split_whitespace().next().map(str::to_string));
+            if child_pid.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let foreground_lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut h = harness();
+        h.backend = Arc::new(ShellPidBackend {
+            shell_pid,
+            foreground_lookups: foreground_lookups.clone(),
+        });
+        let terminal = Arc::new(Terminal::new(
+            "claude-pane".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        h.terminals
+            .lock()
+            .insert("claude-pane".to_string(), terminal);
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        let (read, probed) = local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let mut results = Vec::new();
+                for probe_foreground in [false, true] {
+                    let result = request(
+                        &bridge_tx,
+                        RemoteCommand::ClaudeTerminalInfo {
+                            terminal_id: "claude-pane".to_string(),
+                            probe_foreground,
+                        },
+                        "ClaudeTerminalInfo",
+                    )
+                    .await;
+                    let value = match result {
+                        CommandResult::Ok(Some(v)) => v,
+                        other => panic!("expected Ok(Some), got {other:?}"),
+                    };
+                    let info: ClaudeTerminalInfo =
+                        serde_json::from_value(value).expect("deserialize ClaudeTerminalInfo");
+                    let lookups = foreground_lookups.load(std::sync::atomic::Ordering::Relaxed);
+                    results.push((info.foreground_command, lookups));
+                }
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+                (results[0].clone(), results[1].clone())
+            })
+            .await;
+
+        let _ = std::process::Command::new("kill")
+            .arg("--")
+            .arg(format!("-{shell_pid}"))
+            .status();
+        let _ = shell.wait();
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(child_pid.is_some(), "shell never started its child");
+        assert_eq!(read, (None, 0), "a read without the probe looks nothing up");
+        assert_eq!(probed, (Some("claude".to_string()), 1));
+    }
+
+    #[test]
+    fn known_terminal_ids_cover_the_registry_and_the_workspace() {
+        let workspace = Arc::new(Mutex::new(workspace_with_migration_terminals("/tmp")));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        terminals.lock().insert(
+            "registered".to_string(),
+            Arc::new(Terminal::new(
+                "registered".to_string(),
+                TerminalSize::default(),
+                Arc::new(StubTransport),
+                "/tmp".to_string(),
+            )),
+        );
+
+        assert_eq!(
+            known_terminal_ids(&terminals, &workspace),
+            HashSet::from([
+                "registered".to_string(),
+                "ordinary".to_string(),
+                "hook".to_string()
+            ])
+        );
     }
 
     /// App-scoped `GetSettingsSchema` returns `Ok(Some(_))` with settings keys.

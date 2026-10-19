@@ -26,23 +26,16 @@ impl IntoResponse for ClaudeRemoteError {
             ),
             Self::EmptyPrompt => (StatusCode::BAD_REQUEST, "prompt is empty".to_string()),
             Self::PromptTooLong => (StatusCode::BAD_REQUEST, "prompt is too long".to_string()),
-            Self::Busy => {
-                return (
-                    StatusCode::CONFLICT,
-                    "Claude is busy and Okena's hooks are not attached; try again when it finishes",
-                )
-                    .into_response();
-            }
-            Self::NoClaudeSession => {
-                return (
-                    StatusCode::CONFLICT,
-                    "No Claude session detected in this pane",
-                )
-                    .into_response();
-            }
-            Self::QueueFull => {
-                return (StatusCode::CONFLICT, "too many queued prompts").into_response();
-            }
+            Self::Busy => (
+                StatusCode::CONFLICT,
+                "Claude is busy and Okena's hooks are not attached; try again when it finishes"
+                    .to_string(),
+            ),
+            Self::NoClaudeSession => (
+                StatusCode::CONFLICT,
+                "No Claude session detected in this pane".to_string(),
+            ),
+            Self::QueueFull => (StatusCode::CONFLICT, "too many queued prompts".to_string()),
             Self::TerminalNotFound(message) => (StatusCode::NOT_FOUND, message),
             Self::DialogNotFound => (
                 StatusCode::NOT_FOUND,
@@ -59,7 +52,7 @@ impl IntoResponse for ClaudeRemoteError {
             ),
             Self::Io(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         };
-        (status, Json(serde_json::json!({"error": message}))).into_response()
+        (status, message).into_response()
     }
 }
 
@@ -342,6 +335,53 @@ mod tests {
             .await
             .expect("read body");
         assert_eq!(&body[..], b"No Claude session detected in this pane");
+    }
+
+    #[tokio::test]
+    async fn errors_are_plain_text() {
+        let mut router = router();
+        let calls = [
+            (
+                "/v1/claude/terminals/t1/dialogs/k3f9a2-7",
+                r#"{"decision":"allow"}"#,
+                StatusCode::NOT_FOUND,
+                "dialog is no longer open",
+            ),
+            (
+                "/v1/claude/terminals/t1/prompt",
+                r#"{"text":"  "}"#,
+                StatusCode::BAD_REQUEST,
+                "prompt is empty",
+            ),
+        ];
+        for (uri, body, expected_status, expected_body) in calls {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("build request");
+            request.extensions_mut().insert(PeerInfo::Local);
+
+            let response = router
+                .call(request)
+                .await
+                .expect("the router is infallible");
+
+            assert_eq!(response.status(), expected_status, "{uri}");
+            assert!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("text/plain")),
+                "{uri}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .expect("read body");
+            assert_eq!(&bytes[..], expected_body.as_bytes(), "{uri}");
+        }
     }
 
     #[tokio::test]
