@@ -2,11 +2,12 @@
 
 //! GPUI-free agent usage core.
 //!
-//! Everything provider-related that used to live in the Claude and Codex
+//! Everything provider-related that used to live in the Claude, Codex and Grok
 //! desktop extensions: credential reading (credentials file / macOS Keychain /
-//! `~/.codex/auth.json`), Codex token refresh, the blocking HTTP fetches,
-//! parsing into the [`okena_core::api::ApiUsage`] wire model, the retry and
-//! backoff policy ([`provider`]), and history recording ([`history`]).
+//! `~/.codex/auth.json` / the Grok CLI session), Codex token refresh, the
+//! blocking HTTP fetches, parsing into the [`okena_core::api::ApiUsage`] wire
+//! model, the retry and backoff policy ([`provider`]), and history recording
+//! ([`history`]).
 //! [`pace`] holds the pure pace/severity/working-day math the desktop widgets
 //! render with.
 //!
@@ -16,6 +17,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod grok;
 pub mod history;
 pub mod pace;
 pub mod pool;
@@ -32,9 +34,15 @@ pub use provider::{FetchOutcome, ProviderData, ProviderTracker};
 pub const CLAUDE_EXTENSION_ID: &str = "claude-code";
 /// Extension id whose enablement turns Codex usage polling on.
 pub const CODEX_EXTENSION_ID: &str = "codex";
+/// Extension id whose enablement turns Grok usage polling on.
+pub const GROK_EXTENSION_ID: &str = "grok";
 
 /// Providers in wire order.
-pub const PROVIDERS: [ApiUsageProvider; 2] = [ApiUsageProvider::Claude, ApiUsageProvider::Codex];
+pub const PROVIDERS: [ApiUsageProvider; 3] = [
+    ApiUsageProvider::Claude,
+    ApiUsageProvider::Codex,
+    ApiUsageProvider::Grok,
+];
 
 /// Fetch Claude usage for `claude_dir` and record/attach history.
 pub fn fetch_claude(claude_dir: &Path) -> FetchOutcome {
@@ -57,6 +65,20 @@ pub fn fetch_codex() -> FetchOutcome {
         history::record_windows(
             history::Provider::Codex,
             account_id,
+            data.plan.clone(),
+            &mut data.windows,
+        );
+    }
+    outcome
+}
+
+/// Fetch Grok usage and record/attach history.
+pub fn fetch_grok() -> FetchOutcome {
+    let (mut outcome, user_id) = grok::fetch();
+    if let (FetchOutcome::Ok(data), Some(user_id)) = (&mut outcome, user_id) {
+        history::record_windows(
+            history::Provider::Grok,
+            user_id,
             data.plan.clone(),
             &mut data.windows,
         );

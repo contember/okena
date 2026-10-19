@@ -1,11 +1,11 @@
-//! Agent usage poller: fetches Claude Code / Codex rate-limit usage on the
+//! Agent usage poller: fetches Claude Code / Codex / Grok usage on the
 //! daemon's machine and publishes it into the remote server's [`UsageHub`].
 //!
 //! Which providers run is read from the daemon's own settings, the same keys
 //! the desktop extensions toggle: `enabled_extensions` contains `claude-code`
-//! / `codex`, `extension_settings."claude-code".config_dir` picks the Claude
-//! account, and `extension_settings.usage.working_days` is forwarded so
-//! clients compute pace the same way. Settings are re-read every
+//! / `codex` / `grok`, `extension_settings."claude-code".config_dir` picks
+//! the Claude account, and `extension_settings.usage.working_days` is
+//! forwarded so clients compute pace the same way. Settings are re-read every
 //! [`SETTINGS_POLL`] (cheap: one mutex lock, no I/O), so toggling an extension
 //! starts or stops polling within seconds.
 //!
@@ -35,7 +35,8 @@ use std::time::{Duration, Instant};
 
 use okena_agent_usage::pace::{USAGE_SETTINGS_KEY, WorkingDays};
 use okena_agent_usage::{
-    CLAUDE_EXTENSION_ID, CODEX_EXTENSION_ID, FetchOutcome, PROVIDERS, ProviderTracker,
+    CLAUDE_EXTENSION_ID, CODEX_EXTENSION_ID, FetchOutcome, GROK_EXTENSION_ID, PROVIDERS,
+    ProviderTracker,
 };
 use okena_core::api::{ApiUsage, ApiUsageProvider};
 use okena_remote_server::usage::{UsageHub, UsageRefresh};
@@ -58,9 +59,8 @@ pub fn default_fetcher() -> UsageFetcher {
             None => FetchOutcome::NoCredentials("No Claude config directory".into()),
         },
         ApiUsageProvider::Codex => okena_agent_usage::fetch_codex(),
-        ApiUsageProvider::Grok | ApiUsageProvider::Unknown => {
-            FetchOutcome::Failed("unknown provider".into())
-        }
+        ApiUsageProvider::Grok => okena_agent_usage::fetch_grok(),
+        ApiUsageProvider::Unknown => FetchOutcome::Failed("unknown provider".into()),
     })
 }
 
@@ -76,7 +76,8 @@ fn extension_id(provider: ApiUsageProvider) -> &'static str {
     match provider {
         ApiUsageProvider::Claude => CLAUDE_EXTENSION_ID,
         ApiUsageProvider::Codex => CODEX_EXTENSION_ID,
-        ApiUsageProvider::Grok | ApiUsageProvider::Unknown => "",
+        ApiUsageProvider::Grok => GROK_EXTENSION_ID,
+        ApiUsageProvider::Unknown => "",
     }
 }
 
@@ -473,10 +474,50 @@ mod tests {
     fn initial_usage_reflects_enabled_extensions() {
         let settings = settings_with(&["codex"]);
         let usage = initial_usage(&settings.lock());
-        assert_eq!(usage.providers.len(), 2);
+        assert_eq!(usage.providers.len(), 3);
         assert_eq!(usage.providers[0].status, ApiUsageStatus::Disabled);
         assert_eq!(usage.providers[1].status, ApiUsageStatus::Pending);
+        assert_eq!(usage.providers[2].provider, ApiUsageProvider::Grok);
+        assert_eq!(usage.providers[2].status, ApiUsageStatus::Disabled);
         assert_eq!(usage.working_days, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grok_toggle_starts_and_stops_polling() {
+        let settings = settings_with(&[]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher: UsageFetcher = {
+            let calls = calls.clone();
+            Arc::new(move |provider, dir| {
+                assert_eq!(provider, ApiUsageProvider::Grok, "only grok is enabled");
+                assert!(dir.is_none(), "only claude gets a config dir");
+                calls.fetch_add(1, Ordering::SeqCst);
+                ok_outcome()
+            })
+        };
+        let task = tokio::spawn(run_usage_poll_with(
+            settings.clone(),
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        settings
+            .lock()
+            .enabled_extensions
+            .insert(GROK_EXTENSION_ID.to_string());
+        let usage = wait_for(&hub, |u| u.providers[2].status == ApiUsageStatus::Ok).await;
+        assert_eq!(usage.providers[2].windows[0].used_percent, 42.0);
+        assert_eq!(usage.providers[0].status, ApiUsageStatus::Disabled);
+        assert_eq!(usage.providers[1].status, ApiUsageStatus::Disabled);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        settings.lock().enabled_extensions.clear();
+        wait_for(&hub, |u| u.providers[2].status == ApiUsageStatus::Disabled).await;
+        task.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
