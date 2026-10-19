@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use okena_core::api::{ApiPool, ApiUsage, ApiUsageProvider};
+use okena_core::api::{ApiPool, ApiUsage, ApiUsageProvider, ApiUsageStatus};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -45,11 +45,14 @@ struct UsageSources {
 }
 
 impl UsageSources {
-    /// The poller's snapshot with the pool in the Claude entry.
+    /// The poller's snapshot with the pool in the Claude entry, unless the
+    /// user turned Claude usage off.
     fn merged(&self) -> ApiUsage {
         let mut usage = self.polled.clone();
         for entry in &mut usage.providers {
-            if entry.provider == ApiUsageProvider::Claude {
+            if entry.provider == ApiUsageProvider::Claude
+                && entry.status != ApiUsageStatus::Disabled
+            {
                 entry.pool = self.pool.clone();
             }
         }
@@ -119,15 +122,16 @@ impl UsageHub {
         self.send(sources.merged(), now)
     }
 
-    /// A published change is stamped no earlier than `now`, so a pool change
-    /// between two polls never repeats the poller's `generated_at`; clients
-    /// drop only snapshots older than the one they have.
+    /// A published change is stamped no earlier than `now` nor the snapshot
+    /// it replaces, so a pool change between two polls never repeats the
+    /// poller's `generated_at` and a clock step back never makes clients drop
+    /// it as older than the one they have.
     fn send(&self, mut usage: ApiUsage, now: f64) -> bool {
         self.state.send_if_modified(|current| {
             let changed =
                 current.providers != usage.providers || current.working_days != usage.working_days;
             if changed {
-                usage.generated_at = usage.generated_at.max(now);
+                usage.generated_at = usage.generated_at.max(now).max(current.generated_at);
                 *current = usage;
             }
             changed
@@ -172,7 +176,7 @@ fn now_epoch() -> f64 {
 mod tests {
     use super::*;
     use okena_core::api::{
-        ApiPoolAmount, ApiPoolNonstop, ApiPoolPace, ApiPoolToday, ApiProviderUsage, ApiUsageStatus,
+        ApiPoolAmount, ApiPoolNonstop, ApiPoolPace, ApiPoolToday, ApiProviderUsage,
     };
 
     #[test]
@@ -295,8 +299,28 @@ mod tests {
 
         // Timestamp-only polls still publish nothing.
         next.generated_at = 400.0;
-        assert!(!hub.publish_at(next, 400.0));
+        assert!(!hub.publish_at(next.clone(), 400.0));
         assert_eq!(hub.snapshot().generated_at, 170.0);
+
+        // After the clock steps back, a change keeps the newest stamp.
+        next.providers[0].status = ApiUsageStatus::Error;
+        next.generated_at = 80.0;
+        assert!(hub.publish_at(next, 90.0));
+        assert_eq!(hub.snapshot().generated_at, 170.0);
+    }
+
+    #[test]
+    fn a_disabled_claude_entry_carries_no_pool() {
+        let hub = UsageHub::detached();
+        let mut disabled = polled(1.0);
+        disabled.providers[0].status = ApiUsageStatus::Disabled;
+        hub.publish(disabled);
+        hub.set_pool(Some(pool(3600.0)));
+        assert_eq!(claude_pool(&hub.snapshot()), None);
+
+        // Turning Claude usage back on shows the pool the proxy last gave.
+        hub.publish(polled(2.0));
+        assert_eq!(claude_pool(&hub.snapshot()), Some(pool(3600.0)));
     }
 
     #[tokio::test]
