@@ -43,8 +43,9 @@ pub struct ApiUsage {
     /// preference the desktop uses for its weekly pace marker.
     #[serde(default = "all_working_days")]
     pub working_days: Vec<u8>,
-    /// When the daemon produced this snapshot (epoch seconds). Compare with
-    /// the client clock to detect skew before computing pace.
+    /// When the daemon published this snapshot's latest change (epoch
+    /// seconds); never earlier than a snapshot it replaces. Compare with the
+    /// client clock to detect skew before computing pace.
     #[serde(default)]
     pub generated_at: f64,
 }
@@ -400,7 +401,8 @@ pub struct ApiPoolAccount {
     /// Weekly percent of this account used since the daemon's local midnight.
     pub used_today_percent: f64,
     /// The `five_hour` and `seven_day` windows, shaped like provider windows
-    /// and with their history.
+    /// but without `history`: the pool is republished as often as once a
+    /// minute, and clients draw only the bars.
     #[serde(default)]
     pub windows: Vec<ApiUsageWindow>,
 }

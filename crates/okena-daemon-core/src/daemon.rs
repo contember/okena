@@ -612,6 +612,7 @@ impl DaemonCore {
                 settings.clone(),
                 backend.clone(),
                 claude_pane_env.clone(),
+                usage_hub.clone(),
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),
