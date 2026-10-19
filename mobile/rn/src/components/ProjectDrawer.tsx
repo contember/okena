@@ -33,7 +33,7 @@ import {
   View,
   Text,
   Pressable,
-  ScrollView,
+  FlatList,
   TextInput,
   Modal,
   Animated,
@@ -41,18 +41,16 @@ import {
   useWindowDimensions,
 } from 'react-native';
 
-import {
-  useWorkspaceStore,
-  useConnectionStore,
-} from '../state';
+import { useWorkspaceStore, useConnectionStore } from '../state';
 import type { FolderInfo, OkenaNative, ProjectInfo } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import {
   buildProjectList,
   filterProjectList,
+  flattenProjectList,
   projectDisplayName,
   projectMatches,
-  type ProjectNode,
+  type ProjectListRow,
   type ProjectSignals,
 } from '../models';
 import { useSettingsStore } from '../state/settingsStore';
@@ -98,10 +96,21 @@ const DRAWER_WIDTH_FRACTION = 0.82;
 const DRAWER_MAX_WIDTH = 360;
 const INDENT_STEP = 16;
 
+type DrawerNative = Pick<
+  OkenaNative,
+  | 'focusTerminal'
+  | 'setProjectColor'
+  | 'setFolderColor'
+  | 'addProject'
+  | 'reorderProjectInFolder'
+  | 'closeTerminal'
+  | 'createTerminal'
+>;
+
 export interface ProjectDrawerProps {
   open: boolean;
   onClose: () => void;
-  native?: OkenaNative;
+  native?: DrawerNative;
 }
 
 export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
@@ -163,7 +172,21 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     () => buildProjectList(projects, folders, projectOrder),
     [projects, folders, projectOrder],
   );
-  const items = useMemo(() => filterProjectList(allItems, query), [allItems, query]);
+  const items = useMemo(
+    () => filterProjectList(allItems, query),
+    [allItems, query],
+  );
+  const manualRows = useMemo(() => flattenProjectList(items), [items]);
+  const projectFolders = useMemo(() => {
+    const byId = new Map<string, FolderInfo>();
+    for (const item of allItems) {
+      if (item.kind === 'folder') {
+        for (const node of item.projects)
+          byId.set(node.project.id, item.folder);
+      }
+    }
+    return byId;
+  }, [allItems]);
   // Activity order, frozen while the drawer is on screen (incl. its close).
   const allActivityRows = useActivityRows(open || mounted);
   const activityRows = useMemo(() => {
@@ -172,7 +195,17 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     return allActivityRows.filter((r) => projectMatches(r.project, needle));
   }, [allActivityRows, query]);
   const isActivity = sortMode === 'activity';
-  const shownCount = isActivity ? activityRows.length : items.length;
+  const rows: ProjectListRow[] = useMemo(
+    () =>
+      isActivity
+        ? activityRows.map(({ project }) => ({
+            kind: 'project',
+            project,
+            depth: 0,
+          }))
+        : manualRows,
+    [isActivity, activityRows, manualRows],
+  );
 
   if (!mounted) return null;
 
@@ -199,7 +232,8 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
     if (!connId) return;
     setColorPicker({
       current: project.folderColor,
-      onSelect: (color) => void native.setProjectColor(connId, project.id, color),
+      onSelect: (color) =>
+        void native.setProjectColor(connId, project.id, color),
     });
   };
 
@@ -218,7 +252,10 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
       </Animated.View>
 
       <Animated.View
-        style={[styles.drawer, { width: drawerWidth, transform: [{ translateX }] }]}
+        style={[
+          styles.drawer,
+          { width: drawerWidth, transform: [{ translateX }] },
+        ]}
       >
         {/* Header */}
         <View style={styles.header}>
@@ -253,82 +290,83 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
         </View>
 
         {/* Project / folder list */}
-        <ScrollView
+        <FlatList
           style={styles.flex}
+          data={rows}
+          initialNumToRender={12}
+          maxToRenderPerBatch={12}
+          windowSize={5}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           automaticallyAdjustKeyboardInsets
-        >
-          {shownCount === 0 && query.trim().length > 0 ? (
-            <Text style={styles.emptyText}>No matching projects</Text>
-          ) : null}
-          {isActivity
-            ? activityRows.map((row, i) => (
-                <React.Fragment key={`activity-${row.project.id}`}>
-                  {i === 0 || activityRows[i - 1]!.tier !== row.tier ? (
-                    <TierHeader tier={row.tier} />
-                  ) : null}
-                  <ProjectRow
-                    project={row.project}
-                    depth={0}
-                    signals={signals}
-                    selectedProjectId={selectedProjectId}
-                    selectedTerminalId={selectedTerminalId}
-                    connId={connId}
-                    native={native}
-                    onSelectProject={handleSelectProject}
-                    onSelectTerminal={handleSelectTerminal}
-                    onLongPress={() => openColorPickerForProject(row.project)}
+          keyExtractor={(row) =>
+            row.kind === 'folder' ? `folder-${row.folder.id}` : row.project.id
+          }
+          ListEmptyComponent={
+            query.trim() ? (
+              <Text style={styles.emptyText}>No matching projects</Text>
+            ) : null
+          }
+          renderItem={({ item, index }) => {
+            if (item.kind === 'folder') {
+              const color = folderColor(item.folder.folderColor);
+              return (
+                <Pressable
+                  style={styles.folderHeader}
+                  onLongPress={() => openColorPickerForFolder(item.folder)}
+                >
+                  <Icon
+                    name="caretRight"
+                    size={12}
+                    color={color}
+                    style={styles.folderIcon}
                   />
-                </React.Fragment>
-              ))
-            : items.map((item) =>
-            item.kind === 'folder' ? (
-              <FolderSection
-                key={`folder-${item.folder.id}`}
-                folder={item.folder}
-                projects={item.projects}
-                signals={signals}
-                selectedProjectId={selectedProjectId}
-                selectedTerminalId={selectedTerminalId}
-                connId={connId}
-                native={native}
-                onSelectProject={handleSelectProject}
-                onSelectTerminal={handleSelectTerminal}
-                onLongPressFolder={() => openColorPickerForFolder(item.folder)}
-                onLongPressProject={(project) => {
-                  // Index into the folder's own `projectIds` — the list the
-                  // daemon's `reorder_project_in_folder` indexes — not into the
-                  // (possibly filtered) displayed rows.
-                  const index = item.folder.projectIds.indexOf(project.id);
-                  if (index < 0) return;
-                  setReorder({
-                    project,
-                    folderId: item.folder.id,
-                    index,
-                    total: item.folder.projectIds.length,
-                  });
-                }}
-                onLongPressWorktree={openColorPickerForProject}
-              />
-            ) : (
-              <ProjectNodeRows
-                key={`project-${item.node.project.id}`}
-                node={item.node}
-                depth={0}
-                signals={signals}
-                selectedProjectId={selectedProjectId}
-                selectedTerminalId={selectedTerminalId}
-                connId={connId}
-                native={native}
-                onSelectProject={handleSelectProject}
-                onSelectTerminal={handleSelectTerminal}
-                onLongPressProject={openColorPickerForProject}
-                onLongPressWorktree={openColorPickerForProject}
-              />
-            ),
-          )}
-        </ScrollView>
+                  <Text style={[styles.folderName, { color }]}>
+                    {item.folder.name}
+                  </Text>
+                </Pressable>
+              );
+            }
+            const activity = isActivity ? activityRows[index] : undefined;
+            return (
+              <>
+                {activity &&
+                (index === 0 ||
+                  activityRows[index - 1]?.tier !== activity.tier) ? (
+                  <TierHeader tier={activity.tier} />
+                ) : null}
+                <ProjectRow
+                  project={item.project}
+                  depth={item.depth}
+                  signals={signals}
+                  selectedProjectId={selectedProjectId}
+                  selectedTerminalId={selectedTerminalId}
+                  connId={connId}
+                  native={native}
+                  onSelectProject={handleSelectProject}
+                  onSelectTerminal={handleSelectTerminal}
+                  onLongPress={() => {
+                    const folder = !isActivity
+                      ? projectFolders.get(item.project.id)
+                      : undefined;
+                    if (folder) {
+                      const folderIndex = folder.projectIds.indexOf(
+                        item.project.id,
+                      );
+                      if (folderIndex >= 0)
+                        setReorder({
+                          project: item.project,
+                          folderId: folder.id,
+                          index: folderIndex,
+                          total: folder.projectIds.length,
+                        });
+                    } else openColorPickerForProject(item.project);
+                  }}
+                />
+              </>
+            );
+          }}
+        />
 
         {/* Footer */}
         <View style={styles.divider} />
@@ -362,13 +400,20 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           }}
         >
           <View style={styles.footerIcon}>
-            <Icon name="disconnect" size={18} color={OkenaColors.textSecondary} />
+            <Icon
+              name="disconnect"
+              size={18}
+              color={OkenaColors.textSecondary}
+            />
           </View>
           <Text style={styles.footerText}>Disconnect</Text>
         </Pressable>
       </Animated.View>
 
-      <SettingsSheet visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsSheet
+        visible={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
 
       {/* Add Project dialog */}
       <AddProjectDialog
@@ -403,7 +448,12 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
           const r = reorder;
           setReorder(null);
           if (r && connId) {
-            void native.reorderProjectInFolder(connId, r.folderId, r.project.id, newIndex);
+            void native.reorderProjectInFolder(
+              connId,
+              r.folderId,
+              r.project.id,
+              newIndex,
+            );
           }
         }}
       />
@@ -419,67 +469,10 @@ interface RowCommon {
   selectedProjectId: string | null;
   selectedTerminalId: string | null;
   connId: string | null;
-  native: OkenaNative;
+  native: DrawerNative;
   onSelectProject: (project: ProjectInfo) => void;
   onSelectTerminal: (project: ProjectInfo, terminalId: string) => void;
 }
-
-const FolderSection: React.FC<
-  RowCommon & {
-    folder: FolderInfo;
-    projects: ProjectNode[];
-    onLongPressFolder: () => void;
-    onLongPressProject: (project: ProjectInfo) => void;
-    onLongPressWorktree: (project: ProjectInfo) => void;
-  }
-> = ({ folder, projects, onLongPressFolder, ...row }) => {
-  const color = folderColor(folder.folderColor);
-  return (
-    <View>
-      <Pressable style={styles.folderHeader} onLongPress={onLongPressFolder}>
-        <Icon name="caretRight" size={12} color={color} style={styles.folderIcon} />
-        <Text style={[styles.folderName, { color }]}>{folder.name}</Text>
-      </Pressable>
-      {projects.map((node) => (
-        <ProjectNodeRows
-          key={`folder-${folder.id}-${node.project.id}`}
-          node={node}
-          depth={1}
-          {...row}
-        />
-      ))}
-    </View>
-  );
-};
-
-// ── A project + its nested worktrees ────────────────────────────────────────
-
-const ProjectNodeRows: React.FC<
-  RowCommon & {
-    node: ProjectNode;
-    depth: number;
-    onLongPressProject: (project: ProjectInfo) => void;
-    onLongPressWorktree: (project: ProjectInfo) => void;
-  }
-> = ({ node, depth, onLongPressProject, onLongPressWorktree, ...row }) => (
-  <View>
-    <ProjectRow
-      project={node.project}
-      depth={depth}
-      {...row}
-      onLongPress={() => onLongPressProject(node.project)}
-    />
-    {node.worktrees.map((wt) => (
-      <ProjectRow
-        key={`worktree-${wt.id}`}
-        project={wt}
-        depth={depth + 1}
-        {...row}
-        onLongPress={() => onLongPressWorktree(wt)}
-      />
-    ))}
-  </View>
-);
 
 // ── Project row (+ inline expansion when selected) ──────────────────────────
 
@@ -504,7 +497,9 @@ const ProjectRow: React.FC<
 }) => {
   const isSelected = project.id === selectedProjectId;
   const color = folderColor(project.folderColor);
-  const runningServices = project.services.filter((s) => s.status === 'running').length;
+  const runningServices = project.services.filter(
+    (s) => s.status === 'running',
+  ).length;
 
   return (
     <View>
@@ -517,18 +512,29 @@ const ProjectRow: React.FC<
           name={project.parentProjectId ? 'gitBranch' : 'caretRight'}
           size={project.parentProjectId ? 15 : 14}
           color={isSelected ? OkenaColors.accent : color}
-          style={[styles.projectIcon, depth > 0 && { marginLeft: INDENT_STEP * depth }]}
+          style={[
+            styles.projectIcon,
+            depth > 0 && { marginLeft: INDENT_STEP * depth },
+          ]}
         />
         <View style={styles.flex}>
           <Text style={styles.projectName} numberOfLines={1}>
             {projectDisplayName(project)}
           </Text>
-          {(project.gitBranch && !project.parentProjectId) || runningServices > 0 ? (
+          {(project.gitBranch && !project.parentProjectId) ||
+          runningServices > 0 ? (
             <View style={styles.subtitleRow}>
               {project.gitBranch && !project.parentProjectId ? (
                 <>
-                  <Icon name="gitBranch" size={11} color={OkenaColors.textTertiary} />
-                  <Text style={[styles.subtitleText, styles.subtitleBranch]} numberOfLines={1}>
+                  <Icon
+                    name="gitBranch"
+                    size={11}
+                    color={OkenaColors.textTertiary}
+                  />
+                  <Text
+                    style={[styles.subtitleText, styles.subtitleBranch]}
+                    numberOfLines={1}
+                  >
                     {project.gitBranch}
                   </Text>
                 </>
@@ -538,7 +544,9 @@ const ProjectRow: React.FC<
                   <View
                     style={[
                       styles.runningDot,
-                      project.gitBranch && !project.parentProjectId && styles.runningDotSpaced,
+                      project.gitBranch &&
+                        !project.parentProjectId &&
+                        styles.runningDotSpaced,
                     ]}
                   />
                   <Text style={[styles.subtitleText, styles.subtitleRunning]}>
@@ -566,7 +574,11 @@ const ProjectRow: React.FC<
                 <Icon
                   name="prompt"
                   size={14}
-                  color={isTerminalSelected ? OkenaColors.accent : OkenaColors.textSecondary}
+                  color={
+                    isTerminalSelected
+                      ? OkenaColors.accent
+                      : OkenaColors.textSecondary
+                  }
                   style={styles.terminalIcon}
                 />
                 <Text
@@ -582,10 +594,15 @@ const ProjectRow: React.FC<
                 <Pressable
                   hitSlop={8}
                   onPress={() => {
-                    if (connId) void native.closeTerminal(connId, project.id, tid);
+                    if (connId)
+                      void native.closeTerminal(connId, project.id, tid);
                   }}
                 >
-                  <Icon name="close" size={14} color={OkenaColors.textTertiary} />
+                  <Icon
+                    name="close"
+                    size={14}
+                    color={OkenaColors.textTertiary}
+                  />
                 </Pressable>
               </Pressable>
             );
@@ -619,8 +636,8 @@ const StatusDot: React.FC<{ status: string }> = ({ status }) => {
     status === 'connected'
       ? OkenaColors.success
       : status === 'error'
-        ? OkenaColors.error
-        : OkenaColors.warning;
+      ? OkenaColors.error
+      : OkenaColors.warning;
   return <View style={[styles.dot, { backgroundColor: color }]} />;
 };
 
@@ -651,7 +668,12 @@ const AddProjectDialog: React.FC<{
   };
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
       <View style={styles.dialogBackdrop}>
         <View style={styles.dialog}>
           <Text style={styles.dialogTitle}>Add Project</Text>
@@ -677,7 +699,9 @@ const AddProjectDialog: React.FC<{
               <Text style={styles.dialogBtnText}>Cancel</Text>
             </Pressable>
             <Pressable style={styles.dialogBtn} onPress={submit}>
-              <Text style={[styles.dialogBtnText, styles.dialogBtnPrimary]}>Add</Text>
+              <Text style={[styles.dialogBtnText, styles.dialogBtnPrimary]}>
+                Add
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -694,7 +718,12 @@ const ColorPicker: React.FC<{
   onClose: () => void;
   onSelect: (color: string) => void;
 }> = ({ visible, current, onClose, onSelect }) => (
-  <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+  <Modal
+    visible={visible}
+    transparent
+    animationType="slide"
+    onRequestClose={onClose}
+  >
     <Pressable style={styles.sheetBackdrop} onPress={onClose} />
     <View style={styles.sheet}>
       <Text style={styles.sheetTitle}>Choose Color</Text>
@@ -711,7 +740,9 @@ const ColorPicker: React.FC<{
               ]}
               onPress={() => onSelect(name)}
             >
-              {selected ? <Icon name="check" size={18} strokeWidth={3} color="#ffffff" /> : null}
+              {selected ? (
+                <Icon name="check" size={18} strokeWidth={3} color="#ffffff" />
+              ) : null}
             </Pressable>
           );
         })}
@@ -723,7 +754,12 @@ const ColorPicker: React.FC<{
 // ── Reorder action sheet ────────────────────────────────────────────────────
 
 const ReorderSheet: React.FC<{
-  info: { project: ProjectInfo; folderId: string; index: number; total: number } | null;
+  info: {
+    project: ProjectInfo;
+    folderId: string;
+    index: number;
+    total: number;
+  } | null;
   onClose: () => void;
   onChangeColor: () => void;
   /**
@@ -786,8 +822,16 @@ const styles = StyleSheet.create({
     backgroundColor: OkenaColors.surfaceElevated,
     justifyContent: 'flex-start',
   },
-  headerTitle: { color: OkenaColors.textPrimary, fontSize: 22, fontWeight: '700' },
-  headerSubtitle: { color: OkenaColors.textSecondary, fontSize: 12, marginTop: 4 },
+  headerTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 22,
+    fontWeight: '700',
+  },
+  headerSubtitle: {
+    color: OkenaColors.textSecondary,
+    fontSize: 12,
+    marginTop: 4,
+  },
   statusRow: { flexDirection: 'row', alignItems: 'center' },
   statusText: { color: OkenaColors.textSecondary, fontSize: 12, marginLeft: 6 },
   dot: { width: 8, height: 8, borderRadius: 4 },
@@ -847,7 +891,10 @@ const styles = StyleSheet.create({
   terminalIcon: { marginRight: 8 },
   terminalName: { color: OkenaColors.textPrimary, fontSize: 14 },
   terminalSelected: { color: OkenaColors.accent },
-  divider: { height: StyleSheet.hairlineWidth, backgroundColor: OkenaColors.border },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: OkenaColors.border,
+  },
   footerItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -872,7 +919,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 20,
   },
-  dialogTitle: { color: OkenaColors.textPrimary, fontSize: 18, fontWeight: '600', marginBottom: 16 },
+  dialogTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
   dialogInput: {
     backgroundColor: OkenaColors.surface,
     borderRadius: 8,
@@ -881,7 +933,11 @@ const styles = StyleSheet.create({
     color: OkenaColors.textPrimary,
     marginBottom: 12,
   },
-  dialogActions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 4 },
+  dialogActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 4,
+  },
   dialogBtn: { paddingHorizontal: 16, paddingVertical: 8, marginLeft: 8 },
   dialogBtnText: { color: OkenaColors.textSecondary, fontSize: 14 },
   dialogBtnPrimary: { color: OkenaColors.accent, fontWeight: '600' },
@@ -894,7 +950,12 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 32,
   },
-  sheetTitle: { color: OkenaColors.textPrimary, fontSize: 16, fontWeight: '600', marginBottom: 12 },
+  sheetTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
   sheetItem: { paddingVertical: 14 },
   sheetItemText: { color: OkenaColors.textPrimary, fontSize: 15 },
   swatchWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },

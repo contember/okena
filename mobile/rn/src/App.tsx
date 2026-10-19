@@ -37,6 +37,7 @@ import {
 import { workspaceStore } from './state/workspaceStore';
 import { restoreForServer, sessionStore } from './state/sessionStore';
 import { bindSessionMemory, loadAndRestore } from './state/sessionRestore';
+import { onConnectionNotificationDisconnect } from './native/connectionService';
 import { settingsStore } from './state/settingsStore';
 import { OkenaColors } from './theme';
 
@@ -86,10 +87,13 @@ export const App: React.FC = () => {
     const unbindNav = bindConnectionToNavigation();
     const unbindWs = bindConnectionToWorkspace();
     const unbindSession = bindSessionMemory();
+    const unbindNotification = onConnectionNotificationDisconnect(() =>
+      connectionStore().getState().disconnect(),
+    );
     loadAndRestore().catch(() => {
       // A failed restore just leaves the user on the server list.
     });
-    // Pause reconnects in the background and retry at once on return.
+    // The store keeps background reconnects enabled while the Android service runs.
     const appState = AppState.addEventListener('change', (next) =>
       connectionStore().getState().onAppStateChange(next),
     );
@@ -98,6 +102,7 @@ export const App: React.FC = () => {
       unbindNav();
       unbindWs();
       unbindSession();
+      unbindNotification();
     };
   }, []);
 

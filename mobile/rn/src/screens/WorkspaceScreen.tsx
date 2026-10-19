@@ -40,20 +40,25 @@ import {
   KeyboardAvoidingView,
   Platform,
   Modal,
-  ScrollView,
+  FlatList,
   StyleSheet,
   TextInput,
 } from 'react-native';
 import { useFont } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useWorkspaceStore, useConnectionStore, selectIsReconnecting } from '../state';
+import {
+  useWorkspaceStore,
+  useConnectionStore,
+  selectIsReconnecting,
+} from '../state';
 import { ReconnectBanner } from '../components/ReconnectBanner';
 import {
   buildProjectList,
   filterProjectList,
   findTerminalPath,
   flattenProjectList,
+  type ProjectListRow,
   parseLayout,
   pickTerminal,
   projectDisplayName,
@@ -63,11 +68,22 @@ import {
   type ProjectSignals,
 } from '../models';
 import { useSettingsStore } from '../state/settingsStore';
-import { ActivityDot, TierHeader, useActivityRows } from '../components/projectActivity';
-import { getOkenaNative, type OkenaNative, type ProjectInfo } from '../native/okena';
+import {
+  ActivityDot,
+  TierHeader,
+  useActivityRows,
+} from '../components/projectActivity';
+import {
+  getOkenaNative,
+  type OkenaNative,
+  type ProjectInfo,
+} from '../native/okena';
 import { OkenaColors, TerminalTheme } from '../theme';
 import { TerminalTabs } from '../components/TerminalTabs';
-import { TerminalPane, type TerminalPaneHandle } from '../components/TerminalPane';
+import {
+  TerminalPane,
+  type TerminalPaneHandle,
+} from '../components/TerminalPane';
 import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
 import { Icon } from '../components/Icon';
@@ -87,10 +103,22 @@ export const WorkspaceScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   // ── fonts (Skia useFont; null until loaded) ────────────────────────────────
   const fontSize = TerminalTheme.defaultFontSize;
-  const regular = useFont(require('../../assets/JetBrainsMono-Regular.ttf'), fontSize);
-  const bold = useFont(require('../../assets/JetBrainsMono-Bold.ttf'), fontSize);
-  const italic = useFont(require('../../assets/JetBrainsMono-Italic.ttf'), fontSize);
-  const boldItalic = useFont(require('../../assets/JetBrainsMono-BoldItalic.ttf'), fontSize);
+  const regular = useFont(
+    require('../../assets/JetBrainsMono-Regular.ttf'),
+    fontSize,
+  );
+  const bold = useFont(
+    require('../../assets/JetBrainsMono-Bold.ttf'),
+    fontSize,
+  );
+  const italic = useFont(
+    require('../../assets/JetBrainsMono-Italic.ttf'),
+    fontSize,
+  );
+  const boldItalic = useFont(
+    require('../../assets/JetBrainsMono-BoldItalic.ttf'),
+    fontSize,
+  );
 
   const fonts: TerminalFonts | null = useMemo(
     () =>
@@ -119,15 +147,21 @@ export const WorkspaceScreen: React.FC = () => {
   const secondsSinceActivity = useWorkspaceStore((s) => s.secondsSinceActivity);
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
-  const restoreProjectMissing = useWorkspaceStore((s) => s.restoreProjectMissing);
-  const clearRestoreProjectMissing = useWorkspaceStore((s) => s.clearRestoreProjectMissing);
+  const restoreProjectMissing = useWorkspaceStore(
+    (s) => s.restoreProjectMissing,
+  );
+  const clearRestoreProjectMissing = useWorkspaceStore(
+    (s) => s.clearRestoreProjectMissing,
+  );
   const previousProjectId = useWorkspaceStore((s) => s.previousProjectId);
   const signals = useWorkspaceStore((s) => s.projectSignals);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
     if (selectedProjectId === null) return projects[0] ?? null;
-    return projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null;
+    return (
+      projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null
+    );
   }, [projects, selectedProjectId]);
 
   const connId = useConnectionStore((s) => s.connId);
@@ -165,7 +199,10 @@ export const WorkspaceScreen: React.FC = () => {
     if (needle.length > 0) {
       return activityRows
         .filter((r) => projectMatches(r.project, needle))
-        .map((r) => ({ project: r.project, tier: undefined as ActivityTier | undefined }));
+        .map((r) => ({
+          project: r.project,
+          tier: undefined as ActivityTier | undefined,
+        }));
     }
     const { top, rest } = splitSwitcherRows(
       activityRows,
@@ -173,7 +210,10 @@ export const WorkspaceScreen: React.FC = () => {
       previousProjectId,
     );
     return [
-      ...top.map((r) => ({ project: r.project, tier: undefined as ActivityTier | undefined })),
+      ...top.map((r) => ({
+        project: r.project,
+        tier: undefined as ActivityTier | undefined,
+      })),
       ...rest.map((r, i) => ({
         project: r.project,
         tier: i === 0 || rest[i - 1]!.tier !== r.tier ? r.tier : undefined,
@@ -181,7 +221,6 @@ export const WorkspaceScreen: React.FC = () => {
     ];
   }, [activityRows, switcherQuery, project?.id, previousProjectId]);
   const isActivity = sortMode === 'activity';
-  const switcherCount = isActivity ? activitySwitcherRows.length : manualRows.length;
   const closeSwitcher = () => {
     setSwitcherOpen(false);
     setSwitcherQuery('');
@@ -204,10 +243,10 @@ export const WorkspaceScreen: React.FC = () => {
   const dotColor = reconnecting
     ? OkenaColors.warning
     : secondsSinceActivity < 3
-      ? OkenaColors.success
-      : secondsSinceActivity < 10
-        ? OkenaColors.warning
-        : OkenaColors.error;
+    ? OkenaColors.success
+    : secondsSinceActivity < 10
+    ? OkenaColors.warning
+    : OkenaColors.error;
 
   const projectName = project ? projectDisplayName(project) : 'No Project';
 
@@ -219,7 +258,9 @@ export const WorkspaceScreen: React.FC = () => {
   const onSplit = (direction: 'vertical' | 'horizontal') => {
     if (!connId || !project) return;
     const path =
-      layoutNode && activeTerminalId ? (findTerminalPath(layoutNode, activeTerminalId) ?? []) : [];
+      layoutNode && activeTerminalId
+        ? findTerminalPath(layoutNode, activeTerminalId) ?? []
+        : [];
     void native?.splitTerminal(connId, project.id, path, direction);
   };
 
@@ -267,13 +308,26 @@ export const WorkspaceScreen: React.FC = () => {
     );
   };
 
-  const showToolbar = connId !== null && project !== null && activeTerminalId !== null;
+  const switcherRows: ProjectListRow[] = isActivity
+    ? activitySwitcherRows.map(({ project: entry }) => ({
+        kind: 'project',
+        project: entry,
+        depth: 0,
+      }))
+    : manualRows;
+
+  const showToolbar =
+    connId !== null && project !== null && activeTerminalId !== null;
 
   return (
     <View style={styles.root}>
       {/* App bar */}
       <View style={styles.appBar}>
-        <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setDrawerOpen(true)}>
+        <Pressable
+          hitSlop={8}
+          style={styles.appBarBtn}
+          onPress={() => setDrawerOpen(true)}
+        >
           <Icon name="menu" size={22} color={OkenaColors.textPrimary} />
         </Pressable>
         <Pressable
@@ -285,20 +339,35 @@ export const WorkspaceScreen: React.FC = () => {
             {projectName}
           </Text>
           {projects.length > 1 ? (
-            <Icon name="caretDown" size={14} color={OkenaColors.textSecondary} style={styles.titleCaret} />
+            <Icon
+              name="caretDown"
+              size={14}
+              color={OkenaColors.textSecondary}
+              style={styles.titleCaret}
+            />
           ) : null}
         </Pressable>
         <View style={styles.flexSpacer} />
-        {connId ? <View style={[styles.dot, { backgroundColor: dotColor }]} /> : null}
+        {connId ? (
+          <View style={[styles.dot, { backgroundColor: dotColor }]} />
+        ) : null}
         {connId && project ? (
-          <Pressable hitSlop={8} style={styles.appBarBtn} onPress={() => setActionsOpen(true)}>
+          <Pressable
+            hitSlop={8}
+            style={styles.appBarBtn}
+            onPress={() => setActionsOpen(true)}
+          >
             <Icon name="plus" size={22} color={OkenaColors.textPrimary} />
           </Pressable>
         ) : null}
       </View>
 
       {reconnecting ? (
-        <ReconnectBanner status={connStatus} since={connectingSince} onRetry={retryNow} />
+        <ReconnectBanner
+          status={connStatus}
+          since={connectingSince}
+          onRetry={retryNow}
+        />
       ) : null}
 
       {connId && project && project.terminalIds.length > 1 ? (
@@ -336,7 +405,11 @@ export const WorkspaceScreen: React.FC = () => {
       </KeyboardAvoidingView>
 
       {/* Drawer */}
-      <ProjectDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} native={native} />
+      <ProjectDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        native={native}
+      />
 
       {/* Project switcher */}
       <Modal
@@ -361,60 +434,59 @@ export const WorkspaceScreen: React.FC = () => {
               returnKeyType="search"
               keyboardAppearance="dark"
             />
-            <ScrollView
+            <FlatList
+              data={switcherRows}
+              initialNumToRender={12}
+              maxToRenderPerBatch={12}
+              windowSize={5}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
               automaticallyAdjustKeyboardInsets
-            >
-              {switcherCount === 0 ? (
-                <Text style={[styles.menuItem, styles.dim]}>No matching projects</Text>
-              ) : null}
-              {isActivity
-                ? activitySwitcherRows.map(({ project: p, tier }) => (
-                    <React.Fragment key={p.id}>
-                      {tier ? <TierHeader tier={tier} style={styles.menuTier} /> : null}
-                      <SwitcherRow
-                        project={p}
-                        depth={0}
-                        selected={p.id === project?.id}
-                        previous={p.id === previousProjectId && p.id !== project?.id}
-                        signals={signals[p.id]}
-                        onPress={() => {
-                          selectProject(p.id);
-                          closeSwitcher();
-                        }}
-                      />
-                    </React.Fragment>
-                  ))
-                : manualRows.map((row) => {
-                    if (row.kind === 'folder') {
-                      return (
-                        <Text
-                          key={`folder-${row.folder.id}`}
-                          style={styles.menuFolder}
-                          numberOfLines={1}
-                        >
-                          {row.folder.name}
-                        </Text>
-                      );
-                    }
-                    const { project: p, depth } = row;
-                    return (
-                      <SwitcherRow
-                        key={p.id}
-                        project={p}
-                        depth={depth}
-                        selected={p.id === project?.id}
-                        previous={false}
-                        signals={signals[p.id]}
-                        onPress={() => {
-                          selectProject(p.id);
-                          closeSwitcher();
-                        }}
-                      />
-                    );
-                  })}
-            </ScrollView>
+              keyExtractor={(row) =>
+                row.kind === 'folder'
+                  ? `folder-${row.folder.id}`
+                  : row.project.id
+              }
+              ListEmptyComponent={
+                <Text style={[styles.menuItem, styles.dim]}>
+                  No matching projects
+                </Text>
+              }
+              renderItem={({ item, index }) => {
+                if (item.kind === 'folder') {
+                  return (
+                    <Text style={styles.menuFolder} numberOfLines={1}>
+                      {item.folder.name}
+                    </Text>
+                  );
+                }
+                const tier = isActivity
+                  ? activitySwitcherRows[index]?.tier
+                  : undefined;
+                return (
+                  <>
+                    {tier ? (
+                      <TierHeader tier={tier} style={styles.menuTier} />
+                    ) : null}
+                    <SwitcherRow
+                      project={item.project}
+                      depth={item.depth}
+                      selected={item.project.id === project?.id}
+                      previous={
+                        isActivity &&
+                        item.project.id === previousProjectId &&
+                        item.project.id !== project?.id
+                      }
+                      signals={signals[item.project.id]}
+                      onPress={() => {
+                        selectProject(item.project.id);
+                        closeSwitcher();
+                      }}
+                    />
+                  </>
+                );
+              }}
+            />
           </Pressable>
         </Pressable>
       </Modal>
@@ -426,7 +498,10 @@ export const WorkspaceScreen: React.FC = () => {
         animationType="slide"
         onRequestClose={() => setActionsOpen(false)}
       >
-        <Pressable style={styles.sheetBackdrop} onPress={() => setActionsOpen(false)} />
+        <Pressable
+          style={styles.sheetBackdrop}
+          onPress={() => setActionsOpen(false)}
+        />
         <View style={styles.sheet}>
           <ActionItem
             label="New Terminal"
@@ -468,9 +543,15 @@ const SwitcherRow: React.FC<{
   signals?: ProjectSignals;
   onPress: () => void;
 }> = ({ project: p, depth, selected, previous, signals, onPress }) => (
-  <Pressable style={[styles.menuItem, styles.menuRow, { paddingLeft: 16 + depth * 12 }]} onPress={onPress}>
+  <Pressable
+    style={[styles.menuItem, styles.menuRow, { paddingLeft: 16 + depth * 12 }]}
+    onPress={onPress}
+  >
     <View style={styles.flexShrink}>
-      <Text style={[styles.menuItemText, selected && styles.menuItemSelected]} numberOfLines={1}>
+      <Text
+        style={[styles.menuItemText, selected && styles.menuItemSelected]}
+        numberOfLines={1}
+      >
         {projectDisplayName(p)}
       </Text>
       {p.gitBranch && !p.parentProjectId ? (
@@ -494,7 +575,10 @@ const Centered: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <View style={styles.centered}>{children}</View>
 );
 
-const ActionItem: React.FC<{ label: string; onPress: () => void }> = ({ label, onPress }) => (
+const ActionItem: React.FC<{ label: string; onPress: () => void }> = ({
+  label,
+  onPress,
+}) => (
   <Pressable style={styles.sheetItem} onPress={onPress}>
     <Text style={styles.sheetItemText}>{label}</Text>
   </Pressable>
@@ -515,10 +599,20 @@ const styles = StyleSheet.create({
   },
   appBarBtn: { padding: 8 },
   titleWrap: { flexDirection: 'row', alignItems: 'center', flexShrink: 1 },
-  title: { color: OkenaColors.textPrimary, fontSize: 17, fontWeight: '600', flexShrink: 1 },
+  title: {
+    color: OkenaColors.textPrimary,
+    fontSize: 17,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
   titleCaret: { marginLeft: 4 },
   dot: { width: 8, height: 8, borderRadius: 4, marginHorizontal: 6 },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  centered: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
   dim: { color: OkenaColors.textTertiary, fontSize: 14 },
   primaryBtn: {
     marginTop: 16,
@@ -529,7 +623,12 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
   // project switcher menu
-  menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', paddingTop: 96, paddingLeft: 48 },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    paddingTop: 96,
+    paddingLeft: 48,
+  },
   menu: {
     backgroundColor: OkenaColors.surfaceElevated,
     borderRadius: 10,
@@ -564,7 +663,12 @@ const styles = StyleSheet.create({
   flexShrink: { flexShrink: 1 },
   menuItemSelected: { color: OkenaColors.accent, fontWeight: '700' },
   menuBranchRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  menuBranch: { color: OkenaColors.textTertiary, fontSize: 11, marginLeft: 4, flexShrink: 1 },
+  menuBranch: {
+    color: OkenaColors.textTertiary,
+    fontSize: 11,
+    marginLeft: 4,
+    flexShrink: 1,
+  },
   // action sheet
   sheetBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
   sheet: {
