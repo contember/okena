@@ -252,7 +252,7 @@ impl ClaudeUsage {
         };
         let (title, plan, body) = match &self.active {
             Trigger::Account(key) => {
-                let Some(detail) = self.render_account_detail(key, working, t, cx) else {
+                let Some(detail) = self.render_account_detail(key, t, cx) else {
                     return div().size_0().into_any_element();
                 };
                 ("CLAUDE ACCOUNT", None, detail)
@@ -272,7 +272,7 @@ impl ClaudeUsage {
                 let detail = self
                     .pool_detail
                     .as_ref()
-                    .and_then(|key| self.render_account_detail(key, working, t, cx));
+                    .and_then(|key| self.render_account_detail(key, t, cx));
                 let body = match detail {
                     Some(detail) => {
                         let entity = cx.entity().downgrade();
@@ -297,8 +297,7 @@ impl ClaudeUsage {
                                     cx.notify();
                                 });
                             });
-                        crate::pool_summary::render_body(&summary, working, open, t, cx)
-                            .into_any_element()
+                        crate::pool_summary::render_body(&summary, open, t, cx).into_any_element()
                     }
                 };
                 ("CLAUDE POOL", summary.host_name.clone(), body)
@@ -357,12 +356,19 @@ impl ClaudeUsage {
         .into_any_element()
     }
 
+    /// The working days `connection_id`'s daemon computes its usage with.
+    fn host_working_days(&self, connection_id: &str, cx: &App) -> WorkingDays {
+        self.store.read(cx).host_usage(connection_id).map_or_else(
+            || read_working_days(cx),
+            |usage| WorkingDays::from_indices(&usage.working_days),
+        )
+    }
+
     /// One pool account's usage with its history chart, or `None` when the
     /// account is gone.
     fn render_account_detail(
         &self,
         key: &AccountKey,
-        working: WorkingDays,
         t: &ThemeColors,
         cx: &App,
     ) -> Option<AnyElement> {
@@ -370,6 +376,7 @@ impl ClaudeUsage {
             .pool
             .iter()
             .find(|host| host.connection_id == key.connection_id)?;
+        let working = self.host_working_days(&key.connection_id, cx);
         let account = host
             .accounts
             .iter()
@@ -518,9 +525,8 @@ impl Render for ClaudeUsage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        let working = read_working_days(cx);
         let triggers = if self.pool.is_empty() {
-            let items = login_trigger_items(working, cx);
+            let items = login_trigger_items(read_working_days(cx), cx);
             if items.is_empty() {
                 return div().size_0().into_any_element();
             }
@@ -529,6 +535,7 @@ impl Render for ClaudeUsage {
             let display = PoolDisplay::read(cx);
             let mut triggers = Vec::new();
             for host in &self.pool {
+                let working = self.host_working_days(&host.connection_id, cx);
                 let pool_content = if display.summary() {
                     self.store
                         .read(cx)

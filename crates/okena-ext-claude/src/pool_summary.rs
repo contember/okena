@@ -41,8 +41,8 @@ pub(crate) struct HostSummary<'a> {
     /// `None` for the local daemon.
     pub host_name: Option<String>,
     pool: &'a ApiPool,
-    /// The host's working days are every day, so it has no days off to show.
-    works_every_day: bool,
+    /// The host's working days, which its pool numbers were computed with.
+    working: WorkingDays,
     accounts: Vec<AccountShare<'a>>,
 }
 
@@ -70,7 +70,7 @@ pub(crate) fn summarize<'a>(host: &HostAiAccounts, usage: &'a ApiUsage) -> Optio
         host_name: (host.connection_id != LOCAL_DAEMON_CONNECTION_ID)
             .then(|| host.host_name.clone()),
         pool,
-        works_every_day: WorkingDays::from_indices(&usage.working_days).is_all(),
+        working: WorkingDays::from_indices(&usage.working_days),
         accounts,
     })
 }
@@ -247,10 +247,8 @@ pub(crate) fn render_trigger(
     Some(items)
 }
 
-/// `working` is this desktop's working days, for the account bars' grid.
 pub(crate) fn render_body(
     summary: &HostSummary,
-    working: WorkingDays,
     open_account: OpenAccount,
     t: &ThemeColors,
     cx: &App,
@@ -353,7 +351,7 @@ pub(crate) fn render_body(
                         },
                     ))
                     .when(
-                        !summary.works_every_day && today.off_day.account_week_percent > 0.0,
+                        !summary.working.is_all() && today.off_day.account_week_percent > 0.0,
                         |el| {
                             el.child(muted(format!(
                                 "Days off use {} each, as last week.",
@@ -379,7 +377,7 @@ pub(crate) fn render_body(
                 summary
                     .accounts
                     .iter()
-                    .map(|share| render_share(share, working, open_account.clone(), t, cx)),
+                    .map(|share| render_share(share, summary.working, open_account.clone(), t, cx)),
             ),
     )
 }
@@ -651,7 +649,7 @@ mod tests {
         let usage = usage(Some(pool(2.0)));
         let local = summarize(&host(LOCAL_DAEMON_CONNECTION_ID), &usage).unwrap();
         assert_eq!(local.host_name, None);
-        assert!(!local.works_every_day);
+        assert!(!local.working.is_all());
         let remote = summarize(&host("remote"), &usage).unwrap();
         assert_eq!(remote.host_name.as_deref(), Some("studio"));
         let share = &remote.accounts[0];
