@@ -27,12 +27,12 @@ The directory contains:
 
 ## Usage limit history
 
-The Claude, Codex, and Grok desktop widgets append each successful usage fetch to
-`usage-history/claude.jsonl`, `usage-history/codex.jsonl`, and
+The daemon's usage poller appends each successful Claude, Codex, and Grok usage
+fetch to `usage-history/claude.jsonl`, `usage-history/codex.jsonl`, and
 `usage-history/grok.jsonl` under the config
 directory above. These files are shared across Okena profiles. Collection runs
-while the widgets are active, normally every five minutes; opening a popover can
-trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
+while the provider's extension is enabled, normally every five minutes; opening a
+popover can trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
 responses without recognized limits do not add samples.
 
 Each line is a versioned JSON object with `version: 1`, `recorded_at`, `provider`,

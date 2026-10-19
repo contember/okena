@@ -83,7 +83,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-remote-server` | The HTTP/WS server itself: routes, auth/pairing, PTY broadcaster, daemon bridge, local-daemon discovery. |
 | `okena-cli` | `okena <subcommand>` — controls a running instance over the remote HTTP API. Gated before GUI startup in `main.rs`. |
 | `okena-tui` | Proof-of-concept terminal UI client for a running daemon. |
-| `okena-agent-usage` | GPUI-free agent usage core: Claude/Codex credentials (file, macOS Keychain, `~/.codex/auth.json` + token refresh), usage fetch + parsing into `ApiUsage`, retry/backoff, history, pace/working-days math. Driven by the daemon's `usage_poll`. |
+| `okena-agent-usage` | GPUI-free agent usage core: Claude/Codex/Grok credentials (file, macOS Keychain, `~/.codex/auth.json` + token refresh, the Grok CLI session), usage fetch + parsing into `ApiUsage`, retry/backoff, history, pace/working-days math, and the AI proxy pool model + summary. Driven by the daemon's `usage_poll` and `ai_proxy`. |
 | `okena-usage` | GPUI usage-bar UI behind the Claude/Codex/Grok widgets, plus `GlobalDaemonUsage` (the desktop mirror of the daemon's usage snapshot). Re-exports the pure math from `okena-agent-usage`. |
 
 ## Module-Specific Context

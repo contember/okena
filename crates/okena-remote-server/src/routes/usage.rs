@@ -1,5 +1,6 @@
 //! `GET /v1/usage` and `POST /v1/usage/refresh` — agent usage (Claude Code /
-//! Codex rate limits) measured on the daemon's machine.
+//! Codex / Grok rate limits, and the AI proxy's account pool) measured on the
+//! daemon's machine.
 
 use crate::routes::AppState;
 use axum::Json;

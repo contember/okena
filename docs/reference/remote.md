@@ -193,7 +193,9 @@ Get the visible terminal viewport as text.
 
 ### `GET /v1/usage`
 
-Claude Code / Codex rate-limit usage measured on the daemon's machine. Bearer
+Claude Code / Codex / Grok rate-limit usage measured on the daemon's machine,
+and the AI proxy's account pool while new shells route through it (`pool` on
+the Claude entry, see [ai-proxy.md](ai-proxy.md)). Bearer
 auth like the other `/v1` routes. Returns `ApiUsage`
 (`crates/okena-core/src/usage.rs` is the schema, with field docs):
 

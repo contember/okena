@@ -156,7 +156,13 @@ settings choose any combination of three items per host:
 Today and Nonstop weigh accounts by plan size (Pro 1, Max 5x 5, Max 20x 20),
 from the `rate_limit_tier` of the OAuth profile. The proxy stores
 it at login; accounts logged in before learn it once per proxy process from the
-usage poll. Hovering either item opens the pool popover with one section per
+usage poll.
+
+The host's daemon computes the pool, in its own time zone and with its working
+days, and publishes it as `pool` in the Claude entry of the usage channel
+(`GET /v1/usage`, `usage_changed`). The desktop and the mobile app only render
+it, for every connected host. The pool is recomputed on each accounts poll in
+whole minutes, so it republishes at most once a minute. Hovering either item opens the pool popover with one section per
 limit; an (i) next to Today and Nonstop explains each value in a tooltip. The
 soft-limit section adds today's use, the safe daily use, and where the last 24
 hours' pace runs short. One row per account follows, with a 5h and a 7d bar
@@ -167,11 +173,12 @@ Successful five-minute usage polls append quota samples to
 `<profile>/ai-proxy/usage-history/claude.jsonl`, keyed by account ID. Collection
 continues while the proxy runs, even with the desktop closed. Samples survive
 proxy restarts; history begins with the first successful poll after upgrading.
-The popup loads the selected account's last seven days through the authenticated
-`usage_history` management command, at most once a minute across desktop windows.
-While Today or Nonstop is shown, every pool account's history is loaded the same
-way.
-History is omitted from ordinary status and workspace snapshots. The shared
+While new shells route through the proxy, the daemon loads every in-service
+account's last seven days through the authenticated `usage_history` management
+command, at most once a minute per account, to compute the pool. The popup loads
+the selected account's history the same way for its chart, at most once a minute
+across desktop windows. History is omitted from ordinary status and workspace
+snapshots and from the published pool. The shared
 storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
 them without owning proxy persistence.
 

@@ -111,7 +111,7 @@ WS "state_changed" / initial connect → RemoteClient fetches GET /v1/state
   → RN stores poll getProjects()/getFolders()/getProjectLayoutJson() (1s)
 ```
 
-### Agent usage (Claude Code / Codex)
+### Agent usage (Claude Code / Codex / Grok)
 
 ```
 WS "usage_changed" → ConnectionManager stores ApiUsage per connection, bumps a revision
@@ -119,13 +119,18 @@ WS "usage_changed" → ConnectionManager stores ApiUsage per connection, bumps a
 ```
 
 The app bar shows one small ring per enabled, signed-in provider (`UsageIndicator`), colored by the
-desktop's `max(abs, pace)` severity. Tapping it, or Usage in the drawer footer, opens `UsageSheet`,
+desktop's `max(abs, pace)` severity. While the host routes shells through the AI proxy, the Claude
+entry carries the daemon's account pool: the app bar then shows its Today value in its severity
+color, and the sheet shows the pool (Today, Nonstop, the daily budget and one row per account with
+5h and 7d bars) instead of the login's windows. The daemon computes the pool; the app only formats
+it (`buildPoolView` in `src/models/usage.ts`). Tapping it, or Usage in the drawer footer, opens `UsageSheet`,
 which calls `requestUsageRefresh` on open (the daemon throttles to once a minute per provider). It
 resolves to whether a fetch is running; when it is not (throttled), the spinner ends at once.
 `src/models/usage.ts` ports the pace math of `okena-agent-usage::pace`, including the working-day
 reshaping of weekly windows, and the desktop popover's display rules, so both clients show the same
 numbers (golden tests in `usage.test.ts` and `pace.rs` pin shared values). Codex rows are
-titled by window length ("5-hour limit", "Weekly limit") on both clients. Times use the phone's clock and zone; clock skew against the daemon is not corrected.
+titled by window length ("5-hour limit", "Weekly limit") on both clients; Grok rows ("Credits",
+"On-demand") keep the desktop's billing-period badge. Times use the phone's clock and zone; clock skew against the daemon is not corrected.
 
 ### Presentation: one terminal at a time
 

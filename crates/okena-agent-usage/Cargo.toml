@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
-# GPUI-free agent usage core: Claude Code / Codex credential reading, token
+# GPUI-free agent usage core: Claude Code / Codex / Grok credential reading, token
 # refresh, usage fetch + parsing into the `okena_core::api::ApiUsage` wire
 # model, retry/backoff policy, history recording, and the pure pace/severity
 # math. Linked by the headless daemon, so it must never depend on gpui.
