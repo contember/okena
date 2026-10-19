@@ -9,7 +9,7 @@ import React from 'react';
 import { Text } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 
-import type { UsageInfo } from '../native/okena';
+import type { PoolInfo, UsageInfo } from '../native/okena';
 import { UsageIndicator } from './UsageIndicator';
 import { UsageSheet } from '../screens/UsageSheet';
 
@@ -36,6 +36,51 @@ function texts(renderer: TestRenderer.ReactTestRenderer): string[] {
       const c = t.props.children;
       return Array.isArray(c) ? c.join('') : String(c ?? '');
     });
+}
+
+function samplePool(now: number, leftSeconds: number): PoolInfo {
+  const amount = (workSeconds: number, accountWeekPercent: number) => ({ workSeconds, accountWeekPercent });
+  return {
+    today: {
+      left: amount(leftSeconds, 2),
+      used: amount(3_720, 4),
+      safePerDay: amount(7_200, 7),
+      offDay: amount(0, 0),
+    },
+    nonstop: { kind: 'blocked', until: now + 600 },
+    pace: { sessionFillSeconds: 7_200, sessionWeekPercent: 10, fromHistory: true },
+    accounts: [
+      {
+        id: 'a1',
+        label: 'Work',
+        tier: 'Max 5x',
+        blocked: '7d limit',
+        usedTodayPercent: 2,
+        windows: [
+          {
+            id: 'five_hour',
+            label: 'Session',
+            kind: 'five_hour',
+            usedPercent: 30,
+            windowSeconds: 18_000,
+            resetAt: now + 9_000,
+            active: true,
+            history: [],
+          },
+          {
+            id: 'seven_day',
+            label: 'Weekly',
+            kind: 'weekly',
+            usedPercent: 100,
+            windowSeconds: 604_800,
+            resetAt: now + 86_400,
+            active: true,
+            history: [],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 describe('UsageIndicator', () => {
@@ -107,6 +152,17 @@ describe('UsageIndicator', () => {
     );
     act(() => button.props.onPress());
     expect(onPress).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
+  it("shows the pool's Today as text instead of Claude's ring", () => {
+    const pooled = indicatorUsage(20, now + 9_000);
+    pooled.providers[0] = { ...pooled.providers[0]!, pool: samplePool(now, -45 * 60) };
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(<UsageIndicator usage={pooled} onPress={() => {}} />);
+    });
+    expect(texts(renderer)).toEqual(['45m over', 'C', '–', 'X']);
     act(() => renderer.unmount());
   });
 
@@ -233,6 +289,67 @@ describe('UsageSheet', () => {
     };
     const all = texts(render({ usage: fast }).renderer);
     expect(all).toContain('Slow down to last the period');
+  });
+
+  it('shows a Grok section with its prepaid balance', () => {
+    const grok: UsageInfo = {
+      ...usage,
+      providers: [
+        {
+          provider: 'grok',
+          status: 'ok',
+          fetching: false,
+          consecutiveFailures: 0,
+          prepaidBalance: 15.5,
+          windows: [
+            {
+              id: 'included',
+              label: 'Credits',
+              kind: 'other',
+              usedPercent: 40,
+              windowSeconds: 2_592_000,
+              resetAt: now + 864_000,
+              active: true,
+              history: [],
+            },
+          ],
+        },
+      ],
+    };
+    const all = texts(render({ usage: grok }).renderer);
+    expect(all).toContain('GROK');
+    expect(all).toContain('Credits');
+    expect(all).toContain('40%');
+    expect(all).toContain('Prepaid');
+    expect(all).toContain('15.50');
+  });
+
+  it("shows Claude's account pool instead of the login's windows", () => {
+    const pooled: UsageInfo = {
+      ...usage,
+      providers: [{ ...usage.providers[0]!, pool: samplePool(now, 3 * 3_600) }],
+    };
+    const { renderer } = render({ usage: pooled });
+    const all = texts(renderer);
+    expect(all).toContain('CLAUDE POOL');
+    expect(all).not.toContain('Session'); // the login's window
+    expect(all).not.toContain('Extra usage');
+    expect(all).toContain('Today');
+    expect(all).toContain('3h00m left');
+    expect(all.some((t) => t.startsWith('Work up to this and every working day'))).toBe(true);
+    expect(all).toContain('Used today');
+    expect(all).toContain('1h02m (4%)');
+    expect(all).toContain('Safe per working day');
+    expect(all).toContain("At the last 24h's pace");
+    expect(all).toContain('lasts the week');
+    expect(all).toContain('Nonstop');
+    expect(all).toContain('blocked');
+    expect(all).toContain('Every account has hit its 5h or weekly limit; the first is back today 11:10.');
+    expect(all).toContain('Work');
+    expect(all).toContain('Max 5x');
+    expect(all).toContain('7d limit');
+    expect(all).toEqual(expect.arrayContaining(['5h', '30%', '7d', '100%', 'today +2%']));
+    expect(all).toContain('resets tomorrow 11:00');
   });
 
   it('explains an empty snapshot and a missing one', () => {

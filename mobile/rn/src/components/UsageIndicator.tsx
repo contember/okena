@@ -1,11 +1,12 @@
 /**
- * UsageIndicator.tsx — compact Claude / Codex usage in the workspace app bar.
+ * UsageIndicator.tsx — compact Claude / Codex / Grok usage in the workspace app bar.
  *
- * One tiny ring per provider (Claude first, Codex second) with the headline
- * window's percentage inside and the provider initial under it (`C`, `X`),
- * colored by `max(abs, pace)` severity. About 56 pt wide, so the project name
- * keeps most of a small phone's bar. Renders nothing when no provider is
- * enabled and signed in.
+ * One tiny ring per provider (Claude, Codex, then Grok) with the headline
+ * window's percentage inside and the provider initial under it (`C`, `X`,
+ * `G`), colored by `max(abs, pace)` severity. Claude with an account pool
+ * shows the pool's Today value (`3h00m left`) as text instead of a ring. About
+ * 28 pt per ring, so the project name keeps most of a small phone's bar.
+ * Renders nothing when no provider is enabled and signed in.
  *
  * Pace moves with the clock, so the rings re-derive every minute. That tick
  * lives here, not in the screen, so only this small component re-renders.
@@ -18,10 +19,10 @@ import { indicatorAccessibilityLabel, indicatorItems, type ProviderId } from '..
 import type { UsageInfo } from '../native/okena';
 import { useWorkspaceStore } from '../state/workspaceStore';
 import { OkenaColors } from '../theme';
-import { UsageRing } from './UsageVisuals';
+import { UsageRing, severityColor } from './UsageVisuals';
 import { useNow } from './useNow';
 
-const INITIALS: Record<ProviderId, string> = { claude: 'C', codex: 'X' };
+const INITIALS: Record<ProviderId, string> = { claude: 'C', codex: 'X', grok: 'G' };
 
 export interface UsageIndicatorProps {
   usage: UsageInfo | null;
@@ -44,7 +45,19 @@ export const UsageIndicator: React.FC<UsageIndicatorProps> = ({ usage, onPress }
     >
       {items.map((item) => (
         <View key={item.provider} style={styles.item}>
-          <UsageRing pct={item.usedPercent} severity={item.severity} />
+          {item.today !== undefined ? (
+            <View style={styles.todayBox}>
+              <Text
+                style={[styles.todayText, { color: severityColor(item.severity) }]}
+                numberOfLines={1}
+                allowFontScaling={false}
+              >
+                {item.today}
+              </Text>
+            </View>
+          ) : (
+            <UsageRing pct={item.usedPercent} severity={item.severity} />
+          )}
           <Text style={styles.initial} allowFontScaling={false}>
             {INITIALS[item.provider]}
           </Text>
@@ -71,6 +84,9 @@ const styles = StyleSheet.create({
   },
   pressed: { backgroundColor: OkenaColors.surfaceOverlay },
   item: { alignItems: 'center' },
+  // Same height as a ring, so the initials stay on one line.
+  todayBox: { height: 22, justifyContent: 'center' },
+  todayText: { fontSize: 10, fontWeight: '700', fontVariant: ['tabular-nums'] },
   initial: {
     color: OkenaColors.textTertiary,
     fontSize: 8,

@@ -4,12 +4,15 @@
 // Rust tests this mirrors (`crates/okena-agent-usage/src/pace.rs`).
 process.env.TZ = 'Europe/Prague';
 
-import type { ProviderUsageInfo, UsageInfo, UsageWindowInfo } from '../native/okena';
+import type { PoolInfo, ProviderUsageInfo, UsageInfo, UsageWindowInfo } from '../native/okena';
 import {
   absSeverity,
   ALL_WORKING_DAYS,
   buildUsageView,
+  formatBalance,
   formatDuration,
+  formatPoolAmount,
+  grokPeriodLabel,
   formatResetClock,
   formatResetsIn,
   formatWindowLabel,
@@ -19,8 +22,13 @@ import {
   indicatorItems,
   linearTimePct,
   paceSeverity,
+  poolNonstopSeverity,
+  poolNonstopValue,
+  poolTodaySeverity,
+  poolTodayValue,
   resetAlignedSegments,
   segmentUnitForWindow,
+  shortDuration,
   timeFraction,
   workingDayReshape,
   workingDaysFromIndices,
@@ -292,6 +300,253 @@ describe('display rules', () => {
     expect(view[0]!.detailText).toBe('Updated 10m ago · retry in 30s');
     expect(view[0]!.isError).toBe(true);
     expect(view[1]!.statusText).toBe('Not signed in on this machine');
+  });
+});
+
+describe('Grok', () => {
+  const now = 1_781_773_200;
+  const credits = (id: string, label: string, usedPercent: number) =>
+    win({ id, label, kind: 'other', usedPercent, windowSeconds: 30 * DAY, resetAt: now + 10 * DAY });
+
+  it('titles the credit windows and shows prepaid only above zero', () => {
+    const grok = (prepaidBalance?: number) =>
+      buildUsageView(
+        usage([
+          provider({
+            provider: 'grok',
+            windows: [credits('included', 'Credits', 40), credits('on_demand', 'On-demand', 5)],
+            prepaidBalance,
+          }),
+        ]),
+        now,
+      )[0]!;
+    const view = grok(15.5);
+    expect(view.name).toBe('Grok');
+    expect(view.windows.map((w) => [w.title, w.period])).toEqual([
+      ['Credits', '30d'],
+      ['On-demand', '30d'],
+    ]);
+    expect(view.prepaid).toBe('15.50');
+    expect(grok(0).prepaid).toBeUndefined();
+    expect(grok(undefined).prepaid).toBeUndefined();
+  });
+
+  it("labels periods like the desktop's Grok widget", () => {
+    expect(grokPeriodLabel(0)).toBe('period');
+    expect(grokPeriodLabel(14 * DAY)).toBe('14d');
+    expect(grokPeriodLabel(30 * DAY)).toBe('30d');
+    const view = buildUsageView(
+      usage([provider({ provider: 'grok', windows: [credits('included', 'Credits', 40)] })]),
+      now,
+    )[0]!;
+    expect(view.windows[0]!.period).toBe('30d');
+    const fortnight = buildUsageView(
+      usage([
+        provider({
+          provider: 'grok',
+          windows: [win({ id: 'included', kind: 'other', windowSeconds: 14 * DAY, resetAt: now + DAY })],
+        }),
+      ]),
+      now,
+    )[0]!;
+    expect(fortnight.windows[0]!.period).toBe('14d');
+  });
+
+  it('formats balances like the desktop', () => {
+    expect(formatBalance(15)).toBe('15');
+    expect(formatBalance(15.5)).toBe('15.50');
+  });
+
+  it('headlines the worse of credits and on-demand', () => {
+    const items = indicatorItems(
+      usage([
+        provider({
+          provider: 'grok',
+          windows: [credits('included', 'Credits', 10), credits('on_demand', 'On-demand', 90)],
+        }),
+      ]),
+      now,
+    );
+    expect(items).toEqual([
+      { provider: 'grok', name: 'Grok', usedPercent: 90, severity: 'critical', period: '30d' },
+    ]);
+  });
+});
+
+describe('Claude account pool', () => {
+  const now = 1_781_773_200; // Thu 2026-06-18 11:00 CEST
+  const amount = (workSeconds: number, accountWeekPercent: number) => ({ workSeconds, accountWeekPercent });
+
+  function pool(overrides: Partial<PoolInfo> = {}): PoolInfo {
+    return {
+      today: {
+        left: amount(3 * 3600, 3),
+        used: amount(3720, 4),
+        safePerDay: amount(4 * 3600 + 3720, 7),
+        offDay: amount(1800, 1),
+      },
+      nonstop: { kind: 'lasts', workSeconds: 26 * 3600 },
+      pace: { sessionFillSeconds: 2 * 3600 + 600, sessionWeekPercent: 9.4, fromHistory: true },
+      accounts: [
+        {
+          id: 'a1',
+          label: 'Work',
+          tier: 'Max 5x',
+          blocked: '5h limit',
+          usedTodayPercent: 3.6,
+          windows: [
+            win({ usedPercent: 100, resetAt: now + 3600 }),
+            win({ id: 'seven_day', label: 'Weekly', kind: 'weekly', windowSeconds: WEEK, usedPercent: 40, resetAt: now + 2 * DAY }),
+          ],
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  it('formats short work durations like short_duration', () => {
+    expect(shortDuration(0)).toBe('1m');
+    expect(shortDuration(45 * 60)).toBe('45m');
+    expect(shortDuration(45 * 60 + 59)).toBe('45m');
+    expect(shortDuration(3 * 3600 + 600)).toBe('3h10m');
+    expect(shortDuration(3600 + 120)).toBe('1h02m');
+    expect(shortDuration(26 * 3600)).toBe('26h');
+    expect(shortDuration(7 * DAY)).toBe('7d');
+    expect(shortDuration(600 * 60 - 1)).toBe('9h59m');
+    expect(shortDuration(600 * 60)).toBe('10h');
+    expect(shortDuration(2880 * 60 - 1)).toBe('47h');
+    expect(shortDuration(2880 * 60)).toBe('2d');
+    expect(shortDuration(-90)).toBe('1m');
+    expect(formatPoolAmount(amount(3720, 4.4))).toBe('1h02m (4%)');
+  });
+
+  it('says how much today has left or went over, with its severity', () => {
+    expect(poolTodayValue(amount(3 * 3600, 3))).toBe('3h00m left');
+    expect(poolTodayValue(amount(-45 * 60, -1))).toBe('45m over');
+    expect(poolTodaySeverity(amount(3600, 1))).toBe('normal');
+    expect(poolTodaySeverity(amount(3599, 1))).toBe('warning');
+    expect(poolTodaySeverity(amount(0, 0))).toBe('warning');
+    expect(poolTodaySeverity(amount(-1, 0))).toBe('critical');
+  });
+
+  it('says how long nonstop work lasts, with its severity', () => {
+    const lasts = (workSeconds: number) => ({ kind: 'lasts', workSeconds });
+    expect(poolNonstopValue(lasts(26 * 3600))).toBe('26h');
+    expect(poolNonstopValue({ kind: 'beyond_horizon', horizonSeconds: WEEK })).toBe('a week or more');
+    expect(poolNonstopValue({ kind: 'blocked', until: now + 600 })).toBe('blocked');
+    expect(poolNonstopValue({ kind: 'unknown' })).toBe('–');
+
+    expect(poolNonstopSeverity(lasts(3 * 3600))).toBe('normal');
+    expect(poolNonstopSeverity(lasts(3 * 3600 - 1))).toBe('warning');
+    expect(poolNonstopSeverity(lasts(3599))).toBe('critical');
+    expect(poolNonstopSeverity({ kind: 'blocked' })).toBe('critical');
+    expect(poolNonstopSeverity({ kind: 'beyond_horizon', horizonSeconds: WEEK })).toBe('normal');
+    expect(poolNonstopSeverity({ kind: 'unknown' })).toBe('normal');
+  });
+
+  it('replaces the login rows and explains Today and Nonstop', () => {
+    const login = provider({
+      plan: 'max',
+      status: 'no_credentials',
+      windows: [win({ resetAt: now + 3600 })],
+      extraUsage: { isEnabled: true, monthlyLimitCents: 100, usedCreditsCents: 1, utilization: 1 },
+      pool: pool({
+        today: {
+          ...pool().today,
+          runsShortAt: now + 2 * DAY,
+          runsShortBefore: 'Work',
+          runsOutAtRecentPace: now + DAY,
+        },
+      }),
+    });
+    const view = buildUsageView(usage([login], [0, 1, 2, 3, 4]), now)[0]!;
+    expect(view.windows).toEqual([]);
+    expect(view.plan).toBeUndefined();
+    expect(view.extra).toBeUndefined();
+    expect(view.statusText).toBeUndefined();
+    const p = view.pool!;
+    expect(p.todayValue).toBe('3h00m left');
+    expect(p.todaySeverity).toBe('normal');
+    expect(p.todayNotes).toEqual([
+      'Work up to this and every working day until the resets still has quota. ' +
+        'More is possible, but the pool then runs short Sat 11:00, before Work resets.',
+      'Times are work at your pace: a 5h window fills in 2h10m and costs 9% of a week. ' +
+        "Percentages are of one account's week. Measured over the last 7 days.",
+    ]);
+    expect(p.usedToday).toBe('1h02m (4%)');
+    expect(p.safePerDay).toBe('5h02m (7%)');
+    expect(p.recentPace).toEqual({ text: 'runs out tomorrow 11:00', warning: true });
+    expect(p.offDayNote).toBe('Days off use 30m (1%) each, as last week.');
+    expect(p.nonstopValue).toBe('26h');
+    expect(p.nonstopSeverity).toBe('normal');
+    expect(p.nonstopNote).toBe(
+      'Working nonstop from now, every account hits its 5h or weekly limit after this long. ' +
+        'Accounts come back as their windows reset.',
+    );
+
+    const account = p.accounts[0]!;
+    expect(account).toMatchObject({ label: 'Work', tier: 'Max 5x', blocked: '5h limit' });
+    expect(account.windows.map((w) => [w.title, Math.round(w.usedPercent), w.severity])).toEqual([
+      ['5h', 100, 'critical'],
+      ['7d', 40, 'normal'],
+    ]);
+    expect(account.usedToday).toBe('today +4%');
+    expect(account.weeklyReset).toBe('resets Sat 11:00');
+  });
+
+  it('falls back to the plain explanations without a bottleneck or recent-pace wall', () => {
+    const blocked = pool({
+      nonstop: { kind: 'blocked', until: now + 600 },
+      pace: { sessionFillSeconds: 7200, sessionWeekPercent: 10, fromHistory: false },
+    });
+    const p = buildUsageView(usage([provider({ pool: blocked })]), now)[0]!.pool!;
+    expect(p.todayNotes[0]).toBe(
+      'Work up to this and every working day until the resets still has quota. ' +
+        'More takes from what the pool refills for later weeks.',
+    );
+    expect(p.todayNotes[1]).toMatch(/Defaults until there is more history\.$/);
+    expect(p.recentPace).toEqual({ text: 'lasts the week', warning: false });
+    expect(p.offDayNote).toBeUndefined(); // every day is a working day
+    expect(p.nonstopNote).toBe('Every account has hit its 5h or weekly limit; the first is back today 11:10.');
+    const unknownUntil = buildUsageView(
+      usage([provider({ pool: pool({ nonstop: { kind: 'blocked' } }) })]),
+      now,
+    )[0]!.pool!;
+    expect(unknownUntil.nonstopNote).toBe('Every account has hit its 5h or weekly limit.');
+  });
+
+  it('has no Nonstop note for a state from a newer daemon', () => {
+    const p = buildUsageView(usage([provider({ pool: pool({ nonstop: { kind: 'unknown' } }) })]), now)[0]!
+      .pool!;
+    expect(p.nonstopValue).toBe('–');
+    expect(p.nonstopNote).toBeUndefined();
+  });
+
+  it('shows the pool even when the Claude login is disabled', () => {
+    const view = buildUsageView(usage([provider({ status: 'disabled', pool: pool() })]), now);
+    expect(view.map((p) => p.provider)).toEqual(['claude']);
+    expect(view[0]!.pool?.todayValue).toBe('3h00m left');
+  });
+
+  it('hides the days-off line when days off use nothing', () => {
+    const idle = pool({ today: { ...pool().today, offDay: amount(0, 0) } });
+    const p = buildUsageView(usage([provider({ pool: idle })], [0, 1, 2, 3, 4]), now)[0]!.pool!;
+    expect(p.offDayNote).toBeUndefined();
+  });
+
+  it("puts the pool's Today in the indicator instead of the login's windows", () => {
+    const items = indicatorItems(
+      usage([
+        provider({
+          status: 'no_credentials',
+          windows: [win({ usedPercent: 90 })],
+          pool: pool({ today: { ...pool().today, left: amount(-45 * 60, -1) } }),
+        }),
+      ]),
+      now,
+    );
+    expect(items).toEqual([{ provider: 'claude', name: 'Claude', severity: 'critical', today: '45m over' }]);
+    expect(indicatorAccessibilityLabel(items)).toBe('Agent usage: Claude pool 45m over today, critical');
   });
 });
 

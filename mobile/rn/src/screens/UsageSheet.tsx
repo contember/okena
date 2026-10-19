@@ -1,5 +1,5 @@
 /**
- * UsageSheet.tsx — Claude Code / Codex usage of the connected server.
+ * UsageSheet.tsx — Claude Code / Codex / Grok usage of the connected server.
  *
  * Opens from the app-bar usage indicator and from the drawer footer. Same
  * modal sheet style as {@link SettingsSheet}. The header names the server,
@@ -7,7 +7,13 @@
  *
  * Per provider: plan badge, status or error, and one row per window as the
  * desktop popover shows it (bar with the time-elapsed tick, used %, pace note,
- * "resets in …", history sparkline), then Claude extra usage or Codex credits.
+ * "resets in …", history sparkline), then Claude extra usage, Codex credits or
+ * the Grok prepaid balance.
+ *
+ * While the server routes shells through the AI proxy, Claude shows its
+ * account pool instead (`PoolSection`): Today and Nonstop with the desktop
+ * tooltips' explanations as small text, the day's amounts, then one row per
+ * account with its 5h and 7d bars.
  *
  * Opening the sheet asks the daemon to refetch; a spinner shows until the new
  * snapshot arrives or a few seconds pass. The daemon throttles to once a
@@ -34,6 +40,8 @@ import { useConnectionStore, useWorkspaceStore } from '../state';
 import {
   buildUsageView,
   hasHistoryShape,
+  type PoolAccountView,
+  type PoolView,
   type ProviderView,
   type UsageWindowView,
 } from '../models/usage';
@@ -111,7 +119,7 @@ export const UsageSheet: React.FC<UsageSheetProps> = ({
           {providers.length === 0 ? (
             <Text style={styles.empty}>
               {usage
-                ? `Claude Code and Codex usage are turned off on ${serverName}. Enable the Claude or Codex extension in Okena's settings there.`
+                ? `Claude Code, Codex and Grok usage are turned off on ${serverName}. Enable the Claude, Codex or Grok extension in Okena's settings there.`
                 : `No usage data from ${serverName} yet. Okena on that machine may need an update.`}
             </Text>
           ) : null}
@@ -148,7 +156,7 @@ export const ConnectedUsageSheet: React.FC<{ visible: boolean; onClose: () => vo
 const ProviderSection: React.FC<{ provider: ProviderView; first: boolean }> = ({ provider: p, first }) => (
   <View testID={`usage-provider-${p.provider}`}>
     <View style={[styles.sectionHeader, !first && styles.sectionSpacing]}>
-      <Text style={styles.sectionLabel}>{p.name.toUpperCase()}</Text>
+      <Text style={styles.sectionLabel}>{(p.pool ? `${p.name} pool` : p.name).toUpperCase()}</Text>
       {p.plan ? (
         <View style={styles.planBadge}>
           <Text style={styles.planText}>{p.plan}</Text>
@@ -156,58 +164,160 @@ const ProviderSection: React.FC<{ provider: ProviderView; first: boolean }> = ({
       ) : null}
       {p.fetching ? <Text style={styles.fetching}>Updating…</Text> : null}
     </View>
-    <View style={styles.group}>
-      {p.statusText ? (
-        <View style={[styles.row, styles.statusRow]}>
-          <Text style={[styles.statusText, p.isError && styles.statusError]}>{p.statusText}</Text>
-        </View>
-      ) : null}
-      {p.windows.map((w, i) => (
-        <WindowRow key={w.id} window={w} last={i === p.windows.length - 1 && !hasExtras(p)} />
-      ))}
-      {p.extra ? (
-        <View style={styles.row}>
-          <View style={styles.kvRow}>
-            <Text style={styles.rowTitle}>Extra usage</Text>
-            <Text style={styles.kvValue}>{`${p.extra.used} / ${p.extra.limit}`}</Text>
+    {p.pool ? (
+      <PoolSection pool={p.pool} />
+    ) : (
+      <View style={styles.group}>
+        {p.statusText ? (
+          <View style={[styles.row, styles.statusRow]}>
+            <Text style={[styles.statusText, p.isError && styles.statusError]}>{p.statusText}</Text>
           </View>
-          <UsageBar usedPercent={p.extra.utilization} segments={NO_SEGMENTS} height={6} />
-        </View>
-      ) : null}
-      {p.credits ? (
-        <View style={styles.row}>
-          <View style={styles.kvRow}>
-            <Text style={styles.rowTitle}>Credits</Text>
-            <Text style={[styles.kvValue, p.credits.unlimited && { color: OkenaColors.success }]}>
-              {p.credits.text}
-            </Text>
+        ) : null}
+        {p.windows.map((w, i) => (
+          <WindowRow key={w.id} window={w} last={i === p.windows.length - 1 && !hasExtras(p)} />
+        ))}
+        {p.extra ? (
+          <View style={styles.row}>
+            <View style={styles.kvRow}>
+              <Text style={styles.rowTitle}>Extra usage</Text>
+              <Text style={styles.kvValue}>{`${p.extra.used} / ${p.extra.limit}`}</Text>
+            </View>
+            <UsageBar usedPercent={p.extra.utilization} segments={NO_SEGMENTS} height={6} />
           </View>
-        </View>
-      ) : null}
-      {p.resetCredits ? (
-        <View style={styles.row}>
-          <View style={styles.kvRow}>
-            <Text style={styles.rowTitle}>{p.resetCredits.summary}</Text>
-            {p.resetCredits.firstExpiry ? (
-              <Text style={styles.meta}>{p.resetCredits.firstExpiry}</Text>
-            ) : null}
+        ) : null}
+        {p.credits ? (
+          <View style={styles.row}>
+            <View style={styles.kvRow}>
+              <Text style={styles.rowTitle}>Credits</Text>
+              <Text style={[styles.kvValue, p.credits.unlimited && { color: OkenaColors.success }]}>
+                {p.credits.text}
+              </Text>
+            </View>
           </View>
-        </View>
-      ) : null}
-      {p.windows.length === 0 && !p.statusText && !hasExtras(p) ? (
-        <View style={[styles.row, styles.statusRow]}>
-          <Text style={styles.statusText}>No limits reported.</Text>
-        </View>
-      ) : null}
-    </View>
+        ) : null}
+        {p.resetCredits ? (
+          <View style={styles.row}>
+            <View style={styles.kvRow}>
+              <Text style={styles.rowTitle}>{p.resetCredits.summary}</Text>
+              {p.resetCredits.firstExpiry ? (
+                <Text style={styles.meta}>{p.resetCredits.firstExpiry}</Text>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
+        {p.prepaid ? (
+          <View style={styles.row}>
+            <View style={styles.kvRow}>
+              <Text style={styles.rowTitle}>Prepaid</Text>
+              <Text style={styles.kvValue}>{p.prepaid}</Text>
+            </View>
+          </View>
+        ) : null}
+        {p.windows.length === 0 && !p.statusText && !hasExtras(p) ? (
+          <View style={[styles.row, styles.statusRow]}>
+            <Text style={styles.statusText}>No limits reported.</Text>
+          </View>
+        ) : null}
+      </View>
+    )}
     {p.detailText ? <Text style={styles.footnote}>{p.detailText}</Text> : null}
+  </View>
+);
+
+const PoolSection: React.FC<{ pool: PoolView }> = ({ pool }) => (
+  <>
+    <Text style={styles.subsectionLabel}>THIS WEEK · SOFT LIMIT</Text>
+    <View style={styles.group}>
+      <View style={[styles.row, styles.rowDivider]} testID="usage-pool-today">
+        <View style={styles.kvRow}>
+          <Text style={styles.rowTitle}>Today</Text>
+          <Text style={[styles.pct, { color: severityColor(pool.todaySeverity) }]}>{pool.todayValue}</Text>
+        </View>
+        {pool.todayNotes.map((note) => (
+          <Text key={note} style={styles.note}>
+            {note}
+          </Text>
+        ))}
+      </View>
+      <View style={styles.row}>
+        <PoolKvRow title="Used today" value={pool.usedToday} />
+        <PoolKvRow title="Safe per working day" value={pool.safePerDay} />
+        <PoolKvRow
+          title="At the last 24h's pace"
+          value={pool.recentPace.text}
+          color={pool.recentPace.warning ? OkenaColors.warning : undefined}
+        />
+        {pool.offDayNote ? <Text style={styles.note}>{pool.offDayNote}</Text> : null}
+      </View>
+    </View>
+    <Text style={styles.subsectionLabel}>RIGHT NOW · HARD LIMIT</Text>
+    <View style={styles.group}>
+      <View style={styles.row} testID="usage-pool-nonstop">
+        <View style={styles.kvRow}>
+          <Text style={styles.rowTitle}>Nonstop</Text>
+          <Text style={[styles.pct, { color: severityColor(pool.nonstopSeverity) }]}>
+            {pool.nonstopValue}
+          </Text>
+        </View>
+        {pool.nonstopNote ? <Text style={styles.note}>{pool.nonstopNote}</Text> : null}
+      </View>
+    </View>
+    {pool.accounts.length > 0 ? (
+      <>
+        <Text style={styles.subsectionLabel}>ACCOUNTS</Text>
+        <View style={styles.group}>
+          {pool.accounts.map((account, i) => (
+            <PoolAccountRow key={account.id} account={account} last={i === pool.accounts.length - 1} />
+          ))}
+        </View>
+      </>
+    ) : null}
+  </>
+);
+
+const PoolKvRow: React.FC<{ title: string; value: string; color?: string }> = ({ title, value, color }) => (
+  <View style={styles.kvRow}>
+    <Text style={styles.kvTitle}>{title}</Text>
+    <Text style={[styles.kvSmall, color !== undefined && { color }]}>{value}</Text>
+  </View>
+);
+
+const PoolAccountRow: React.FC<{ account: PoolAccountView; last: boolean }> = ({ account: a, last }) => (
+  <View style={[styles.row, !last && styles.rowDivider]} testID={`usage-pool-account-${a.id}`}>
+    <View style={styles.windowHeader}>
+      <Text style={styles.rowTitle} numberOfLines={1}>
+        {a.label}
+      </Text>
+      {a.tier ? <Text style={styles.period}>{a.tier}</Text> : null}
+      {a.blocked ? <Text style={styles.blocked}>{a.blocked}</Text> : null}
+    </View>
+    {a.windows.map((w) => (
+      <View key={w.id} style={styles.accountBar}>
+        <Text style={styles.accountPeriod}>{w.period}</Text>
+        <View style={styles.accountBarTrack}>
+          <UsageBar usedPercent={w.usedPercent} timePct={w.timePct} segments={w.segments} height={6} />
+        </View>
+        <Text style={[styles.accountPct, { color: severityColor(w.severity) }]}>
+          {`${Math.round(w.usedPercent)}%`}
+        </Text>
+      </View>
+    ))}
+    <View style={styles.accountFooter}>
+      <Text style={styles.meta}>{a.usedToday}</Text>
+      {a.weeklyReset ? <Text style={styles.meta}>{a.weeklyReset}</Text> : null}
+    </View>
   </View>
 );
 
 const NO_SEGMENTS = { dividers: [], workingDates: [] };
 
 function hasExtras(p: ProviderView): boolean {
-  return p.extra !== undefined || p.credits !== undefined || p.resetCredits !== undefined;
+  return (
+    p.extra !== undefined ||
+    p.credits !== undefined ||
+    p.resetCredits !== undefined ||
+    p.prepaid !== undefined
+  );
 }
 
 const PACE_NOTES = {
@@ -297,6 +407,15 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sectionSpacing: { marginTop: 28 },
+  subsectionLabel: {
+    color: OkenaColors.textTertiary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.4,
+    marginHorizontal: 32,
+    marginTop: 10,
+    marginBottom: 6,
+  },
   sectionLabel: {
     color: OkenaColors.textTertiary,
     fontSize: 12,
@@ -337,6 +456,15 @@ const styles = StyleSheet.create({
   meta: { color: OkenaColors.textTertiary, fontSize: 12 },
   kvRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
   kvValue: { color: OkenaColors.textPrimary, fontSize: 15, fontVariant: ['tabular-nums'] },
+  kvTitle: { color: OkenaColors.textSecondary, fontSize: 13, flexShrink: 1 },
+  kvSmall: { color: OkenaColors.textSecondary, fontSize: 13, fontVariant: ['tabular-nums'] },
+  note: { color: OkenaColors.textTertiary, fontSize: 12, lineHeight: 16 },
+  blocked: { color: OkenaColors.warning, fontSize: 12, marginLeft: 6 },
+  accountBar: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  accountBarTrack: { flex: 1 },
+  accountPeriod: { width: 18, color: OkenaColors.textTertiary, fontSize: 12 },
+  accountPct: { width: 40, textAlign: 'right', fontSize: 12, fontVariant: ['tabular-nums'] },
+  accountFooter: { flexDirection: 'row', gap: 10 },
   footnote: {
     color: OkenaColors.textTertiary,
     fontSize: 12,

@@ -1,4 +1,5 @@
-//! uniffi mirrors of the agent usage snapshot (`okena_core::api::ApiUsage`).
+//! uniffi mirrors of the agent usage snapshot (`okena_core::api::ApiUsage`),
+//! including the Claude account pool of the AI proxy.
 //!
 //! The daemon pushes the snapshot as the `usage_changed` WS message; the
 //! connection manager stores the latest one per connection and bumps a
@@ -6,18 +7,19 @@
 //! conversion when nothing changed.
 //!
 //! Wire enums are flattened to their snake_case wire strings (`provider`,
-//! `status`, window `kind`) so the RN side can switch on the same tokens the
+//! `status`, window `kind`, pool nonstop `kind`) so the RN side can switch on the same tokens the
 //! HTTP API documents, and unknown values from a newer daemon stay readable.
 
 use okena_core::api::{
-    ApiExtraUsage, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
+    ApiExtraUsage, ApiPool, ApiPoolAccount, ApiPoolAmount, ApiPoolNonstop, ApiPoolPace,
+    ApiPoolToday, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
     ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow, ApiUsageWindowKind,
 };
 
 /// Full usage snapshot of one server.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct UsageInfo {
-    /// One entry per provider (`claude`, then `codex`).
+    /// One entry per provider (`claude`, `codex`, then `grok`).
     pub providers: Vec<ProviderUsageInfo>,
     /// Working days, `0 = Monday .. 6 = Sunday`; never empty. `u32` because
     /// ubrn maps `Vec<u8>` to an `ArrayBuffer`.
@@ -29,7 +31,7 @@ pub struct UsageInfo {
 /// Usage of one provider.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ProviderUsageInfo {
-    /// `claude` | `codex` | `unknown`.
+    /// `claude` | `codex` | `grok` | `unknown`.
     pub provider: String,
     /// `disabled` | `no_credentials` | `pending` | `ok` | `error` | `unknown`.
     pub status: String,
@@ -45,6 +47,11 @@ pub struct ProviderUsageInfo {
     pub extra_usage: Option<ExtraUsageInfo>,
     pub credits: Option<UsageCreditsInfo>,
     pub reset_credits: Option<ResetCreditsInfo>,
+    /// Grok prepaid credit balance, in the provider's credit units.
+    pub prepaid_balance: Option<f64>,
+    /// Claude only: the AI proxy's account pool, present while the host routes
+    /// new shells through it; show it instead of `windows` then.
+    pub pool: Option<PoolInfo>,
 }
 
 /// One rate-limit window.
@@ -100,6 +107,73 @@ pub struct ResetCreditInfo {
     pub expires_at: Option<f64>,
 }
 
+/// The AI proxy's account pool (`ApiPool`). Quantities are already work time
+/// and percent of an account's week; the severity rules are on `ApiPool`.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PoolInfo {
+    pub today: PoolTodayInfo,
+    pub nonstop: PoolNonstopInfo,
+    pub pace: PoolPaceInfo,
+    /// Accounts that serve requests, in pool order.
+    pub accounts: Vec<PoolAccountInfo>,
+}
+
+/// Weighted weekly quota, as work and as a share of a week.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct PoolAmountInfo {
+    pub work_seconds: f64,
+    pub account_week_percent: f64,
+}
+
+/// The soft limit: what today may use.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PoolTodayInfo {
+    /// Negative when today already used more than `safe_per_day`.
+    pub left: PoolAmountInfo,
+    pub used: PoolAmountInfo,
+    pub safe_per_day: PoolAmountInfo,
+    pub off_day: PoolAmountInfo,
+    pub runs_short_at: Option<f64>,
+    /// Label of the account whose weekly reset is at `runs_short_at`.
+    pub runs_short_before: Option<String>,
+    pub runs_out_at_recent_pace: Option<f64>,
+}
+
+/// The hard limit: nonstop work until every account is blocked.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PoolNonstopInfo {
+    /// `lasts` | `beyond_horizon` | `blocked` | `unknown`.
+    pub kind: String,
+    /// `lasts`: work until every account is blocked.
+    pub work_seconds: Option<f64>,
+    /// `beyond_horizon`: the simulated horizon.
+    pub horizon_seconds: Option<f64>,
+    /// `blocked`: when the first account is back, if known.
+    pub until: Option<f64>,
+}
+
+/// The pace that converts quota into work time.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct PoolPaceInfo {
+    pub session_fill_seconds: f64,
+    pub session_week_percent: f64,
+    pub from_history: bool,
+}
+
+/// One pool account.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PoolAccountInfo {
+    pub id: String,
+    pub label: String,
+    /// `Max 20x` / `Max 5x`; `None` for the base plan.
+    pub tier: Option<String>,
+    /// Why the proxy skips the account now (`7d limit`, `429 cooldown`).
+    pub blocked: Option<String>,
+    pub used_today_percent: f64,
+    /// The `five_hour` and `seven_day` windows.
+    pub windows: Vec<UsageWindowInfo>,
+}
+
 fn status_str(status: ApiUsageStatus) -> &'static str {
     match status {
         ApiUsageStatus::Disabled => "disabled",
@@ -116,6 +190,7 @@ pub fn parse_provider(name: &str) -> Option<ApiUsageProvider> {
     match name {
         "claude" => Some(ApiUsageProvider::Claude),
         "codex" => Some(ApiUsageProvider::Codex),
+        "grok" => Some(ApiUsageProvider::Grok),
         _ => None,
     }
 }
@@ -147,6 +222,8 @@ impl From<&ApiProviderUsage> for ProviderUsageInfo {
             extra_usage: p.extra_usage.as_ref().map(Into::into),
             credits: p.credits.as_ref().map(Into::into),
             reset_credits: p.reset_credits.as_ref().map(Into::into),
+            prepaid_balance: p.prepaid_balance,
+            pool: p.pool.as_ref().map(Into::into),
         }
     }
 }
@@ -222,6 +299,82 @@ impl From<&ApiResetCredit> for ResetCreditInfo {
     }
 }
 
+impl From<&ApiPool> for PoolInfo {
+    fn from(pool: &ApiPool) -> Self {
+        Self {
+            today: (&pool.today).into(),
+            nonstop: (&pool.nonstop).into(),
+            pace: pool.pace.into(),
+            accounts: pool.accounts.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ApiPoolAmount> for PoolAmountInfo {
+    fn from(amount: ApiPoolAmount) -> Self {
+        Self {
+            work_seconds: amount.work_seconds,
+            account_week_percent: amount.account_week_percent,
+        }
+    }
+}
+
+impl From<&ApiPoolToday> for PoolTodayInfo {
+    fn from(today: &ApiPoolToday) -> Self {
+        Self {
+            left: today.left.into(),
+            used: today.used.into(),
+            safe_per_day: today.safe_per_day.into(),
+            off_day: today.off_day.into(),
+            runs_short_at: today.runs_short_at,
+            runs_short_before: today.runs_short_before.clone(),
+            runs_out_at_recent_pace: today.runs_out_at_recent_pace,
+        }
+    }
+}
+
+impl From<&ApiPoolNonstop> for PoolNonstopInfo {
+    fn from(nonstop: &ApiPoolNonstop) -> Self {
+        let (kind, work_seconds, horizon_seconds, until) = match *nonstop {
+            ApiPoolNonstop::Lasts { work_seconds } => ("lasts", Some(work_seconds), None, None),
+            ApiPoolNonstop::BeyondHorizon { horizon_seconds } => {
+                ("beyond_horizon", None, Some(horizon_seconds), None)
+            }
+            ApiPoolNonstop::Blocked { until } => ("blocked", None, None, until),
+            ApiPoolNonstop::Unknown => ("unknown", None, None, None),
+        };
+        Self {
+            kind: kind.to_string(),
+            work_seconds,
+            horizon_seconds,
+            until,
+        }
+    }
+}
+
+impl From<ApiPoolPace> for PoolPaceInfo {
+    fn from(pace: ApiPoolPace) -> Self {
+        Self {
+            session_fill_seconds: pace.session_fill_seconds,
+            session_week_percent: pace.session_week_percent,
+            from_history: pace.from_history,
+        }
+    }
+}
+
+impl From<&ApiPoolAccount> for PoolAccountInfo {
+    fn from(account: &ApiPoolAccount) -> Self {
+        Self {
+            id: account.id.clone(),
+            label: account.label.clone(),
+            tier: account.tier.clone(),
+            blocked: account.blocked.clone(),
+            used_today_percent: account.used_today_percent,
+            windows: account.windows.iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,13 +394,41 @@ mod tests {
                          "used_percent": 0.2, "window_seconds": 604800.0, "active": false}
                     ],
                     "extra_usage": {"is_enabled": true, "monthly_limit_cents": 10000.0,
-                                    "used_credits_cents": 250.0, "utilization": 2.5}
+                                    "used_credits_cents": 250.0, "utilization": 2.5},
+                    "pool": {
+                        "today": {
+                            "left": {"work_seconds": -2700.0, "account_week_percent": -2.0},
+                            "used": {"work_seconds": 9000.0, "account_week_percent": 8.0},
+                            "safe_per_day": {"work_seconds": 6300.0, "account_week_percent": 6.0},
+                            "off_day": {"work_seconds": 1800.0, "account_week_percent": 1.5},
+                            "runs_short_at": 500.0,
+                            "runs_short_before": "Work"
+                        },
+                        "nonstop": {"type": "blocked", "until": 300.0},
+                        "pace": {"session_fill_seconds": 7200.0, "session_week_percent": 9.0,
+                                 "from_history": true},
+                        "accounts": [{
+                            "id": "a1", "label": "Work", "tier": "Max 5x", "blocked": "5h limit",
+                            "used_today_percent": 3.5,
+                            "windows": [
+                                {"id": "five_hour", "label": "Session", "kind": {"type": "five_hour"},
+                                 "used_percent": 100.0, "window_seconds": 18000.0, "reset_at": 300.0}
+                            ]
+                        }]
+                    }
                 },
                 {
                     "provider": "codex", "status": "no_credentials", "error": "not signed in",
                     "credits": {"has_credits": true, "unlimited": false, "balance": 4.5},
                     "reset_credits": {"available_count": 7000000000u64,
                                       "credits": [{"title": "Reset", "expires_at": null}]}
+                },
+                {
+                    "provider": "grok", "status": "ok", "prepaid_balance": 15.5,
+                    "windows": [
+                        {"id": "included", "label": "Credits", "kind": {"type": "other"},
+                         "used_percent": 40.0, "window_seconds": 2592000.0}
+                    ]
                 },
                 {"provider": "gemini", "status": "throttled"}
             ],
@@ -286,15 +467,89 @@ mod tests {
         let resets = codex.reset_credits.as_ref().expect("reset credits");
         assert_eq!(resets.available_count, u32::MAX, "u64 count saturates");
         assert_eq!(resets.credits[0].expires_at, None);
+        assert_eq!(codex.pool, None);
 
-        assert_eq!(info.providers[2].provider, "unknown");
-        assert_eq!(info.providers[2].status, "unknown");
+        let grok = &info.providers[2];
+        assert_eq!(grok.provider, "grok");
+        assert_eq!(grok.prepaid_balance, Some(15.5));
+        assert_eq!(grok.windows[0].id, "included");
+        assert_eq!(grok.windows[0].kind, "other");
+
+        assert_eq!(info.providers[3].provider, "unknown");
+        assert_eq!(info.providers[3].status, "unknown");
+    }
+
+    #[test]
+    fn converts_the_account_pool() {
+        let info = UsageInfo::from(&sample());
+        let pool = info.providers[0].pool.as_ref().expect("claude pool");
+
+        assert_eq!(pool.today.left.work_seconds, -2700.0);
+        assert_eq!(pool.today.used.work_seconds, 9000.0);
+        assert_eq!(pool.today.used.account_week_percent, 8.0);
+        assert_eq!(pool.today.safe_per_day.account_week_percent, 6.0);
+        assert_eq!(pool.today.off_day.work_seconds, 1800.0);
+        assert_eq!(pool.today.off_day.account_week_percent, 1.5);
+        assert_eq!(pool.today.runs_short_at, Some(500.0));
+        assert_eq!(pool.today.runs_short_before.as_deref(), Some("Work"));
+        assert_eq!(pool.today.runs_out_at_recent_pace, None);
+        assert_eq!(pool.nonstop.kind, "blocked");
+        assert_eq!(pool.nonstop.until, Some(300.0));
+        assert_eq!(pool.pace.session_fill_seconds, 7200.0);
+        assert_eq!(pool.pace.session_week_percent, 9.0);
+        assert!(pool.pace.from_history);
+
+        let account = &pool.accounts[0];
+        assert_eq!(account.id, "a1");
+        assert_eq!(account.label, "Work");
+        assert_eq!(account.tier.as_deref(), Some("Max 5x"));
+        assert_eq!(account.blocked.as_deref(), Some("5h limit"));
+        assert_eq!(account.used_today_percent, 3.5);
+        assert_eq!(account.windows[0].kind, "five_hour");
+        assert_eq!(account.windows[0].reset_at, Some(300.0));
+    }
+
+    #[test]
+    fn flattens_every_nonstop_state() {
+        let flat = |json: serde_json::Value| {
+            let nonstop: ApiPoolNonstop = serde_json::from_value(json).expect("nonstop parses");
+            PoolNonstopInfo::from(&nonstop)
+        };
+        assert_eq!(
+            flat(serde_json::json!({"type": "lasts", "work_seconds": 93600.0})),
+            PoolNonstopInfo {
+                kind: "lasts".into(),
+                work_seconds: Some(93600.0),
+                horizon_seconds: None,
+                until: None,
+            }
+        );
+        assert_eq!(
+            flat(serde_json::json!({"type": "beyond_horizon", "horizon_seconds": 604800.0})),
+            PoolNonstopInfo {
+                kind: "beyond_horizon".into(),
+                work_seconds: None,
+                horizon_seconds: Some(604800.0),
+                until: None,
+            }
+        );
+        assert_eq!(
+            flat(serde_json::json!({"type": "blocked"})),
+            PoolNonstopInfo {
+                kind: "blocked".into(),
+                work_seconds: None,
+                horizon_seconds: None,
+                until: None,
+            }
+        );
+        assert_eq!(flat(serde_json::json!({"type": "drained"})).kind, "unknown");
     }
 
     #[test]
     fn parses_refresh_provider_names() {
         assert_eq!(parse_provider("claude"), Some(ApiUsageProvider::Claude));
         assert_eq!(parse_provider("codex"), Some(ApiUsageProvider::Codex));
+        assert_eq!(parse_provider("grok"), Some(ApiUsageProvider::Grok));
         assert_eq!(parse_provider("gemini"), None);
     }
 }

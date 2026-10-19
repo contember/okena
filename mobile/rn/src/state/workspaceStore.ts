@@ -154,7 +154,7 @@ export interface WorkspaceState {
   claudeSessions: TerminalId[];
   /** How each terminal is shown; terminals not listed show the terminal. */
   terminalViews: Record<TerminalId, TerminalViewMode>;
-  /** The server's latest Claude / Codex usage snapshot, if it sent one. */
+  /** The server's latest Claude / Codex / Grok usage snapshot, if it sent one. */
   usage: UsageInfo | null;
   /**
    * A refresh is in flight: until the daemon reports no fetch started
@@ -185,7 +185,7 @@ export interface WorkspaceState {
   /** Show a terminal as its terminal or as its Claude chat. */
   setTerminalView(terminalId: TerminalId, view: TerminalViewMode): void;
   /**
-   * Ask the daemon to refetch usage (`provider` `claude` / `codex`, or all)
+   * Ask the daemon to refetch usage (`provider` `claude` / `codex` / `grok`, or all)
    * and show {@link usageRefreshing} until the result arrives.
    */
   refreshUsage(provider?: string): void;

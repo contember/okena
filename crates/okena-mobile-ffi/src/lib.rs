@@ -48,7 +48,8 @@ pub use types::{
     ScrollInfo, SelectionBounds, ServiceInfo, TerminalActivity,
 };
 pub use usage::{
-    ExtraUsageInfo, ProviderUsageInfo, ResetCreditInfo, ResetCreditsInfo, UsageCreditsInfo,
+    ExtraUsageInfo, PoolAccountInfo, PoolAmountInfo, PoolInfo, PoolNonstopInfo, PoolPaceInfo,
+    PoolTodayInfo, ProviderUsageInfo, ResetCreditInfo, ResetCreditsInfo, UsageCreditsInfo,
     UsageInfo, UsagePointInfo, UsageWindowInfo,
 };
 
@@ -484,7 +485,7 @@ pub fn take_dirty(conn_id: String, terminal_id: String) -> bool {
 
 // ── Agent usage ─────────────────────────────────────────────────────
 
-/// Latest Claude Code / Codex usage snapshot the server pushed
+/// Latest Claude Code / Codex / Grok usage snapshot the server pushed
 /// (`usage_changed`). `None` until the first push (or for a daemon that
 /// predates the usage API).
 #[uniffi::export]
@@ -501,8 +502,8 @@ pub fn get_usage_revision(conn_id: String) -> u32 {
     ConnectionManager::get().usage_revision(&conn_id)
 }
 
-/// Ask the daemon to refetch usage now. `provider` is `"claude"`, `"codex"`
-/// or `None` for every enabled provider. The daemon throttles to one attempt
+/// Ask the daemon to refetch usage now. `provider` is `"claude"`, `"codex"`,
+/// `"grok"` or `None` for every enabled provider. The daemon throttles to one attempt
 /// per provider per 60 s; the fresh snapshot arrives via `usage_changed`.
 /// Resolves to whether a fetch is now running for the requested provider(s)
 /// (`false` when throttled), so the UI can end its spinner right away.

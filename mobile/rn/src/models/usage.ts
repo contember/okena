@@ -1,14 +1,18 @@
 /**
- * usage.ts — Claude Code / Codex usage: pace, severity and display rules.
+ * usage.ts — Claude Code / Codex / Grok usage: pace, severity and display rules.
  *
  * A port of `crates/okena-agent-usage/src/pace.rs` (the math the desktop
  * widgets use) plus the display rules of the desktop popovers
- * (`okena-ext-claude` / `okena-ext-codex`): which windows get a row or the
- * headline, so the phone shows the same numbers and colors as the desktop for
- * the same snapshot. Codex rows are titled by window length ("5-hour limit" /
- * "Weekly limit" / "Code review"), as in the desktop popover's
- * `window_title`; the API's primary/secondary order says nothing about which
- * window is which.
+ * (`okena-ext-claude` / `okena-ext-codex` / `okena-ext-grok`): which windows
+ * get a row or the headline, so the phone shows the same numbers and colors as
+ * the desktop for the same snapshot. Codex rows are titled by window length
+ * ("5-hour limit" / "Weekly limit" / "Code review"), as in the desktop
+ * popover's `window_title`; the API's primary/secondary order says nothing
+ * about which window is which.
+ *
+ * While the host routes shells through the AI proxy, Claude carries the
+ * account pool, already summarized by the daemon as work time; the pool rules
+ * mirror `okena-ext-claude/src/pool_summary.rs` and replace the login's rows.
  *
  * Time is epoch SECONDS (the wire unit). Calendar math (working-day blocks,
  * reset-anchored dividers, "today/tomorrow" labels) uses the device's local
@@ -16,6 +20,10 @@
  */
 
 import type {
+  PoolAccountInfo,
+  PoolAmountInfo,
+  PoolInfo,
+  PoolNonstopInfo,
   ProviderUsageInfo,
   ResetCreditsInfo,
   UsageInfo,
@@ -143,6 +151,26 @@ export function formatWindowLabel(windowSeconds: number): string {
   if (secs <= 86400) return '1d';
   if (secs <= 604800) return '7d';
   return '30d';
+}
+
+/**
+ * Period badge of a Grok credit window, whose length the provider picks:
+ * `30d` for about a month, else whole days or hours; `period` when unknown.
+ * Mirrors `period_label` in `okena-ext-grok`.
+ */
+export function grokPeriodLabel(windowSeconds: number): string {
+  if (windowSeconds <= 0) return 'period';
+  const days = windowSeconds / 86400;
+  if (days >= 27 && days <= 32) return '30d';
+  if (days >= 6.5 && days <= 7.5) return '7d';
+  if (days >= 0.9 && days <= 1.1) return '1d';
+  if (days >= 1) return `${Math.round(days)}d`;
+  return `${Math.round(windowSeconds / 3600)}h`;
+}
+
+/** Period badge of a window: Grok's own labels, else {@link formatWindowLabel}. */
+function windowPeriodLabel(provider: ProviderId, windowSeconds: number): string {
+  return provider === 'grok' ? grokPeriodLabel(windowSeconds) : formatWindowLabel(windowSeconds);
 }
 
 /**
@@ -351,15 +379,33 @@ export function formatDollars(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
+/** A credit balance: whole numbers bare (`15`), else two decimals (`15.50`). */
+export function formatBalance(amount: number): string {
+  return Number.isInteger(amount) ? String(amount) : amount.toFixed(2);
+}
+
+/** Narrow duration of work: `45m`, `3h10m`, `26h`, `3d`; never below `1m`. Mirrors `short_duration`. */
+export function shortDuration(seconds: number): string {
+  const minutes = Math.max(Math.trunc(seconds / 60), 1);
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 10 * 60) return `${Math.floor(minutes / 60)}h${pad2(minutes % 60)}m`;
+  if (minutes < 48 * 60) return `${Math.floor(minutes / 60)}h`;
+  return `${Math.floor(minutes / (24 * 60))}d`;
+}
+
 function capitalize(text: string): string {
   return text.length === 0 ? text : text[0]!.toUpperCase() + text.slice(1);
 }
 
 // ── Display model ────────────────────────────────────────────────────────
 
-export type ProviderId = 'claude' | 'codex';
+export type ProviderId = 'claude' | 'codex' | 'grok';
 
-export const PROVIDER_NAMES: Record<ProviderId, string> = { claude: 'Claude', codex: 'Codex' };
+export const PROVIDER_NAMES: Record<ProviderId, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  grok: 'Grok',
+};
 
 export interface UsageWindowView {
   id: string;
@@ -403,6 +449,10 @@ export interface ProviderView {
   credits?: { text: string; unlimited: boolean };
   /** Codex reset credits summary. */
   resetCredits?: { summary: string; firstExpiry?: string; titles: string[] };
+  /** Grok prepaid balance (`15.50`), only when above zero. */
+  prepaid?: string;
+  /** Claude account pool; when set, it replaces the login's windows, plan and extra usage. */
+  pool?: PoolView;
 }
 
 /** Whether a scoped Claude window gets a row (`active` or ≥ 0.5 %). */
@@ -421,6 +471,16 @@ function codexWindowTitle(window: UsageWindowInfo): string {
 
 /** Row title for a window, or `undefined` when the desktop hides it. */
 export function windowTitle(provider: ProviderId, window: UsageWindowInfo): string | undefined {
+  if (provider === 'grok') {
+    switch (window.id) {
+      case 'included':
+        return 'Credits';
+      case 'on_demand':
+        return 'On-demand';
+      default:
+        return undefined;
+    }
+  }
   if (provider === 'claude') {
     switch (window.kind) {
       case 'five_hour':
@@ -452,6 +512,16 @@ export function buildWindowView(
 ): UsageWindowView | undefined {
   const title = windowTitle(provider, window);
   if (title === undefined) return undefined;
+  return windowView(window, title, windowPeriodLabel(provider, window.windowSeconds), working, now);
+}
+
+function windowView(
+  window: UsageWindowInfo,
+  title: string,
+  periodLabel: string,
+  working: WorkingDays,
+  now: number,
+): UsageWindowView {
   const segments = windowSegments(window, working, now);
   const period = window.windowSeconds;
   const resetAt = window.resetAt;
@@ -468,7 +538,7 @@ export function buildWindowView(
   return {
     id: window.id,
     title,
-    period: formatWindowLabel(period),
+    period: periodLabel,
     usedPercent: window.usedPercent,
     timePct,
     severity: headlineSeverity(window.usedPercent, timePct),
@@ -485,7 +555,7 @@ export function buildWindowView(
 }
 
 function isProviderId(value: string): value is ProviderId {
-  return value === 'claude' || value === 'codex';
+  return value === 'claude' || value === 'codex' || value === 'grok';
 }
 
 function statusLines(p: ProviderUsageInfo, now: number): {
@@ -535,14 +605,30 @@ function resetCreditsView(resets: ResetCreditsInfo, now: number): ProviderView['
   };
 }
 
-/** One provider's view, or `undefined` when it is disabled or unknown. */
+/**
+ * One provider's view, or `undefined` when it is disabled or unknown. A
+ * Claude pool is shown whatever the login's status: the pool's shells do not
+ * use the login.
+ */
 export function buildProviderView(
   p: ProviderUsageInfo,
   working: WorkingDays,
   now: number,
 ): ProviderView | undefined {
-  if (!isProviderId(p.provider) || p.status === 'disabled') return undefined;
+  if (!isProviderId(p.provider)) return undefined;
   const provider = p.provider;
+  if (provider === 'claude' && p.pool) {
+    return {
+      provider,
+      name: PROVIDER_NAMES[provider],
+      status: p.status,
+      isError: false,
+      fetching: p.fetching,
+      windows: [],
+      pool: buildPoolView(p.pool, working, now),
+    };
+  }
+  if (p.status === 'disabled') return undefined;
   const windows = p.windows
     .map((w) => buildWindowView(provider, w, working, now))
     .filter((w): w is UsageWindowView => w !== undefined);
@@ -572,15 +658,179 @@ export function buildProviderView(
     extra,
     credits,
     resetCredits: p.resetCredits ? resetCreditsView(p.resetCredits, now) : undefined,
+    prepaid:
+      p.prepaidBalance !== undefined && p.prepaidBalance > 0
+        ? formatBalance(p.prepaidBalance)
+        : undefined,
   };
 }
 
-/** Every visible provider of a snapshot, in wire order (Claude, then Codex). */
+/** Every visible provider of a snapshot, in wire order (Claude, Codex, then Grok). */
 export function buildUsageView(usage: UsageInfo, now: number): ProviderView[] {
   const working = workingDaysFromIndices(usage.workingDays);
   return usage.providers
     .map((p) => buildProviderView(p, working, now))
     .filter((p): p is ProviderView => p !== undefined);
+}
+
+// ── Claude account pool ──────────────────────────────────────────────────
+
+const HOUR = 3600;
+
+export interface PoolAccountView {
+  id: string;
+  label: string;
+  /** `Max 20x` / `Max 5x`. */
+  tier?: string;
+  /** Why the proxy skips the account now (`7d limit`). */
+  blocked?: string;
+  /** The account's 5h and 7d windows, as bars. */
+  windows: UsageWindowView[];
+  /** `today +3%`. */
+  usedToday: string;
+  /** `resets Tue 09:00`: the weekly window's reset. */
+  weeklyReset?: string;
+}
+
+export interface PoolView {
+  /** `3h00m left` / `45m over`. */
+  todayValue: string;
+  todaySeverity: Severity;
+  /** What Today means and how the times are measured. */
+  todayNotes: string[];
+  /** `26h` / `a week or more` / `blocked`. */
+  nonstopValue: string;
+  nonstopSeverity: Severity;
+  /** Unset for a state from a newer daemon. */
+  nonstopNote?: string;
+  /** `1h02m (4%)`. */
+  usedToday: string;
+  safePerDay: string;
+  /** `runs out Tue 14:00` (warning) or `lasts the week`. */
+  recentPace: { text: string; warning: boolean };
+  /** `Days off use … each, as last week.`, only for tailored working days. */
+  offDayNote?: string;
+  accounts: PoolAccountView[];
+}
+
+/** An amount as work and share of an account's week: `1h02m (4%)`. */
+export function formatPoolAmount(amount: PoolAmountInfo): string {
+  return `${shortDuration(amount.workSeconds)} (${Math.round(amount.accountWeekPercent)}%)`;
+}
+
+/** `3h00m left` or `45m over`. */
+export function poolTodayValue(left: PoolAmountInfo): string {
+  return left.workSeconds >= 0
+    ? `${shortDuration(left.workSeconds)} left`
+    : `${shortDuration(-left.workSeconds)} over`;
+}
+
+/** Critical once today is over its safe amount, warning under an hour of work left. */
+export function poolTodaySeverity(left: PoolAmountInfo): Severity {
+  if (left.workSeconds < 0) return 'critical';
+  if (left.workSeconds < HOUR) return 'warning';
+  return 'normal';
+}
+
+/** `26h`, `a week or more`, `blocked`; `–` for a state from a newer daemon. */
+export function poolNonstopValue(nonstop: PoolNonstopInfo): string {
+  switch (nonstop.kind) {
+    case 'lasts':
+      return shortDuration(nonstop.workSeconds ?? 0);
+    case 'beyond_horizon':
+      return 'a week or more';
+    case 'blocked':
+      return 'blocked';
+    default:
+      return '–';
+  }
+}
+
+/** Critical when blocked or under an hour of nonstop work, warning under three hours. */
+export function poolNonstopSeverity(nonstop: PoolNonstopInfo): Severity {
+  if (nonstop.kind === 'blocked') return 'critical';
+  if (nonstop.kind !== 'lasts') return 'normal';
+  const seconds = nonstop.workSeconds ?? 0;
+  if (seconds < HOUR) return 'critical';
+  if (seconds < 3 * HOUR) return 'warning';
+  return 'normal';
+}
+
+function poolTodayNotes(pool: PoolInfo, now: number): string[] {
+  const { today, pace } = pool;
+  const safe = 'Work up to this and every working day until the resets still has quota.';
+  const beyondSafe =
+    today.runsShortAt !== undefined
+      ? `${safe} More is possible, but the pool then runs short ${formatResetClock(today.runsShortAt, now, true)}${
+          today.runsShortBefore ? `, before ${today.runsShortBefore} resets` : ''
+        }.`
+      : `${safe} More takes from what the pool refills for later weeks.`;
+  const paceNote =
+    `Times are work at your pace: a 5h window fills in ${shortDuration(pace.sessionFillSeconds)} ` +
+    `and costs ${Math.round(pace.sessionWeekPercent)}% of a week. ` +
+    "Percentages are of one account's week. " +
+    (pace.fromHistory ? 'Measured over the last 7 days.' : 'Defaults until there is more history.');
+  return [beyondSafe, paceNote];
+}
+
+function poolNonstopNote(nonstop: PoolNonstopInfo, now: number): string | undefined {
+  switch (nonstop.kind) {
+    case 'lasts':
+    case 'beyond_horizon':
+      return (
+        'Working nonstop from now, every account hits its 5h or weekly limit after this long. ' +
+        'Accounts come back as their windows reset.'
+      );
+    case 'blocked':
+      return nonstop.until !== undefined
+        ? `Every account has hit its 5h or weekly limit; the first is back ${formatResetClock(nonstop.until, now, true)}.`
+        : 'Every account has hit its 5h or weekly limit.';
+    default:
+      return undefined;
+  }
+}
+
+function poolAccountView(account: PoolAccountInfo, working: WorkingDays, now: number): PoolAccountView {
+  const titled = (window: UsageWindowInfo): UsageWindowView | undefined => {
+    if (window.kind !== 'five_hour' && window.kind !== 'weekly') return undefined;
+    const period = formatWindowLabel(window.windowSeconds);
+    return windowView(window, period, period, working, now);
+  };
+  const weeklyReset = account.windows.find((w) => w.kind === 'weekly')?.resetAt;
+  return {
+    id: account.id,
+    label: account.label,
+    tier: account.tier,
+    blocked: account.blocked,
+    windows: account.windows.map(titled).filter((w): w is UsageWindowView => w !== undefined),
+    usedToday: `today +${Math.round(account.usedTodayPercent)}%`,
+    weeklyReset:
+      weeklyReset !== undefined ? `resets ${formatResetClock(weeklyReset, now, true)}` : undefined,
+  };
+}
+
+export function buildPoolView(pool: PoolInfo, working: WorkingDays, now: number): PoolView {
+  const { today } = pool;
+  const tailored = workingCount(working) < 7;
+  return {
+    todayValue: poolTodayValue(today.left),
+    todaySeverity: poolTodaySeverity(today.left),
+    todayNotes: poolTodayNotes(pool, now),
+    nonstopValue: poolNonstopValue(pool.nonstop),
+    nonstopSeverity: poolNonstopSeverity(pool.nonstop),
+    nonstopNote: poolNonstopNote(pool.nonstop, now),
+    usedToday: formatPoolAmount(today.used),
+    safePerDay: formatPoolAmount(today.safePerDay),
+    recentPace:
+      today.runsOutAtRecentPace !== undefined
+        ? { text: `runs out ${formatResetClock(today.runsOutAtRecentPace, now, true)}`, warning: true }
+        : { text: 'lasts the week', warning: false },
+    offDayNote:
+      tailored && today.offDay.accountWeekPercent > 0
+        ? `Days off use ${formatPoolAmount(today.offDay)} each, as last week.`
+        : undefined,
+    accounts: pool.accounts.map((account) => poolAccountView(account, working, now)),
+  };
 }
 
 // ── App bar indicator ────────────────────────────────────────────────────
@@ -593,12 +843,14 @@ export interface IndicatorItem {
   severity: Severity;
   /** The headline window's period badge (`5h`). */
   period?: string;
+  /** Claude with a pool: its Today value (`3h00m left`), shown instead of a percentage. */
+  today?: string;
 }
 
 /**
  * Windows that can headline the indicator, mirroring the desktop status bar:
  * Claude session, weekly and scoped limits that are binding or ≥ 80 %; Codex
- * primary and secondary.
+ * primary and secondary; Grok credits and on-demand.
  */
 function headlineCandidates(provider: ProviderId, windows: UsageWindowInfo[]): UsageWindowInfo[] {
   if (provider === 'claude') {
@@ -609,14 +861,17 @@ function headlineCandidates(provider: ProviderId, windows: UsageWindowInfo[]): U
         (w.kind === 'weekly_scoped' && (w.active || w.usedPercent >= 80)),
     );
   }
+  if (provider === 'grok') {
+    return windows.filter((w) => w.id === 'included' || w.id === 'on_demand');
+  }
   return windows.filter((w) => w.id === 'primary' || w.id === 'secondary');
 }
 
 /**
  * The most relevant window per provider for the app bar: the worst severity,
- * ties going to the first (Claude's session / Codex's primary). Providers that
- * are disabled or signed out are left out; an empty result hides the
- * indicator.
+ * ties going to the first (Claude's session / Codex's primary). Claude with a
+ * pool shows the pool's Today instead. Providers that are disabled or signed
+ * out are left out; an empty result hides the indicator.
  */
 export function indicatorItems(usage: UsageInfo | null | undefined, now: number): IndicatorItem[] {
   if (!usage) return [];
@@ -624,6 +879,15 @@ export function indicatorItems(usage: UsageInfo | null | undefined, now: number)
   const items: IndicatorItem[] = [];
   for (const p of usage.providers) {
     if (!isProviderId(p.provider)) continue;
+    if (p.provider === 'claude' && p.pool) {
+      items.push({
+        provider: p.provider,
+        name: PROVIDER_NAMES[p.provider],
+        severity: poolTodaySeverity(p.pool.today.left),
+        today: poolTodayValue(p.pool.today.left),
+      });
+      continue;
+    }
     if (p.status === 'disabled' || p.status === 'no_credentials' || p.status === 'unknown') continue;
     let best: { window: UsageWindowInfo; severity: Severity } | undefined;
     for (const window of headlineCandidates(p.provider, p.windows)) {
@@ -635,7 +899,7 @@ export function indicatorItems(usage: UsageInfo | null | undefined, now: number)
       name: PROVIDER_NAMES[p.provider],
       usedPercent: best?.window.usedPercent,
       severity: best?.severity ?? 'normal',
-      period: best ? formatWindowLabel(best.window.windowSeconds) : undefined,
+      period: best ? windowPeriodLabel(p.provider, best.window.windowSeconds) : undefined,
     });
   }
   return items;
@@ -644,8 +908,9 @@ export function indicatorItems(usage: UsageInfo | null | undefined, now: number)
 /** Spoken summary of the indicator, e.g. `Claude 20% of 5h limit, Codex 3% …`. */
 export function indicatorAccessibilityLabel(items: readonly IndicatorItem[]): string {
   const parts = items.map((item) => {
-    if (item.usedPercent === undefined) return `${item.name} no data yet`;
     const pace = item.severity === 'normal' ? '' : item.severity === 'warning' ? ', warning' : ', critical';
+    if (item.today !== undefined) return `${item.name} pool ${item.today} today${pace}`;
+    if (item.usedPercent === undefined) return `${item.name} no data yet`;
     return `${item.name} ${Math.round(item.usedPercent)}% of ${item.period ?? ''} limit${pace}`;
   });
   return `Agent usage: ${parts.join('; ')}`;
