@@ -6,7 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::ai_proxy::{AiAccount, AiProxyCommand, AiProxyState, AiUsage};
-use okena_core::api::ActionRequest;
+use okena_core::api::{ActionRequest, ApiUsageWindow};
 use okena_extensions::{ExtensionActions, ThemeColors};
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
@@ -55,6 +55,8 @@ pub(crate) struct AccountHistory {
     request: Option<Task<()>>,
 }
 
+/// Usage history of the pool accounts whose detail is open, fetched on demand
+/// and shared across windows.
 #[derive(Default)]
 pub(crate) struct PoolHistory {
     pub entries: BTreeMap<AccountKey, AccountHistory>,
@@ -214,26 +216,27 @@ fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> 
 /// One labeled bar per known window, with the grid and time marker of the
 /// account detail, for the pool popover's account list.
 pub(crate) fn window_bars(
-    five_hour: Option<&AiUsage>,
-    seven_day: Option<&AiUsage>,
+    five_hour: Option<&ApiUsageWindow>,
+    seven_day: Option<&ApiUsageWindow>,
     working: WorkingDays,
     marker: &str,
     t: &ThemeColors,
     cx: &App,
 ) -> Vec<AnyElement> {
     [
-        ("5h", five_hour, FIVE_HOUR_SECS, SegmentUnit::Hour),
-        ("7d", seven_day, SEVEN_DAY_SECS, SegmentUnit::Day),
+        ("5h", five_hour, SegmentUnit::Hour),
+        ("7d", seven_day, SegmentUnit::Day),
     ]
     .into_iter()
-    .filter_map(|(period, usage, seconds, unit)| {
-        let usage = usage?;
-        let segments = reset_epoch(usage).map_or_else(Segments::default, |reset| {
+    .filter_map(|(period, window, unit)| {
+        let window = window?;
+        let seconds = window.window_seconds;
+        let segments = window.reset_at.map_or_else(Segments::default, |reset| {
             reset_aligned_segments(reset, seconds, unit, working)
         });
         let time = segments
             .time_pct
-            .or_else(|| linear_time_pct(usage, seconds));
+            .or_else(|| okena_usage::linear_time_pct(window.reset_at?, seconds, now_secs()?));
         Some(
             h_flex()
                 .gap(px(8.0))
@@ -247,7 +250,7 @@ pub(crate) fn window_bars(
                 )
                 .child(div().flex_1().child(render_usage_bar(
                     t,
-                    usage.utilization,
+                    window.used_percent,
                     time,
                     format!("{marker}-{period}-bar"),
                     &segments,
@@ -258,8 +261,8 @@ pub(crate) fn window_bars(
                         .flex()
                         .justify_end()
                         .text_size(ui_text_xs(cx))
-                        .text_color(rgb(headline_color(t, usage.utilization, time)))
-                        .child(format!("{:.0}%", usage.utilization)),
+                        .text_color(rgb(headline_color(t, window.used_percent, time)))
+                        .child(format!("{:.0}%", window.used_percent)),
                 )
                 .into_any_element(),
         )

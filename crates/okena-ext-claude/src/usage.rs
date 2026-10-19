@@ -4,7 +4,8 @@
 //! the app-installed [`GlobalDaemonUsage`] entity. This widget never fetches;
 //! opening the popover asks the daemon to refresh (throttled there to 60 s).
 //! While a host routes new shells through the AI proxy, the widget shows the
-//! proxy's account pool instead.
+//! proxy's account pool instead: each account from the host's state sync, and
+//! the pool summary from the host's usage snapshot.
 
 use crate::pool_usage::{AccountKey, PoolHistory};
 use crate::settings::PoolDisplay;
@@ -66,7 +67,6 @@ pub struct ClaudeUsage {
     popover_visible: bool,
     hover_token: Arc<AtomicU64>,
     history_refresh_task: Option<Task<()>>,
-    _summary_history_task: Task<()>,
     /// The account opened from the pool popover, shown in place of the pool.
     pool_detail: Option<AccountKey>,
 }
@@ -83,24 +83,8 @@ impl ClaudeUsage {
         // Extensions may activate before the app installs the workspace.
         cx.observe_global::<GlobalWorkspace>(|this, cx| this.bind_workspace(cx))
             .detach();
-        cx.observe_global::<ExtensionSettingsStore>(|this, cx| {
-            this.request_summary_history(cx);
-            cx.notify();
-        })
-        .detach();
-        // The summary reads every account's history; the shared cache
-        // refetches each at most once a minute.
-        let summary_history_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            loop {
-                smol::Timer::after(Duration::from_secs(60)).await;
-                if this
-                    .update(cx, |this, cx| this.request_summary_history(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        cx.observe_global::<ExtensionSettingsStore>(|_, cx| cx.notify())
+            .detach();
         let mut this = Self {
             store,
             pool: Vec::new(),
@@ -113,7 +97,6 @@ impl ClaudeUsage {
             popover_visible: false,
             hover_token: Arc::new(AtomicU64::new(0)),
             history_refresh_task: None,
-            _summary_history_task: summary_history_task,
             pool_detail: None,
         };
         this.bind_workspace(cx);
@@ -165,45 +148,22 @@ impl ClaudeUsage {
             if self.popover_visible {
                 self.request_pool_history(cx);
             }
-            self.request_summary_history(cx);
             cx.notify();
         }
     }
 
-    fn request_history(&self, keys: Vec<AccountKey>, cx: &mut Context<Self>) {
-        self.pool_history.update(cx, |history, cx| {
-            for key in keys {
-                history.request(key, cx);
-            }
-        });
-    }
-
-    fn host_keys(host: &HostAiAccounts) -> impl Iterator<Item = AccountKey> + '_ {
-        host.accounts
-            .iter()
-            .map(move |account| AccountKey::new(host, account))
-    }
-
+    /// Load the history of the account whose detail the popover shows.
     fn request_pool_history(&self, cx: &mut Context<Self>) {
-        let keys = match &self.active {
-            Trigger::Login => return,
-            Trigger::Account(key) => vec![key.clone()],
-            Trigger::Pool(connection_id) => self
-                .pool
-                .iter()
-                .filter(|host| &host.connection_id == connection_id)
-                .flat_map(Self::host_keys)
-                .collect(),
+        let key = match &self.active {
+            Trigger::Login => None,
+            Trigger::Account(key) => Some(key),
+            Trigger::Pool(_) => self.pool_detail.as_ref(),
         };
-        self.request_history(keys, cx);
-    }
-
-    fn request_summary_history(&self, cx: &mut Context<Self>) {
-        if !PoolDisplay::read(cx).summary() {
+        let Some(key) = key.cloned() else {
             return;
-        }
-        let keys = self.pool.iter().flat_map(Self::host_keys).collect();
-        self.request_history(keys, cx);
+        };
+        self.pool_history
+            .update(cx, |history, cx| history.request(key, cx));
     }
 
     fn show_popover(&mut self, trigger: Trigger, cx: &mut Context<Self>) {
@@ -298,15 +258,17 @@ impl ClaudeUsage {
                 ("CLAUDE ACCOUNT", None, detail)
             }
             Trigger::Pool(connection_id) => {
-                let Some(host) = self
+                let Some(summary) = self
                     .pool
                     .iter()
                     .find(|host| &host.connection_id == connection_id)
+                    .and_then(|host| {
+                        let usage = self.store.read(cx).host_usage(connection_id)?;
+                        crate::pool_summary::summarize(host, usage)
+                    })
                 else {
                     return div().size_0().into_any_element();
                 };
-                let summary =
-                    crate::pool_summary::summarize(host, self.pool_history.read(cx), working);
                 let detail = self
                     .pool_detail
                     .as_ref()
@@ -331,10 +293,12 @@ impl ClaudeUsage {
                             Rc::new(move |key: &AccountKey, _: &mut Window, cx: &mut App| {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.pool_detail = Some(key.clone());
+                                    this.request_pool_history(cx);
                                     cx.notify();
                                 });
                             });
-                        crate::pool_summary::render_body(&summary, open, t, cx).into_any_element()
+                        crate::pool_summary::render_body(&summary, working, open, t, cx)
+                            .into_any_element()
                     }
                 };
                 ("CLAUDE POOL", summary.host_name.clone(), body)
@@ -565,10 +529,19 @@ impl Render for ClaudeUsage {
             let display = PoolDisplay::read(cx);
             let mut triggers = Vec::new();
             for host in &self.pool {
-                if display.summary() {
-                    let summary =
-                        crate::pool_summary::summarize(host, self.pool_history.read(cx), working);
-                    let content = crate::pool_summary::render_trigger(&summary, display, &t, cx);
+                let pool_content = if display.summary() {
+                    self.store
+                        .read(cx)
+                        .host_usage(&host.connection_id)
+                        .and_then(|usage| crate::pool_summary::summarize(host, usage))
+                        .and_then(|summary| {
+                            crate::pool_summary::render_trigger(&summary, display, &t, cx)
+                        })
+                } else {
+                    None
+                };
+                let shows_pool = pool_content.is_some();
+                if let Some(content) = pool_content {
                     triggers.push(self.render_trigger(
                         Trigger::Pool(host.connection_id.clone()),
                         content,
@@ -576,7 +549,7 @@ impl Render for ClaudeUsage {
                         cx,
                     ));
                 }
-                if display.accounts {
+                if shows_account_items(display, shows_pool) {
                     for account in &host.accounts {
                         let content = crate::pool_usage::render_trigger(account, working, &t, cx);
                         triggers.push(self.render_trigger(
@@ -645,6 +618,12 @@ impl ClaudeUsage {
     }
 }
 
+/// A host whose pool item is not shown (no pool published, or no value to
+/// show) keeps its account items, so it never vanishes from the status bar.
+fn shows_account_items(display: PoolDisplay, shows_pool: bool) -> bool {
+    display.accounts || !shows_pool
+}
+
 /// The `claude` login's usage for the status bar, empty before the daemon
 /// reported any.
 fn login_trigger_items(working: WorkingDays, cx: &mut App) -> Vec<okena_usage::TriggerItem> {
@@ -704,6 +683,22 @@ mod tests {
             trigger_label(&window(ApiUsageWindowKind::FiveHour, 1.0, true)).as_deref(),
             Some("5h")
         );
+    }
+
+    #[test]
+    fn a_host_without_a_pool_item_keeps_its_accounts() {
+        let summary_only = PoolDisplay {
+            accounts: false,
+            runway: true,
+            today: true,
+        };
+        assert!(!shows_account_items(summary_only, true));
+        assert!(shows_account_items(summary_only, false));
+        let both = PoolDisplay {
+            accounts: true,
+            ..summary_only
+        };
+        assert!(shows_account_items(both, true));
     }
 
     #[test]

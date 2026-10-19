@@ -4,8 +4,11 @@
 //! WebSocket (`usage_changed`). The app layer (`okena-app`) owns the
 //! connection, so it installs a [`GlobalDaemonUsage`] entity, feeds it every
 //! snapshot from the local daemon connection, and plugs in a
-//! [`UsageRefreshFn`] that calls `POST /v1/usage/refresh`. The usage widgets
-//! in the extension crates only read this entity — they never fetch.
+//! [`UsageRefreshFn`] that calls `POST /v1/usage/refresh`. It also mirrors
+//! every connection's snapshot, the local daemon's included, by connection id
+//! ([`DaemonUsage::host_usage`]) for widgets that show one item per host. The
+//! usage widgets in the extension crates only read this entity — they never
+//! fetch.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -33,6 +36,8 @@ const REFRESH_REQUEST_THROTTLE: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub struct DaemonUsage {
     usage: Option<ApiUsage>,
+    /// Latest snapshot of each connection that has one, by connection id.
+    hosts: HashMap<String, ApiUsage>,
     source_label: Option<SharedString>,
     refresh: Option<UsageRefreshFn>,
     last_refresh_request: HashMap<ApiUsageProvider, Instant>,
@@ -59,6 +64,28 @@ impl DaemonUsage {
             self.usage = usage;
             cx.notify();
         }
+    }
+
+    /// The snapshot of the connection `connection_id`, local daemon included.
+    pub fn host_usage(&self, connection_id: &str) -> Option<&ApiUsage> {
+        self.hosts.get(connection_id)
+    }
+
+    /// Replace one connection's snapshot (`None` when it has none any more).
+    pub fn set_host_usage(
+        &mut self,
+        connection_id: &str,
+        usage: Option<ApiUsage>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hosts.get(connection_id) == usage.as_ref() {
+            return;
+        }
+        match usage {
+            Some(usage) => self.hosts.insert(connection_id.to_string(), usage),
+            None => self.hosts.remove(connection_id),
+        };
+        cx.notify();
     }
 
     pub fn set_source_label(&mut self, label: Option<SharedString>, cx: &mut Context<Self>) {
@@ -182,9 +209,58 @@ pub fn window_trigger_item(
 mod tests {
     // Not `super::*`: it re-exports `gpui::*`, whose `test` macro shadows
     // the built-in `#[test]` that `#[gpui::test]` expands to.
-    use super::{ApiUsageProvider, GlobalDaemonUsage};
+    use super::{ApiUsage, ApiUsageProvider, GlobalDaemonUsage};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    #[gpui::test]
+    fn host_usage_is_kept_per_connection_apart_from_the_local_snapshot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let remote = ApiUsage {
+            generated_at: 2.0,
+            ..ApiUsage::default()
+        };
+        cx.update(|cx| {
+            let entity = GlobalDaemonUsage::entity(cx);
+            entity.update(cx, |store, cx| {
+                store.set_host_usage("local", Some(ApiUsage::default()), cx);
+                store.set_host_usage("remote", Some(remote.clone()), cx);
+            });
+            let store = entity.read(cx);
+            assert_eq!(store.host_usage("remote"), Some(&remote));
+            assert_eq!(store.host_usage("local"), Some(&ApiUsage::default()));
+            assert_eq!(store.usage(), None);
+
+            entity.update(cx, |store, cx| store.set_host_usage("remote", None, cx));
+            assert_eq!(entity.read(cx).host_usage("remote"), None);
+            assert!(entity.read(cx).host_usage("local").is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn host_usage_notifies_only_on_change(cx: &mut gpui::TestAppContext) {
+        let notified = Rc::new(Cell::new(0));
+        let (entity, _subscription) = cx.update(|cx| {
+            let entity = GlobalDaemonUsage::entity(cx);
+            let counter = notified.clone();
+            let subscription = cx.observe(&entity, move |_, _| counter.set(counter.get() + 1));
+            (entity, subscription)
+        });
+        let set = |usage: Option<ApiUsage>, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                entity.update(cx, |store, cx| store.set_host_usage("remote", usage, cx))
+            });
+        };
+        set(Some(ApiUsage::default()), cx);
+        assert_eq!(notified.get(), 1);
+        set(Some(ApiUsage::default()), cx);
+        assert_eq!(notified.get(), 1);
+        set(None, cx);
+        assert_eq!(notified.get(), 2);
+        set(None, cx);
+        assert_eq!(notified.get(), 2);
+    }
 
     #[gpui::test]
     fn refresh_throttle_only_counts_sent_requests(cx: &mut gpui::TestAppContext) {

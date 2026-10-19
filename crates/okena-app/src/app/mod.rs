@@ -486,15 +486,14 @@ impl Okena {
             RemoteManagerEvent::LocalConnectionFailed => {
                 this.recover_local_daemon(cx);
             }
-            RemoteManagerEvent::UsageChanged { connection_id }
-                if connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID =>
-            {
-                this.sync_daemon_usage(cx);
+            // Every host's usage is mirrored per connection; the widgets'
+            // main snapshot stays the desktop's own daemon.
+            RemoteManagerEvent::UsageChanged { connection_id } => {
+                this.sync_host_usage(connection_id, cx);
+                if connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID {
+                    this.sync_daemon_usage(cx);
+                }
             }
-            // Usage of user-managed remote daemons stays on their connection
-            // (`RemoteConnectionManager::usage`); the status bar shows the
-            // desktop's own daemon.
-            RemoteManagerEvent::UsageChanged { .. } => {}
             RemoteManagerEvent::SettingsChanged(settings) => {
                 // Initial/reconnected daemon snapshots also restore the
                 // transient appearance after a daemon restart.
@@ -1066,6 +1065,16 @@ impl Okena {
         store.update(cx, |store, cx| {
             store.set_source_label(source_label, cx);
             store.set_usage(usage, cx);
+        });
+    }
+
+    /// Copy one connection's usage snapshot into the widgets' per-host store;
+    /// a removed or dead connection has none, which clears its entry.
+    fn sync_host_usage(&self, connection_id: &str, cx: &mut Context<Self>) {
+        let usage = self.remote_manager.read(cx).usage(connection_id).cloned();
+        let store = okena_usage::GlobalDaemonUsage::entity(cx);
+        store.update(cx, |store, cx| {
+            store.set_host_usage(connection_id, usage, cx);
         });
     }
 
