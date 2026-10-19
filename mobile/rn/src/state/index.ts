@@ -45,6 +45,16 @@ export {
 } from './sessionStore';
 
 export {
+  useClaudeStore,
+  claudeStore,
+  configureClaudeStore,
+  CLAUDE_POLL_MS,
+  type ClaudeState,
+  type ClaudeDeps,
+  type ClaudeNative,
+} from './claudeStore';
+
+export {
   asyncStoragePersistence,
   createMemoryPersistence,
   type Persistence,

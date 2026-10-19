@@ -1,6 +1,7 @@
 /// <reference types="jest" />
 // tsconfig pins `types` to react/react-native, so pull jest globals in here.
 
+import type { AgentLifecycle } from '../native/claude';
 import type { ProjectInfo, TerminalActivity } from '../native/okena';
 import {
   RUNNING_OUTPUT_WINDOW_MS,
@@ -136,7 +137,7 @@ describe('projectSignals', () => {
   });
 
   it('maps agent lifecycles: blocked and unseen done need attention, working runs', () => {
-    const withAgent = (lifecycle: string) =>
+    const withAgent = (lifecycle: AgentLifecycle) =>
       project('p', { terminalAgentStatus: { 'p-t': { lifecycle } } });
     expect(projectSignals(withAgent('blocked'), map(), none)).toEqual({
       attention: true,

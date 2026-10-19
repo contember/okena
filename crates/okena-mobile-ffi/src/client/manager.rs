@@ -782,6 +782,19 @@ impl ConnectionManager {
         );
     }
 
+    /// The connection config and bearer token for HTTP requests to its server.
+    pub fn http_auth(&self, conn_id: &str) -> anyhow::Result<(RemoteConnectionConfig, String)> {
+        let connections = self.connections.read();
+        let conn = connections
+            .get(conn_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
+        let config = conn.client.read().config().clone();
+        let token = config
+            .effective_auth_token()
+            .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
+        Ok((config, token))
+    }
+
     /// Send an action to the remote server via POST /v1/actions.
     pub async fn send_action(&self, conn_id: &str, action: ActionRequest) -> anyhow::Result<()> {
         self.send_action_with_response(conn_id, action).await?;
@@ -794,18 +807,7 @@ impl ConnectionManager {
         conn_id: &str,
         action: ActionRequest,
     ) -> anyhow::Result<String> {
-        let (config, token) = {
-            let connections = self.connections.read();
-            let conn = connections
-                .get(conn_id)
-                .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
-            let config = conn.client.read().config().clone();
-            let token = config
-                .effective_auth_token()
-                .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
-            (config, token)
-        };
-
+        let (config, token) = self.http_auth(conn_id)?;
         let response = okena_transport::remote_action::post_action_async(&config, &token, action)
             .await
             .map_err(anyhow::Error::msg)?;

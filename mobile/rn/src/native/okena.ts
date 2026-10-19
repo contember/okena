@@ -29,6 +29,8 @@
  *              project / layout calls, readContent).
  */
 
+import { toAgentLifecycle, type AgentLifecycle } from './claude';
+
 // ─────────────────────────────────────────────────────────────────────────
 // Scalar / id aliases (documentation only — all are `string`/`number` at runtime)
 // ─────────────────────────────────────────────────────────────────────────
@@ -163,6 +165,13 @@ export interface ServiceInfo {
   isExtra: boolean;
 }
 
+/** AI agent status of one terminal — mirrors FFI `AgentStatusInfo` (`types.rs`). */
+export interface AgentStatusInfo {
+  lifecycle: AgentLifecycle;
+  /** Free-form text the agent set, e.g. "running tests 3/5". */
+  custom?: string;
+}
+
 /** Project info — mirrors FFI `ProjectInfo` (`api/state.rs`). */
 export interface ProjectInfo {
   id: ProjectId;
@@ -191,14 +200,6 @@ export interface ProjectInfo {
    * focus, a finished command and a bell); `undefined` = never.
    */
   lastActivityAt?: number;
-}
-
-/** AI agent status of one terminal — mirrors FFI `AgentStatusInfo`. */
-export interface AgentStatusInfo {
-  /** `working` | `blocked` | `done` | `idle`. */
-  lifecycle: string;
-  /** Free-form text the agent set. */
-  custom?: string;
 }
 
 /** Activity signals of one mirrored terminal — mirrors FFI `TerminalActivity`. */
@@ -525,6 +526,54 @@ export interface OkenaNative {
     targetTerminalId: TerminalId,
     zone: string,
   ): Promise<void>;
+
+  // ── Claude remote (lib.rs; JSON strings — parse them with ./claude) ──────
+
+  /** Open Claude dialogs per terminal, from the cached state (sync). */
+  getClaudeDialogCounts(connId: ConnId): Record<TerminalId, number>;
+  /** JSON `ApiClaudeSession`. */
+  claudeGetSession(connId: ConnId, terminalId: TerminalId): Promise<string>;
+  /**
+   * JSON `ApiClaudeTranscriptPage`. Cursor `0n` asks for the first page; pass
+   * back the previous page's `cursor` and `session_id` for newer entries.
+   * (`u64` Rust-side, which ubrn maps to `bigint`.)
+   */
+  claudeGetTranscript(
+    connId: ConnId,
+    terminalId: TerminalId,
+    cursor: bigint,
+    sessionId: string | undefined,
+  ): Promise<string>;
+  /** JSON `ApiClaudePromptResponse`; rejects with the server's reason (400 / 409). */
+  claudeSendPrompt(connId: ConnId, terminalId: TerminalId, text: string): Promise<string>;
+  /**
+   * `decisionJson` is an `ApiClaudeDecision`. Rejects with
+   * {@link CLAUDE_DIALOG_GONE_MESSAGE} when the dialog is no longer open.
+   */
+  claudeAnswerDialog(
+    connId: ConnId,
+    terminalId: TerminalId,
+    dialogId: string,
+    decisionJson: string,
+  ): Promise<void>;
+}
+
+/** Mirrors `DIALOG_GONE_MESSAGE` in `crates/okena-mobile-ffi/src/claude.rs`. */
+export const CLAUDE_DIALOG_GONE_MESSAGE = 'dialog already answered';
+
+/**
+ * The message of an error thrown by a native call. ubrn throws
+ * `MobileFfiError.Action` with the Rust message under `.inner.message`; mocks
+ * and JS code throw plain errors.
+ */
+export function nativeErrorMessage(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'inner' in error) {
+    const inner = error.inner;
+    if (typeof inner === 'object' && inner !== null && 'message' in inner) {
+      if (typeof inner.message === 'string') return inner.message;
+    }
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -553,8 +602,9 @@ export interface OkenaNative {
  *     `.inner.message`). App wants `{ kind: 'lowercase' }`. → `ConnectionStatus`.
  *   - Fieldless enums → a numeric TS enum (`CursorShape.Block === 0`). App wants
  *     the lowercase string. → `getCursor().shape`.
- *   - Map-typed record fields → a JS `Map`. App indexes them as plain objects.
- *     → `ProjectInfo.terminalNames`.
+ *   - Map-typed record fields and returns → a JS `Map`. App indexes them as
+ *     plain objects. → `ProjectInfo.terminalNames` / `.terminalAgentStatus`,
+ *     `getClaudeDialogCounts()`.
  * Plain-string enums (split direction, diff mode) and all other record fields
  * already match (camelCase), so they pass through untouched.
  */
@@ -608,12 +658,40 @@ function toRecord<V>(value: unknown): Record<string, V> {
   return (value as Record<string, V> | undefined) ?? {};
 }
 
+function mapEntries(value: unknown): Array<[unknown, unknown]> {
+  if (value instanceof Map) return Array.from(value.entries());
+  if (typeof value === 'object' && value !== null) return Object.entries(value);
+  return [];
+}
+
+/** A generated `Map` (or plain object) → `Record`, keeping entries `parse` accepts. */
+function parseRecord<V>(value: unknown, parse: (v: unknown) => V | undefined): Record<string, V> {
+  const out: Record<string, V> = {};
+  for (const [key, raw] of mapEntries(value)) {
+    const parsed = parse(raw);
+    if (typeof key === 'string' && parsed !== undefined) out[key] = parsed;
+  }
+  return out;
+}
+
+const asString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+
+const asCount = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
+
+function toAgentStatusInfo(v: unknown): AgentStatusInfo | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const lifecycle = 'lifecycle' in v ? toAgentLifecycle(v.lifecycle) : undefined;
+  if (lifecycle === undefined) return undefined;
+  return {lifecycle, custom: 'custom' in v ? asString(v.custom) : undefined};
+}
+
 function toProjectInfo(p: GenProjectInfo): ProjectInfo {
   return {
     ...p,
     terminalNames: toRecord<string>(p.terminalNames),
     worktreeIds: p.worktreeIds ?? [],
-    terminalAgentStatus: toRecord<AgentStatusInfo>(p.terminalAgentStatus),
+    terminalAgentStatus: parseRecord(p.terminalAgentStatus, toAgentStatusInfo),
     pinned: p.pinned ?? false,
     lastActivityAt: p.lastActivityAt === undefined ? undefined : Number(p.lastActivityAt),
   };
@@ -678,6 +756,8 @@ export function getOkenaNative(): OkenaNative {
           : (connId: ConnId, terminalId: TerminalId, lines: number) =>
               gen.scroll(connId, terminalId, lines),
       takeDirty: typeof gen.takeDirty === 'function' ? gen.takeDirty : gen.isDirty,
+      getClaudeDialogCounts: (connId: ConnId) =>
+        parseRecord(gen.getClaudeDialogCounts(connId), asCount),
       canReportCertFingerprint: () => pinsReadable,
       // Bindings generated before the lifecycle hooks existed: no-ops, and
       // "Retry now" falls back to a fresh connect.

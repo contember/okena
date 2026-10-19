@@ -10,7 +10,8 @@
  *   - the fullscreen terminal (`getFullscreenTerminal`),
  *   - the selected project's layout JSON (`getProjectLayoutJson`),
  *   - per-terminal activity (`getTerminalActivity`), folded into per-project
- *     {@link ProjectSignals} for the activity-ordered project list.
+ *     {@link ProjectSignals} for the activity-ordered project list,
+ *   - open Claude dialogs per terminal (`getClaudeDialogCounts`).
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
@@ -75,6 +76,7 @@ export type WorkspaceNative = Pick<
   | 'getProjectOrder'
   | 'getFullscreenTerminal'
   | 'getProjectLayoutJson'
+  | 'getClaudeDialogCounts'
   | 'secondsSinceActivity'
   | 'getTerminalActivity'
   | 'markTerminalSeen'
@@ -128,6 +130,8 @@ export interface WorkspaceState {
    * shows the project list and clears it via {@link clearRestoreProjectMissing}.
    */
   restoreProjectMissing: boolean;
+  /** Open Claude dialogs per terminal id; terminals without one are absent. */
+  claudeDialogs: Record<TerminalId, number>;
 
   // ── actions ────────────────────────────────────────────────────────────
   /**
@@ -317,6 +321,12 @@ function folderListEquals(a: FolderInfo[], b: FolderInfo[]): boolean {
   return true;
 }
 
+function countsEqual(a: Record<string, number>, b: Record<string, number>): boolean {
+  const entries = Object.entries(a);
+  if (entries.length !== Object.keys(b).length) return false;
+  return entries.every(([key, count]) => b[key] === count);
+}
+
 function arrayEquals<T>(a: readonly T[], b: readonly T[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -346,6 +356,7 @@ function pollState(
   const newFolders = native.getFolders(connId);
   const newProjectOrder = native.getProjectOrder(connId);
   const newFullscreen = native.getFullscreenTerminal(connId) ?? null;
+  const newClaudeDialogs = native.getClaudeDialogCounts(connId);
 
   const prev = get();
   const patch: Partial<WorkspaceState> = {};
@@ -365,6 +376,10 @@ function pollState(
   }
   if (newFullscreen?.terminalId !== prev.fullscreenTerminal?.terminalId) {
     patch.fullscreenTerminal = newFullscreen;
+    changed = true;
+  }
+  if (!countsEqual(newClaudeDialogs, prev.claudeDialogs)) {
+    patch.claudeDialogs = newClaudeDialogs;
     changed = true;
   }
 
@@ -498,6 +513,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     projectSignals: {},
     previousProjectId: null,
     restoreProjectMissing: false,
+    claudeDialogs: {},
 
     start(connId, restore) {
       if (pollTimer !== null && activeConnId === connId) return; // already polling this conn
@@ -525,6 +541,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         projectSignals: {},
         previousProjectId: null,
         restoreProjectMissing: false,
+        claudeDialogs: {},
       });
     },
 

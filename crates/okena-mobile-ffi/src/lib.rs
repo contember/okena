@@ -26,6 +26,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod api;
+mod claude;
 mod client;
 mod logging;
 pub mod render;
@@ -37,6 +38,7 @@ use okena_core::keys::SpecialKey;
 use okena_core::theme::DARK_THEME;
 use okena_core::types::{DiffMode, SplitDirection};
 use okena_transport::client::{WsClientMessage, collect_state_terminal_ids};
+use std::collections::HashMap;
 
 use crate::client::manager::ConnectionManager;
 
@@ -483,6 +485,16 @@ pub fn get_all_terminal_ids(conn_id: String) -> Vec<String> {
         Some(state) => collect_state_terminal_ids(&state),
         None => Vec::new(),
     }
+}
+
+/// Open Claude dialogs per terminal id, from the cached remote state.
+/// Terminals without an open dialog are absent.
+#[uniffi::export]
+pub fn get_claude_dialog_counts(conn_id: String) -> HashMap<String, u32> {
+    ConnectionManager::get()
+        .get_state(&conn_id)
+        .map(|state| state.claude_dialogs)
+        .unwrap_or_default()
 }
 
 /// Send a special key (e.g. `"Enter"`, `"CtrlC"`, `"ArrowUp"`) to a terminal.
@@ -1040,4 +1052,52 @@ pub async fn move_pane_to(
         },
     )
     .await
+}
+
+// ── Claude remote (async — return JSON strings) ─────────────────────
+
+/// The Claude session in a pane, as JSON `ApiClaudeSession`.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn claude_get_session(
+    conn_id: String,
+    terminal_id: String,
+) -> Result<String, MobileFfiError> {
+    claude::get_session(&conn_id, &terminal_id).await
+}
+
+/// One transcript page, the server's JSON `ApiClaudeTranscriptPage` forwarded
+/// unchanged (entry kinds are left to the RN parser). Cursor 0 asks for
+/// the first page; pass back the previous page's `cursor` and `session_id` to
+/// get only newer entries.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn claude_get_transcript(
+    conn_id: String,
+    terminal_id: String,
+    cursor: u64,
+    session_id: Option<String>,
+) -> Result<String, MobileFfiError> {
+    claude::get_transcript(&conn_id, &terminal_id, cursor, session_id.as_deref()).await
+}
+
+/// Send a prompt to Claude, as JSON `ApiClaudePromptResponse`. An undeliverable
+/// or empty prompt fails with the server's reason.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn claude_send_prompt(
+    conn_id: String,
+    terminal_id: String,
+    text: String,
+) -> Result<String, MobileFfiError> {
+    claude::send_prompt(&conn_id, &terminal_id, text).await
+}
+
+/// Answer an open dialog. `decision_json` is an `ApiClaudeDecision`. A dialog
+/// that is no longer open fails with the message "dialog already answered".
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn claude_answer_dialog(
+    conn_id: String,
+    terminal_id: String,
+    dialog_id: String,
+    decision_json: String,
+) -> Result<(), MobileFfiError> {
+    claude::answer_dialog(&conn_id, &terminal_id, &dialog_id, &decision_json).await
 }

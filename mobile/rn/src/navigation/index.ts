@@ -7,8 +7,10 @@
 export {
   useNavStore,
   navigate,
+  openClaude,
   currentScreen,
   deriveScreen,
+  nextScreen,
   bindConnectionToNavigation,
   type Screen,
   type NavState,

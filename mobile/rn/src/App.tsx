@@ -44,6 +44,7 @@ import { OkenaColors } from './theme';
 import { ServerListScreen } from './screens/ServerListScreen';
 import { PairingScreen } from './screens/PairingScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
+import { ClaudeScreen } from './screens/ClaudeScreen';
 
 /**
  * Bridge the connection store to the workspace store's polling lifecycle:
@@ -116,6 +117,8 @@ export const App: React.FC = () => {
         <SafeAreaView style={styles.root}>
           {screen === 'workspace' ? (
             <WorkspaceScreen />
+          ) : screen === 'claude' ? (
+            <ClaudeScreen />
           ) : screen === 'pairing' ? (
             <PairingScreen />
           ) : (

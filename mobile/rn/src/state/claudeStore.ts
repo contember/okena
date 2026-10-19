@@ -1,0 +1,336 @@
+/**
+ * claudeStore.ts — the Claude session of one terminal (zustand).
+ *
+ * While a terminal is open ({@link ClaudeState.open}) the store polls the
+ * session and then the transcript every {@link CLAUDE_POLL_MS}. A poll starts
+ * only after the previous one finished, so slow responses never pile up. The
+ * session is published as soon as it arrives, so a failing transcript never
+ * freezes the dialogs. Transcript pages are appended, or replace everything on
+ * `reset`; the page's `cursor` and `session_id` are sent back on the next poll.
+ * Polls that change nothing leave the state objects untouched.
+ *
+ * Results of a poll or an answer that finish after {@link ClaudeState.close}
+ * (or after another terminal was opened) are dropped.
+ *
+ * The native module is injected via {@link configureClaudeStore}, like the
+ * other stores.
+ */
+
+import { create, type StoreApi, type UseBoundStore } from 'zustand';
+
+import {
+  parseClaudePromptResponse,
+  parseClaudeSession,
+  parseClaudeTranscriptPage,
+  type ApiClaudeDecision,
+  type ApiClaudeEntry,
+  type ApiClaudePromptDelivery,
+  type ApiClaudeSession,
+  type ApiClaudeTranscriptPage,
+} from '../native/claude';
+import type { ConnId, OkenaNative, TerminalId } from '../native/okena';
+import {
+  CLAUDE_DIALOG_GONE_MESSAGE,
+  getOkenaNative,
+  nativeErrorMessage,
+} from '../native/okena';
+
+/** Delay (ms) between the end of one poll and the start of the next. */
+export const CLAUDE_POLL_MS = 1000;
+
+/** Transcript entries kept in memory; older ones are dropped. */
+export const CLAUDE_MAX_ENTRIES = 1000;
+
+/** The slice of the native surface this store calls. */
+export type ClaudeNative = Pick<
+  OkenaNative,
+  | 'claudeGetSession'
+  | 'claudeGetTranscript'
+  | 'claudeSendPrompt'
+  | 'claudeAnswerDialog'
+  | 'sendSpecialKey'
+>;
+
+export interface ClaudeDeps {
+  native: ClaudeNative;
+}
+
+export interface ClaudeState {
+  connId: ConnId | null;
+  terminalId: TerminalId | null;
+  /** Latest session; `null` until the first poll succeeds. */
+  session: ApiClaudeSession | null;
+  /** Transcript entries of `sessionId`, oldest first. */
+  entries: ApiClaudeEntry[];
+  /** Cursor of the last transcript page; 0 asks for the first page. */
+  cursor: number;
+  sessionId: string | undefined;
+  /** Error of the last session fetch; cleared by the next successful one. */
+  sessionError: string | null;
+  /** Error of the last transcript fetch; cleared by the next successful one. */
+  transcriptError: string | null;
+  sending: boolean;
+  /** How the last prompt was delivered. */
+  lastDelivery: ApiClaudePromptDelivery | null;
+  /** Why the last prompt (or interrupt) was not accepted. */
+  promptError: string | null;
+  /** Why the last dialog answer failed (other than "already answered"). */
+  dialogError: string | null;
+
+  /** Start following a terminal. Re-opening the same terminal is a no-op. */
+  open(connId: ConnId, terminalId: TerminalId): void;
+  /** Stop polling and clear everything. */
+  close(): void;
+  /** Send a prompt; resolves to whether the server accepted it. */
+  sendPrompt(text: string): Promise<boolean>;
+  /** Answer a dialog; the dialog leaves the session once answered or gone. */
+  answerDialog(dialogId: string, decision: ApiClaudeDecision): Promise<void>;
+  /** Press Escape in the terminal; a failure lands in `promptError`. */
+  interrupt(): Promise<void>;
+}
+
+let injectedDeps: Partial<ClaudeDeps> = {};
+let resolvedDeps: ClaudeDeps | null = null;
+
+function deps(): ClaudeDeps {
+  if (!resolvedDeps) {
+    resolvedDeps = { native: injectedDeps.native ?? getOkenaNative() };
+  }
+  return resolvedDeps;
+}
+
+export function configureClaudeStore(overrides: Partial<ClaudeDeps>): void {
+  injectedDeps = { ...injectedDeps, ...overrides };
+  resolvedDeps = null;
+}
+
+const CLOSED = {
+  connId: null,
+  terminalId: null,
+  session: null,
+  entries: [],
+  cursor: 0,
+  sessionId: undefined,
+  sessionError: null,
+  transcriptError: null,
+  sending: false,
+  lastDelivery: null,
+  promptError: null,
+  dialogError: null,
+} satisfies Partial<ClaudeState>;
+
+// ── polling: one chain per open terminal ────────────────────────────────────
+
+/** Bumped by open/close; work started under an older generation is dropped. */
+let generation = 0;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+/** Dialogs answered (or found gone) in this generation, hidden until the server drops them. */
+let answeredDialogIds = new Set<string>();
+
+function stopPolling(): void {
+  generation += 1;
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  answeredDialogIds = new Set();
+}
+
+function withoutAnswered(session: ApiClaudeSession): ApiClaudeSession {
+  if (answeredDialogIds.size === 0) return session;
+  return {
+    ...session,
+    dialogs: session.dialogs.filter(
+      (dialog) => !answeredDialogIds.has(dialog.id),
+    ),
+  };
+}
+
+function keepLatest(entries: ApiClaudeEntry[]): ApiClaudeEntry[] {
+  return entries.length > CLAUDE_MAX_ENTRIES
+    ? entries.slice(-CLAUDE_MAX_ENTRIES)
+    : entries;
+}
+
+/** The parsed records are built field by field in a fixed order, so their JSON compares structure. */
+function sameSession(a: ApiClaudeSession | null, b: ApiClaudeSession): boolean {
+  return a !== null && JSON.stringify(a) === JSON.stringify(b);
+}
+
+function nextEntries(
+  previous: ApiClaudeEntry[],
+  page: ApiClaudeTranscriptPage,
+): ApiClaudeEntry[] {
+  if (page.entries.length === 0)
+    return page.reset && previous.length > 0 ? [] : previous;
+  return keepLatest(page.reset ? page.entries : [...previous, ...page.entries]);
+}
+
+async function poll(
+  pollGeneration: number,
+  get: StoreApi<ClaudeState>['getState'],
+  set: StoreApi<ClaudeState>['setState'],
+): Promise<void> {
+  const { connId, terminalId } = get();
+  if (connId === null || terminalId === null) return;
+  const native = deps().native;
+
+  let session: ApiClaudeSession;
+  try {
+    session = withoutAnswered(
+      parseClaudeSession(await native.claudeGetSession(connId, terminalId)),
+    );
+  } catch (error) {
+    if (pollGeneration === generation)
+      set({ sessionError: nativeErrorMessage(error) });
+    return;
+  }
+  if (pollGeneration !== generation) return;
+  const previous = get();
+  if (
+    !sameSession(previous.session, session) ||
+    previous.sessionError !== null
+  ) {
+    set({
+      session: sameSession(previous.session, session)
+        ? previous.session
+        : session,
+      sessionError: null,
+    });
+  }
+
+  if (!session.has_transcript) {
+    if (
+      previous.entries.length > 0 ||
+      previous.cursor !== 0 ||
+      previous.sessionId !== undefined
+    ) {
+      set({ entries: [], cursor: 0, sessionId: undefined });
+    }
+    return;
+  }
+
+  try {
+    const page = parseClaudeTranscriptPage(
+      await native.claudeGetTranscript(
+        connId,
+        terminalId,
+        BigInt(previous.cursor),
+        previous.sessionId,
+      ),
+    );
+    if (pollGeneration !== generation) return;
+    const current = get();
+    const entries = nextEntries(current.entries, page);
+    if (
+      entries !== current.entries ||
+      page.cursor !== current.cursor ||
+      page.session_id !== current.sessionId ||
+      current.transcriptError !== null
+    ) {
+      set({
+        entries,
+        cursor: page.cursor,
+        sessionId: page.session_id,
+        transcriptError: null,
+      });
+    }
+  } catch (error) {
+    if (pollGeneration === generation)
+      set({ transcriptError: nativeErrorMessage(error) });
+  }
+}
+
+function schedulePoll(
+  pollGeneration: number,
+  delayMs: number,
+  get: StoreApi<ClaudeState>['getState'],
+  set: StoreApi<ClaudeState>['setState'],
+): void {
+  pollTimer = setTimeout(() => {
+    pollTimer = null;
+    void poll(pollGeneration, get, set).finally(() => {
+      if (pollGeneration === generation)
+        schedulePoll(pollGeneration, CLAUDE_POLL_MS, get, set);
+    });
+  }, delayMs);
+}
+
+export const useClaudeStore: UseBoundStore<StoreApi<ClaudeState>> =
+  create<ClaudeState>((set, get) => ({
+    ...CLOSED,
+
+    open(connId, terminalId) {
+      const current = get();
+      if (current.connId === connId && current.terminalId === terminalId)
+        return;
+      stopPolling();
+      set({ ...CLOSED, connId, terminalId });
+      schedulePoll(generation, 0, get, set);
+    },
+
+    close() {
+      stopPolling();
+      set(CLOSED);
+    },
+
+    async sendPrompt(text) {
+      const { connId, terminalId } = get();
+      if (connId === null || terminalId === null || text.trim().length === 0)
+        return false;
+      const sendGeneration = generation;
+      set({ sending: true, promptError: null, lastDelivery: null });
+      try {
+        const response = parseClaudePromptResponse(
+          await deps().native.claudeSendPrompt(connId, terminalId, text),
+        );
+        if (sendGeneration === generation)
+          set({ sending: false, lastDelivery: response.delivery });
+        return true;
+      } catch (error) {
+        if (sendGeneration === generation) {
+          set({ sending: false, promptError: nativeErrorMessage(error) });
+        }
+        return false;
+      }
+    },
+
+    async answerDialog(dialogId, decision) {
+      const { connId, terminalId } = get();
+      if (connId === null || terminalId === null) return;
+      const answerGeneration = generation;
+      set({ dialogError: null });
+      try {
+        await deps().native.claudeAnswerDialog(
+          connId,
+          terminalId,
+          dialogId,
+          JSON.stringify(decision),
+        );
+      } catch (error) {
+        const message = nativeErrorMessage(error);
+        if (message !== CLAUDE_DIALOG_GONE_MESSAGE) {
+          if (answerGeneration === generation) set({ dialogError: message });
+          return;
+        }
+      }
+      if (answerGeneration !== generation) return;
+      answeredDialogIds.add(dialogId);
+      const session = get().session;
+      if (session !== null) set({ session: withoutAnswered(session) });
+    },
+
+    async interrupt() {
+      const { connId, terminalId } = get();
+      if (connId === null || terminalId === null) return;
+      try {
+        await deps().native.sendSpecialKey(connId, terminalId, 'Escape');
+      } catch (error) {
+        set({ promptError: nativeErrorMessage(error) });
+      }
+    },
+  }));
+
+export function claudeStore(): StoreApi<ClaudeState> {
+  return useClaudeStore;
+}

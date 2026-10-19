@@ -23,24 +23,37 @@ import {
   type ConnectionState,
 } from '../state/connectionStore';
 
-/** The three screens of the app, in flow order. */
-export type Screen = 'serverList' | 'pairing' | 'workspace';
+/**
+ * The screens of the app, in flow order. `claude` is the Claude chat of one
+ * terminal ({@link NavState.claudeTerminalId}), entered from the workspace.
+ */
+export type Screen = 'serverList' | 'pairing' | 'workspace' | 'claude';
 
 /** Nav store state + the navigate action. */
 export interface NavState {
   /** The currently-displayed screen. */
   screen: Screen;
+  /** Terminal shown by the `claude` screen; `null` on every other screen. */
+  claudeTerminalId: string | null;
   /**
    * Navigate to a screen. Screens call this directly (e.g. the server-list
    * screen calls `navigate('pairing')` after kicking off a connection — though
    * the connection-driven binding usually handles that automatically).
    */
   navigate(screen: Screen): void;
+  /** Open the Claude chat of a terminal. */
+  openClaude(terminalId: string): void;
 }
 
 const useNavStoreImpl: UseBoundStore<StoreApi<NavState>> = create<NavState>((set) => ({
   screen: 'serverList',
-  navigate: (screen) => set({ screen }),
+  claudeTerminalId: null,
+  navigate: (screen) =>
+    set((state) => ({
+      screen,
+      claudeTerminalId: screen === 'claude' ? state.claudeTerminalId : null,
+    })),
+  openClaude: (terminalId) => set({ screen: 'claude', claudeTerminalId: terminalId }),
 }));
 
 /**
@@ -56,6 +69,11 @@ export const useNavStore = useNavStoreImpl;
 /** Imperative navigate (for non-React callers). Prefer the hook inside components. */
 export function navigate(screen: Screen): void {
   useNavStoreImpl.getState().navigate(screen);
+}
+
+/** Open the Claude chat of a terminal (for non-React callers). */
+export function openClaude(terminalId: string): void {
+  useNavStoreImpl.getState().openClaude(terminalId);
 }
 
 /** The current screen, imperatively. */
@@ -77,6 +95,14 @@ export function deriveScreen(conn: ConnectionState): Screen {
 }
 
 /**
+ * The screen to show after a connection change: the derived one, except that
+ * a connected app stays on the Claude chat it was opened into.
+ */
+export function nextScreen(current: Screen, derived: Screen): Screen {
+  return current === 'claude' && derived === 'workspace' ? current : derived;
+}
+
+/**
  * Subscribe the navigation store to the connection store so the screen tracks
  * connection state automatically (the Dart `AppRouter` behavior). Call once at
  * app start (App.tsx). Returns an unsubscribe fn.
@@ -87,9 +113,10 @@ export function deriveScreen(conn: ConnectionState): Screen {
  */
 export function bindConnectionToNavigation(): () => void {
   const conn = connectionStore();
+  const apply = (state: ConnectionState) => {
+    navigate(nextScreen(currentScreen(), deriveScreen(state)));
+  };
   // Apply once immediately for the initial state.
-  navigate(deriveScreen(conn.getState()));
-  return conn.subscribe((state) => {
-    navigate(deriveScreen(state));
-  });
+  apply(conn.getState());
+  return conn.subscribe(apply);
 }

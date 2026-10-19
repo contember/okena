@@ -6,6 +6,7 @@
  * the terminal id set is untouched (CORR-15).
  */
 
+import type { AgentLifecycle } from '../native/claude';
 import type { ProjectInfo, TerminalActivity } from '../native/okena';
 import {
   configureWorkspaceStore,
@@ -57,6 +58,7 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getProjectOrder: () => [PROJECT.id],
     getFullscreenTerminal: () => undefined,
     getProjectLayoutJson: () => layouts[Math.min(tick++, layouts.length - 1)]!,
+    getClaudeDialogCounts: () => ({}),
     secondsSinceActivity: () => 0,
     getTerminalActivity: () => [],
     markTerminalSeen: () => {},
@@ -325,7 +327,7 @@ describe('workspace activity signals', () => {
   });
 
   it('acknowledges a done agent once seen, until the next transition to done', () => {
-    let lifecycle = 'done';
+    let lifecycle: AgentLifecycle = 'done';
     const withAgent = (): ProjectInfo[] => [
       A,
       { ...B, terminalAgentStatus: { b1: { lifecycle } } },
@@ -385,5 +387,30 @@ describe('workspace activity signals', () => {
     pinned = true;
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().projects[0]!.pinned).toBe(true);
+  });
+});
+
+describe('workspace Claude dialog tracking', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes dialog-count changes', () => {
+    let counts: Record<string, number> = {};
+    configureWorkspaceStore({
+      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeDialogCounts: () => counts },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().claudeDialogs).toEqual({});
+
+    counts = { t1: 1 };
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().claudeDialogs).toEqual({ t1: 1 });
   });
 });

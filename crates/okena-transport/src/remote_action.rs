@@ -1,7 +1,9 @@
 //! Shared async and blocking clients for actions sent to an Okena daemon.
 
 use crate::RemoteConnectionConfig;
-use okena_core::api::{ActionRequest, FileDownloadRequest};
+use okena_core::api::ActionRequest;
+#[cfg(feature = "blocking-http")]
+use okena_core::api::FileDownloadRequest;
 #[cfg(feature = "blocking-http")]
 use std::sync::{Arc, OnceLock};
 
@@ -26,6 +28,7 @@ const SEARCH_TIMEOUT_SECS: u64 = 90;
 const LONG_MUTATION_TIMEOUT_SECS: u64 = 11 * 60;
 
 const ACTIONS_PATH: &str = "/v1/actions";
+#[cfg(feature = "blocking-http")]
 const DOWNLOAD_PATH: &str = "/v1/files/download";
 
 /// Hard ceiling on response body size accepted by the remote bridge. Cuts
@@ -342,8 +345,14 @@ pub async fn post_action_async_with_client(
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-    reject_declared_oversize(response.content_length())?;
     let status = response.status();
+    let body = read_limited_body_async(&mut response).await?;
+    parse_action_response(status, &body)
+}
+
+#[cfg(any(feature = "client", feature = "cancellable-http"))]
+async fn read_limited_body_async(response: &mut reqwest::Response) -> Result<Vec<u8>, String> {
+    reject_declared_oversize(response.content_length())?;
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -355,7 +364,100 @@ pub async fn post_action_async_with_client(
         }
         body.extend_from_slice(&chunk);
     }
-    parse_action_response(status, &body)
+    Ok(body)
+}
+
+/// Failure of a JSON request to a daemon route outside `/v1/actions`.
+#[cfg(feature = "client")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JsonRequestError {
+    /// The server answered with a non-success status; `body` is its text.
+    Status { status: u16, body: String },
+    /// The request could not be sent, or its response could not be read or parsed.
+    Transport(String),
+}
+
+#[cfg(feature = "client")]
+impl std::fmt::Display for JsonRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status { status, body } => write!(f, "Server returned {status}: {body}"),
+            Self::Transport(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// `GET` a JSON route with the connection's transport policy and bearer token.
+/// Path segments and query values are percent-encoded, so ids can be passed
+/// as they are.
+#[cfg(feature = "client")]
+pub async fn get_json_async<T: serde::de::DeserializeOwned>(
+    config: &RemoteConnectionConfig,
+    token: &str,
+    segments: &[&str],
+    query: &[(&str, &str)],
+) -> Result<T, JsonRequestError> {
+    let (client, origin) = crate::remote_http::async_client_and_url(config, "")
+        .map_err(JsonRequestError::Transport)?;
+    let url = route_url(&origin, segments, query).map_err(JsonRequestError::Transport)?;
+    send_json_request(client.get(url), token).await
+}
+
+/// `POST` a JSON body to a route; see [`get_json_async`].
+#[cfg(feature = "client")]
+pub async fn post_json_async<T: serde::de::DeserializeOwned, B: serde::Serialize + ?Sized>(
+    config: &RemoteConnectionConfig,
+    token: &str,
+    segments: &[&str],
+    body: &B,
+) -> Result<T, JsonRequestError> {
+    let (client, origin) = crate::remote_http::async_client_and_url(config, "")
+        .map_err(JsonRequestError::Transport)?;
+    let url = route_url(&origin, segments, &[]).map_err(JsonRequestError::Transport)?;
+    send_json_request(client.post(url).json(body), token).await
+}
+
+#[cfg(feature = "client")]
+fn route_url(
+    origin: &str,
+    segments: &[&str],
+    query: &[(&str, &str)],
+) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(origin)
+        .map_err(|error| format!("Invalid server address {origin}: {error}"))?;
+    url.path_segments_mut()
+        .map_err(|()| format!("Invalid server address {origin}"))?
+        .clear()
+        .extend(segments);
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    Ok(url)
+}
+
+#[cfg(feature = "client")]
+async fn send_json_request<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    token: &str,
+) -> Result<T, JsonRequestError> {
+    let mut response = request
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(FAST_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| JsonRequestError::Transport(format!("HTTP request failed: {e}")))?;
+    let status = response.status();
+    let body = read_limited_body_async(&mut response)
+        .await
+        .map_err(JsonRequestError::Transport)?;
+    if !status.is_success() {
+        return Err(JsonRequestError::Status {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| JsonRequestError::Transport(format!("Failed to parse response: {e}")))
 }
 
 #[cfg(feature = "blocking-http")]
@@ -573,6 +675,120 @@ mod tests {
             }),
             ActionClientKind::Bytes
         );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn route_url_percent_encodes_segments_and_query() {
+        let url = route_url(
+            "http://okena.local",
+            &["v1", "claude", "terminals", "a/b c", "transcript"],
+            &[("cursor", "7"), ("session_id", "s&1")],
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://okena.local/v1/claude/terminals/a%2Fb%20c/transcript?cursor=7&session_id=s%261"
+        );
+    }
+
+    /// Serves one HTTP request with `response` and returns the request head.
+    #[cfg(feature = "client")]
+    fn serve_once(response: &'static str) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8(request[..end].to_vec()).unwrap();
+                let content_length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + content_length {
+                    stream.write_all(response.as_bytes()).unwrap();
+                    return head;
+                }
+            }
+        });
+        (port, server)
+    }
+
+    #[cfg(feature = "client")]
+    fn plain_config(port: u16) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            saved_token: None,
+            token_obtained_at: None,
+            tls: false,
+            pinned_cert_sha256: None,
+            local_endpoint: None,
+        }
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn get_json_sends_the_bearer_token_and_parses_the_body() {
+        let (port, server) = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+
+        let body: serde_json::Value =
+            get_json_async(&plain_config(port), "secret", &["v1", "x"], &[("a", "1")])
+                .await
+                .unwrap();
+
+        assert_eq!(body, serde_json::json!({ "ok": true }));
+        let head = server.join().unwrap();
+        assert!(head.starts_with("GET /v1/x?a=1 HTTP/1.1"), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer secret"),
+            "{head}"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn post_json_reports_error_status_with_the_body_text() {
+        let (port, server) = serve_once(
+            "HTTP/1.1 409 Conflict\r\ncontent-type: text/plain\r\ncontent-length: 4\r\nconnection: close\r\n\r\nbusy",
+        );
+
+        let error = post_json_async::<serde_json::Value, _>(
+            &plain_config(port),
+            "secret",
+            &["v1", "x"],
+            &serde_json::json!({ "text": "hi" }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            JsonRequestError::Status {
+                status: 409,
+                body: "busy".to_string(),
+            }
+        );
+        assert!(server.join().unwrap().starts_with("POST /v1/x HTTP/1.1"));
     }
 
     #[cfg(feature = "cancellable-http")]
