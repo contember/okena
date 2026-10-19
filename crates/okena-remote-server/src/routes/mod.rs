@@ -672,6 +672,20 @@ mod tests {
         }
     }
 
+    /// Like `next_frame_type`, but skips `system_stats_changed`: the stream
+    /// pushes it on its own timer, starting right after `auth_ok`.
+    async fn next_frame_type_skipping_stats<S>(socket: &mut S) -> Option<String>
+    where
+        S: futures::Stream<Item = Result<TestFrame, TestFrameError>> + Unpin,
+    {
+        loop {
+            let frame_type = next_frame_type(socket).await;
+            if frame_type.as_deref() != Some("system_stats_changed") {
+                return frame_type;
+            }
+        }
+    }
+
     async fn send_frame<S>(socket: &mut S, frame: serde_json::Value)
     where
         S: futures::Sink<TestFrame, Error = TestFrameError> + Unpin,
@@ -779,11 +793,11 @@ mod tests {
         assert!(store.revoke_token(&token_id));
 
         assert_eq!(
-            next_frame_type(&mut socket).await.as_deref(),
+            next_frame_type_skipping_stats(&mut socket).await.as_deref(),
             Some("auth_failed")
         );
         assert!(
-            next_frame_type(&mut socket).await.is_none(),
+            next_frame_type_skipping_stats(&mut socket).await.is_none(),
             "the daemon must close the revoked stream"
         );
     }
