@@ -29,6 +29,9 @@ const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// How long an account's usage history serves the pool summary before it is
 /// read again.
 const HISTORY_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
+/// Cap on one account's history read, so a proxy that hangs on it does not
+/// hold up the accounts poll for the client's minute-long command timeout.
+const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest wait between attempts to start a proxy that keeps failing to come up.
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(10 * 60);
 
@@ -199,12 +202,16 @@ pub(crate) async fn run_accounts_poll(
             continue;
         };
         accounts.publish(current.clone());
-        // A refresh cuts a stalled history read short; reads still due run on
-        // the next poll.
+        // A refresh cuts the history reads short and polls again at once; the
+        // pool waits for that pass, so it never shows an account without the
+        // history that is still being read.
         let refresh_requested = tokio::select! {
             () = histories.reload_due(&client, &current) => false,
             () = accounts.refresh.notified() => true,
         };
+        if refresh_requested {
+            continue;
+        }
         let pool_histories = histories.by_account().clone();
         let working =
             WorkingDays::from_value(settings.lock().extension_settings.get(USAGE_SETTINGS_KEY));
@@ -219,9 +226,7 @@ pub(crate) async fn run_accounts_poll(
             }
             Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
         }
-        if !refresh_requested {
-            wait_for_next_poll(&accounts).await;
-        }
+        wait_for_next_poll(&accounts).await;
     }
 }
 
@@ -277,12 +282,14 @@ impl PoolHistories {
 
     async fn reload_due(&mut self, client: &ProxyClient, accounts: &[AiAccount]) {
         for account_id in self.due(accounts, Instant::now()) {
-            let result = client
-                .command(&AiProxyCommand::UsageHistory {
-                    account_id: account_id.clone(),
-                })
-                .await
-                .and_then(|status| account_history(status, &account_id));
+            let command = AiProxyCommand::UsageHistory {
+                account_id: account_id.clone(),
+            };
+            let read = client.command(&command);
+            let result = match tokio::time::timeout(HISTORY_READ_TIMEOUT, read).await {
+                Ok(status) => status.and_then(|status| account_history(status, &account_id)),
+                Err(_) => Err(anyhow::anyhow!("Usage history read timed out")),
+            };
             self.record(account_id, result, Instant::now());
         }
     }
