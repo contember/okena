@@ -495,6 +495,47 @@ mod tests {
     }
 
     #[test]
+    fn today_starts_at_the_local_midnight() {
+        // 08:00 UTC is 18:00 at UTC+10, whose midnight was 18 hours ago.
+        let now_secs = NOW_MS as f64 / 1000.0;
+        let reset = now_secs + 2.0 * 86400.0;
+        let weekly = |hours_ago: f64, used: f64| {
+            sample(
+                "a",
+                now_secs - hours_ago * 3600.0,
+                vec![("7d", used, SEVEN_DAY_SECS, reset)],
+            )
+        };
+        let history = History::from_samples(vec![
+            weekly(19.0, 20.0),
+            weekly(17.0, 20.0),
+            weekly(9.0, 30.0),
+            weekly(7.0, 30.0),
+        ]);
+        let account = AiAccount {
+            seven_day: usage(40.0, NOW_MS + 48 * HOUR_MS),
+            ..account("a")
+        };
+        let used_today = |tz: TimeZone| {
+            let summary = summarize(
+                std::slice::from_ref(&account),
+                &HashMap::from([("a".to_string(), history.clone())]),
+                WorkingDays::all(),
+                now(),
+                &tz,
+            )
+            .unwrap();
+            (
+                summary.accounts[0].used_today_percent,
+                summary.today.used.account_week_percent,
+            )
+        };
+        let east = TimeZone::fixed(jiff::tz::offset(10));
+        assert_eq!(used_today(east), (20.0, 20.0));
+        assert_eq!(used_today(TimeZone::UTC), (10.0, 10.0));
+    }
+
+    #[test]
     fn the_same_minute_gives_the_same_pool() {
         let account = AiAccount {
             five_hour: usage(50.0, NOW_MS + 4 * HOUR_MS),
