@@ -67,6 +67,38 @@ impl StatusBarStyle {
     }
 }
 
+/// What the small ring before a worktree row in the sidebar shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreeMarker {
+    /// The project's colour (inherited from the parent unless overridden).
+    #[default]
+    Project,
+    /// The colour of the worktree's status column; the project colour when
+    /// it has none.
+    Status,
+    /// No ring; the chevron and the name stay.
+    None,
+}
+
+impl WorktreeMarker {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            WorktreeMarker::Project => "Project colour",
+            WorktreeMarker::Status => "Status colour",
+            WorktreeMarker::None => "None",
+        }
+    }
+
+    pub fn all_variants() -> &'static [WorktreeMarker] {
+        &[
+            WorktreeMarker::Project,
+            WorktreeMarker::Status,
+            WorktreeMarker::None,
+        ]
+    }
+}
+
 /// One column of the terminal status board. `id` is the stable key that
 /// `ProjectData::status` stores; `name` is what the user sees and
 /// may rename without touching any terminal.

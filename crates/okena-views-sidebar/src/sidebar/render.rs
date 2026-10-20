@@ -1167,6 +1167,7 @@ impl Render for Sidebar {
                                     &mut flat_elements[guide_start..],
                                     12.0,
                                     t.get_folder_color(project.folder_color),
+                                    cx,
                                 );
                             }
                         }
@@ -1386,6 +1387,7 @@ impl Render for Sidebar {
                                         &mut flat_elements[guide_start..],
                                         28.0,
                                         t.get_folder_color(fp.folder_color),
+                                        cx,
                                     );
                                 }
                             } else {

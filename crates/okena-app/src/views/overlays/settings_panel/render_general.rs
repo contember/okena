@@ -3,7 +3,7 @@ use crate::theme::theme;
 use crate::ui::tokens::{ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::SimpleInput;
 use crate::workspace::settings::{
-    HeaderDensity, HostStatsStyle, RemoteSidebarLayout, StatusBarStyle,
+    HeaderDensity, HostStatsStyle, RemoteSidebarLayout, StatusBarStyle, WorktreeMarker,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -46,7 +46,14 @@ impl SettingsPanel {
                 "status-board", "Status Board", s.status_board.enabled, true,
                 |state, val, cx| state.set_status_board_enabled(val, cx), cx,
             ))
-            .when(s.status_board.enabled, |d| d.child(self.render_board_columns(cx)))
+            .when(s.status_board.enabled, |d| {
+                d.child(self.render_toggle(
+                    "sidebar-worktree-guide", "Sidebar Family Guide", s.sidebar.worktree_guide, true,
+                    |state, val, cx| state.set_sidebar_worktree_guide(val, cx), cx,
+                ))
+                .child(self.render_board_columns(cx))
+            })
+            .child(self.render_worktree_marker_row(s.sidebar.worktree_marker, cx))
             .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
@@ -266,6 +273,43 @@ impl SettingsPanel {
                 let style = variants[i];
                 settings_entity(cx).update(cx, |state, cx| {
                     state.set_sidebar_host_stats(style, cx);
+                });
+            },
+        ))
+    }
+
+    fn render_worktree_marker_row(
+        &self,
+        current: WorktreeMarker,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let variants = WorktreeMarker::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|marker| Segment {
+                id: format!("{:?}", marker).into(),
+                label: marker.display_name(),
+                selected: *marker == current,
+            })
+            .collect();
+
+        settings_row(
+            "sidebar-worktree-marker".to_string(),
+            "Sidebar Worktree Marker",
+            &t,
+            cx,
+            true,
+        )
+        .child(segmented_control(
+            "sidebar-worktree-marker",
+            &segments,
+            &t,
+            cx,
+            move |i, _, cx| {
+                let marker = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_sidebar_worktree_marker(marker, cx);
                 });
             },
         ))

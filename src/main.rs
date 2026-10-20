@@ -731,6 +731,13 @@ fn main() {
 
         // Terminal status board columns, read by the sidebar groups and the
         // board overlay.
+        cx.set_global(okena_ui::board::GlobalSidebarLook(|cx| {
+            let s = &settings::settings_entity(cx).read(cx).settings.sidebar;
+            okena_ui::board::SidebarLook {
+                worktree_marker: s.worktree_marker,
+                worktree_guide: s.worktree_guide,
+            }
+        }));
         cx.set_global(okena_ui::board::GlobalStatusBoardEnabled(|cx| {
             settings::settings_entity(cx)
                 .read(cx)

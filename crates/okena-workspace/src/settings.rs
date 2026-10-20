@@ -1,5 +1,7 @@
 use okena_core::theme::ThemeMode;
-pub use okena_core::types::{BoardColumn, DiffViewMode, StatusBarStyle, default_board_columns};
+pub use okena_core::types::{
+    BoardColumn, DiffViewMode, StatusBarStyle, WorktreeMarker, default_board_columns,
+};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -269,6 +271,13 @@ pub struct SidebarSettings {
     /// (host rows in Separate layout, connection rows otherwise).
     #[serde(default)]
     pub host_stats: HostStatsStyle,
+    /// What the ring before a worktree row shows — see [`WorktreeMarker`].
+    #[serde(default)]
+    pub worktree_marker: WorktreeMarker,
+    /// Draw a thin guide in the parent's colour down an expanded family.
+    /// Only drawn while the status board is enabled.
+    #[serde(default = "default_true")]
+    pub worktree_guide: bool,
 }
 
 impl Default for SidebarSettings {
@@ -279,6 +288,8 @@ impl Default for SidebarSettings {
             width: DEFAULT_SIDEBAR_WIDTH,
             remote_layout: RemoteSidebarLayout::default(),
             host_stats: HostStatsStyle::default(),
+            worktree_marker: WorktreeMarker::default(),
+            worktree_guide: true,
         }
     }
 }

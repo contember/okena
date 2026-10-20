@@ -32,9 +32,11 @@ as it did before.
   worktree rows split under small captions (a dot and the name in the
   column's colour), one per non-empty column in the columns' order, then
   *No status*. A thin guide in the parent's colour runs down the left of
-  the expanded family, so a worktree still reads as its parent's while the
-  captions say where it stands. Keyboard navigation walks the rows in the
-  same order.
+  the expanded family (Settings > General > *Sidebar Family Guide*), so a
+  worktree still reads as its parent's while the captions say where it
+  stands. The ring before each worktree can show the project colour (the
+  default), the status colour, or nothing (*Sidebar Worktree Marker*).
+  Keyboard navigation walks the rows in the same order.
 
 ## Columns
 

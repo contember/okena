@@ -327,6 +327,22 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set what the ring before a worktree row shows.
+    pub fn set_sidebar_worktree_marker(
+        &mut self,
+        value: crate::workspace::settings::WorktreeMarker,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.worktree_marker = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Show or hide the family guide in the sidebar.
+    pub fn set_sidebar_worktree_guide(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.worktree_guide = value;
+        self.save_and_notify(cx);
+    }
+
     /// Switch the status board feature on or off.
     pub fn set_status_board_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.status_board.enabled = value;

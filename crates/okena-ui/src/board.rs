@@ -42,6 +42,34 @@ pub fn status_color(status: Option<&str>, cx: &App) -> Option<okena_core::theme:
         .filter(|c| *c != okena_core::theme::FolderColor::Default)
 }
 
+/// Sidebar presentation choices read by the sidebar crate.
+#[derive(Clone, Copy, Debug)]
+pub struct SidebarLook {
+    pub worktree_marker: okena_core::types::WorktreeMarker,
+    pub worktree_guide: bool,
+}
+
+impl Default for SidebarLook {
+    fn default() -> Self {
+        Self {
+            worktree_marker: okena_core::types::WorktreeMarker::Project,
+            worktree_guide: true,
+        }
+    }
+}
+
+/// Global function pointer that reads [`SidebarLook`] from the host app's
+/// settings. Unregistered falls back to the defaults.
+pub struct GlobalSidebarLook(pub fn(&App) -> SidebarLook);
+
+impl Global for GlobalSidebarLook {}
+
+pub fn sidebar_look(cx: &App) -> SidebarLook {
+    cx.try_global::<GlobalSidebarLook>()
+        .map(|g| (g.0)(cx))
+        .unwrap_or_default()
+}
+
 pub fn board_columns(cx: &App) -> Vec<BoardColumn> {
     cx.try_global::<GlobalBoardColumns>()
         .map(|g| (g.0)(cx))
