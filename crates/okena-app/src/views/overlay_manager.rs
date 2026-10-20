@@ -116,6 +116,11 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
+    /// The project context menu asked for the status board. The host owns the
+    /// terminal registry the board reads agent statuses from, so it opens it.
+    ShowTerminalBoard {
+        project_id: String,
+    },
     /// Session manager requested a session/workspace action (load/save/import/
     /// export). The host dispatches it to the local daemon, which owns session
     /// files + the authoritative workspace.
@@ -775,6 +780,56 @@ impl OverlayManager {
         toggle_overlay!(self, cx, HookLog, HookLogEvent, HookLog::new);
     }
 
+    /// Toggle the terminal status board, scoped to `project_id` or to every
+    /// project. A drop on a column dispatches `SetTerminalStatus` through the
+    /// project's dispatcher; the board itself writes nothing.
+    pub fn toggle_terminal_board(
+        &mut self,
+        project_id: Option<String>,
+        terminals: okena_terminal::TerminalsRegistry,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::views::overlays::terminal_board::{TerminalBoard, TerminalBoardEvent};
+        if self.is_modal::<TerminalBoard>() {
+            self.close_modal(cx);
+            return;
+        }
+        let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
+        let board = cx.new(|cx| {
+            TerminalBoard::new(
+                workspace,
+                focus_manager,
+                window_id,
+                terminals,
+                project_id,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &board,
+            |this, _, event: &TerminalBoardEvent, cx| match event {
+                TerminalBoardEvent::Close => this.close_modal(cx),
+                TerminalBoardEvent::SetStatus {
+                    project_id,
+                    terminal_id,
+                    status,
+                } => this.emit_project_action(
+                    project_id,
+                    ActionRequest::SetTerminalStatus {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                        status: status.clone(),
+                    },
+                    cx,
+                ),
+            },
+        )
+        .detach();
+        self.open_modal(board, cx);
+    }
+
     /// Toggle the log console overlay (live in-app log viewer).
     pub fn toggle_log_console(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, LogConsole, LogConsoleEvent, LogConsole::new);
@@ -1117,6 +1172,12 @@ impl OverlayManager {
                 ContextMenuEvent::CreateWorktree { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::CreateWorktree {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::ShowStatusBoard { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ShowTerminalBoard {
                         project_id: project_id.clone(),
                     });
                 }

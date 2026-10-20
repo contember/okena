@@ -879,6 +879,13 @@ impl WindowView {
                     terminal.clear();
                 }
             }
+            OverlayManagerEvent::ShowTerminalBoard { project_id } => {
+                let terminals = self.terminals.clone();
+                let project_id = project_id.clone();
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.toggle_terminal_board(Some(project_id), terminals, cx);
+                });
+            }
             OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
                 {
                     let terminals = self.terminals.lock();

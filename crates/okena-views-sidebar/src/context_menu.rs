@@ -78,6 +78,10 @@ pub enum ContextMenuEvent {
         project_id: String,
         project_name: String,
     },
+    /// Open the terminal status board scoped to this project.
+    ShowStatusBoard {
+        project_id: String,
+    },
     RenameDirectory {
         project_id: String,
         project_path: String,
@@ -533,6 +537,21 @@ impl Render for ContextMenu {
                         })
                         // Separator (only if worktree items above were shown)
                         .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
+                        .child(
+                            menu_item(
+                                "context-menu-status-board",
+                                "icons/tabs.svg",
+                                "Status Board…",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    cx.emit(ContextMenuEvent::ShowStatusBoard {
+                                        project_id: this.request.project_id.clone(),
+                                    });
+                                },
+                            )),
+                        )
                         // Rename option
                         .child(
                             menu_item(

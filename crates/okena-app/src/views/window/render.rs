@@ -5,8 +5,9 @@ use crate::keybindings::{
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ShowTerminalBoard, ShowTerminalBoardAll, ShowThemeSelector, StartAllServices, StopAllServices,
+    TogglePaneSwitcher, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar,
+    ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
@@ -1130,6 +1131,25 @@ impl Render for WindowView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowHookLog, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_hook_log(cx));
+                }
+            }))
+            // Terminal status board: the focused project, or everything.
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |this, _: &ShowTerminalBoard, _window, cx| {
+                    let project_id = this.focus_manager.read(cx).focused_project_id().cloned();
+                    let terminals = this.terminals.clone();
+                    overlay_manager.update(cx, |om, cx| {
+                        om.toggle_terminal_board(project_id, terminals, cx)
+                    });
+                }
+            }))
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |this, _: &ShowTerminalBoardAll, _window, cx| {
+                    let terminals = this.terminals.clone();
+                    overlay_manager
+                        .update(cx, |om, cx| om.toggle_terminal_board(None, terminals, cx));
                 }
             }))
             // Handle show log console action

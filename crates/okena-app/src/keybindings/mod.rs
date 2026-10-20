@@ -46,6 +46,8 @@ actions!(
         StopAllServices,
         ShowHookLog,
         ShowLogConsole,
+        ShowTerminalBoard,
+        ShowTerminalBoardAll,
         EqualizeLayout,
         ToggleProjectLayout,
         ToggleProjectVisibility,
