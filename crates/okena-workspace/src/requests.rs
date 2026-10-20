@@ -157,6 +157,10 @@ pub enum OverlayRequest {
     AddProjectDialog {
         target_connection_id: Option<String>,
     },
+    /// Open the terminal status board for one project, or for all (`None`).
+    TerminalBoard {
+        project_id: Option<String>,
+    },
     RemoteConnect,
     RemoteConnectionContextMenu {
         connection_id: String,

@@ -870,6 +870,31 @@ impl ProjectColumn {
             .into_any_element()
         });
 
+        let status_board_button = {
+            use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+            let request_broker = self.request_broker.clone();
+            let project_id = self.project_id.clone();
+            header_button_base(
+                HeaderAction::StatusBoard,
+                &self.project_id,
+                ButtonSize::COMPACT,
+                &t,
+                None,
+                None,
+            )
+            .on_click(move |_, _window, cx| {
+                request_broker.update(cx, |broker, cx| {
+                    broker.push_overlay_request(
+                        crate::workspace::requests::OverlayRequest::TerminalBoard {
+                            project_id: Some(project_id.clone()),
+                        },
+                        cx,
+                    );
+                });
+                cx.stop_propagation();
+            })
+        };
+
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
@@ -877,6 +902,7 @@ impl ProjectColumn {
                 h_flex()
                     .gap(px(2.0))
                     .when_some(header_reveal, |d, controls| d.child(controls))
+                    .child(status_board_button)
                     .child({
                         self.hook_panel
                             .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))

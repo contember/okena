@@ -11,7 +11,8 @@ demand.
 
 ## What you see
 
-- **Terminal menu → Status** (right-click a tab or a sidebar terminal row): a
+- **Terminal menu → Status** (right-click a tab, a pane header's terminal
+  button, or a terminal row in the sidebar): a
   flyout with the columns; the current one is ticked, *No status* is last and
   ticked when the terminal has none. Picking a column sets the status, *No
   status* clears it.
@@ -19,9 +20,10 @@ demand.
   Terminals list splits under small captions, one per non-empty column in
   the columns' order, then *No status*. Terminals keep their layout order
   inside a group. Keyboard navigation walks the rows in the same order.
-- **Status board** (project context menu → *Status Board…*, or the command
-  palette: *Status Board* for the focused project, *Status Board (All
-  Projects)* for everything): one column per board column plus *No status*,
+- **Status board** (the kanban button in a project's header, `Cmd+Shift+K` /
+  `Ctrl+Shift+K` for the focused project, project context menu → *Status
+  Board…*, or the command palette: *Status Board* / *Status Board (All
+  Projects)*): one column per board column plus *No status*,
   one card per terminal. A card shows the terminal's name, in the
   all-projects scope its project and colour, and the agent status the
   terminal reports (dot + text) when there is one. Click a card to jump to
@@ -36,6 +38,8 @@ The columns live in Settings > General > **Terminal Status Columns**
 display `name`. A fresh install starts with `todo`, `in-progress`, `review`,
 `done`.
 
+- Each column can take a colour (the same palette as projects); it tints
+  the sidebar caption and the board column header.
 - Renaming a column keeps its id, so every terminal keeps its status.
 - Removing a column leaves its terminals' status ids in place; they render
   as *No status* until the id comes back or you re-sort them. Nothing is

@@ -1470,6 +1470,12 @@ impl WindowView {
                         om.toggle_add_project_dialog(rm, target_connection_id, cx);
                     });
                 }
+                OverlayRequest::TerminalBoard { project_id } => {
+                    let terminals = self.terminals.clone();
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.toggle_terminal_board(project_id, terminals, cx);
+                    });
+                }
                 OverlayRequest::RemoteConnect => {
                     if let Some(ref rm) = self.remote_manager {
                         let rm = rm.clone();

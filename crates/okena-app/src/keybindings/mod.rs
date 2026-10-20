@@ -483,6 +483,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
         "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
         "ShowLogConsole" => Some(KeyBinding::new(keystroke, ShowLogConsole, context)),
+        "ShowTerminalBoard" => Some(KeyBinding::new(keystroke, ShowTerminalBoard, context)),
+        "ShowTerminalBoardAll" => Some(KeyBinding::new(keystroke, ShowTerminalBoardAll, context)),
         "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);

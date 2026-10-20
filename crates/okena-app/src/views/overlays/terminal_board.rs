@@ -86,6 +86,7 @@ struct CardView {
 struct ColumnView {
     id: Option<String>,
     label: String,
+    color: FolderColor,
     cards: Vec<CardView>,
 }
 
@@ -167,6 +168,7 @@ impl TerminalBoard {
             .map(|column| ColumnView {
                 id: column.column.as_ref().map(|c| c.id.clone()),
                 label: column.label().to_string(),
+                color: column.column.as_ref().map(|c| c.color).unwrap_or_default(),
                 cards: column
                     .cards
                     .into_iter()
@@ -352,6 +354,10 @@ impl TerminalBoard {
         let slug = column.id.clone().unwrap_or_else(|| "none".to_string());
         let drop_status = column.id.clone();
         let count = column.cards.len();
+        let accent = match column.color {
+            FolderColor::Default => None,
+            color => Some(t.get_folder_color(color)),
+        };
         let cards: Vec<AnyElement> = column
             .cards
             .into_iter()
@@ -390,11 +396,18 @@ impl TerminalBoard {
                     .gap(px(6.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
+                    .children(accent.map(|hex| {
+                        div()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(rgb(hex))
+                            .flex_shrink_0()
+                    }))
                     .child(
                         div()
                             .text_size(ui_text_ms(cx))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_secondary))
+                            .text_color(rgb(accent.unwrap_or(t.text_secondary)))
                             .child(column.label.to_uppercase()),
                     )
                     .child(

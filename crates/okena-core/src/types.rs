@@ -74,6 +74,9 @@ impl StatusBarStyle {
 pub struct BoardColumn {
     pub id: String,
     pub name: String,
+    /// Accent for the column's caption and header; `Default` means none.
+    #[serde(default)]
+    pub color: crate::theme::FolderColor,
 }
 
 impl BoardColumn {
@@ -81,7 +84,13 @@ impl BoardColumn {
         Self {
             id: id.into(),
             name: name.into(),
+            color: crate::theme::FolderColor::Default,
         }
+    }
+
+    pub fn with_color(mut self, color: crate::theme::FolderColor) -> Self {
+        self.color = color;
+        self
     }
 }
 

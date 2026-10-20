@@ -10,6 +10,7 @@ use crate::views::components::simple_input::{InputChangedEvent, SimpleInput, Sim
 use crate::workspace::settings::BoardColumn;
 use gpui::prelude::*;
 use gpui::*;
+use okena_core::theme::FolderColor;
 use okena_ui::button::button;
 use okena_ui::icon_button::icon_button;
 use okena_ui::settings::{input_box, settings_input_row};
@@ -78,6 +79,35 @@ impl SettingsPanel {
                 let id_up = id.clone();
                 let id_down = id.clone();
                 let id_remove = id.clone();
+                let current_color = columns
+                    .iter()
+                    .find(|c| &c.id == id)
+                    .map(|c| c.color)
+                    .unwrap_or_default();
+                let swatches: Vec<AnyElement> = FolderColor::all()
+                    .iter()
+                    .map(|&color| {
+                        let id_color = id.clone();
+                        let selected = color == current_color;
+                        div()
+                            .id(ElementId::Name(
+                                format!("board-col-color-{id}-{color:?}").into(),
+                            ))
+                            .size(px(12.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(t.get_folder_color(color)))
+                            .cursor_pointer()
+                            .when(selected, |d| d.border_2().border_color(rgb(t.text_primary)))
+                            .when(!selected, |d| d.border_1().border_color(rgb(t.border)))
+                            .hover(|s| s.opacity(0.8))
+                            .on_click(cx.listener(move |_this, _, _window, cx| {
+                                settings_entity(cx).update(cx, |state, cx| {
+                                    state.set_terminal_board_column_color(&id_color, color, cx);
+                                });
+                            }))
+                            .into_any_element()
+                    })
+                    .collect();
                 div()
                     .flex()
                     .items_center()
@@ -88,6 +118,7 @@ impl SettingsPanel {
                             .min_w_0()
                             .child(SimpleInput::new(input).text_size(ui_text_md(cx))),
                     )
+                    .child(div().flex().items_center().gap(px(3.0)).children(swatches))
                     .child(
                         icon_button(
                             ElementId::Name(format!("board-col-up-{id}").into()),

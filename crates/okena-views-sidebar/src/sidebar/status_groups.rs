@@ -59,10 +59,15 @@ impl Sidebar {
     pub(crate) fn render_status_group_header(
         &self,
         label: &str,
+        color: okena_core::theme::FolderColor,
         left_padding: f32,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
+        let text_color = match color {
+            okena_core::theme::FolderColor::Default => t.text_muted,
+            color => t.get_folder_color(color),
+        };
         div()
             .h(px(18.0))
             .pl(px(left_padding))
@@ -73,7 +78,7 @@ impl Sidebar {
                 div()
                     .text_size(ui_text_xs(cx))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(text_color))
                     .child(label.to_uppercase()),
             )
     }

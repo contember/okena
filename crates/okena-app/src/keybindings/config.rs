@@ -108,6 +108,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "ShowTerminalBoard".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-k", None),
+                KeybindingEntry::new("ctrl-shift-k", None),
+            ],
+        );
+        bindings.insert(
             "OpenSettingsFile".to_string(),
             vec![
                 KeybindingEntry::new("cmd-alt-,", None),

@@ -367,6 +367,29 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Recolour a column.
+    pub fn set_terminal_board_column_color(
+        &mut self,
+        id: &str,
+        color: okena_core::theme::FolderColor,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(column) = self
+            .settings
+            .terminal_board
+            .columns
+            .iter_mut()
+            .find(|c| c.id == id)
+        else {
+            return;
+        };
+        if column.color == color {
+            return;
+        }
+        column.color = color;
+        self.save_and_notify(cx);
+    }
+
     /// Remove a column. Terminals in it keep their status id and render as
     /// unassigned until the id comes back or they are re-sorted.
     pub fn remove_terminal_board_column(&mut self, id: &str, cx: &mut Context<Self>) {

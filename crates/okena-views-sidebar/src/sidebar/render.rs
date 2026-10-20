@@ -646,8 +646,13 @@ impl Sidebar {
                     if captioned {
                         extra_rows.push(*flat_idx);
                         flat_elements.push(
-                            self.render_status_group_header(group.label(), group_items_padding, cx)
-                                .into_any_element(),
+                            self.render_status_group_header(
+                                group.label(),
+                                group.column.as_ref().map(|c| c.color).unwrap_or_default(),
+                                group_items_padding,
+                                cx,
+                            )
+                            .into_any_element(),
                         );
                     }
                     let minimized_states: Vec<(String, bool)> = {

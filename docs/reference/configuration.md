@@ -193,7 +193,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `terminal_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a terminal can be sorted into (terminal menu → Status; the status board). `id` is the stable key stored on terminals, `name` is what you see. Rename freely; removing a column leaves its terminals unassigned. See [terminal-board.md](terminal-board.md). |
+| `terminal_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a terminal can be sorted into (terminal menu → Status; the status board). `id` is the stable key stored on terminals, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its terminals unassigned. See [terminal-board.md](terminal-board.md). |
 
 #### File Opener
 

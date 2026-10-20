@@ -598,6 +598,44 @@ impl Sidebar {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
+            // Right-click: the same terminal menu the pane header opens
+            // (rename, status, shell, zoom, …).
+            .on_mouse_down(MouseButton::Right, {
+                let project_id = project_id.clone();
+                let terminal_id = terminal_id.clone();
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let layout_path = this
+                        .workspace
+                        .read(cx)
+                        .project(&project_id)
+                        .and_then(|p| p.layout.as_ref())
+                        .and_then(|l| l.find_terminal_path(&terminal_id));
+                    let Some(layout_path) = layout_path else {
+                        return;
+                    };
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            okena_workspace::requests::OverlayRequest::Project(
+                                okena_workspace::requests::ProjectOverlay {
+                                    project_id: project_id.clone(),
+                                    kind: okena_workspace::requests::ProjectOverlayKind::TerminalMenu {
+                                        terminal_id: terminal_id.clone(),
+                                        layout_path,
+                                        position: event.position,
+                                        can_export_buffer: false,
+                                        invocation:
+                                            okena_workspace::requests::TerminalMenuInvocation::Header {
+                                                include_primary_actions: true,
+                                            },
+                                    },
+                                },
+                            ),
+                            cx,
+                        );
+                    });
+                    cx.stop_propagation();
+                })
+            })
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_minimized, |d| d.opacity(0.5))
             .when(is_inactive_tab && !is_minimized, |d| d.opacity(0.5))
