@@ -20,5 +20,6 @@ pub mod sessions;
 pub mod settings;
 pub mod sidebar_controller;
 pub mod state;
+pub mod terminal_board;
 pub mod toast;
 pub mod visibility;

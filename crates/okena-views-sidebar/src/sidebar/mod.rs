@@ -12,6 +12,7 @@ mod renames;
 mod render;
 pub(crate) mod section_header;
 pub(crate) mod sections;
+pub(crate) mod status_groups;
 mod worktree;
 
 #[cfg(test)]
@@ -900,6 +901,8 @@ pub struct SidebarProjectInfo {
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
+    /// User-set board status per terminal (terminal id → column id).
+    pub terminal_statuses: HashMap<String, String>,
     /// Terminal IDs that are behind a non-active tab (not currently visible)
     pub inactive_tab_terminals: HashSet<String>,
     /// Terminal IDs that belong to a tab group (Tabs node with 2+ children)
@@ -979,6 +982,7 @@ impl SidebarProjectInfo {
                 .map(|l| l.collect_tab_group_terminal_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
+            terminal_statuses: project.terminal_statuses.clone(),
             is_orphan: false,
             worktree_count: 0,
             parent_project_id: project
@@ -1014,6 +1018,7 @@ impl SidebarProjectInfo {
 /// An item in the sidebar's top-level ordering: a project, a folder, or (in
 /// the Separate remote layout) a host section header. Headers are not cursor
 /// targets.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SidebarItem {
     SectionHeader {
         section: sections::SidebarSectionInfo,
