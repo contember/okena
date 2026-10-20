@@ -30,6 +30,27 @@ pub struct ReleaseCatalog {
     pub releases: Vec<RevertRelease>,
 }
 
+/// One published release with its notes, for the What's New overlay.
+/// Unlike [`RevertRelease`] it does not care about platform assets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseNote {
+    pub version: String,
+    pub published_at: String,
+    pub release_url: String,
+    /// The GitHub release body, Markdown. Empty when the release has none.
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseNotes {
+    pub current_version: String,
+    /// Newest first.
+    pub releases: Vec<ReleaseNote>,
+}
+
+/// How many releases What's New shows at most.
+pub const RELEASE_NOTES_CAP: usize = 20;
+
 /// Check GitHub for the latest release newer than `app_version`.
 pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset>> {
     smol::unblock(move || check_blocking(&app_version)).await
@@ -39,6 +60,16 @@ pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset
 /// this platform. GitHub returns releases newest-first; the order is preserved.
 pub async fn list_revert_releases(app_version: String) -> Result<ReleaseCatalog> {
     smol::unblock(move || list_revert_releases_blocking(&app_version)).await
+}
+
+/// List the notes of stable releases up to and including the running
+/// version — only those newer than `since` when it is given. See
+/// [`select_release_notes`] for the rules.
+pub async fn list_release_notes(
+    app_version: String,
+    since: Option<String>,
+) -> Result<ReleaseNotes> {
+    smol::unblock(move || list_release_notes_blocking(&app_version, since.as_deref())).await
 }
 
 /// Resolve one exact downgrade target from GitHub. The target must be older
@@ -77,6 +108,72 @@ fn list_revert_releases_blocking(app_version: &str) -> Result<ReleaseCatalog> {
         current_version: app_version.to_string(),
         releases,
     })
+}
+
+fn list_release_notes_blocking(app_version: &str, since: Option<&str>) -> Result<ReleaseNotes> {
+    let response = fetch_json(
+        &format!("{RELEASES_URL}?per_page=100"),
+        app_version,
+        "updater.release_notes",
+    )?;
+    let releases = response
+        .as_array()
+        .context("release list is not an array")?;
+    let current = Version::parse(app_version).context("invalid current version")?;
+    let since =
+        since.and_then(|since| Version::parse(since.strip_prefix('v').unwrap_or(since)).ok());
+    Ok(ReleaseNotes {
+        current_version: app_version.to_string(),
+        releases: select_release_notes(releases, &current, since.as_ref()),
+    })
+}
+
+/// Pick the releases What's New shows, newest first in GitHub's order:
+/// stable only, `since < version <= current` (just `version <= current`
+/// without `since`), capped at [`RELEASE_NOTES_CAP`]. A build ahead of the
+/// last tag (nothing `<= current`) gets the newest published release instead
+/// of an empty list.
+pub fn select_release_notes(
+    releases: &[serde_json::Value],
+    current: &Version,
+    since: Option<&Version>,
+) -> Vec<ReleaseNote> {
+    let stable: Vec<(Version, &serde_json::Value)> = releases
+        .iter()
+        .filter(|release| is_stable_release(release))
+        .filter_map(|release| {
+            let tag = release["tag_name"].as_str()?;
+            let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+            Some((version, release))
+        })
+        .collect();
+
+    let selected: Vec<ReleaseNote> = stable
+        .iter()
+        .filter(|(version, _)| version <= current && since.is_none_or(|since| version > since))
+        .take(RELEASE_NOTES_CAP)
+        .map(|(version, release)| release_note(version, release))
+        .collect();
+    if !selected.is_empty() || stable.iter().any(|(version, _)| version <= current) {
+        return selected;
+    }
+    stable
+        .iter()
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(version, release)| vec![release_note(version, release)])
+        .unwrap_or_default()
+}
+
+fn release_note(version: &Version, release: &serde_json::Value) -> ReleaseNote {
+    ReleaseNote {
+        version: version.to_string(),
+        published_at: release["published_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        release_url: release["html_url"].as_str().unwrap_or_default().to_string(),
+        body: release["body"].as_str().unwrap_or_default().to_string(),
+    }
 }
 
 fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<ReleaseAsset> {
@@ -281,5 +378,106 @@ mod tests {
     fn exact_release_rejects_prerelease() {
         let candidate = release("0.26.0", false, true, true);
         assert!(!is_stable_release(&candidate));
+    }
+
+    fn note(
+        version: &str,
+        draft: bool,
+        prerelease: bool,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": format!("v{version}"),
+            "published_at": "2026-10-09T15:49:55Z",
+            "html_url": format!("https://github.com/contember/okena/releases/tag/v{version}"),
+            "draft": draft,
+            "prerelease": prerelease,
+            "body": body,
+            "assets": []
+        })
+    }
+
+    /// GitHub order, newest first: a draft, a prerelease, then four stable
+    /// releases 0.35 … 0.32.
+    fn notes_fixture() -> Vec<serde_json::Value> {
+        vec![
+            note("0.36.0", true, false, "## Draft".into()),
+            note("0.36.0-rc.1", false, true, "## Prerelease".into()),
+            note("0.35.0", false, false, "## What's new\n\n- 0.35".into()),
+            note("0.34.0", false, false, serde_json::Value::Null),
+            note("0.33.0", false, false, "## What's new\n\n- 0.33".into()),
+            note("0.32.0", false, false, "## What's Changed".into()),
+        ]
+    }
+
+    fn versions(notes: &[ReleaseNote]) -> Vec<&str> {
+        notes.iter().map(|n| n.version.as_str()).collect()
+    }
+
+    #[test]
+    fn notes_since_keep_only_what_the_update_brought() {
+        let current = Version::parse("0.34.0").unwrap();
+        let since = Version::parse("0.33.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, Some(&since));
+        assert_eq!(versions(&notes), ["0.34.0"]);
+    }
+
+    #[test]
+    fn notes_without_since_keep_everything_up_to_current() {
+        let current = Version::parse("0.34.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, None);
+        assert_eq!(versions(&notes), ["0.34.0", "0.33.0", "0.32.0"]);
+    }
+
+    #[test]
+    fn notes_for_a_bumped_unreleased_version_show_the_published_ones() {
+        let current = Version::parse("0.36.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, None);
+        assert_eq!(versions(&notes), ["0.35.0", "0.34.0", "0.33.0", "0.32.0"]);
+    }
+
+    #[test]
+    fn notes_fall_back_to_the_newest_release_when_nothing_is_older() {
+        let current = Version::parse("0.31.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, None);
+        assert_eq!(versions(&notes), ["0.35.0"]);
+    }
+
+    #[test]
+    fn notes_skip_drafts_and_prereleases() {
+        let current = Version::parse("0.99.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, None);
+        assert!(
+            notes
+                .iter()
+                .all(|n| !n.body.contains("Draft") && !n.body.contains("Prerelease"))
+        );
+    }
+
+    #[test]
+    fn notes_carry_body_url_and_date_and_a_null_body_becomes_empty() {
+        let current = Version::parse("0.35.0").unwrap();
+        let notes = select_release_notes(&notes_fixture(), &current, None);
+        assert_eq!(notes[0].body, "## What's new\n\n- 0.35");
+        assert_eq!(notes[0].published_at, "2026-10-09T15:49:55Z");
+        assert_eq!(
+            notes[0].release_url,
+            "https://github.com/contember/okena/releases/tag/v0.35.0"
+        );
+        assert_eq!(notes[1].version, "0.34.0");
+        assert_eq!(notes[1].body, "");
+    }
+
+    #[test]
+    fn notes_are_capped_at_the_newest_twenty() {
+        let releases: Vec<serde_json::Value> = (0..25)
+            .rev()
+            .map(|minor| note(&format!("0.{minor}.0"), false, false, "x".into()))
+            .collect();
+        let current = Version::parse("0.24.0").unwrap();
+        let notes = select_release_notes(&releases, &current, None);
+        assert_eq!(notes.len(), RELEASE_NOTES_CAP);
+        assert_eq!(notes[0].version, "0.24.0");
+        assert_eq!(notes[19].version, "0.5.0");
     }
 }

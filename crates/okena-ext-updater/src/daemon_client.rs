@@ -1,4 +1,4 @@
-use crate::{ReleaseCatalog, UpdateStatusSnapshot};
+use crate::{ReleaseCatalog, ReleaseNotes, UpdateStatusSnapshot};
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -99,6 +99,25 @@ pub fn fetch_releases() -> Result<ReleaseCatalog> {
         .context("release history request failed")?
         .json()
         .context("failed to decode release history")
+}
+
+/// Release notes up to the running version; only those after `since` when given.
+pub fn fetch_release_notes(since: Option<&str>) -> Result<ReleaseNotes> {
+    let path = match since {
+        Some(since) => format!("/v1/update/release-notes?since={since}"),
+        None => "/v1/update/release-notes".to_string(),
+    };
+    let endpoint = local_update_endpoint(&path)?;
+    endpoint
+        .client
+        .get(&endpoint.url)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .context("failed to fetch release notes")?
+        .error_for_status()
+        .context("release notes request failed")?
+        .json()
+        .context("failed to decode release notes")
 }
 
 pub fn request_revert(version: &str, keep_config: bool) -> Result<UpdateStatusSnapshot> {

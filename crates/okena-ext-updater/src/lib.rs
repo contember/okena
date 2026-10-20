@@ -23,7 +23,7 @@ use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistrati
 use std::sync::Arc;
 
 // Re-export public types used by the host app
-pub use checker::{ReleaseCatalog, RevertRelease};
+pub use checker::{ReleaseCatalog, ReleaseNote, ReleaseNotes, RevertRelease};
 #[cfg(feature = "gpui-ui")]
 pub use installer::restart_app;
 #[cfg(feature = "gpui-ui")]

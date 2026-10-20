@@ -255,6 +255,10 @@ pub fn build_router(
             "/v1/update/releases",
             axum::routing::get(update::get_releases),
         )
+        .route(
+            "/v1/update/release-notes",
+            axum::routing::get(update::get_release_notes),
+        )
         .route("/v1/update/check", axum::routing::post(update::post_check))
         .route(
             "/v1/update/revert",
@@ -600,6 +604,7 @@ mod tests {
         for call in [
             Call::post("/v1/auth/reload"),
             Call::get("/v1/update/status"),
+            Call::get("/v1/update/release-notes"),
             Call::post("/v1/update/check"),
             Call::post("/v1/update/install"),
             Call::post("/v1/update/dismiss"),

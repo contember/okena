@@ -1,6 +1,6 @@
 use crate::routes::{AppState, PeerInfo};
 use axum::Json;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use okena_ext_updater::UpdateStatus;
 use std::time::Duration;
@@ -83,6 +83,30 @@ pub async fn get_releases(
         .map(Json)
         .map_err(|error| {
             log::error!("Failed to list revert releases: {error}");
+            StatusCode::BAD_GATEWAY
+        })
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReleaseNotesQuery {
+    /// Only releases newer than this version (the one seen last).
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+pub async fn get_release_notes(
+    Extension(peer): Extension<PeerInfo>,
+    State(state): State<AppState>,
+    Query(query): Query<ReleaseNotesQuery>,
+) -> Result<Json<okena_ext_updater::ReleaseNotes>, StatusCode> {
+    if !peer.is_local_trusted() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    okena_ext_updater::checker::list_release_notes(state.update_info.app_version(), query.since)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            log::error!("Failed to list release notes: {error}");
             StatusCode::BAD_GATEWAY
         })
 }
