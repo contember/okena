@@ -26,6 +26,22 @@ pub fn status_board_enabled(cx: &App) -> bool {
         .is_some_and(|g| (g.0)(cx))
 }
 
+/// The colour a project's status lends it: the column's colour when the
+/// board is enabled, the status resolves to a column and that column has a
+/// colour. Views use it in place of the project's own colour so a status
+/// reads at a glance everywhere the project is drawn.
+pub fn status_color(status: Option<&str>, cx: &App) -> Option<okena_core::theme::FolderColor> {
+    let status = status?;
+    if !status_board_enabled(cx) {
+        return None;
+    }
+    board_columns(cx)
+        .into_iter()
+        .find(|c| c.id == status)
+        .map(|c| c.color)
+        .filter(|c| *c != okena_core::theme::FolderColor::Default)
+}
+
 pub fn board_columns(cx: &App) -> Vec<BoardColumn> {
     cx.try_global::<GlobalBoardColumns>()
         .map(|g| (g.0)(cx))

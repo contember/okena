@@ -513,7 +513,7 @@ impl Sidebar {
     ) -> impl IntoElement {
         let t = theme(cx);
         let project_id = info.id.clone();
-        let dot_color = t.get_folder_color(info.folder_color);
+        let dot_color = t.get_folder_color(info.display_color(cx));
         div()
             .id(ElementId::Name(
                 format!("attention-mirror-{}", info.id).into(),

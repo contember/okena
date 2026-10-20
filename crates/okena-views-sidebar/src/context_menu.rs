@@ -83,6 +83,8 @@ pub enum ContextMenuEvent {
         project_id: String,
         status: Option<String>,
     },
+    /// Flip this window's status-lanes view.
+    ToggleStatusLanes,
     RenameDirectory {
         project_id: String,
         project_path: String,
@@ -407,6 +409,7 @@ impl Render for ContextMenu {
             None => "Status".to_string(),
         };
         let status_board = okena_ui::board::status_board_enabled(cx);
+        let lanes_on = ws.status_lanes(self.window_id);
         let status_group = okena_ui::submenu::Submenu::new(
             "context-menu-status",
             "icons/arrow-up-down.svg",
@@ -606,7 +609,25 @@ impl Render for ContextMenu {
                         })
                         // Separator (only if worktree items above were shown)
                         .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
-                        .when(status_board, |menu| menu.child(status_group))
+                        .when(status_board, |menu| {
+                            menu.child(status_group).child(
+                                menu_item(
+                                    "context-menu-status-lanes",
+                                    if lanes_on {
+                                        "icons/check.svg"
+                                    } else {
+                                        "icons/kanban.svg"
+                                    },
+                                    "Status lanes",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |_this, _, _window, cx| {
+                                        cx.emit(ContextMenuEvent::ToggleStatusLanes);
+                                    },
+                                )),
+                            )
+                        })
                         // Rename option
                         .child(
                             menu_item(

@@ -19,8 +19,9 @@ as it did before.
   the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
   sidebar): the same choices as a flyout; the current one is ticked.
-- **Lanes** (sidebar View menu → *Status lanes*, or `Cmd+Shift+K` /
-  `Ctrl+Shift+K`, per window): the main area's project columns stand in
+- **Lanes** (the lanes button next to *View* at the top of the sidebar,
+  the project menu → *Status lanes*, the View menu, or `Cmd+Shift+K` /
+  `Ctrl+Shift+K`; per window): the main area's project columns stand in
   lanes, one per board column that has a member, *No status* last, each
   under a thin caption (dot in the column's colour, name, hairline).
   Focus a parent to see its worktrees sorted; the Overview sorts every
@@ -40,8 +41,11 @@ The columns live in Settings > General > **Status Columns**
 Each column has a stable `id`, a display `name` and an optional colour. A
 fresh install starts with `todo`, `in-progress`, `review`, `done`.
 
-- A colour (the same palette as projects) tints the pill, the lane caption
-  and the sidebar caption.
+- A colour (the same palette as projects) becomes the project's colour
+  wherever it is drawn while the status is set: the sidebar dot or ring, the
+  column header dot, the tinted terminal background (with "Color Tinted
+  Background" on), the pill, the lane caption and the sidebar caption. Clear
+  the status and the project's own colour returns.
 - Renaming a column keeps its id, so every project keeps its status.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until the id comes back or you re-sort them. Nothing is

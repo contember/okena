@@ -703,7 +703,8 @@ impl ProjectColumn {
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
         let window_id_for_hide = self.window_id;
-        let effective_color = self.workspace.read(cx).effective_folder_color(project);
+        let effective_color = okena_ui::board::status_color(project.status.as_deref(), cx)
+            .unwrap_or_else(|| self.workspace.read(cx).effective_folder_color(project));
         let folder_color = t.get_folder_color(effective_color);
         let app_settings = crate::settings::settings(cx);
         let density = app_settings.header_density;
@@ -1345,7 +1346,8 @@ impl Render for ProjectColumn {
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
-                    let color = workspace.effective_folder_color(&project);
+                    let color = okena_ui::board::status_color(project.status.as_deref(), cx)
+                        .unwrap_or_else(|| workspace.effective_folder_color(&project));
                     if color != crate::theme::FolderColor::Default {
                         rgb(crate::ui::tint_color(
                             t.bg_primary,

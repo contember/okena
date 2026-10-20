@@ -614,6 +614,47 @@ impl Sidebar {
                             .flex()
                             .items_center()
                             .gap(px(4.0))
+                            // Status lanes toggle (only with the status board enabled):
+                            // lit while this window groups its columns by status.
+                            .when(okena_ui::board::status_board_enabled(cx), |row| {
+                                let lanes_on = self.workspace.read(cx).status_lanes(window_id);
+                                row.child(
+                                    div()
+                                        .id("status-lanes-btn")
+                                        .cursor_pointer()
+                                        .size(px(24.0))
+                                        .rounded(px(4.0))
+                                        .when(lanes_on, |b| b.bg(rgb(t.bg_hover)))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            svg()
+                                                .path("icons/kanban.svg")
+                                                .size(px(13.0))
+                                                .text_color(rgb(if lanes_on {
+                                                    t.border_active
+                                                } else {
+                                                    t.text_secondary
+                                                })),
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(if lanes_on {
+                                                "Status lanes on"
+                                            } else {
+                                                "Status lanes"
+                                            })
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.workspace.update(cx, |ws, cx| {
+                                                ws.toggle_status_lanes(window_id, cx);
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("project-view-menu-btn")
@@ -958,6 +999,12 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
+    /// The colour this row draws with: the status colour when the board is
+    /// on and the project's status column has one, else the project colour.
+    pub fn display_color(&self, cx: &App) -> FolderColor {
+        okena_ui::board::status_color(self.status.as_deref(), cx).unwrap_or(self.folder_color)
+    }
+
     /// Build a sidebar projection of a project.
     ///
     /// `show_in_overview` on the projection is derived from
