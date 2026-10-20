@@ -17,6 +17,8 @@ mod render_terminal;
 mod render_worktree;
 mod sidebar;
 
+mod board_columns;
+
 use categories::SettingsCategory;
 use components::opt_string;
 
@@ -101,6 +103,8 @@ pub struct SettingsPanel {
     pub(super) file_opener_input: Entity<SimpleInputState>,
     // Remote listen address input
     pub(super) listen_address_input: Entity<SimpleInputState>,
+    /// One name input per terminal status board column, by column id.
+    pub(super) board_column_inputs: Vec<(String, Entity<SimpleInputState>)>,
     // Paired devices. The remote server lives in the daemon process, so the list
     // is fetched over its REST API rather than read from an in-process store.
     pub(super) daemon_endpoint: Option<DaemonEndpoint>,
@@ -926,6 +930,7 @@ impl SettingsPanel {
             worktree_dir_suffix_input,
             file_opener_input,
             listen_address_input,
+            board_column_inputs: Vec::new(),
             paired_devices: PairedDevices::Loading,
             daemon_endpoint,
             extension_views: HashMap::new(),

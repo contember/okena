@@ -42,6 +42,7 @@ impl SettingsPanel {
             ))
             .child(self.render_remote_sidebar_layout_row(s.sidebar.remote_layout, cx))
             .child(self.render_host_stats_row(s.sidebar.host_stats, cx))
+            .child(self.render_board_columns(cx))
             .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,

@@ -189,6 +189,12 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `status_bar.show_metrics` | bool | `true` | Show the CPU and memory readout in the status bar |
 | `status_bar.metrics_graph` | bool | `true` | Draw CPU and memory as short history graphs instead of single-value bars |
 
+#### Terminal Status Board
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `terminal_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a terminal can be sorted into (terminal menu → Status; the status board). `id` is the stable key stored on terminals, `name` is what you see. Rename freely; removing a column leaves its terminals unassigned. See [terminal-board.md](terminal-board.md). |
+
 #### File Opener
 
 | Key | Type | Default | Description |

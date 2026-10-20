@@ -6,6 +6,7 @@
 
 pub mod activity_repaint;
 pub mod badge;
+pub mod board;
 pub mod button;
 pub mod chip;
 pub mod click_detector;

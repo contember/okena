@@ -729,6 +729,17 @@ fn main() {
             settings::settings_entity(cx).read(cx).settings.status_bar.style
         }));
 
+        // Terminal status board columns, read by the sidebar groups and the
+        // board overlay.
+        cx.set_global(okena_ui::board::GlobalBoardColumns(|cx| {
+            settings::settings_entity(cx)
+                .read(cx)
+                .settings
+                .terminal_board
+                .columns
+                .clone()
+        }));
+
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 

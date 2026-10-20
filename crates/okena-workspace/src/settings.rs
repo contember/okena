@@ -1,5 +1,5 @@
 use okena_core::theme::ThemeMode;
-pub use okena_core::types::{DiffViewMode, StatusBarStyle};
+pub use okena_core::types::{BoardColumn, DiffViewMode, StatusBarStyle, default_board_columns};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -315,6 +315,29 @@ fn default_status_bar_metrics_graph() -> bool {
     true
 }
 
+/// Terminal status board: the columns a terminal can be sorted into.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TerminalBoardSettings {
+    /// Ordered columns. Ids are stable; names are free to change.
+    #[serde(default = "default_board_columns")]
+    pub columns: Vec<BoardColumn>,
+}
+
+impl Default for TerminalBoardSettings {
+    fn default() -> Self {
+        Self {
+            columns: default_board_columns(),
+        }
+    }
+}
+
+impl TerminalBoardSettings {
+    /// The column a status id refers to, if it still exists.
+    pub fn column(&self, id: &str) -> Option<&BoardColumn> {
+        self.columns.iter().find(|c| c.id == id)
+    }
+}
+
 /// Current settings schema version - increment when making breaking changes
 pub const SETTINGS_VERSION: u32 = 3;
 
@@ -336,6 +359,9 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
+    /// Terminal status board columns.
+    #[serde(default)]
+    pub terminal_board: TerminalBoardSettings,
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
@@ -581,6 +607,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
+            terminal_board: TerminalBoardSettings::default(),
             show_focused_border: default_show_focused_border(),
             color_tinted_background: false,
             font_size: default_font_size(),
@@ -1061,6 +1088,35 @@ mod tests {
         assert_eq!(config.project.on_open, Some("echo open".into()));
         assert!(config.worktree.pre_merge.is_none());
         assert!(config.worktree.after_remove.is_none());
+    }
+
+    #[test]
+    fn terminal_board_defaults_when_absent_and_keeps_custom_columns() {
+        // A settings.json from before the board existed gets the default
+        // columns; one that names its own keeps them verbatim, ids included.
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        let ids: Vec<&str> = settings
+            .terminal_board
+            .columns
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["todo", "in-progress", "review", "done"]);
+        assert_eq!(
+            settings
+                .terminal_board
+                .column("review")
+                .map(|c| c.name.as_str()),
+            Some("Review")
+        );
+        assert!(settings.terminal_board.column("missing").is_none());
+
+        let json = r#"{"terminal_board":{"columns":[{"id":"qa","name":"QA"}]}}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            settings.terminal_board.columns,
+            vec![BoardColumn::new("qa", "QA")]
+        );
     }
 
     #[test]
