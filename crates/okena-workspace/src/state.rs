@@ -41,6 +41,15 @@ struct FocusAnchor {
     replacement: Option<String>,
 }
 
+/// The per-project fields the cached terminal views render from — see
+/// `Workspace::project_presentation`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectPresentation {
+    terminal_names: HashMap<String, String>,
+    folder_color: FolderColor,
+    color_override: Option<FolderColor>,
+}
+
 /// The project layouts as they stood before the reconciliation numbered
 /// `generation` reshaped them. See `Workspace::focus_reference_layout`.
 struct SyncLayoutPreimage {
@@ -2361,6 +2370,7 @@ impl Workspace {
         let anchor = self.capture_focus_anchor(focus_manager, last_seen);
 
         let before = self.project_layouts();
+        let presentation_before = self.project_presentation();
         let taken_at = self.sync_generation;
 
         let outcome = crate::remote_apply::apply_remote_snapshot(
@@ -2430,6 +2440,35 @@ impl Workspace {
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         self.notify_ui_only(cx);
+
+        // Terminal names (tab bar, pane overlays) and project colours (pane
+        // tint) are drawn by views behind `.cached()`, which a plain notify
+        // never reaches. A rename or recolour made elsewhere (the sidebar,
+        // another client) only became visible once something else happened
+        // to repaint the window.
+        if self.project_presentation() != presentation_before {
+            cx.refresh_views();
+        }
+    }
+
+    /// What the cached terminal views draw from each project: custom terminal
+    /// names, the project colour and a worktree's colour override. Keyed by
+    /// project id, compared before and after a snapshot.
+    fn project_presentation(&self) -> HashMap<String, ProjectPresentation> {
+        self.data
+            .projects
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    ProjectPresentation {
+                        terminal_names: p.terminal_names.clone(),
+                        folder_color: p.folder_color,
+                        color_override: p.worktree_info.as_ref().and_then(|wt| wt.color_override),
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Every project's layout, keyed by project id.
@@ -2610,6 +2649,7 @@ mod workspace_tests {
     #[derive(Default)]
     struct RecordingCx {
         notifications: usize,
+        refreshes: usize,
     }
 
     impl WorkspaceCx for RecordingCx {
@@ -2617,7 +2657,9 @@ mod workspace_tests {
             self.notifications += 1;
         }
 
-        fn refresh_views(&mut self) {}
+        fn refresh_views(&mut self) {
+            self.refreshes += 1;
+        }
 
         fn hook_runner(&self) -> Option<okena_hooks::HookRunner> {
             None
@@ -2626,6 +2668,151 @@ mod workspace_tests {
         fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor> {
             None
         }
+    }
+
+    /// One connection, one project, one terminal, with the given custom names.
+    fn snapshot_with_terminal_names(names: &[(&str, &str)]) -> crate::remote_apply::RemoteSnapshot {
+        snapshot_with(names, FolderColor::Default)
+    }
+
+    fn snapshot_with(
+        names: &[(&str, &str)],
+        folder_color: FolderColor,
+    ) -> crate::remote_apply::RemoteSnapshot {
+        use okena_core::api::{ApiLayoutNode, ApiProject, StateResponse};
+        crate::remote_apply::RemoteSnapshot {
+            config: okena_transport::client::RemoteConnectionConfig {
+                id: "c1".to_string(),
+                name: "conn-c1".to_string(),
+                host: "c1.example.com".to_string(),
+                port: 19100,
+                saved_token: None,
+                token_obtained_at: None,
+                tls: false,
+                pinned_cert_sha256: None,
+                local_endpoint: None,
+            },
+            state: Some(StateResponse {
+                state_version: 1,
+                projects: vec![ApiProject {
+                    id: "p1".to_string(),
+                    name: "proj-p1".to_string(),
+                    path: "/srv/p1".to_string(),
+                    show_in_overview: true,
+                    layout: Some(ApiLayoutNode::Terminal {
+                        terminal_id: Some("t1".to_string()),
+                        minimized: false,
+                        detached: false,
+                        shell_type: Default::default(),
+                        cols: None,
+                        rows: None,
+                        show_name_when_inactive: false,
+                    }),
+                    terminal_names: names
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                    git_status: None,
+                    terminal_agent_status: HashMap::new(),
+                    folder_color,
+                    services: Vec::new(),
+                    worktree_info: None,
+                    worktree_ids: Vec::new(),
+                    pinned: false,
+                    last_activity_at: None,
+                    default_shell: None,
+                    hook_terminals: Vec::new(),
+                    hooks: Default::default(),
+                    is_creating: false,
+                    is_closing: false,
+                    creating_progress: None,
+                }],
+                focused_project_id: None,
+                fullscreen_terminal: None,
+                project_order: vec!["p1".to_string()],
+                folders: Vec::new(),
+                windows: Vec::new(),
+                hooks: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn snapshot_that_recolours_a_project_refreshes_cached_views() {
+        let mut ws = Workspace::new(make_workspace_data(vec![], vec![]));
+        let mut fm = crate::focus::FocusManager::new();
+        let mut cx = RecordingCx::default();
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with(&[], FolderColor::Blue)],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        let after_first = cx.refreshes;
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with(&[], FolderColor::Blue)],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(
+            cx.refreshes, after_first,
+            "unchanged colour must not refresh"
+        );
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with(&[], FolderColor::Red)],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 1);
+    }
+
+    #[test]
+    fn snapshot_that_renames_a_terminal_refreshes_cached_views() {
+        let mut ws = Workspace::new(make_workspace_data(vec![], vec![]));
+        let mut fm = crate::focus::FocusManager::new();
+        let mut cx = RecordingCx::default();
+
+        // First sync: names arrive with the project — the tab bar is painted
+        // fresh anyway, but the map went from absent to present.
+        ws.apply_remote_snapshot(
+            &[snapshot_with_terminal_names(&[("t1", "build")])],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        let after_first = cx.refreshes;
+
+        // Same snapshot again: nothing to repaint.
+        ws.apply_remote_snapshot(
+            &[snapshot_with_terminal_names(&[("t1", "build")])],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(
+            cx.refreshes, after_first,
+            "unchanged names must not refresh"
+        );
+
+        // A rename made elsewhere: exactly one refresh.
+        ws.apply_remote_snapshot(
+            &[snapshot_with_terminal_names(&[("t1", "tests")])],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 1);
+        assert_eq!(
+            ws.project("remote:c1:p1")
+                .and_then(|p| p.terminal_names.get("remote:c1:t1"))
+                .map(String::as_str),
+            Some("tests")
+        );
     }
 
     #[test]
