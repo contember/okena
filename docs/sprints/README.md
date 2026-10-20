@@ -21,3 +21,4 @@ Lifecycle (full detail in [`../CLAUDE.md`](../CLAUDE.md)):
 
 <!-- one line per active sprint; empty between sprints -->
 - [Native terminal view (iOS + Android)](sprint-2026-10-17-native-terminal-view.md) — replace the JS/Skia renderer with Swift/Kotlin views over a Rust C ABI
+- [Terminal status board](sprint-2026-10-20-terminal-status-board.md) — manual per-terminal statuses, status groups in the sidebar, kanban overlay per project / all projects

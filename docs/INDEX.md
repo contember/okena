@@ -27,6 +27,7 @@ Architecture and build rules live next to the code, not here:
 
 <!-- list the sprint files currently in sprints/ ; empty between sprints -->
 - [Native terminal view (iOS + Android)](sprints/sprint-2026-10-17-native-terminal-view.md) — replace the JS/Skia renderer with Swift/Kotlin views over a Rust C ABI
+- [Terminal status board](sprints/sprint-2026-10-20-terminal-status-board.md) — manual per-terminal statuses, status groups in the sidebar, kanban overlay per project / all projects
 - _none active_
 
 ## What's hot
