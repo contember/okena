@@ -11,7 +11,9 @@ the binary) to the first usable of:
 
 1. `<profile config dir>/claude-remote/preload.js`
 2. `$XDG_RUNTIME_DIR/okena/<profile id>/claude-remote/preload.js`
-3. `$TMPDIR/okena-<profile id>/claude-remote/preload.js`
+3. `<user cache dir>/okena/<profile id>/claude-remote/preload.js`
+   (`~/.cache` on Linux, `~/Library/Caches` on macOS)
+4. `$TMPDIR/okena-<profile id>/claude-remote/preload.js`
 
 Bun splits `BUN_OPTIONS` on whitespace without quoting, so a path with
 whitespace is skipped. Every directory Okena creates or reuses there must be
@@ -23,6 +25,7 @@ removed or changed. It then gives every new pane:
 | `BUN_OPTIONS` | `--preload=<path to preload.js>` (plus any `BUN_OPTIONS` the daemon inherited) |
 | `OKENA_BIN` | the `okena` binary the hooks and the channel server run |
 | `OKENA_CLAUDE_REMOTE_CHANNEL` | `1` when the MCP channel is on, else `0` |
+| `OKENA_PROFILE` | the daemon's profile, so the hooks reach this daemon even from a tmux server another profile started |
 
 `claude` is a Bun-compiled binary, so Bun runs the preload before Claude Code
 starts. Panes created before the setting was turned on are not affected.

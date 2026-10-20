@@ -39,15 +39,20 @@ pub struct PaneEnv {
     okena_bin: Option<PathBuf>,
     /// In order of preference.
     preload_locations: Vec<PreloadLocation>,
+    /// Exported to panes so the hooks reach this daemon: a tmux server shared
+    /// by several profiles hands panes the environment of the first one.
+    profile_id: Option<String>,
 }
 
 impl PaneEnv {
     pub fn resolve() -> Self {
-        let preload_locations = match okena_core::profiles::try_current() {
+        let profile = okena_core::profiles::try_current();
+        let preload_locations = match profile {
             Some(profile) => preload_locations(
                 &profile.id,
                 &profile.root,
                 std::env::var_os("XDG_RUNTIME_DIR"),
+                okena_core::profiles::cache_root(),
                 std::env::var_os("TMPDIR"),
             ),
             None => Vec::new(),
@@ -57,6 +62,7 @@ impl PaneEnv {
                 .ok()
                 .and_then(|exe| okena_bin_for_exe(&exe)),
             preload_locations,
+            profile_id: profile.map(|profile| profile.id.clone()),
         }
     }
 
@@ -84,6 +90,9 @@ impl PaneEnv {
             self.okena_bin.as_deref(),
             std::env::var("BUN_OPTIONS").ok().as_deref(),
         ));
+        if let (Some(_), Some(profile_id)) = (&preload, &self.profile_id) {
+            env.push(("OKENA_PROFILE".to_string(), Some(profile_id.clone())));
+        }
         env
     }
 
@@ -132,6 +141,7 @@ fn preload_locations(
     profile_id: &str,
     profile_root: &Path,
     xdg_runtime_dir: Option<OsString>,
+    cache_root: Option<PathBuf>,
     tmpdir: Option<OsString>,
 ) -> Vec<PreloadLocation> {
     let non_empty = |value: Option<OsString>| value.filter(|value| !value.is_empty());
@@ -147,6 +157,14 @@ fn preload_locations(
                 profile_id.to_string(),
                 PRELOAD_DIR.to_string(),
             ],
+        });
+    }
+    // Before $TMPDIR: macOS deletes its files after a few days unused, and a
+    // pane whose preload is gone cannot start any Bun program.
+    if let Some(cache_root) = cache_root {
+        locations.push(PreloadLocation {
+            base: cache_root,
+            dirs: vec![profile_id.to_string(), PRELOAD_DIR.to_string()],
         });
     }
     if let Some(tmpdir) = non_empty(tmpdir) {
@@ -281,11 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn locations_are_profile_dir_then_runtime_dir_then_tmpdir() {
+    fn locations_are_profile_dir_then_runtime_dir_then_cache_then_tmpdir() {
         let locations = preload_locations(
             "work",
             Path::new("/home/u/.config/okena/profiles/work"),
             Some("/run/user/1000".into()),
+            Some(PathBuf::from("/home/u/.cache/okena")),
             Some("/var/folders/xy/T/".into()),
         );
 
@@ -299,6 +318,10 @@ mod tests {
                 location(
                     Path::new("/run/user/1000"),
                     &["okena", "work", "claude-remote"]
+                ),
+                location(
+                    Path::new("/home/u/.cache/okena"),
+                    &["work", "claude-remote"]
                 ),
                 location(
                     Path::new("/var/folders/xy/T/"),
@@ -318,17 +341,24 @@ mod tests {
             "default",
             Path::new("/Users/u/Library/Application Support/okena/profiles/default"),
             Some("".into()),
+            Some(PathBuf::from("/Users/u/Library/Caches/okena")),
             Some("/var/folders/xy/T".into()),
         );
 
         assert_eq!(
             locations,
-            vec![location(
-                Path::new("/var/folders/xy/T"),
-                &["okena-default", "claude-remote"]
-            )]
+            vec![
+                location(
+                    Path::new("/Users/u/Library/Caches/okena"),
+                    &["default", "claude-remote"]
+                ),
+                location(
+                    Path::new("/var/folders/xy/T"),
+                    &["okena-default", "claude-remote"]
+                ),
+            ]
         );
-        assert!(preload_locations("default", Path::new("/a b"), None, None).is_empty());
+        assert!(preload_locations("default", Path::new("/a b"), None, None, None).is_empty());
     }
 
     #[test]
@@ -466,6 +496,7 @@ mod tests {
                 location(&missing_base, &[PRELOAD_DIR]),
                 location(&root, &["okena-p", PRELOAD_DIR]),
             ],
+            profile_id: Some("work".to_string()),
         };
 
         assert_eq!(
@@ -482,6 +513,7 @@ mod tests {
         let pane_env = PaneEnv {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
+            profile_id: Some("work".to_string()),
         };
         let settings = AppSettings::default();
 
@@ -508,6 +540,7 @@ mod tests {
         let pane_env = PaneEnv {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
+            profile_id: Some("work".to_string()),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
@@ -529,6 +562,7 @@ mod tests {
             "OKENA_CLAUDE_REMOTE_CHANNEL".to_string(),
             Some("1".to_string())
         )));
+        assert!(env.contains(&("OKENA_PROFILE".to_string(), Some("work".to_string()))));
         std::fs::remove_dir_all(root).expect("remove temp dir");
     }
 
@@ -538,6 +572,7 @@ mod tests {
         let pane_env = PaneEnv {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: Vec::new(),
+            profile_id: Some("work".to_string()),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;

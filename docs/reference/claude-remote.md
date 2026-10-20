@@ -32,8 +32,8 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
 ## How a session is connected
 
 1. The daemon writes a Bun preload script and gives new panes
-   `BUN_OPTIONS=--preload=<file>`, `OKENA_BIN` and
-   `OKENA_CLAUDE_REMOTE_CHANNEL`. The `claude` binary is Bun-compiled, so the
+   `BUN_OPTIONS=--preload=<file>`, `OKENA_BIN`,
+   `OKENA_CLAUDE_REMOTE_CHANNEL` and `OKENA_PROFILE`. The `claude` binary is Bun-compiled, so the
    preload runs inside it before Claude Code parses its arguments.
 2. For an interactive run, the preload appends `--settings` with Okena's hooks
    and, with the channel on, `--mcp-config` plus

@@ -159,6 +159,11 @@ pub fn config_root() -> PathBuf {
         .join("okena")
 }
 
+/// `~/Library/Caches/okena` on macOS; `~/.cache/okena` on Linux.
+pub fn cache_root() -> Option<PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join("okena"))
+}
+
 // ─── Startup resolution ───────────────────────────────────────────────────────
 
 /// Resolve the active profile from the explicit flag, the `OKENA_PROFILE` env var,
