@@ -275,3 +275,23 @@ sidebar follows.
 ## Run log
 
 <!-- Append as you work: discoveries, deviations, blockers. -->
+
+- 2026-10-20 WU1: beyond the four `terminal_names` cleanup sites the plan
+  listed, the status also had to ride the runtime slot
+  (`ProjectRuntimeSlot`, `take_project_layout_runtime`), both move paths in
+  `actions/layout/move_ops.rs`, the orphan prune in `actions/layout/mod.rs`
+  (which is what `close_terminal` uses) and the failed-hook cleanup in
+  `execute/session.rs`. Found by the close-cleanup test failing first.
+- 2026-10-20 WU1: the presentation fingerprint (`project_presentation`) the
+  plan wanted to extend is on PR #247, not on `main` yet; add
+  `terminal_statuses` to it when the two land together.
+- 2026-10-20 WU1: `okena-mobile-ffi` got its test literal updated but was not
+  compiled here (its deps are not in the offline cache); run its tests
+  before merge.
+- 2026-10-20 WU4: the sidebar on `main` had no bookkeeping for non-cursor
+  rows between terminal rows; added `fold_extra_rows` in
+  `sidebar/status_groups.rs`, used by both the manual and the activity
+  path. PR #246 adds a sibling mechanism for host section headers; merge
+  them onto one when both are in.
+- 2026-10-20 WU5: no per-terminal activity timestamp exists, so the card
+  carries no "last activity" (the plan listed it); only the project has one.

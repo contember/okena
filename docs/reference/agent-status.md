@@ -71,6 +71,10 @@ Nothing ties it to the pane's process, so an agent that dies without sending
 leaves the tab tinted and the pane listed in AGENTS indefinitely. Closing the
 pane, or having an agent report again in it, clears it.
 
+Agent status is the agent's own report and changes by itself. The manual
+label you sort terminals by — the [terminal status board](terminal-board.md)
+— is a separate thing; both show at once.
+
 ## The data model
 
 | Field | Meaning |
