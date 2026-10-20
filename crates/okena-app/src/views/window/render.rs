@@ -1175,7 +1175,7 @@ impl Render for WindowView {
                 let overlay_manager = overlay_manager.clone();
                 move |this, _: &NewProject, _window, cx| {
                     let rm = this.remote_manager.clone();
-                    overlay_manager.update(cx, |om, cx| om.toggle_add_project_dialog(rm, cx));
+                    overlay_manager.update(cx, |om, cx| om.toggle_add_project_dialog(rm, None, cx));
                 }
             }))
             // Handle open settings file action

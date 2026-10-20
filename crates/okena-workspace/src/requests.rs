@@ -152,7 +152,11 @@ pub enum FolderOverlayKind {
 pub enum OverlayRequest {
     Project(ProjectOverlay),
     Folder(FolderOverlay),
-    AddProjectDialog,
+    /// Open the "New project" dialog; `target_connection_id` preselects a
+    /// remote host (`None` keeps the local target).
+    AddProjectDialog {
+        target_connection_id: Option<String>,
+    },
     RemoteConnect,
     RemoteConnectionContextMenu {
         connection_id: String,

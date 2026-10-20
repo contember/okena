@@ -38,6 +38,31 @@ pub fn status_bar_style(cx: &App) -> StatusBarStyle {
 // Bars and graphs
 // =============================================================================
 
+/// Colour for a CPU load reading, in percent: normal up to 50, warning up to
+/// 80, critical above. Shared by the status bar and the sidebar host stats so
+/// the same load reads the same everywhere.
+pub fn cpu_metric_color(cpu_usage: f32, t: &ThemeColors) -> u32 {
+    if cpu_usage > 80.0 {
+        t.metric_critical
+    } else if cpu_usage > 50.0 {
+        t.metric_warning
+    } else {
+        t.metric_normal
+    }
+}
+
+/// Colour for a memory reading, in percent used: normal up to 60, warning up
+/// to 80, critical above.
+pub fn memory_metric_color(memory_percent: u64, t: &ThemeColors) -> u32 {
+    if memory_percent > 80 {
+        t.metric_critical
+    } else if memory_percent > 60 {
+        t.metric_warning
+    } else {
+        t.metric_normal
+    }
+}
+
 /// Muted track drawn behind a metric bar or under a sparkline.
 pub fn metric_track_color(t: &ThemeColors) -> Rgba {
     let mut color = rgb(t.text_muted);

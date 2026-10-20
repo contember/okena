@@ -376,23 +376,11 @@ impl StatusBar {
     }
 
     fn cpu_metric_color(cpu_usage: f32, t: &okena_core::theme::ThemeColors) -> u32 {
-        if cpu_usage > 80.0 {
-            t.metric_critical
-        } else if cpu_usage > 50.0 {
-            t.metric_warning
-        } else {
-            t.metric_normal
-        }
+        crate::ui::metrics::cpu_metric_color(cpu_usage, t)
     }
 
     fn memory_metric_color(memory_percent: u64, t: &okena_core::theme::ThemeColors) -> u32 {
-        if memory_percent > 80 {
-            t.metric_critical
-        } else if memory_percent > 60 {
-            t.metric_warning
-        } else {
-            t.metric_normal
-        }
+        crate::ui::metrics::memory_metric_color(memory_percent, t)
     }
 
     fn memory_percent_from_bytes(stats: &ApiSystemStats) -> u64 {
@@ -730,6 +718,7 @@ impl Render for StatusBar {
         let status_bar = settings_entity(cx).read(cx).settings.status_bar.clone();
         let bar_style = status_bar.style;
         let graphs = status_bar.metrics_graph;
+        let show_metrics = status_bar.show_metrics;
 
         let cpu_metric = SystemMetric {
             id: "cpu-status-metric",
@@ -802,17 +791,23 @@ impl Render for StatusBar {
                                     window.dispatch_action(Box::new(ToggleSidebar), cx);
                                 }),
                         )
-                    })
-                    .child(Self::render_system_metric(
-                        cpu_metric, bar_style, graphs, &t, cx,
-                    ))
-                    .child(Self::render_system_metric(
-                        memory_metric,
-                        bar_style,
-                        graphs,
-                        &t,
-                        cx,
-                    ));
+                    });
+
+                // The CPU / MEM readout is optional; the remote popover still
+                // reports per-host load when it is hidden.
+                if show_metrics {
+                    left = left
+                        .child(Self::render_system_metric(
+                            cpu_metric, bar_style, graphs, &t, cx,
+                        ))
+                        .child(Self::render_system_metric(
+                            memory_metric,
+                            bar_style,
+                            graphs,
+                            &t,
+                            cx,
+                        ));
+                }
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {
