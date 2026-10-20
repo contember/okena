@@ -396,6 +396,10 @@ pub struct AppSettings {
     /// A real tab group always keeps its header visible (default: false).
     #[serde(default)]
     pub auto_hide_single_terminal_header: bool,
+    /// Draw the terminal's name over every pane that does not have focus
+    /// (default: false).
+    #[serde(default)]
+    pub show_terminal_name_when_inactive: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -598,6 +602,7 @@ impl Default for AppSettings {
             default_shell: ShellType::default(),
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
+            show_terminal_name_when_inactive: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
             claude_remote: false,

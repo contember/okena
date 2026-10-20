@@ -121,6 +121,8 @@ pub struct TerminalViewSettings {
     pub show_shell_selector: bool,
     #[serde(default)]
     pub auto_hide_single_terminal_header: bool,
+    #[serde(default)]
+    pub show_name_when_inactive: bool,
     pub idle_timeout_secs: u32,
     pub color_tinted_background: bool,
     pub file_opener: String,
@@ -166,6 +168,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             show_focused_border: false,
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
+            show_name_when_inactive: false,
             idle_timeout_secs: 0,
             color_tinted_background: false,
             file_opener: String::new(),
